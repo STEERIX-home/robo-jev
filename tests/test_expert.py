@@ -637,3 +637,43 @@ def test_aux_labels_are_masked_without_a_commitment():
     out = expert().act(request, None, scene())
     labels = {label["question_id"] for label in expert().labels(out, request)}
     assert labels == set(BOOLEANS) | {"q_main"}
+
+
+# --------------------------------------------------------------------------
+# 폐루프 인수 — 실제 환경에서 E0·E1을 완료한다
+# --------------------------------------------------------------------------
+
+
+def run_episode(profile: str, seed: int) -> dict:
+    from robo_jev.data.robot_episodes import generate_episode, load_generator_config
+
+    policy = Expert()
+    record = generate_episode(profile, seed, policy=policy, expert=policy, config=load_generator_config())
+    return record["provenance"]["outcome"]
+
+
+def assert_completed(outcome: dict) -> None:
+    assert outcome["done"] is True, outcome
+    assert outcome["done_tick"] is not None and outcome["done_tick"] < 300, outcome
+    assert outcome["target_inside_zone"] is True, outcome
+    assert outcome["holding"] is None, outcome
+
+
+@pytest.mark.parametrize("seed", [17, 29, 43])
+def test_the_expert_completes_an_e0_episode(seed):
+    assert_completed(run_episode("E0", seed))
+
+
+CAP_BLOCKED = (
+    "E1 seed 29: 후보 상한(29 + 고정 3)이 지시의 대상×목표 영역 파지 후보를 목록에서 뺀다 — 전문가는 목록에 없는"
+    " 행동을 고를 수 없어 hold한다(3b 보고서 '남은 걱정 1', 3c-1 보고서 E1 표). 하네스가 고쳐지면 이 표시를 지운다."
+)
+
+
+@pytest.mark.parametrize(
+    "seed",
+    [17, 43, 11, pytest.param(29, marks=pytest.mark.xfail(strict=True, reason=CAP_BLOCKED))],
+)
+def test_the_expert_completes_an_e1_episode(seed):
+    """E1: 물체 6~10개, 취약·금지, 지시 변경(5~15초), 외란. 300틱 안에 대상이 영역 안에 놓이고 손은 빈다."""
+    assert_completed(run_episode("E1", seed))

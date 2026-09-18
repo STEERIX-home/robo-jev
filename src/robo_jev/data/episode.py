@@ -111,11 +111,13 @@ def append_tick(
     adopted: dict[str, Any] | None = None,
     ack: dict[str, Any] | None = None,
     labels: list[dict[str, Any]] | None = None,
+    usage: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """틱 하나를 레코드에 넣는다. 네 출력은 끝까지 분리해 둔다 (docs/08 §8).
 
     `request`는 :meth:`robo_jev.harness.robot.RobotHarness.build_request`가 낸 틱이다.
-    원본은 건드리지 않고 깊은 복사로 옮긴다.
+    원본은 건드리지 않고 깊은 복사로 옮긴다. `usage`는 그 틱의 조합 결과(게이트·조합 기록·실행
+    결과) 요약이다 — 비입력 필드(docs/04 §1 표)이며 :func:`aggregate`가 게이트·정지·전환을 센다.
     """
     tick = {
         key: copy.deepcopy(value) for key, value in request.items() if key != _HARNESS_BLOCK
@@ -128,6 +130,8 @@ def append_tick(
         tick["ack"] = copy.deepcopy(ack)
     if labels is not None:
         tick["labels"] = copy.deepcopy(labels)
+    if usage is not None:
+        tick["usage"] = copy.deepcopy(usage)
 
     _extend_instructions(record, tick)
     record["ticks"].append(tick)
@@ -171,9 +175,17 @@ def posed_questions(tick: dict[str, Any]) -> int:
 
 
 def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
-    """에피소드·틱·질문 수와 split별 편수 (docs/08 §8 "각각 집계한다")."""
+    """에피소드·틱·질문 수와 split별 편수 (docs/08 §8 "각각 집계한다"), 그리고 에피소드별
+    게이트·정지·전환·충돌 횟수 (docs/02 §9의 결정 안정성 지표의 재료).
+
+    게이트는 틱의 `usage.gate`(생성기가 적는다)에서, 정지·전환은 `adopted`에서, 충돌은
+    `usage.records.conflict`에서 센다. 셋 다 비입력 필드다.
+    """
     episodes = ticks = questions = labels = 0
     splits: dict[str, int] = {}
+    gates: dict[str, int] = {}
+    stops = switches = conflicts = 0
+    per_episode: list[dict[str, Any]] = []
     for record in records:
         if record.get("schema_version") != SCHEMA_STREAM:
             continue
@@ -181,16 +193,47 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
         split = record.get("split")
         if isinstance(split, str):
             splits[split] = splits.get(split, 0) + 1
+        summary = {
+            "episode_id": record.get("episode_id"),
+            "ticks": 0,
+            "gates": {},
+            "stops": 0,
+            "switches": 0,
+            "conflicts": 0,
+        }
         for tick in record.get("ticks") or ():
             ticks += 1
+            summary["ticks"] += 1
             questions += posed_questions(tick)
             labels += len(tick.get("labels") or ())
+            adopted = tick.get("adopted") or {}
+            usage = tick.get("usage") or {}
+            gate = usage.get("gate")
+            if gate:
+                summary["gates"][gate] = summary["gates"].get(gate, 0) + 1
+            if adopted.get("stop"):
+                summary["stops"] += 1
+            if adopted.get("switch"):
+                summary["switches"] += 1
+            summary["conflicts"] += int((usage.get("records") or {}).get("conflict", 0))
+        for gate, count in summary["gates"].items():
+            gates[gate] = gates.get(gate, 0) + count
+        stops += summary["stops"]
+        switches += summary["switches"]
+        conflicts += summary["conflicts"]
+        summary["gates"] = dict(sorted(summary["gates"].items()))
+        per_episode.append(summary)
     return {
         "episodes": episodes,
         "ticks": ticks,
         "questions": questions,
         "labels": labels,
         "splits": dict(sorted(splits.items())),
+        "gates": dict(sorted(gates.items())),
+        "stops": stops,
+        "switches": switches,
+        "conflicts": conflicts,
+        "per_episode": per_episode,
     }
 
 
