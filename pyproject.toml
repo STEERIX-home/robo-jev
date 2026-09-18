@@ -1,0 +1,39 @@
+[project]
+name = "robo-jev"
+version = "0.0.1"
+description = "robojev: 로봇용 typed judgment 모델 — 입력·라벨 계약과 fixture"
+readme = "docs/README.md"
+requires-python = ">=3.11"
+dependencies = [
+    # 시뮬레이터는 MuJoCo + robosuite 1.5 계열 (docs/05 §2). `sim/`은 1.5의 API
+    # (part_controllers, load_composite_controller_config, OSC_POSE의 absolute 입력)에
+    # 맞춰 쓰였으므로 상한을 둔다. macOS arm64 / Python 3.11에서 3.9.0 + 1.5.2로 잠갔다.
+    "mujoco>=3.3,<3.10",
+    "pyyaml>=6.0.3",
+    "robosuite>=1.5.2,<1.6",
+    # 모델 계약의 CPU 검증(Task 4a): 기준 mask·손실은 torch, 토큰 실측은 backbone의
+    # 실제 tokenizer(`tokenizers` + `huggingface_hub`로 `tokenizer.json`만 받는다,
+    # `transformers`는 넣지 않는다). torch는 lock이 고른 정확한 버전으로 고정한다 — 수치
+    # 검사의 기준이 되는 버전을 조용히 바꾸지 않기 위해서다. 인덱스는 PyPI 기본 그대로다:
+    # macOS(arm64)에서는 CPU/MPS wheel이, Linux에서는 같은 버전의 CUDA wheel 묶음이
+    # 풀린다(클라우드 학습 단계용, docs/05). 특정 CUDA 버전을 고정하려면 그때 index를 더한다.
+    "torch==2.14.0",
+    "tokenizers>=0.23.2",
+    "huggingface-hub>=1.32.0",
+    # 학습 checkpoint가 numpy RNG 상태도 저장한다 (Task 5). 이미 mujoco/robosuite가 끌어오는 버전 그대로.
+    "numpy>=1.26",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.3"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/robo_jev"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error"]

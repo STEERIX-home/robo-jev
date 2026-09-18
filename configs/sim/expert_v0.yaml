@@ -1,0 +1,78 @@
+# 스크립트 전문가 v0 — docs/08 §7·§9, docs/04 §3 (Task 3c-1).
+#
+# 전문가는 모델 자리에 서서 10개 답을 내고, 그 답이 D1 로봇 에피소드의 라벨 원천이다. 답은 하네스
+# 요청(모델 입력)과 commitment의 함수이며 시뮬레이터 참값을 보지 않는다. 수치는 전부 여기에만 둔다.
+version: e0.2
+
+# 실행기·하네스와 공유하는 값은 복사하지 않고 그 설정을 읽는다 (단일 출처).
+#   controller_config → 속도·힘 수준의 개수
+#   harness_config    → candidates.max_geometry_age_ms (접촉 국면·파지 중의 관측 문턱),
+#                       candidates.grasp_depth_mm (파지점 높이), candidates.push_segment_mm (밀기 구간)
+controller_config: configs/controller/osc_v0.yaml
+harness_config: configs/harness/robot.yaml
+
+# 규칙이 참·거짓이라고 말할 때 쓰는 확률. 결정적이며 보정된 확률 주장이 아니다.
+confidence:
+  high: 0.97
+  low: 0.03
+  choice_mass: 0.9         # choice·ordinal에서 고른 항목의 질량. 나머지는 다른 항목이 고르게 나눈다
+
+# 주 결정 — 구조화된 목표를 실현하는 결합 후보.
+goal:
+  # 같은 행동의 프로파일이 여럿이면 앞의 것을 고른다.
+  profile_preference: [slow, fast]
+  # 목표 대상→목표 영역의 파지 후보가 목록에 없을 때(실행 불가·상한) 대상을 영역 쪽으로 미는 후보를
+  # 고른다 — "밀기는 파지가 불가능할 때만"(docs/02 §1). 예측 자세(한 구간만큼 이동)가 영역까지의
+  # 거리를 이만큼 이상 줄여야 한다.
+  push_when_grasp_unavailable: true
+  # 파지가 막혔고 경유점도 없을 때(하강 구간의 평범한 이웃) 그 이웃을 대상에서 멀리 미는가.
+  push_blockers: true
+  push_min_gain_mm: 20
+  # 실행기 역량 제한(하네스의 `faces: [top]`과 같은 성격). 3c-2에서 밀기는 닫힌 손가락·물체 중간 높이로
+  # 바뀌었고 단일 물체 장면 8 seed 실측(4초, 40틱)은 다음과 같다: ±x는 상자·원통 모두 민다(+x 66~98mm,
+  # 접촉력 5~30N; −x 34~67mm, 5~22N — 시점 쪽에서 돌아 들어가 시작이 늦다). ±y는 상자는 밀지만(33~110mm)
+  # 원통에서는 손가락 옆면이 곡면을 비껴 타 접촉력 45~90N의 반사 정지가 8건 중 6건이다. 그래서 ±y는
+  # 아직 열지 않는다 — 옆면 접촉 자세(손목 요)를 얻으면 되돌린다. 의미 적합성에는 영향이 없다(선택만 거른다).
+  push_directions: ["+x", "-x"]
+
+thresholds:
+  # 관측 (docs/08 §4 `q_observe`): 대상이 아직 추적되지 않았거나 대상 기하가 이보다 오래되면. 파지·놓기
+  # 국면과 파지 중(팔이 대상을 가린다)에는 하네스의 `candidates.max_geometry_age_ms`가 문턱이다.
+  observe_geom_age_ms: 400
+  stop_force_n: 25.0             # 접촉력이 이보다 크면 정지
+  # 파지 중의 정상 하중(쥐는 힘·물체 무게)은 충돌이 아니다. 들고 있는 동안은 실행기의 반사 한계
+  # (osc_v0.yaml reflex.force_limit_n 30N)보다 큰 이 값을 쓴다 — 한 번 쥔 물체의 정적 접촉력이 26~34N으로
+  # 읽히는 장면(E1 seed 7)에서 25N 규칙은 60틱을 정지·해제 반복에 썼다. 그보다 큰 힘은 반사 사건으로도 온다.
+  stop_force_holding_n: 40.0
+  stop_forbidden_mm: 40          # 금지 물체가 말단에서 이보다 가까우면 정지
+  retry_max_same_approach: 1     # 같은 방식의 연속 실패가 이 횟수 안이면 재시도 적절 (실행 이력 `fails=`)
+  grasp_ready_mm: 15             # 파지 국면에서 말단이 파지점에 이 안으로 와야 `closed`
+  fragile_proximity_mm: 120      # 취약 물체가 말단·대상에서 이 안이면 속도를 내린다
+
+# 정지 (docs/08 §4 `q_stop`): 반사 사건, 힘 한계, 금지 물체 근접, 그리고 이 속성의 물체와의 접촉 시작.
+stop:
+  contact_attributes: [forbidden, fragile]
+
+# 국면별 프로파일. 부가 질문은 commitment의 국면 기준으로 답한다 (docs/08 §4).
+profiles:
+  speed_by_phase: {approach: 2, grasp: 1, lift: 1, transport: 2, place: 1, push: 1, none: 0}
+  force_by_phase: {approach: 0, grasp: 1, lift: 0, transport: 0, place: 1, push: 2, none: 0}
+  gripper_by_phase: {approach: open, grasp: closed, lift: closed, transport: closed, place: open, push: open, none: current}
+  # 밀기 후보는 접근·밀기 국면 모두 이 상태다(주먹으로 민다). 열린 손가락은 y축으로 벌어져 ±y 접근에서
+  # 물체를 치고(3c-1 측정 45~78N) ±x에서는 물체가 손가락 사이로 빠진다(≤5mm). 하네스는 밀기 명령에
+  # `gripper_ref`를 두지 않으므로 실행기의 close readiness(대상 거리)가 걸리지 않는다.
+  gripper_for_push: closed
+  fragile_speed_cap: 1
+
+# 라벨 (docs/08 §7).
+labels:
+  source: expert_v0
+  # 그리퍼 전환 틱 ±이 틱은 두 상태를 허용한다.
+  gripper_transition_tolerance_ticks: 1
+  # 막힌 경로의 대안 경유점 가운데 최선보다 이만큼 안에 드는 것은 허용 집합에 넣는다.
+  path_alternative_extra_mm: 60
+  # 낮은 신뢰도 라벨(`label_confidence: low` — 목표를 실현할 후보가 목록에 없거나(상한·실행 불가), 재시도가
+  # 막혔거나, 실행기 사정으로 고를 수 없어 `hold`로 물러난 퇴화 틱)의 손실 가중치 `weight`. 손실은 라벨의
+  # weight를 그대로 쓴다(docs/03 §4). 후보 공간 자체의 결정(E1 퇴화 틱 44%)이 나올 때까지의 완화이며 1이면
+  # 다른 라벨과 같다. 허용 집합이 빈 라벨은 weight가 아니라 마스크다(적지 않는다).
+  low_confidence_weight: 0.25

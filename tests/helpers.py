@@ -1,0 +1,57 @@
+"""검사 공용 도우미.
+
+fixture 파일 경로, 빌더 적재, 키 스캔처럼 두 검사 파일이 함께 쓰는 것만 둔다.
+pytest fixture는 `tests/conftest.py`에 있다.
+"""
+
+import functools
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+FIXTURES = Path(__file__).parent / "fixtures"
+D0 = FIXTURES / "d0.jsonl"
+D0_STREAMS = FIXTURES / "d0_streams.jsonl"
+D0_MANIFEST = FIXTURES / "d0_manifest.json"
+BUILDER = FIXTURES / "build_d0.py"
+
+REPO = Path(__file__).resolve().parent.parent
+SIM_CONFIG = REPO / "configs" / "sim" / "tidy_clutter.yaml"
+CONTROLLER_CONFIG = REPO / "configs" / "controller" / "osc_v0.yaml"
+HARNESS_CONFIG = REPO / "configs" / "harness" / "robot.yaml"
+RULE_JUDGE_CONFIG = REPO / "configs" / "harness" / "rule_judge_v0.yaml"
+REPO_CONFIGS = REPO / "configs"
+
+#: 모델 검사용 작은 어휘. 소형 fixture는 embedding을 별도 generator로 초기화하므로
+#: `TinyHybrid.from_config(vocab_size=SMALL_VOCAB)`는 설정 fixture를 id < SMALL_VOCAB에 제한한 것과
+#: 비트 단위로 같다(tests/test_hybrid.py가 확인). tokenizer 크기가 중요한 검사(어휘 대조)만 설정값을 쓴다.
+SMALL_VOCAB = 4096
+
+
+def all_keys(node) -> set[str]:
+    """중첩 구조 안의 모든 키 이름. 정보 경계 검사가 쓴다."""
+    keys: set[str] = set()
+    if isinstance(node, dict):
+        for key, value in node.items():
+            keys.add(key)
+            keys |= all_keys(value)
+    elif isinstance(node, list):
+        for value in node:
+            keys |= all_keys(value)
+    return keys
+
+
+def read_jsonl(path: Path) -> list[dict]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+@functools.lru_cache(maxsize=1)
+def load_builder():
+    """빌더는 패키지가 아니라 스크립트라서 경로로 불러온다."""
+    spec = importlib.util.spec_from_file_location("build_d0", BUILDER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module  # dataclass가 자기 모듈을 찾을 수 있어야 한다
+    spec.loader.exec_module(module)
+    return module

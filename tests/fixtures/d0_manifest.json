@@ -1,0 +1,47 @@
+{
+  "builder_version": "d0-builder-v0.1.0",
+  "builder": "tests/fixtures/build_d0.py",
+  "seed": 20260918,
+  "question_set": "qs-v0",
+  "questions_per_tick": 10,
+  "files": {
+    "d0.jsonl": {
+      "sha256": "27b6bbbbfcac7e97a5a0aa56e33579e657e863773531e6c585b4acc6db6a26cd",
+      "bytes": 85867,
+      "records": 64,
+      "questions": 88,
+      "labels": 82,
+      "question_types": {
+        "choice": 30,
+        "boolean": 32,
+        "ordinal": 26
+      },
+      "label_kinds": {
+        "valid_set": 38,
+        "single": 32,
+        "event": 6,
+        "distribution": 6
+      },
+      "questions_without_label": 6,
+      "labels_with_multiple_answers": 15,
+      "labels_answering_not_applicable": 2
+    },
+    "d0_streams.jsonl": {
+      "sha256": "e44db9f9eb7c4dc17f5db5931a6a81d941a4824935716191f5a8ee6ecdcb0595",
+      "bytes": 1510434,
+      "records": 4,
+      "ticks": 400,
+      "questions": 4000,
+      "labels": 3444,
+      "label_kinds": {
+        "valid_set": 1116,
+        "single": 2328
+      },
+      "keyframe_labels_with_event_results": 20,
+      "aux_labels_conditioned_on_commitment": 1384,
+      "ticks_with_adopted_switch": 11
+    }
+  },
+  "review_note": "사람 검수 전이다. 검수자는 두 파일을 읽고 이름·날짜를 reviewed_by에 추가한다. 각 에피소드의 provenance.marks에 키프레임·전환·정지·대조 쌍 틱이 적혀 있다. marks의 commanded_gripper_transition_ticks는 명령이고 observed_gripper_close_ticks는 관측(state.robot.gripper_mm)이라 서로 어긋난다.",
+  "reviewed_by": []
+}

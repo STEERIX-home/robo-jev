@@ -1,0 +1,46 @@
+# D1 로봇 에피소드 생성 설정 (docs/04 §5·§6, docs/08 §8·§9).
+#
+#   uv run python scripts/generate_episodes.py --config configs/data/d1_robot.yaml \
+#       --count 40 --out artifacts/datasets/d1-robot/batch-0 [--resume]
+#
+# 한 에피소드가 데이터의 독립 단위다. split은 장면 계열(`robot/<profile>/family-<k>`, k = 물체 수·형상
+# 다중집합·영역 집합의 구조 서명, `robo_jev.data.robot_episodes.family_id`) 단위로 **생성 전에** 배정한다.
+version: d1-robot-v0
+
+# 레코드의 `versions.config_digest`에 드는 설정 파일. 네 경로를 전부 이름으로 적는다 — 빠지면 생성기가 기본 경로로
+# 대신하지 않고 거절한다(지문에 든 파일이 어느 것인지 설정만 보고 알 수 있어야 한다). 컨트롤러 설정은 하네스
+# 설정이 가리키고, 규칙 기준군 설정(DAgger 대역 정책)은 기본 경로(configs/harness/rule_judge_v0.yaml)다.
+sim_config: configs/sim/tidy_clutter.yaml
+harness_config: configs/harness/robot.yaml
+expert_config: configs/sim/expert_v0.yaml
+events_config: configs/sim/events.yaml
+
+# 프로파일은 이 순서로 번갈아 센다: (E0, base), (E1, base), (E0, base+1), … — 같은 설정·count면 같은 일정이고
+# count를 늘려도 앞부분은 그대로다(--resume의 전제).
+profiles: [E0, E1]
+seeds:
+  base: 100
+  # DAgger 사이클 c(`scripts/dagger_cycle.py --cycle c`)는 base + (c + 1) × 이 값부터 센다 — 전문가 배치와 같은 seed·
+  # 같은 id(`ep-E0-000100`)를 다시 만들지 않는다(id에는 `-dagger{c}`도 붙는다). 사이클 한 번(200편)이 다음 시작에
+  # 닿지 않을 만큼 크다.
+  dagger_cycle_offset: 100000
+
+episode:
+  control_steps_per_tick: 5      # 판단 틱 10Hz = 50Hz 제어 5회
+  tail_ticks_after_done: 10      # done 게이트 뒤 1초를 더 적는다
+  # 최대 길이는 장면 설정의 episode.max_ms(30s)다.
+
+# D1 목표 편수 — manifest의 예상 소요 시간 계산에 쓴다 (docs/04 §6).
+target_episodes: 400
+
+split:
+  weights:
+    train: 70
+    dev: 10
+    calibration: 10
+    test: 10
+  holdout_groups: []
+  # ood는 holdout으로만 만든다. 첫 배치에서 ood가 비지 않도록 E1 계열 하나를 건다 — 일정의 첫 E1 에피소드
+  # (seed 100)의 계열을 골랐다(결정적: `family_id(build_plan(sim_config, 100, "E1"))`).
+  holdout_prefixes: ["robot/E1/family-n9-b4c5-zFLR"]
+  holdout_domains: []

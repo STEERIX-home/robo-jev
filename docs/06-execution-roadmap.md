@@ -10,7 +10,7 @@
 
 **Spec:** [모델 설계](03-model-and-training-design.md), [데이터 설계](04-data-generation-plan.md), [실험·GPU 계획](05-experiment-and-cloud-plan.md), [스트리밍 입출력·데이터 계약](08-streaming-io-and-data-contract.md)(로봇 스트림의 정본).
 
-작성일: 2026-09-18. 같은 날 근본 검토를 반영해 Task 2b(backbone 선정 게이트), 결합 행동 후보 하네스, 규칙 기반 기준군, 결정 유지 규칙, pointer readout과 L0/L1 배치를 추가했고, 이어 [스트리밍 계약](08-streaming-io-and-data-contract.md)에 따라 컨트롤러·스크립트 전문가·스트림 하네스·스트림 상태·TBPTT·DAgger 사이클과 D1 규모를 반영했다. 아래 경로·명령은 앞으로 구현할 계약이다. 현재 저장소에는 계획 문서와 원본 DOCX만 있으며, 명령을 실행할 코드나 학습된 checkpoint가 이미 있다는 뜻이 아니다.
+작성일: 2026-09-18. 같은 날 근본 검토를 반영해 Task 2b(backbone 선정 게이트), 결합 행동 후보 하네스, 규칙 기반 기준군, 결정 유지 규칙, pointer readout과 L0/L1 배치를 추가했고, 이어 [스트리밍 계약](08-streaming-io-and-data-contract.md)에 따라 컨트롤러·스크립트 전문가·스트림 하네스·스트림 상태·TBPTT·DAgger 사이클과 D1 규모를 반영했다. 아래 경로·명령은 구현할 계약이다. 어느 Task가 어느 단계(구현·단위 검증·폐루프 인수·학습 실측)까지 통과했는지는 [README의 구현 상태 표](README.md#구현-상태-2026-09-18)가 정본이며, 이 문서의 Task 목록은 완료 표시를 대신하지 않는다.
 
 ## Global Constraints
 
@@ -21,7 +21,7 @@
 - 모델 규모·초기 가중치·정보·데이터 예산·하네스·실행기를 맞춰 비교한다. backbone 규모 자체는 판단 주기의 지연 예산에서 역산한 상한 안에서 후보를 측정해 정한다.
 - 선정한 backbone(첫 후보 Qwen3.8-27B)의 text 가중치 전체와 readout을 학습한다. vision encoder는 고정하고 시각 입력 학습은 별도 실험으로 둔다.
 - readout은 질문마다 결정 위치 하나를 두는 pointer 방식이다. 후보별 분기 readout은 추가 연산을 쓰는 비교군으로만 학습한다.
-- 로봇 하네스는 [스트리밍 계약](08-streaming-io-and-data-contract.md)을 따른다. 에피소드는 append-only 스트림(L1-a)이고 틱마다 고정 9질문(결합 행동 후보의 주 결정, 게이팅 4, 정지, 그리퍼 상태, 경로·속도·힘)을 병렬로 묻는다. 부가 질문은 틱 시작 시 commitment 기준이다. 분해형 질문 구성은 비교군이다.
+- 로봇 하네스는 [스트리밍 계약](08-streaming-io-and-data-contract.md)을 따른다. 에피소드는 append-only 스트림(L1-a)이고 틱마다 고정 10질문(결합 행동 후보의 주 결정, 게이팅 4, 정지, 그리퍼 상태, 경로·속도·힘)을 병렬로 묻는다. 부가 질문은 틱 시작 시 commitment 기준이다. 분해형 질문 구성은 비교군이다.
 - 결정 위치는 틱 끝 공통 상태에서 갈라지는 일시적 분기이고, 다음 틱은 분기 이전 공통 상태에서 이어간다. 실행 이력 입력은 어떤 데이터에서도 라벨로 대체하지 않는다.
 - 스트림 학습은 에피소드 순서의 truncated BPTT(10초 구간, 같은 optimizer step 안에서 상태 전달)로 한다.
 - 컨트롤러 계약(관측 deadline 200ms, 발행 lease 300ms, 혼합 100ms, 정지 전이, 반사, 그리퍼 이벤트 ACK)은 모든 비교군에 동일하다.
@@ -49,8 +49,8 @@
 | `src/robo_jev/sim/expert.py` | 국면 기반 스크립트 전문가와 국소 경유점 플래너 |
 | `src/robo_jev/sim/label.py` | 고정 정책의 counterfactual 사건 결과(키프레임, paired seed) |
 | `src/robo_jev/sim/controller.py` | 컨트롤러 계약: 명령 수명·혼합·정지 전이·반사·그리퍼 이벤트 ACK·OSC 어댑터 |
-| `src/robo_jev/harness/robot.py` | 스트림 요청(9질문·결합 후보·경유점·실행 이력) 구성, 조합 규칙 v0(유효성·정지·게이팅·결정 유지·부가 답), 명령 생성 |
-| `src/robo_jev/harness/rule_judge.py` | 모델 자리에 들어가는 규칙 기반 판단기 기준군(9답) |
+| `src/robo_jev/harness/robot.py` | 스트림 요청(10질문·결합 후보·경유점·실행 이력) 구성, 조합 규칙 v0(유효성·정지·게이팅·결정 유지·부가 답), 명령 생성 |
+| `src/robo_jev/harness/rule_judge.py` | 모델 자리에 들어가는 규칙 기반 판단기 기준군(10답) |
 | `src/robo_jev/model/serialize.py` | 알려진 입력의 토큰·구간·position 생성, 상태 선행(L0)·스트림(L1-a) 배치, 결정 분기 인덱스와 prefix 경계 |
 | `src/robo_jev/model/stream.py` | 스트림 상태(recurrent/conv·윈도우 KV)의 유지·분기·복원과 증분/전체 계산 정합성 |
 | `src/robo_jev/model/attention.py` | 기준 mask와 최적화 mask |
@@ -153,7 +153,7 @@ python -m robo_jev.data.validate --dataset artifacts/datasets/d1 --report artifa
 
 - [ ] [모델 설계](03-model-and-training-design.md)의 후보 표를 측정 직전에 공식 공개로 다시 확인하고 `candidates.yaml`에 revision·라이선스·층 구성을 고정한다.
 - [ ] 실제 tokenizer로 틱당 토큰 분포(물체 6/10개, K=12/32, 지시 변경, 3D 요약 필드 포함)를 측정한다.
-- [ ] 로봇 9질문 스트림과 대표 셀을 D0 스트림·D1 smoke에서 뽑아 후보마다 native forward의 10Hz 연속 틱 지연을 잰다. 스트림 상태 warm과 cold, L1-a 스트림과 무상태 L0 요청을 모두 잰다.
+- [ ] 로봇 10질문 스트림과 대표 셀을 D0 스트림·D1 smoke에서 뽑아 후보마다 native forward의 10Hz 연속 틱 지연을 잰다. 스트림 상태 warm과 cold, L1-a 스트림과 무상태 L0 요청을 모두 잰다.
 - [ ] 같은 후보에 대해 D0와 D1 dev의 무학습 라벨 점수 읽기 품질을 잰다.
 - [ ] 후보별로 10초 학습 구간(약 55K token)의 활성 메모리와 윈도우 KV(prefix + 30틱)를 산정해 학습 가능 노드와 비용을 기록한다.
 - [ ] 탈락 기준: 토큰 하한에서도 native 지연이 예산을 넘음, 학습 메모리가 예산 노드에 맞지 않음, 무학습 품질이 D1 dev에서 다른 후보보다 뚜렷이 낮음. 결과와 근거를 `backbone-screen.json`에 남긴다.
@@ -171,15 +171,15 @@ python -m robo_jev.data.validate --dataset artifacts/datasets/d1 --report artifa
 
 **Files:** `sim/environment.py`, `sim/expert.py`, `sim/controller.py`, `sim/label.py`, `harness/robot.py`, `harness/rule_judge.py`, `data/episode.py`, `configs/sim/tidy_clutter.yaml`, `configs/harness/robot.yaml`, `configs/controller/osc_v0.yaml`, `tests/test_sim_replay.py`, `tests/test_controller.py`, `tests/test_harness.py`.
 
-**Interfaces:** `Environment.reset(seed: int) -> dict`, `step(command: dict) -> dict`, `snapshot() -> bytes`, `restore(snapshot: bytes) -> None`. `Controller.apply(command: dict, now_ms: int) -> dict`는 수명 검사·혼합·정지 전이·반사·그리퍼 이벤트를 처리하고 ACK를 반환한다. `Expert.act(observation: dict, commitment: dict | None) -> dict`는 9질문의 답과 국면을 반환한다. `build_request(observation: dict, exec_history: dict, commitment: dict | None) -> dict`는 9질문 스트림 요청(결합 후보·경유점·실행 이력)을 만든다. `compose(request: dict, results: dict, commitment: dict | None, now_ms: int) -> dict`는 [조합 규칙 v0](08-streaming-io-and-data-contract.md)를 적용해 명령·채택·전환 기록을 반환한다. `rule_judge(request: dict) -> dict`는 모델과 같은 결과 형식을 반환한다. `rollout_event(snapshot: bytes, action: dict, event: dict, seed: int) -> dict`는 success/failure/censored와 evidence를 반환한다.
+**Interfaces:** `Environment.reset(seed: int) -> dict`, `step(command: dict) -> dict`, `snapshot() -> bytes`, `restore(snapshot: bytes) -> None`. `Controller.apply(command: dict, now_ms: int) -> dict`는 수명 검사·혼합·정지 전이·반사·그리퍼 이벤트를 처리하고 ACK를 반환한다. `Expert.act(observation: dict, commitment: dict | None) -> dict`는 10질문의 답과 국면을 반환한다. `build_request(observation: dict, exec_history: dict, commitment: dict | None) -> dict`는 10질문 스트림 요청(결합 후보·경유점·실행 이력)을 만든다. `compose(request: dict, results: dict, commitment: dict | None, now_ms: int) -> dict`는 [조합 규칙 v0](08-streaming-io-and-data-contract.md)를 적용해 명령·채택·전환 기록을 반환한다. `rule_judge(request: dict) -> dict`는 모델과 같은 결과 형식을 반환한다. `rollout_event(snapshot: bytes, action: dict, event: dict, seed: int) -> dict`는 success/failure/censored와 evidence를 반환한다.
 
 - [ ] E0의 reset·목표·성공 판정과 전체 snapshot 저장/복원을 만든다. E1의 다물체 장면(6~10개, 취약·금지 속성), 지시 변경 일정(5~15초), 외란 일정을 seed·모의 시간으로 정의한다.
 - [ ] `Controller`에 명령 수명(관측 deadline 200ms, 발행 lease 300ms, 순번 역행 폐기), 100ms 혼합과 전환 구간 충돌 검사, 정지 전이, 반사, 그리퍼 이벤트(readiness·ID·ACK·멱등)를 구현한다. 늦은 응답에 lease가 새로 붙지 않고, `stop`이 혼합을 우회하며, 같은 그리퍼 상태가 반복돼도 이벤트가 한 번만 나는 검사를 둔다.
 - [ ] `Expert`를 국면(접근·파지·들기·이동·놓기·밀기)과 국소 경유점 플래너, 가림·차단 시 관측·보류 규칙으로 구현하고 10Hz로 에피소드를 실행해 스트림 레코드를 기록한다.
-- [ ] 하네스가 IK·충돌 여유·거리 등 기하 값을 관측된 자세로 계산해 결합 행동 후보(최대 32개)와 관측·보류·재계획 후보, 경유점 후보(≤3)를 만들고 9질문을 붙인다. 정답을 알고 후보를 줄이거나 정렬하지 않는 검사와 후보 포함률 집계를 추가한다.
+- [ ] 하네스가 IK·충돌 여유·거리 등 기하 값을 관측된 자세로 계산해 결합 행동 후보(최대 32개)와 관측·보류·재계획 후보, 경유점 후보(≤3)를 만들고 10질문을 붙인다. 정답을 알고 후보를 줄이거나 정렬하지 않는 검사와 후보 포함률 집계를 추가한다.
 - [ ] `perception/pointworld.py`의 추출 인터페이스(`extract(recon: Reconstruction, robot: dict, now_ms: int) -> dict`)를 공통 스키마로 고정하고, D1에서는 참값 어댑터가 같은 스키마를 채우게 한다. E2용 시뮬 3D 카메라와 재구성 결함 모델은 D1 이후에 붙이되 인터페이스는 지금 고정한다.
 - [ ] `compose`에 유효성 검사, 반사·정지 우선, 게이팅, 결정 유지 규칙(`δ=0.15`, `m=2`, 같은 도전자, 목적지 포함 의미 키, 해제 조건), commitment 기준 부가 답 적용과 전환 틱 폐기를 구현하고 전환·해제·차단·폐기 횟수를 기록한다. 현재 후보보다 `δ` 미만으로 높은 후보는 `m` 틱 전에 선택되지 않고, 도전자가 바뀌면 카운터가 초기화되며, 게이팅 발동 시 즉시 전환되는 검사를 둔다. 분해형 비교 구성에서는 다른 대상의 접근 답을 조합하지 않는 검사를 유지한다.
-- [ ] `rule_judge`를 구조화된 목표·제약의 적합성 필터, 고정 가중 기하 비용, 규칙 임계값으로 구현해 9답을 내고 버전·가중치를 config에 고정한다. 모델과 같은 요청을 받아 같은 형식으로 답하는지 검사한다.
+- [ ] `rule_judge`를 구조화된 목표·제약의 적합성 필터, 고정 가중 기하 비용, 규칙 임계값으로 구현해 10답을 내고 버전·가중치를 config에 고정한다. 모델과 같은 요청을 받아 같은 형식으로 답하는지 검사한다.
 - [ ] event의 action·후속 정책·horizon·성공 기준·외란 분포를 config로 고정한다. 키프레임 선택(에피소드당 5틱)과 paired seed 실행을 구현한다.
 - [ ] 같은 snapshot/seed에서 trajectory가 허용 오차 안에 재현되는지 확인한다. 사건 구간을 완주한 목표 미달은 실패, simulator 오류와 인프라 timeout은 censor 사유로 구분한다.
 - [ ] 128,000개 D1 rollout 계획 중 먼저 100개를 실행해 속도·저장량을 재고 나머지 제작 시간과 CPU 비용을 산정한다. 후보별 결과에서 [08 7절의 규칙](08-streaming-io-and-data-contract.md)(의미 적합성 → 성과 → commitment, `unknown` 처리)으로 주 결정 라벨을 산출한다.
@@ -206,14 +206,14 @@ def test_snapshot_restores_controller_and_rng():
 
 ### Task 4: Hybrid 상태 분기·스트림 상태·readout과 학습 loss
 
-**Files:** `model/serialize.py`, `model/attention.py`, `model/hybrid.py`, `model/stream.py`, `model/judge.py`, `loss.py`, `tests/test_attention.py`, `tests/test_hybrid.py`, `tests/test_stream.py`, `tests/test_loss.py`.
+**Files:** `model/serialize.py`, `model/tokenizer.py`, `model/attention.py`, `model/hybrid.py`, `model/stream.py`, `model/judge.py`, `loss.py`, `configs/model/tiny_hybrid.yaml`, `scripts/fetch_tokenizer.py`, `scripts/measure_tokens.py`, `tests/test_serialize.py`, `tests/test_attention.py`, `tests/test_hybrid.py`, `tests/test_stream.py`, `tests/test_judge.py`, `tests/test_loss.py`, `tests/test_measure_tokens.py`.
 
 **Interfaces:** `serialize_request(request: dict, tokenizer, layout: str = "state_first") -> dict`는 알려진 토큰·구간 ID·논리적 분기·local position·후보 경계 index·결정 위치 index·candidate mapping을 반환한다. `layout`은 상태 선행 `state_first`(L0)와 스트림 `stream_l1a`를 지원하며 스트림에서는 prefix 경계와 틱 경계도 반환한다. `StreamState.fork(n: int) -> list[StreamState]`는 결정 분기용 일시 상태를 만들고, `StreamState.advance(tokens) -> StreamState`는 분기 이전 공통 상태에 다음 틱 토큰을 이어 붙이며, 윈도우(정적 prefix + 30틱) 밖의 KV를 내보낸다. `build_reference_mask(layout: dict) -> Tensor`는 full-attention 층의 query×key 허용 행렬이다. `fork_delta_state(state: dict, branches: int) -> list[dict]`는 한 층의 `recurrent`·`conv` tensor를 분기하되 gradient 연결을 유지한다. `Judge.forward(batch: dict) -> dict`는 질문별 logits를 반환하며, `judgment_loss(outputs: dict, labels: dict) -> Tensor`는 상태 평균 loss를 반환한다.
 
 - [ ] [정보 접근 규칙](03-model-and-training-design.md)에 따라 각 질문의 `S+T_i`를 독립 causal 경로로 실행하는 P0를 만든다. `T_i`에는 전체 후보 목록, 후보 경계, 결정 위치가 들어간다. 같은 backbone의 native 결과를 정답 기준으로 보존한다.
 - [ ] Full-attention의 명시적 mask와 DeltaNet·conv 상태의 미분 가능한 분기를 각각 구현한다. state 공유 경로가 in-place 갱신되는 kernel은 독립된 상태 버퍼로 격리한다.
 - [ ] 공유 pointer readout `z_ik = (U h_{d_i})ᵀ (V h_{c_ik}) / √r + b`와 choice/boolean/ordinal의 결과 변환을 구현한다. 후보별 분기 readout(참고군 R)은 같은 직렬화 계약의 선택지로 두되 주 경로의 인수 검사를 먼저 통과시킨다. 실행 command 생성은 넣지 않는다.
-- [ ] 스트림 배치(L1-a)를 구현한다. prefix 캐시, 틱마다 `[상태][실행 이력][동적 후보]` 뒤에 9개 결정 위치를 일시적 분기로 실행(attention mask 차단, recurrent/conv fork), 분기 상태 폐기, 분기 이전 공통 상태에서 다음 틱 이어가기, 윈도우 = 정적 prefix + 30틱과 학습·추론 동일 mask·position. 같은 요청의 L0/L1-a 틱당 새 토큰 수를 집계한다. L1-b는 full-attention 후보에서만 별도 옵션으로 둔다.
+- [ ] 스트림 배치(L1-a)를 구현한다. prefix 캐시, 틱마다 `[상태][실행 이력][동적 후보]` 뒤에 10개 결정 위치를 일시적 분기로 실행(attention mask 차단, recurrent/conv fork), 분기 상태 폐기, 분기 이전 공통 상태에서 다음 틱 이어가기, 윈도우 = 정적 prefix + 30틱과 학습·추론 동일 mask·position. 같은 요청의 L0/L1-a 틱당 새 토큰 수를 집계한다. L1-b는 full-attention 후보에서만 별도 옵션으로 둔다.
 - [ ] 스트림 정합성 검사: 증분 계산과 처음부터 계산의 logits가 일치(윈도우 절단 제외), 결정 분기가 서로의 출력을 바꾸지 않음, 질문 하나를 바꿨을 때 다른 분기·다음 틱 상태의 변화량을 품질 지표로 기록.
 - [ ] valid-set CE·분포 CE·관측 사건 NLL·결측 mask·상태별 정규화와 `unknown` 후보를 정규화에서 빼는 부분 라벨 손실을 구현한다.
 - [ ] 작은 random-weight hybrid fixture와 실제 backbone 양쪽에서 질문 단독/묶음, 복제/공유의 logits·loss·gradient를 비교한다. recurrent 초기 상태·conv history로 돌아가는 gradient를 포함한다.
@@ -292,7 +292,7 @@ def test_decision_branches_do_not_leak_into_next_tick():
 
 ### Task 5: 실제 학습·저장·중단 후 재개
 
-**Files:** `train.py`, `checkpoint.py`, `configs/train/qwen38-27b-pilot.yaml`, `infra/train.Dockerfile`, `tests/test_resume.py`.
+**Files:** `train.py`, `checkpoint.py`, `sampler.py`, `configs/train/tiny_cpu.yaml`(CPU fixture), `configs/train/qwen38-27b-pilot.yaml`, `infra/train.Dockerfile`, `tests/test_checkpoint.py`, `tests/test_sampler.py`, `tests/test_train.py`, `tests/test_resume.py`.
 
 **Interfaces:** `train(config: dict) -> dict`는 run ID·checkpoint 경로·마지막 step·지표를 반환한다. `save_checkpoint(path: str, state: dict) -> None`, `load_checkpoint(path: str) -> dict`는 model/optimizer/scheduler/RNG/sampler/config/manifest를 다룬다.
 
@@ -333,13 +333,15 @@ budget_usd: 63.84
 seed: 17
 ```
 
-`independent_paths`는 질문별 causal 경로를 복제하는 P0다. Q개 경로를 내부 microbatch로 나누어 상태별 loss를 구성하고 실제 처리량을 기록한다. `readout: candidate_branch`는 비교군 R이며 경로가 Q×K개로 늘어난다. 로봇 스트림 레코드는 `layout: stream_l1a`로 읽히며 `stream_chunk_seconds`·`stream_window_ticks`가 truncated BPTT와 윈도우를 정한다. `model_id`는 Task 2b에서 확정한 backbone으로 바꾸며, 위 값은 첫 후보의 예시다. 이후 `shared_hybrid` P1을 따로 profile한다. 이 경로는 full-attention과 DeltaNet의 정합성 검사를 모두 통과해야 한다. 입력 축소만으로 최대 지원 길이를 통과한 것처럼 표시하지 않는다. profile 후 본 학습용 step·epoch 상한을 다시 산정한다.
+학습 설정은 `dataset_manifests: [...]`로 로봇 batch와 비로봇 데이터의 manifest를 여러 개 받아 한 run에 넣는다(manifest별 domain 기본값, 레코드의 `provenance.domain`이 우선). step마다 로봇 스트림 단위와 비로봇 묶음 단위를 둘 다 넣고 손실은 04의 0.6/0.4 혼합이다(CPU 검증 완료). `independent_paths`는 질문별 causal 경로를 복제하는 P0다. Q개 경로를 내부 microbatch로 나누어 상태별 loss를 구성하고 실제 처리량을 기록한다. `readout: candidate_branch`는 비교군 R이며 경로가 Q×K개로 늘어난다. 로봇 스트림 레코드는 `layout: stream_l1a`로 읽히며 `stream_chunk_seconds`·`stream_window_ticks`가 truncated BPTT와 윈도우를 정한다. `model_id`는 Task 2b에서 확정한 backbone으로 바꾸며, 위 값은 첫 후보의 예시다. 이후 `shared_hybrid` P1을 따로 profile한다. 이 경로는 full-attention과 DeltaNet의 정합성 검사를 모두 통과해야 한다. 입력 축소만으로 최대 지원 길이를 통과한 것처럼 표시하지 않는다. profile 후 본 학습용 step·epoch 상한을 다시 산정한다.
 
 예정 CLI:
 
 ```bash
 torchrun --standalone --nproc_per_node=8 -m robo_jev.train --config configs/train/qwen38-27b-pilot.yaml
 ```
+
+**클라우드(GPU) 단계의 전제 — CPU 검증에서 드러난 것(2026-09-19).** (1) sampler가 에피소드를 토큰 단위 Python 리스트로 미리 직렬화해 들고 있어 D1 규모(400 에피소드 × ≈165K 토큰)에서는 10GB를 넘는다 — 단위별 지연 직렬화와 배열 기반 layout으로 바꾼 뒤에 D1 학습을 시작한다. (2) `torch` 핀은 Linux에서 CUDA 13 휠 묶음을 받으므로 클라우드 이미지·드라이버에 맞는 index를 05에 고정한다. (3) `configs/`는 wheel에 포함되지 않으므로 Dockerfile이 저장소째 담는다. (4) step 중간 checkpoint는 누적 gradient(실제 backbone 크기)를 담으므로 선점(preemption) 환경에서만 켠다. (5) 질문 수·후보 수의 프로파일 상한(Q≤16, K≤32)은 `validate_record`가 아직 강제하지 않는다 — 실제 backbone 실행 전에 넣는다. (6) 서빙 클라이언트는 응답에 `meta`(observed_at·goal_version·후보 집합 버전·seq)를 반드시 실어야 하네스의 유효성 검사(08 §5.0)가 동작한다.
 
 인수 검사의 핵심 비교는 `동일 seed의 20 step 연속 실행` 대 `10 step 저장 + 프로세스 재시작 + 10 step`이다. loss뿐 아니라 sampler 위치·optimizer step·선택한 parameter tensor의 차이를 보고한다. GPU 정밀도에 맞는 허용 오차를 고정하고 실패하면 긴 run을 시작하지 않는다.
 

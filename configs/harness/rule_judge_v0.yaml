@@ -1,0 +1,95 @@
+# 규칙 기반 판단기 기준군 v0 — docs/02 §9, docs/08 §5.
+#
+# 모델 자리에 들어가 **같은 요청**을 받고 **같은 형식**으로 10개 답을 낸다. 가중치와
+# 임계값은 여기에 고정해 공개하고 레코드의 `versions.rules`에 버전을 적는다. 이 기준군이
+# 어떤 조건 층에서 모델과 같은 성공률을 내면 그 층에서는 모델의 기여를 주장하지 않는다.
+version: rj0.3
+
+# 실행기·하네스와 공유하는 값은 복사하지 않고 그 설정을 읽는다 (단일 출처).
+#   controller_config → 속도·힘 수준의 개수 (`q_speed`·`q_force`의 후보 수)
+#   harness_config    → `candidates.max_geometry_age_ms` (접촉 국면·파지 중의 관측 문턱)
+controller_config: configs/controller/osc_v0.yaml
+harness_config: configs/harness/robot.yaml
+
+# 지시 완결성 (docs/08 §4 `q_instr`): 지시 자체의 문제만 본다 — 대상의 가시성과 무관하다.
+# 상태에 구조화된 목표(`target_desc`·`target_zone`·`forbidden_contact`, 3c-1)가 있으면 그 필드로
+# 판정한다: 대상이 지목됐고, 목적지가 상태의 영역이며, 대상이 금지 물체가 아니다. 구조화된 목표가
+# 없는 틱(D0 fixture 등)은 텍스트 근사다: 대상은 상태의 물체 설명이 텍스트에 있는가, 목적지는 영역
+# 설명, 제약은 표지 앞에 물체 구절이 있어야 한다. 장면 어휘 설정은 더 이상 필요 없다 — 텍스트 근사에
+# 어휘를 더 주려면 선택 키 `vocabulary_config: configs/sim/tidy_clutter.yaml`을 적는다.
+instruction:
+  constraint_markers: ["건드리지 마라"]
+
+# 주 결정 — 적합성 필터 → 고정 가중 기하 비용 → 결정적 분포.
+main:
+  # 비용을 확률로 옮기는 온도. 작을수록 최선 후보에 몰린다.
+  temperature: 0.35
+  # 부적합 후보가 나눠 갖는 총 질량. 0으로 두면 "후보 집합에 대한 분포"가 아니게 되므로
+  # 작게 남긴다 (docs/08 §4의 "적합 후보 집합에 대한 확률").
+  inadmissible_mass: 0.05
+  weights:
+    clearance: 1.0        # 여유가 좁을수록 비싸다
+    distance: 1.0         # 멀수록 비싸다
+    reach: 0.5            # 도달 여유가 없으면 비싸다
+    failed_approach: 1.5  # 직전에 실패한 접근 유형의 감점 (실행 이력에서 읽는다)
+    blocked_path: 0.8     # 직선 경로가 막혔으면 비싸다
+  references:             # 비용을 무차원으로 만드는 기준값
+    clearance_mm: 60
+    distance_mm: 600
+  # 관측·보류·재계획 후보의 비용. 규칙 라벨로만 정답이 되므로 기하 비용이 없다
+  # (docs/08 §7). 적합 후보가 있으면 뒤로 가도록 상수 비용을 준다 — 여유 항은 1.0에서 포화하므로
+  # (외접 구 근사는 85mm 떨어진 키 큰 원통에도 음의 여유를 준다) 깨끗한 적합 후보의 비용 상한
+  # (여유 1.0 + 거리 ~1.2)보다 커야 관측이 파지를 밀어내지 않는다 (E0 seed 11의 관측 반복).
+  fixed_cost:
+    observe: 2.4
+    hold: 2.6
+    replan: 3.0
+
+# 규칙이 참·거짓이라고 말할 때 쓰는 확률. 결정적이며 보정된 확률 주장이 아니다.
+confidence:
+  high: 0.95
+  low: 0.03
+  # choice·ordinal 답에서 고른 수준이 갖는 질량. 나머지는 다른 수준이 고르게 나눈다.
+  choice_mass: 0.9
+
+thresholds:
+  # 관측 (docs/08 §4 `q_observe`): 지시의 대상이 아직 관측되지 않았거나 대상 기하가 이보다 오래되면.
+  # 가시 비율만으로는 요구하지 않는다. 파지·놓기 국면과 파지 중(팔이 대상을 가린다)에는 하네스의
+  # `candidates.max_geometry_age_ms`가 문턱이다.
+  observe_geom_age_ms: 400
+  stop_force_n: 25.0              # 접촉력이 이보다 크면 정지
+  stop_forbidden_mm: 40           # 금지 물체가 말단에서 이보다 가까우면 정지
+  # 같은 방식(기능·대상·접근)의 연속 실패가 이 횟수 안이면 재시도 적절. 실행 이력의 `fails=`를 읽는다.
+  retry_max_same_approach: 1
+  # 파지 국면에서 말단이 파지점에 이 안으로 와야 `closed`를 낸다. 내려가는 도중에 닫으면 패드가
+  # 윗면을 잡고 팔이 물체를 작업면에 누른다(실행기의 close readiness와 같은 값).
+  grasp_ready_mm: 15
+  fragile_proximity_mm: 120       # 취약 물체가 이 안이면 속도를 한 단계 내린다
+
+# 국면별 프로파일. 부가 질문은 commitment의 국면 기준으로 답한다 (docs/08 §4).
+profiles:
+  speed_by_phase:
+    approach: 2
+    grasp: 1
+    lift: 1
+    transport: 2
+    place: 1
+    push: 1
+    none: 0
+  force_by_phase:
+    approach: 0
+    grasp: 1
+    lift: 0
+    transport: 0
+    place: 1
+    push: 2
+    none: 0
+  gripper_by_phase:
+    approach: open
+    grasp: closed
+    lift: closed
+    transport: closed
+    place: open
+    push: open
+    none: current
+  fragile_speed_cap: 1
