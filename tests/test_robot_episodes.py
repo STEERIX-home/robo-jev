@@ -7,6 +7,7 @@
 """
 
 import copy
+import hashlib
 import json
 
 import pytest
@@ -325,10 +326,13 @@ def test_the_manifest_has_the_documented_schema(smoke):
     assert set(manifest["timing"]) >= {"wall_s_per_episode_mean", "episodes_per_hour", "projected_hours_for_target", "target_episodes"}
     assert manifest["timing"]["episodes_per_hour"] > 0
     assert set(manifest["decisions"]) == {"gates", "stops", "switches", "main_changes", "conflicts", "per_episode"}
-    assert len(manifest["files"]) == 2
-    for entry in manifest["files"]:
-        assert set(entry) == {"path", "episode_id", "profile", "seed", "split", "origin_group", "done", "ticks", "bytes", "sha256"}
-        assert (out / entry["path"]).is_file()
+    # `files`는 학습 적재기(`sampler.load_items`)와 비로봇 manifest(`data/generate.py`)가 읽는 꼴 — 경로 → {sha256, …}.
+    assert isinstance(manifest["files"], dict) and len(manifest["files"]) == 2
+    for path, entry in manifest["files"].items():
+        assert path == f"episodes/{entry['episode_id']}/streams.jsonl"
+        assert set(entry) == {"episode_id", "profile", "seed", "split", "origin_group", "done", "ticks", "bytes", "sha256", "records"}
+        assert (out / path).is_file() and entry["records"] == 1
+        assert entry["sha256"] == hashlib.sha256((out / path).read_bytes()).hexdigest()
 
 
 def test_resume_skips_seeds_that_already_have_an_episode(tmp_path, monkeypatch):

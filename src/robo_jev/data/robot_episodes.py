@@ -468,9 +468,9 @@ def build_manifest(
             "conflicts": counts["conflicts"],
             "per_episode": counts["per_episode"],
         },
-        "files": [
-            {
-                "path": str(path.relative_to(out)),
+        # 학습 적재기(`robo_jev.sampler.load_items`)와 비로봇 manifest(`data/generate.py`)가 읽는 꼴 — 경로 → {sha256, …}.
+        "files": {
+            str(path.relative_to(out)): {
                 "episode_id": record["episode_id"],
                 "profile": record["provenance"]["profile"],
                 "seed": record["provenance"]["seed"],
@@ -479,10 +479,11 @@ def build_manifest(
                 "done": bool(record["provenance"]["outcome"]["done"]),
                 "ticks": len(record["ticks"]),
                 "bytes": path.stat().st_size,
+                "records": 1,
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
             }
             for path, record in found
-        ],
+        },
     }
     (out / "manifest.json").write_bytes(
         (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=False) + "\n").encode("utf-8")

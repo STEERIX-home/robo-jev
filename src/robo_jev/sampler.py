@@ -59,6 +59,7 @@ __all__ = [
     "MixedSampler",
     "Unit",
     "load_items",
+    "manifest_files",
     "sha256_of",
     "tick_class",
     "tick_weights",
@@ -110,6 +111,22 @@ def _tag(record: dict, path: str) -> Any:
     return node
 
 
+def manifest_files(manifest: dict, where: str | Path = "manifest") -> dict[str, dict]:
+    """manifest의 `files`를 `{경로: {sha256, …}}`로. dict(비로봇·D0·지금의 로봇 manifest)과 목록(`[{path, sha256, …}]`,
+    이전 로봇 manifest)을 같은 뜻으로 읽는다 — 어느 쪽이든 경로와 sha256이 있어야 한다."""
+    files = manifest.get("files")
+    if isinstance(files, list):
+        normalised: dict[str, dict] = {}
+        for index, entry in enumerate(files):
+            if not isinstance(entry, dict) or not entry.get("path"):
+                raise ValueError(f"{where}: files[{index}].path가 없다")
+            normalised[str(entry["path"])] = {key: value for key, value in entry.items() if key != "path"}
+        files = normalised
+    if not isinstance(files, dict) or not files:
+        raise ValueError(f"{where}: files 항목이 없다")
+    return files
+
+
 def sha256_of(path: Path) -> str:
     """파일의 sha256 (manifest 대조와 checkpoint의 manifest 참조가 같은 함수를 쓴다)."""
     digest = hashlib.sha256()
@@ -140,9 +157,10 @@ def load_items(
     :func:`robo_jev.contracts.validate_record` 를 부르므로(입력 영역의 비입력 키·라벨 구조·후보 참조를
     거절), 잘못된 레코드가 학습 loop에 닿기 전의 **유일한** 관문이 이 적재다 — 학습 loop는 layout과
     라벨을 그대로 믿는다. manifest의 sha256 대조와 JSONL 읽기는 :mod:`robo_jev.data` 의 것
-    (`data/generate.py`의 `write_dataset`이 쓰는 manifest, `data/validate.py`의 `_read_jsonl`)과 **일부러
-    겹친다**: 학습 코드는 generator·QA를 import하지 않는다는 경계(docs/06 §1) 때문에 읽기 쪽을 여기
-    다시 둔다. 두 쪽의 manifest 형식(`files: {이름: {sha256, …}}`)이 바뀌면 같이 고친다.
+    (`data/generate.py`의 `write_dataset`·`data/robot_episodes.py`의 `build_manifest`가 쓰는 manifest,
+    `data/validate.py`의 `_read_jsonl`)과 **일부러 겹친다**: 학습 코드는 generator·QA를 import하지 않는다는
+    경계(docs/06 §1) 때문에 읽기 쪽을 여기 다시 둔다. 두 쪽의 manifest 형식(`files: {경로: {sha256, …}}`,
+    :func:`manifest_files` 가 이전 로봇 manifest의 목록 꼴도 받는다)이 바뀌면 같이 고친다.
     """
     manifest_file = Path(manifest_path)
     if not manifest_file.is_file():
@@ -154,9 +172,7 @@ def load_items(
         raise ValueError(f"stream_max_ticks: 1 이상이거나 None이어야 한다 (받은 값: {stream_max_ticks})")
     layouts = {**DEFAULT_LAYOUTS, **(layouts or {})}
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-    files = manifest.get("files")
-    if not isinstance(files, dict) or not files:
-        raise ValueError(f"{manifest_file}: files 항목이 없다")
+    files = manifest_files(manifest, manifest_file)
 
     items: list[Item] = []
     for name, entry in files.items():

@@ -71,6 +71,30 @@ def test_loader_rejects_tampered_files_unknown_splits_and_missing_manifest(tmp_p
         load_items(tmp_path / "nope.json", tokenizer=WhitespaceTokenizer())
 
 
+def test_loader_accepts_both_manifest_shapes_for_files(tmp_path):
+    """`files`는 dict(`{경로: {sha256, …}}` — 비로봇·D0 manifest, 로봇 manifest도 쓰는 시점에 이 꼴로 맞춘다)이지만
+    목록(`[{path, sha256, …}]` — 이전 로봇 manifest)도 같은 뜻으로 읽는다. 둘 다 sha256을 대조한다."""
+    import hashlib
+
+    manifest = json.loads(D0_MANIFEST.read_text(encoding="utf-8"))
+    (tmp_path / "d0.jsonl").write_bytes(D0_MANIFEST.with_name("d0.jsonl").read_bytes())
+    digest = hashlib.sha256((tmp_path / "d0.jsonl").read_bytes()).hexdigest()
+    as_dict = {**manifest, "files": {"d0.jsonl": {"sha256": digest}}}
+    as_list = {**manifest, "files": [{"path": "d0.jsonl", "sha256": digest, "episode_id": "x"}]}
+    (tmp_path / "dict.json").write_text(json.dumps(as_dict), encoding="utf-8")
+    (tmp_path / "list.json").write_text(json.dumps(as_list), encoding="utf-8")
+    from_dict = load_items(tmp_path / "dict.json", tokenizer=WhitespaceTokenizer())
+    from_list = load_items(tmp_path / "list.json", tokenizer=WhitespaceTokenizer())
+    assert [item.record_id for item in from_dict] == [item.record_id for item in from_list]
+    assert len(from_dict) == 32 and from_dict[0].source == from_list[0].source
+    (tmp_path / "bad.json").write_text(json.dumps({**manifest, "files": [{"path": "d0.jsonl", "sha256": "0" * 64}]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="sha256"):
+        load_items(tmp_path / "bad.json", tokenizer=WhitespaceTokenizer())
+    (tmp_path / "nopath.json").write_text(json.dumps({**manifest, "files": [{"sha256": digest}]}), encoding="utf-8")
+    with pytest.raises(ValueError, match="path"):
+        load_items(tmp_path / "nopath.json", tokenizer=WhitespaceTokenizer())
+
+
 def test_loader_reads_domain_and_material_tags_and_rejects_unknown_values(tmp_path):
     manifest = json.loads(D0_MANIFEST.read_text(encoding="utf-8"))
     records = [json.loads(line) for line in D0_MANIFEST.with_name("d0.jsonl").read_text(encoding="utf-8").splitlines()]
