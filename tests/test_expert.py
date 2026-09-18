@@ -462,6 +462,39 @@ def test_observation_follows_geometry_age_except_when_the_arm_hides_the_target()
     assert expert().act(request, commitment, descending)["q_observe"] == CONFIDENCE["low"]
 
 
+def test_a_push_whose_hand_occludes_the_target_does_not_gate_to_observe():
+    """밀기(접촉) 국면도 팔이 대상을 가리는 국면이다 (docs/08 §5.0·§6): 하네스의 `CONTACT_PHASES`가 단일 출처이고
+    전문가는 그것을 읽는다 — 밀리는 물체의 기하 나이가 관측 문턱을 넘어도 `max_geometry_age_ms` 안이면 관측이 아니다."""
+    from robo_jev.harness.robot import CONTACT_PHASES
+    from robo_jev.sim import expert as expert_module
+
+    assert "push" in CONTACT_PHASES
+    assert expert_module._CONTACT_PHASES is CONTACT_PHASES
+
+    hrn = harness()
+    hrn.build_request(scene(), None, None)
+    stale_ms = THRESHOLDS["observe_geom_age_ms"] + PERIOD_MS
+    pushing = scene(tick=stale_ms // PERIOD_MS, sim_time_ms=stale_ms)
+    pushing["robot"]["ee_pos_mm"] = [240, 0, -80]  # 접촉점 40mm 안 → push 국면
+    pushing["objects"][0].update(visible=False, visible_ratio=0.0)  # 손이 대상을 가린다
+    request, commitment = committed_request("push:o0:+x:none:slow", obs=pushing, hrn=hrn)
+    assert request["request"]["commitment"]["phase"] == "push"
+    target = next(entry for entry in request["request"]["state"]["objects"] if entry["id"] == "o0")
+    assert THRESHOLDS["observe_geom_age_ms"] < target["age_ms"] <= HARNESS["candidates"]["max_geometry_age_ms"]
+    out = expert().act(request, commitment, pushing)
+    assert out["q_observe"] == CONFIDENCE["low"]
+    assert out["expert_meta"]["gates"]["q_observe"]["reason"] == "fresh"
+    assert out["expert_meta"]["main"]["reason"] != "observe_target"
+    assert key_of(request, top(out["q_main"])) != "observe"
+
+    # 같은 나이의 대상을 접근 국면에서 밀러 가는 중이면(손이 아직 가리지 않는다) 관측이 맞다.
+    approaching = copy.deepcopy(pushing)
+    approaching["robot"]["ee_pos_mm"] = [100, 0, 100]
+    request, commitment = committed_request("push:o0:+x:none:slow", obs=approaching, hrn=hrn)
+    assert request["request"]["commitment"]["phase"] == "approach"
+    assert expert().act(request, commitment, approaching)["q_observe"] == CONFIDENCE["high"]
+
+
 def test_observation_waits_while_another_object_is_held():
     """지시가 바뀌어 새 대상이 안 보이는데 손에 옛 대상이 있으면 관측은 지금 할 수 있는 일이 아니다 — 운반 중의
     관측은 제자리 hold이고 가리는 것은 팔 자신이라 영영 풀리지 않는다(E1 seed 2, 244틱). 먼저 놓는다."""

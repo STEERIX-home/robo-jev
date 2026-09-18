@@ -30,7 +30,7 @@ from typing import Any
 import yaml
 
 from robo_jev.contracts import PHASES
-from robo_jev.harness.robot import FIXED_KEYS, load_harness_config, parse_exec_history
+from robo_jev.harness.robot import CONTACT_PHASES, FIXED_KEYS, load_harness_config, parse_exec_history
 from robo_jev.perception.pointworld import named_target
 from robo_jev.sim.controller import load_controller_config, resolve_config_path
 
@@ -57,8 +57,9 @@ _DERIVED = re.compile(
     r"path (?P<path>clear|blocked)|geom (?P<geom>-?\d+)ms"
 )
 
-#: 기하 나이 대신 하네스의 `max_geometry_age_ms`가 관측 문턱인 국면 (docs/08 §4 `q_observe`).
-_CONTACT_PHASES = ("grasp", "place")
+#: 기하 나이 대신 하네스의 `max_geometry_age_ms`가 관측 문턱인 국면 (docs/08 §4 `q_observe`, §5.0). 팔이 대상을
+#: 가리는 접촉 국면(파지·놓기·밀기)의 단일 출처는 하네스다 — 여기 따로 적으면 밀기가 빠진 채 어긋난다.
+_CONTACT_PHASES = CONTACT_PHASES
 
 
 def load_rule_judge_config(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:

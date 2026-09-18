@@ -27,7 +27,7 @@ from typing import Any
 import yaml
 
 from robo_jev.contracts import AUX_QUESTIONS, PHASES
-from robo_jev.harness.robot import FIXED_KEYS, load_harness_config, parse_exec_history
+from robo_jev.harness.robot import CONTACT_PHASES, FIXED_KEYS, load_harness_config, parse_exec_history
 from robo_jev.harness.rule_judge import Goal, candidate_values, normalise_distribution, read_goal
 from robo_jev.perception.pointworld import circumradius_mm, segment_point_distance_mm
 from robo_jev.sim.controller import load_controller_config, resolve_config_path
@@ -48,8 +48,9 @@ _GATE_RULES = {
     "q_stop": "force-reflex-forbidden-contact-v0",
 }
 
-#: 기하 나이 대신 하네스의 `max_geometry_age_ms`가 관측 문턱인 국면 (docs/08 §4 `q_observe`).
-_CONTACT_PHASES = ("grasp", "place")
+#: 기하 나이 대신 하네스의 `max_geometry_age_ms`가 관측 문턱인 국면 (docs/08 §4 `q_observe`, §5.0). 팔이 대상을
+#: 가리는 접촉 국면(파지·놓기·밀기)의 단일 출처는 하네스다 — 여기 따로 적으면 밀기가 빠진 채 어긋난다.
+_CONTACT_PHASES = CONTACT_PHASES
 
 #: 밀기 방향 벡터 (로봇 기준 xy). 하네스의 의미 키와 같은 이름이다.
 _PUSH_VECTORS = {"+x": (1.0, 0.0), "-x": (-1.0, 0.0), "+y": (0.0, 1.0), "-y": (0.0, -1.0)}

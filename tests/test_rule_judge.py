@@ -410,6 +410,35 @@ def test_the_arm_hiding_the_target_in_the_grasp_phase_is_not_a_lack_of_observati
     assert first["request"]["state"]["goal"]["target_ref"] == "o0"
 
 
+def test_a_push_whose_hand_occludes_the_target_does_not_gate_to_observe():
+    """밀기(접촉) 국면도 팔이 대상을 가리는 국면이다 — 하네스의 `CONTACT_PHASES`(grasp·place·push)가 단일 출처다."""
+    from robo_jev.harness import rule_judge as rule_judge_module
+    from robo_jev.harness.robot import CONTACT_PHASES
+
+    assert "push" in CONTACT_PHASES and rule_judge_module._CONTACT_PHASES is CONTACT_PHASES
+
+    hrn = harness()
+    hrn.build_request(observation(), None, None)
+    key = "push:o0:+x:none:slow"
+    commitment = {
+        "action_ref": candidate_id(key), "key": key, "phase": "push", "held_ticks": 4,
+        "last_switch_tick": 0, "goal_version": 1,
+    }
+    stale_ms = CONFIG["thresholds"]["observe_geom_age_ms"] + PERIOD_MS
+    assert stale_ms <= HARNESS["candidates"]["max_geometry_age_ms"]
+    pushing = observation(tick=stale_ms // PERIOD_MS, sim_time_ms=stale_ms)
+    pushing["robot"]["ee_pos_mm"] = [240, 0, -80]  # 접촉점 40mm 안
+    pushing["objects"][0].update(visible=False, visible_ratio=0.0)
+    request = hrn.build_request(pushing, None, commitment)
+    assert request["request"]["commitment"]["phase"] == "push"
+    target = next(entry for entry in request["request"]["state"]["objects"] if entry["id"] == "o0")
+    assert target["age_ms"] > CONFIG["thresholds"]["observe_geom_age_ms"]
+    assert rule_judge(request)["q_observe"] == CONFIDENCE["low"]
+    # 접근 국면(손이 아직 가리지 않는다)이면 같은 나이에 관측을 요구한다.
+    request = hrn.build_request(pushing, None, {**commitment, "phase": "approach"})
+    assert rule_judge(request)["q_observe"] == CONFIDENCE["high"]
+
+
 def test_contact_force_over_the_limit_asks_for_a_stop():
     scene = observation()
     scene["robot"]["contact_force_n"] = CONFIG["thresholds"]["stop_force_n"] + 5
