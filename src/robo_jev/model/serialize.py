@@ -25,11 +25,20 @@
 줄은 조각(chunk) 단위로 따로 토큰화해 이어 붙인다 — 스트림에서 틱마다 새 토큰만 붙이는 것과
 같은 계산이며, 줄 경계에서는 통째 토큰화와 같다(검사가 실제 tokenizer로 확인).
 
-**결정 위치의 예약 토큰.** 질문 i(요청 순서, 스트림에서는 질문 세트 v0 순서)의 결정 위치는
-대문자 ``DECISION_MARKERS[i]``(``A``, ``B``, ``C`` …) **한 토큰**이다. backbone이 모르는 특수
-토큰을 만들지 않는다 — byte-level BPE 어휘에서 ASCII 한 글자는 언제나 한 토큰이고, 검사가 실제
-tokenizer로 확인한다. 질문 머리에도 같은 글자가 붙어(``A q_main choice: …``) 결정 토큰이 어느
-질문의 것인지 문맥에서 읽힌다. 후보 경계는 후보 줄의 **마지막 토큰**(줄바꿈)이다.
+**결정 위치의 예약 토큰.** 결정 위치는 대문자 한 글자 **한 토큰**이다(:data:`DECISION_MARKERS`).
+backbone이 모르는 특수 토큰을 만들지 않는다 — byte-level BPE 어휘에서 ASCII 한 글자는 언제나 한
+토큰이고, 검사가 실제 tokenizer로 확인한다. 어느 글자인지는 **요청 안의 질문 순서에 의존하지 않는다**
+(docs/03 §3, docs/08 §3.1):
+
+* ``state_first``: 모든 질문이 같은 고정 표지 :data:`STATE_FIRST_MARKER`를 쓴다. 질문의 정체는
+  ``T_i`` 문맥이 주므로 질문 추가·삭제·재배열이 다른 질문의 토큰을 바꾸지 않는다(구조로 성립).
+* ``stream_l1a``: 분기가 1토큰이라 표지가 질문의 정체를 져야 한다. 질문 세트 버전이 질문 id마다
+  표지를 고정하고(``QUESTION_SET_V0[qid]["marker"]``), 직렬화는 그 map을 읽어(dict 순서가 아니라)
+  정적 prefix에 ``markers q_main=A q_done=B …`` 한 줄로 선언한다. 틱마다 묻는 부분집합·순서, 세트에
+  끼워 넣은 새 질문과 무관하게 id의 표지가 유지된다. map은 id마다 다른 예약 토큰이어야 한다(검사).
+
+질문 머리에도 같은 글자가 붙어(``A q_main choice: …``) 결정 토큰이 어느 질문의 것인지 문맥에서
+읽힌다. 후보 경계는 후보 줄의 **마지막 토큰**(줄바꿈)이다.
 
 돌려주는 dict의 토큰별 필드(``kind``·``state``·``question``·``candidate``·``position``, 스트림은
 ``tick``)는 :func:`robo_jev.model.attention.build_reference_mask`가 그대로 받는다.
@@ -59,6 +68,7 @@ from robo_jev.contracts import (
 
 __all__ = [
     "DECISION_MARKERS",
+    "STATE_FIRST_MARKER",
     "FIELD_ORDER",
     "LAYOUTS",
     "POSITION_UNIT",
@@ -84,8 +94,11 @@ TIME_UNIT = "ms"
 #: Full-attention 윈도우: 정적 prefix + 최근 30틱 (docs/08 §3.1).
 WINDOW_TICKS = 30
 
-#: 결정 위치의 예약 토큰. 질문 i → i번째 글자 한 토큰. 질문 수 상한은 이 길이다.
+#: 결정 위치에 쓸 수 있는 예약 토큰(대문자 한 글자 = 한 토큰). 스트림의 질문 세트 map은 이 안에서 고른다.
 DECISION_MARKERS = tuple(string.ascii_uppercase)
+
+#: 상태 선행(L0)의 고정 표지 — 모든 질문이 같은 토큰을 쓴다 (docs/03 §3).
+STATE_FIRST_MARKER = "A"
 
 #: 스트림 prefix에 펼치는 질문 세트. id → 질문 정의 (docs/08 §4).
 QUESTION_SETS: dict[str, dict[str, dict[str, Any]]] = {"qs-v0": QUESTION_SET_V0}
@@ -324,45 +337,15 @@ def _last_index(segment: dict[str, Any]) -> int:
 # --------------------------------------------------------------------------
 
 
-def _markers_for(question_ids: list[str], override: dict[str, str] | None) -> list[str]:
-    """질문 i의 결정 표지: 기본은 순서대로 ``DECISION_MARKERS[i]``, ``override``가 그 질문을 말하면 그것.
-
-    override는 요청의 일부(질문 하나)를 다시 직렬화할 때 표지를 전체 요청의 것으로 고정하는 데 쓴다
-    (P0의 질문별 microbatch, docs/03 §5) — 표지는 예약 토큰 집합 안이어야 한다.
-    """
-    markers: list[str] = []
-    for branch, question_id in enumerate(question_ids):
-        marker = DECISION_MARKERS[branch]
-        if override and question_id in override:
-            marker = override[question_id]
-            if marker not in DECISION_MARKERS:
-                raise ValueError(
-                    f"decision_markers.{question_id}: 예약 토큰 {DECISION_MARKERS[0]}~{DECISION_MARKERS[-1]} 중 하나여야 한다 (받은 값: {marker!r})"
-                )
-        markers.append(marker)
-    return markers
-
-
 def _serialize_state_first(
-    projected: dict,
-    tokenizer: Any,
-    *,
-    max_state_tokens: int | None,
-    max_total_tokens: int | None,
-    decision_markers: dict[str, str] | None = None,
+    projected: dict, tokenizer: Any, *, max_state_tokens: int | None, max_total_tokens: int | None
 ) -> dict[str, Any]:
     request = projected["request"]
     questions = request["questions"]
-    if len(questions) > len(DECISION_MARKERS):
-        raise ValueError(
-            f"request.questions: 결정 위치 예약 토큰은 {len(DECISION_MARKERS)}개다 "
-            f"(질문 {len(questions)}개)"
-        )
-    markers = _markers_for([spec["id"] for spec in questions], decision_markers)
+    marker = STATE_FIRST_MARKER  # 모든 질문이 같은 고정 표지 — 질문 수 상한은 프로파일(계약)이 정한다
 
     chunks = [_Chunk("[state]\n" + "\n".join(state_lines(request["state"])) + "\n", "state", "state")]
     for branch, spec in enumerate(questions):
-        marker = markers[branch]
         question_id = spec["id"]
         chunks.append(
             _Chunk(
@@ -419,7 +402,7 @@ def _serialize_state_first(
             },
             "candidate_boundaries": boundaries,
             "decision_positions": decisions,
-            "decision_markers": {spec["id"]: markers[branch] for branch, spec in enumerate(questions)},
+            "decision_markers": {spec["id"]: marker for spec in questions},
         }
     )
     return out
@@ -432,6 +415,28 @@ def _serialize_state_first(
 
 def _instruction_line(instruction: dict) -> str:
     return f"instruction {_pairs(instruction)}\n"
+
+
+def _declared_markers(question_set_id: str, question_set: dict[str, dict[str, Any]]) -> dict[str, str]:
+    """질문 세트가 id마다 선언한 표지 map. 빠짐·중복·예약 밖은 오류다 (dict 순서는 쓰지 않는다)."""
+    markers: dict[str, str] = {}
+    for question_id, spec in question_set.items():
+        marker = spec.get("marker")
+        path = f"prefix.question_set[{question_set_id}].{question_id}.marker"
+        if not isinstance(marker, str) or marker not in DECISION_MARKERS:
+            raise ValueError(
+                f"{path}: 예약 토큰 {DECISION_MARKERS[0]}~{DECISION_MARKERS[-1]} 중 하나여야 한다 (받은 값: {marker!r})"
+            )
+        if marker in markers.values():
+            taken = next(q for q, m in markers.items() if m == marker)
+            raise ValueError(f"{path}: 표지 {marker!r}는 {taken!r}가 이미 쓴다 — id마다 달라야 한다")
+        markers[question_id] = marker
+    return markers
+
+
+def _markers_line(markers: dict[str, str]) -> str:
+    """정적 prefix의 표지 선언 한 줄: ``markers q_main=A q_done=B …``."""
+    return "markers " + " ".join(f"{question_id}={marker}" for question_id, marker in markers.items()) + "\n"
 
 
 _ENVELOPE_FIELDS = ("sim_ms", "observed_at_ms", "obs_age_ms")
@@ -493,8 +498,7 @@ def _serialize_stream(projected: dict, tokenizer: Any, *, window_ticks: int) -> 
         )
     question_set = QUESTION_SETS[question_set_id]
     question_ids = list(question_set)
-    if len(question_ids) > len(DECISION_MARKERS):
-        raise ValueError(f"prefix.question_set: 결정 위치 예약 토큰은 {len(DECISION_MARKERS)}개다")
+    markers = _declared_markers(question_set_id, question_set)
     branch_of = {question_id: branch for branch, question_id in enumerate(question_ids)}
 
     instructions = prefix["instructions"]
@@ -502,11 +506,12 @@ def _serialize_stream(projected: dict, tokenizer: Any, *, window_ticks: int) -> 
         _Chunk(_instruction_line(instructions[0]), "prefix", f"instruction:{instructions[0]['version']}")
     ]
     chunks.append(_Chunk(f"[questions {question_set_id}]\n", "prefix", "question_set"))
+    chunks.append(_Chunk(_markers_line(markers), "prefix", "markers"))
     for question_id, spec in question_set.items():
         branch = branch_of[question_id]
         chunks.append(
             _Chunk(
-                _question_header(DECISION_MARKERS[branch], question_id, spec),
+                _question_header(markers[question_id], question_id, spec),
                 "prefix",
                 f"question:{question_id}",
                 owner=branch,
@@ -596,7 +601,7 @@ def _serialize_stream(projected: dict, tokenizer: Any, *, window_ticks: int) -> 
             branch = branch_of[question_id]
             chunks.append(
                 _Chunk(
-                    DECISION_MARKERS[branch],
+                    markers[question_id],
                     "decision",
                     f"decision:{question_id}",
                     question=branch,
@@ -669,9 +674,7 @@ def _serialize_stream(projected: dict, tokenizer: Any, *, window_ticks: int) -> 
             "unplaced_instructions": unplaced,
             "static_candidate_boundaries": static_boundaries,
             "static_candidate_mapping": static_mapping,
-            "decision_markers": {
-                question_id: DECISION_MARKERS[branch] for branch, question_id in enumerate(question_ids)
-            },
+            "decision_markers": dict(markers),
             "ticks": tick_entries,
             "tick_boundaries": [[entry["start"], entry["end"]] for entry in tick_entries],
         }
@@ -692,16 +695,13 @@ def serialize_request(
     max_state_tokens: int | None = 2048,
     max_total_tokens: int | None = 8192,
     window_ticks: int = WINDOW_TICKS,
-    decision_markers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """레코드 → 토큰·구간·분기·position (모듈 설명 참조).
 
     `request`는 `judgment-v0`(``state_first``) 또는 `stream-v0`(``stream_l1a``) 레코드다. 계약
     검사를 먼저 돌리므로 입력 영역의 비입력 키·라벨 구조는 경로가 붙은 `ValueError`로 거절되고,
     입력 영역 밖의 라벨·근거는 투영에서 빠져 결과에 영향을 주지 않는다. `max_*`는 L0 프로파일의
-    상한(docs/06 Global Constraints)이며 넘으면 자르지 않고 오류다. `decision_markers`(``state_first``)
-    는 질문 id → 결정 표지의 고정값이다: 요청의 일부를 다시 직렬화할 때(P0의 질문별 microbatch)
-    표지가 요청 순서에 따라 바뀌지 않게 전체 요청의 표지를 넘긴다. 기본은 순서대로 ``A, B, C …``다.
+    상한(docs/06 Global Constraints)이며 넘으면 자르지 않고 오류다.
     """
     if layout not in LAYOUTS:
         raise ValueError(f"layout: {list(LAYOUTS)} 중 하나여야 한다 (받은 값: {layout!r})")
@@ -715,14 +715,8 @@ def serialize_request(
         )
     if layout == "state_first":
         return _serialize_state_first(
-            projected,
-            tokenizer,
-            max_state_tokens=max_state_tokens,
-            max_total_tokens=max_total_tokens,
-            decision_markers=decision_markers,
+            projected, tokenizer, max_state_tokens=max_state_tokens, max_total_tokens=max_total_tokens
         )
-    if decision_markers:
-        raise ValueError("decision_markers: 스트림의 표지는 질문 세트 순서로 고정이라 덮어쓸 수 없다")
     if window_ticks < 1:
         raise ValueError(f"window_ticks: 1 이상이어야 한다 (받은 값: {window_ticks})")
     return _serialize_stream(projected, tokenizer, window_ticks=window_ticks)

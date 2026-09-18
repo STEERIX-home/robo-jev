@@ -12,12 +12,14 @@ import yaml
 from helpers import SIM_CONFIG
 
 from robo_jev.contracts import QUESTION_SET_V0, model_input
+from robo_jev.model import serialize as serialize_module
 from robo_jev.model.serialize import (
     DECISION_MARKERS,
     LAYOUTS,
     POSITION_UNIT,
     QUATERNION_DECIMALS,
     SERIALIZER_VERSION,
+    STATE_FIRST_MARKER,
     TIME_UNIT,
     WINDOW_TICKS,
     serialize_request,
@@ -207,18 +209,20 @@ def test_boolean_and_ordinal_candidates_come_from_the_question(three_questions, 
         assert f"value={criterion['value']:g}" in text  # 수준의 수치도 모델이 본다 (docs/03 §2)
 
 
-def test_decision_token_is_the_documented_reserved_token_per_question(three_questions, tokenizer):
+def test_state_first_decision_token_is_one_fixed_marker_for_every_question(three_questions, tokenizer):
+    """docs/03 §3(0d89e27): L0에서는 모든 질문이 같은 고정 표지 토큰을 쓴다 — 질문의 정체는 T_i 문맥이 준다."""
     out = serialize_request(three_questions, tokenizer)
-    for branch, question_id in enumerate(out["question_ids"]):
-        marker = DECISION_MARKERS[branch]
-        assert out["decision_markers"][question_id] == marker
+    assert STATE_FIRST_MARKER in DECISION_MARKERS
+    for question_id in out["question_ids"]:
+        assert out["decision_markers"][question_id] == STATE_FIRST_MARKER
         position = out["decision_positions"][question_id]
-        assert out["tokens"][position] == tokenizer.encode(marker).ids[-1]
+        assert out["tokens"][position] == tokenizer.encode(STATE_FIRST_MARKER).ids[-1]
         # 질문 머리에도 같은 표지가 있어 결정 토큰이 질문과 이어진다.
         header = next(s for s in out["segments"] if s["name"] == f"question:{question_id}")
         assert tokenizer.decode(out["tokens"][header["start"] : header["end"]]).startswith(
-            f"{marker} {question_id} "
+            f"{STATE_FIRST_MARKER} {question_id} "
         )
+    assert len(set(out["decision_markers"].values())) == 1
 
 
 def test_candidate_boundary_is_the_last_token_of_the_candidate_line(single, tokenizer):
@@ -251,39 +255,41 @@ def test_state_first_rejects_oversized_requests(single, tokenizer):
     serialize_request(single, tokenizer, max_state_tokens=None, max_total_tokens=None)
 
 
-def test_decision_markers_can_be_pinned_when_reserializing_part_of_a_request(three_questions, tokenizer):
-    """요청의 일부(질문 하나)를 다시 직렬화해도 표지는 전체 요청의 것으로 고정할 수 있다 (P0 microbatch)."""
+def test_state_first_reserializing_one_question_keeps_its_tokens(three_questions, tokenizer):
+    """질문 하나만 다시 직렬화해도 T_i 토큰이 전체 요청 안의 것과 같다 — 표지가 순서에 묶이지 않으므로
+    질문 추가·삭제·재배열 불변이 구조로 성립한다 (docs/03 §3, P0 microbatch docs/03 §5)."""
     whole = serialize_request(three_questions, tokenizer)
-    second = copy.deepcopy(three_questions)
-    second["request"]["questions"] = [second["request"]["questions"][1]]
-    second["labels"] = [l for l in second["labels"] if l["question_id"] == second["request"]["questions"][0]["id"]]
-    second["usage"]["questions_used"] = [second["request"]["questions"][0]["id"]]
-    question_id = second["request"]["questions"][0]["id"]
-    default = serialize_request(second, tokenizer)
-    assert default["decision_markers"][question_id] == DECISION_MARKERS[0]  # 기본은 요청 순서
-    pinned = serialize_request(second, tokenizer, decision_markers=whole["decision_markers"])
-    assert pinned["decision_markers"][question_id] == whole["decision_markers"][question_id] == DECISION_MARKERS[1]
-    # T_i의 토큰이 전체 요청 안의 것과 정확히 같다
-    header = next(s for s in whole["segments"] if s["name"] == f"question:{question_id}")
-    t_i = whole["tokens"][header["start"] : whole["decision_positions"][question_id] + 1]
-    assert pinned["tokens"][pinned["state_end"] :] == t_i
-    with pytest.raises(ValueError, match="decision_markers"):
-        serialize_request(second, tokenizer, decision_markers={question_id: "a"})
+    for index, question in enumerate(three_questions["request"]["questions"]):
+        alone = copy.deepcopy(three_questions)
+        alone["request"]["questions"] = [copy.deepcopy(question)]
+        alone["labels"] = [l for l in alone["labels"] if l["question_id"] == question["id"]]
+        alone["usage"]["questions_used"] = [question["id"]]
+        out = serialize_request(alone, tokenizer)
+        header = next(s for s in whole["segments"] if s["name"] == f"question:{question['id']}")
+        t_i = whole["tokens"][header["start"] : whole["decision_positions"][question["id"]] + 1]
+        assert out["tokens"][out["state_end"] :] == t_i
+        assert out["decision_markers"][question["id"]] == whole["decision_markers"][question["id"]]
+    reordered = copy.deepcopy(three_questions)
+    reordered["request"]["questions"] = list(reversed(reordered["request"]["questions"]))
+    back = serialize_request(reordered, tokenizer)
+    for question_id in whole["question_ids"]:
+        header_a = next(s for s in whole["segments"] if s["name"] == f"question:{question_id}")
+        header_b = next(s for s in back["segments"] if s["name"] == f"question:{question_id}")
+        span_a = whole["tokens"][header_a["start"] : whole["decision_positions"][question_id] + 1]
+        span_b = back["tokens"][header_b["start"] : back["decision_positions"][question_id] + 1]
+        assert span_a == span_b
 
 
-def test_decision_markers_cannot_override_the_streams_fixed_order(stream, tokenizer):
-    with pytest.raises(ValueError, match="decision_markers"):
-        serialize_request(stream, tokenizer, layout="stream_l1a", decision_markers={"q_main": "B"})
-
-
-def test_too_many_questions_for_the_reserved_markers_is_an_error(single, tokenizer):
+def test_state_first_has_no_question_cap_from_the_reserved_markers(single, tokenizer):
+    """표지가 하나이므로 예약 토큰 수가 L0의 질문 수를 제한하지 않는다 (프로파일 상한은 별도)."""
     question = single["request"]["questions"][0]
     single["request"]["questions"] = [
         {**copy.deepcopy(question), "id": f"q{index}"} for index in range(len(DECISION_MARKERS) + 1)
     ]
     single.pop("labels")
-    with pytest.raises(ValueError, match="결정 위치"):
-        serialize_request(single, tokenizer, max_total_tokens=None)
+    out = serialize_request(single, tokenizer, max_total_tokens=None)
+    assert len(out["decision_positions"]) == len(DECISION_MARKERS) + 1
+    assert set(out["decision_markers"].values()) == {STATE_FIRST_MARKER}
 
 
 def test_layout_must_match_the_record_kind(single, stream, tokenizer):
@@ -463,6 +469,82 @@ def test_tick_header_does_not_repeat_the_states_own_t_line(stream, tokenizer):
 def test_unknown_question_set_is_an_error(stream, tokenizer):
     stream["prefix"]["question_set"] = "qs-v9"
     with pytest.raises(ValueError, match="question_set"):
+        serialize_request(stream, tokenizer, layout="stream_l1a")
+
+
+def test_stream_markers_are_declared_by_the_question_set_and_written_in_the_prefix(stream, tokenizer):
+    """docs/08 §3.1(0d89e27): 표지는 질문 세트 버전이 id마다 고정해 정적 prefix에 선언한다."""
+    out = serialize_request(stream, tokenizer, layout="stream_l1a")
+    declared = {question_id: spec["marker"] for question_id, spec in QUESTION_SET_V0.items()}
+    assert out["decision_markers"] == declared
+    assert len(set(declared.values())) == len(declared)  # id마다 다른 예약 토큰
+    assert all(marker in DECISION_MARKERS for marker in declared.values())
+    prefix_text = tokenizer.decode(out["tokens"][: out["prefix_end"]])
+    line = "markers " + " ".join(f"{question_id}={marker}" for question_id, marker in declared.items())
+    assert line in prefix_text.splitlines()
+    segment = next(s for s in out["segments"] if s["name"] == "markers")
+    assert segment["kind"] == "prefix" and segment["end"] <= out["prefix_end"]
+    for tick in out["ticks"]:
+        for question_id, position in tick["decision_positions"].items():
+            assert out["tokens"][position] == tokenizer.encode(declared[question_id]).ids[-1]
+
+
+def test_stream_marker_of_a_question_does_not_depend_on_the_posed_subset(streams, tokenizer):
+    """q_path가 없는 틱과 있는 틱에서 다른 질문의 표지 토큰이 같다 (묻는 부분집합·순서와 무관)."""
+    record = copy.deepcopy(streams[0])
+    record["ticks"] = record["ticks"][:8]
+    out = serialize_request(record, tokenizer, layout="stream_l1a")
+    with_path = [tick for tick in out["ticks"] if "q_path" in tick["decision_positions"]]
+    without = [tick for tick in out["ticks"] if "q_path" not in tick["decision_positions"]]
+    assert with_path and without
+    for question_id, marker in out["decision_markers"].items():
+        ids = {
+            out["tokens"][tick["decision_positions"][question_id]]
+            for tick in out["ticks"]
+            if question_id in tick["decision_positions"]
+        }
+        assert ids == {tokenizer.encode(marker).ids[-1]}, question_id
+
+
+def test_stream_question_set_can_gain_an_id_without_renumbering_the_others(stream, tokenizer, monkeypatch):
+    """세트에 질문을 끼워 넣어도(선언된 map) 기존 id의 표지·결정 토큰은 그대로다."""
+    before = serialize_request(stream, tokenizer, layout="stream_l1a")
+    grown: dict = {}
+    for question_id, spec in QUESTION_SET_V0.items():
+        grown[question_id] = copy.deepcopy(spec)
+        if question_id == "q_main":  # 두 번째 자리에 새 질문
+            grown["q_new"] = {
+                "type": "boolean",
+                "instructions": "새 질문인가.",
+                "criteria": [{"id": "true", "description": "예"}, {"id": "false", "description": "아니오"}],
+                "marker": "K",
+            }
+    monkeypatch.setitem(serialize_module.QUESTION_SETS, "qs-v0", grown)
+    after = serialize_request(stream, tokenizer, layout="stream_l1a")
+    assert after["question_ids"] == list(grown) and after["question_ids"][1] == "q_new"
+    assert after["decision_markers"]["q_new"] == "K"
+    for question_id, marker in before["decision_markers"].items():
+        assert after["decision_markers"][question_id] == marker
+    for tick_before, tick_after in zip(before["ticks"], after["ticks"]):
+        for question_id, position in tick_before["decision_positions"].items():
+            assert after["tokens"][tick_after["decision_positions"][question_id]] == before["tokens"][position]
+        assert "q_new" in tick_after["decision_positions"]
+    assert "q_new=K" in tokenizer.decode(after["tokens"][: after["prefix_end"]])
+
+
+@pytest.mark.parametrize(
+    "mutate, message",
+    [
+        (lambda s: s["q_done"].pop("marker"), "marker"),
+        (lambda s: s["q_done"].__setitem__("marker", "A"), "marker"),  # q_main과 중복
+        (lambda s: s["q_done"].__setitem__("marker", "b"), "marker"),  # 예약 토큰 밖
+    ],
+)
+def test_stream_question_set_markers_must_be_declared_unique_reserved_tokens(stream, tokenizer, monkeypatch, mutate, message):
+    broken = copy.deepcopy(QUESTION_SET_V0)
+    mutate(broken)
+    monkeypatch.setitem(serialize_module.QUESTION_SETS, "qs-v0", broken)
+    with pytest.raises(ValueError, match=message):
         serialize_request(stream, tokenizer, layout="stream_l1a")
 
 
