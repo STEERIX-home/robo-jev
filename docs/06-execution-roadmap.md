@@ -333,7 +333,7 @@ budget_usd: 63.84
 seed: 17
 ```
 
-`independent_paths`는 질문별 causal 경로를 복제하는 P0다. Q개 경로를 내부 microbatch로 나누어 상태별 loss를 구성하고 실제 처리량을 기록한다. `readout: candidate_branch`는 비교군 R이며 경로가 Q×K개로 늘어난다. 로봇 스트림 레코드는 `layout: stream_l1a`로 읽히며 `stream_chunk_seconds`·`stream_window_ticks`가 truncated BPTT와 윈도우를 정한다. `model_id`는 Task 2b에서 확정한 backbone으로 바꾸며, 위 값은 첫 후보의 예시다. 이후 `shared_hybrid` P1을 따로 profile한다. 이 경로는 full-attention과 DeltaNet의 정합성 검사를 모두 통과해야 한다. 입력 축소만으로 최대 지원 길이를 통과한 것처럼 표시하지 않는다. profile 후 본 학습용 step·epoch 상한을 다시 산정한다.
+학습 설정은 `dataset_manifests: [...]`로 로봇 batch와 비로봇 데이터의 manifest를 여러 개 받아 한 run에 넣는다(manifest별 domain 기본값, 레코드의 `provenance.domain`이 우선). step마다 로봇 스트림 단위와 비로봇 묶음 단위를 둘 다 넣고 손실은 04의 0.6/0.4 혼합이다(CPU 검증 완료). `independent_paths`는 질문별 causal 경로를 복제하는 P0다. Q개 경로를 내부 microbatch로 나누어 상태별 loss를 구성하고 실제 처리량을 기록한다. `readout: candidate_branch`는 비교군 R이며 경로가 Q×K개로 늘어난다. 로봇 스트림 레코드는 `layout: stream_l1a`로 읽히며 `stream_chunk_seconds`·`stream_window_ticks`가 truncated BPTT와 윈도우를 정한다. `model_id`는 Task 2b에서 확정한 backbone으로 바꾸며, 위 값은 첫 후보의 예시다. 이후 `shared_hybrid` P1을 따로 profile한다. 이 경로는 full-attention과 DeltaNet의 정합성 검사를 모두 통과해야 한다. 입력 축소만으로 최대 지원 길이를 통과한 것처럼 표시하지 않는다. profile 후 본 학습용 step·epoch 상한을 다시 산정한다.
 
 예정 CLI:
 
