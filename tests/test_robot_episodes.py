@@ -114,6 +114,8 @@ def test_smoke_e0_completes_with_a_one_second_tail(smoke):
     record = smoke["records"][("E0", 17)]
     outcome = record["provenance"]["outcome"]
     assert outcome["done"] is True and outcome["target_inside_zone"] is True and outcome["holding"] is None
+    # 놓았다 = 손가락이 실제로 열렸다. 마지막 관측의 그리퍼 폭을 결과에 적는다.
+    assert isinstance(outcome["gripper_mm"], int) and outcome["gripper_mm"] > 40
     assert outcome["terminated"] == "done_tail"
     tail = CONFIG["episode"]["tail_ticks_after_done"]
     assert len(record["ticks"]) == outcome["done_tick"] + 1 + tail

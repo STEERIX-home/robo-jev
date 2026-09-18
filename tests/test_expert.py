@@ -14,7 +14,7 @@ import math
 
 import pytest
 import yaml
-from helpers import HARNESS_CONFIG, SIM_CONFIG
+from helpers import CONTROLLER_CONFIG, HARNESS_CONFIG, SIM_CONFIG
 from test_harness import GRASP, PERIOD_MS, harness, obj, observation
 
 from robo_jev.contracts import QUESTION_SET_V0
@@ -23,6 +23,7 @@ from robo_jev.sim.expert import EXPERT_VERSION, Expert, load_expert_config
 
 CONFIG = load_expert_config()
 HARNESS = yaml.safe_load(HARNESS_CONFIG.read_text(encoding="utf-8"))
+CONTROLLER = yaml.safe_load(CONTROLLER_CONFIG.read_text(encoding="utf-8"))
 SIM = yaml.safe_load(SIM_CONFIG.read_text(encoding="utf-8"))
 CONFIDENCE = CONFIG["confidence"]
 THRESHOLDS = CONFIG["thresholds"]
@@ -328,6 +329,31 @@ def test_push_directions_are_restricted_by_config_to_what_the_open_gripper_can_d
     assert key_of(request, top(out["q_main"])).startswith("push:o0:-x:none:")
 
 
+def test_semantic_admissibility_comes_from_the_goal_not_from_executor_capability():
+    """`semantic_admissible`은 지시·목적지·금지 조건에서만 나온다 (docs/08 §7 (1)). 실행기 역량(밀기 방향
+    설정)은 **선택**(`q_main`)만 거른다 — 영역 쪽으로 미는 +y 밀기는 고를 수 없어도 여전히 적합하다."""
+    obs = two_object_scene((100, 120, -80))  # +y만 영역 쪽 — 설정의 방향(±x)이 아니다
+    request = without_goal_grasp(request_for(obs))
+    out = expert().act(request, None, obs)
+    main = out["expert_meta"]["main"]
+    assert key_of(request, top(out["q_main"])) == "hold"
+    assert main["reason"] == "not_executable" and main["confidence"] == "low"
+    admissible = [key_of(request, candidate) for candidate in main["admissible"]]
+    assert admissible and all(key.startswith("push:o0:+y:none:") for key in admissible)
+    assert set(main["excluded"].values()) == {"push_direction"}
+    labels = {label["question_id"]: label for label in expert().labels(out, request)}
+    assert labels["q_main"]["candidate_ids"] == [top(out["q_main"])]
+    assert labels["q_main"]["semantic_admissible"] == main["admissible"]
+
+    # 목표에 맞는 후보가 하나도 없을 때만 적합 집합이 빈다.
+    request["request"]["candidates"]["q_main"] = [
+        entry for entry in request["request"]["candidates"]["q_main"] if not entry["key"].startswith("push:o0:")
+    ]
+    out = expert().act(request, None, obs)
+    assert out["expert_meta"]["main"]["reason"] == "goal_candidate_missing"
+    assert out["expert_meta"]["main"]["admissible"] == []
+
+
 def test_a_held_non_target_is_put_down_in_the_goal_zone_first():
     """지시가 바뀌었는데 손에 옛 대상이 있으면 그것을 먼저 놓는다 — 새 대상은 손이 비어야 집는다."""
     obs = scene(instruction={"version": 2, "t_ms": 500, "text": "red 상자 대신 blue 상자를 왼쪽 정리 영역으로 먼저 옮겨라"})
@@ -346,7 +372,8 @@ def test_a_held_non_target_is_put_down_in_the_goal_zone_first():
 
 def test_a_way_the_harness_just_retry_blocked_is_not_proposed_again():
     """직전 틱에 같은 방식이 한계 횟수를 넘겨 실패했으면(`q_retry` 거짓) 하네스가 그 방식을 막는다 —
-    그때 같은 답을 내면 하네스는 남은 후보 중 임의의 것을 채택한다. 전문가가 먼저 비켜 준다."""
+    그때 같은 답을 내면 하네스는 남은 후보 중 임의의 것을 채택한다. 전문가가 먼저 비켜 준다(hold).
+    차단은 하네스의 일시적 상태이지 의미 적합성이 아니다 — `semantic_admissible`에는 그 방식이 남는다."""
     hrn = harness()
     failed = {
         "adopted": {"main": candidate_id(GRASP), "phase": "approach", "path": "p0", "speed": 1, "force": 0, "gripper": "open", "stop": False},
@@ -360,9 +387,16 @@ def test_a_way_the_harness_just_retry_blocked_is_not_proposed_again():
     assert out["q_retry"] == CONFIDENCE["low"]
     chosen = key_of(request, top(out["q_main"]))
     assert not chosen.startswith("grasp:o0:top:")
-    assert out["expert_meta"]["main"]["blocked_ways"] == ["grasp:o0:top"]
-    assert not any(key.startswith("grasp:o0:top:") for key in
-                   (key_of(request, c) for c in out["expert_meta"]["main"]["admissible"]))
+    assert chosen == "hold"
+    main = out["expert_meta"]["main"]
+    assert main["reason"] == "way_retry_blocked" and main["confidence"] == "low"
+    assert main["blocked_ways"] == ["grasp:o0:top"]
+    admissible = [key_of(request, candidate) for candidate in main["admissible"]]
+    assert admissible and all(key.startswith("grasp:o0:top:zoneL:") for key in admissible)
+    assert main["excluded"] == {candidate: "retry_blocked" for candidate in main["admissible"]}
+    labels = {label["question_id"]: label for label in expert().labels(out, request)}
+    assert labels["q_main"]["candidate_ids"] == [candidate_id("hold")]
+    assert candidate_id(GRASP) in labels["q_main"]["semantic_admissible"]
 
 
 # --------------------------------------------------------------------------
@@ -598,13 +632,22 @@ def test_a_clear_approach_outranks_a_larger_gain_for_a_blocker_push():
 
 
 def test_a_push_whose_contact_point_sits_inside_another_object_is_never_chosen():
-    """대상에서 곧장 멀어지는 +y 밀기는 접촉점이 대상의 외접 구 안이다 — 어떤 경로로도 닿을 수 없다."""
+    """대상에서 곧장 멀어지는 +y 밀기는 접촉점이 대상의 외접 구 안이다 — 어떤 경로로도 닿을 수 없다.
+    접촉점 도달성은 실행기 쪽 조건이므로 선택에서만 뺀다: 목표에는 맞으니(막는 이웃을 대상에서
+    멀리 민다) `semantic_admissible`에는 남고, 뺀 이유는 근거에 적힌다."""
     obs = blocked_descent_scene()
     request, commitment = committed_request(GRASP, obs=obs)
-    out = expert().act(request, commitment, obs)
-    admissible = {key_of(request, candidate) for candidate in out["expert_meta"]["main"]["admissible"]}
-    assert not any(key.startswith("push:o1:+y:") for key in admissible)
+    every_direction = copy.deepcopy(CONFIG)
+    every_direction["goal"]["push_directions"] = None  # 방향 설정과 무관하게 접촉점만 본다
+    out = Expert(every_direction).act(request, commitment, obs)
+    main = out["expert_meta"]["main"]
+    assert not key_of(request, main["choice"]).startswith("push:o1:+y:")
+    admissible = {key_of(request, candidate) for candidate in main["admissible"]}
+    assert any(key.startswith("push:o1:+y:") for key in admissible)
     assert any(key.startswith("push:o1:+x:") for key in admissible)
+    assert candidate_id(GRASP) in main["admissible"]
+    excluded = {key_of(request, candidate): reason for candidate, reason in main["excluded"].items()}
+    assert excluded == {"push:o1:+y:none:slow": "contact_point", "push:o1:+y:none:fast": "contact_point"}
 
 
 def test_speed_is_reduced_next_to_a_fragile_object_and_in_place():
@@ -677,6 +720,9 @@ def assert_completed(outcome: dict) -> None:
     assert outcome["done_tick"] is not None and outcome["done_tick"] < 300, outcome
     assert outcome["target_inside_zone"] is True, outcome
     assert outcome["holding"] is None, outcome
+    # 놓았다는 것은 손이 비었다는 판정만이 아니라 손가락이 실제로 열렸다는 것이다.
+    gripper = CONTROLLER["gripper"]
+    assert outcome["gripper_mm"] > (gripper["open_mm"] + gripper["closed_mm"]) / 2, outcome
 
 
 @pytest.mark.parametrize("seed", [17, 29, 43])

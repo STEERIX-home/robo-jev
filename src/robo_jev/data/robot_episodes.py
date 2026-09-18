@@ -304,8 +304,9 @@ def _outcome(scene: dict[str, Any], plan: ScenePlan, env: Any, done_tick: int | 
     zone = next((entry for entry in scene["zones"] if entry["id"] == instruction.zone), None)
     inside = None
     if target is not None and zone is not None:
-        x0, y0, x1, y1 = zone["bounds_mm"]
-        inside = bool(x0 <= target["pos_mm"][0] <= x1 and y0 <= target["pos_mm"][1] <= y1)
+        x0, y0, x1, y1 = [float(value) for value in zone["bounds_mm"]]
+        x, y = float(target["pos_mm"][0]), float(target["pos_mm"][1])
+        inside = bool(min(x0, x1) <= x <= max(x0, x1) and min(y0, y1) <= y <= max(y0, y1))
     return {
         "done": done_tick is not None,
         "done_tick": done_tick,
@@ -316,6 +317,8 @@ def _outcome(scene: dict[str, Any], plan: ScenePlan, env: Any, done_tick: int | 
         "zone": instruction.zone,
         "target_inside_zone": inside,
         "holding": scene["robot"].get("holding"),
+        # 놓았다는 판정(`holding`)과 별개로 손가락이 실제로 열렸는지 — 인수 검사가 해제를 단언하는 값.
+        "gripper_mm": int(round(float(scene["robot"]["gripper_mm"]))),
         "sim_ms": int(scene["sim_time_ms"]),
     }
 

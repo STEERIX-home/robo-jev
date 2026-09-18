@@ -412,6 +412,20 @@ class RobotHarness:
                 "|".join(candidate.key for candidate in candidates).encode("utf-8")
             ).hexdigest()[:8],
         }
+        # 상한의 붕괴는 대상별이다(목적지는 돌아가며 고르는 차원 중 넷째): 전체로는 모든 목적지가 남아도
+        # 한 대상의 목적지가 하나만 남을 수 있고, 그것이 지시의 대상×목표 영역이면 정답이 목록에서 빠진다.
+        # 밀기의 `none`은 목적지가 아니므로 세지 않는다.
+        by_target = {
+            target: {
+                "kept": len({c.destination for c in kept if c.target_ref == target and c.destination != "none"}),
+                "feasible": len({c.destination for c in feasible if c.target_ref == target and c.destination != "none"}),
+            }
+            for target in sorted({str(c.target_ref) for c in feasible})
+        }
+        accounting["spread"]["destinations"]["by_target"] = by_target
+        accounting["spread"]["destinations"]["targets_collapsed"] = sum(
+            1 for entry in by_target.values() if entry["kept"] < entry["feasible"]
+        )
         return candidates, accounting
 
     def _combinations(

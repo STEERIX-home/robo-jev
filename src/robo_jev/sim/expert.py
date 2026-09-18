@@ -195,7 +195,15 @@ class Expert:
         paths: list[dict[str, Any]],
         model: dict[str, Any],
     ) -> dict[str, Any]:
-        """구조화된 목표를 실현하는 후보 (docs/08 §7의 의미 적합성 → 전문가 선택 → commitment)."""
+        """구조화된 목표를 실현하는 후보 (docs/08 §7의 의미 적합성 → 전문가 선택 → commitment).
+
+        두 집합을 따로 든다. **`admissible`(의미 적합성)**은 지시·목적지·금지 조건에서만 나온다 — 목표
+        대상을 목표 영역으로 옮기는 파지·놓기, 대상을 영역 쪽으로 미는 밀기, 파지 하강을 막는 평범한
+        이웃을 대상에서 멀리 미는 밀기. **선택(`choice`)**은 그 안에서 실행기 역량(설정의 밀기 방향),
+        접촉점 도달성, 하네스의 일시적 재시도 차단으로 거른 것 가운데 고른다. 거른 이유는 `excluded`에
+        남는다. 걸러서 아무것도 남지 않으면 `hold`이되 적합 집합은 그대로다 — 라벨의
+        `semantic_admissible`이 실행기 사정으로 줄면 안 되기 때문이다.
+        """
         ids = [entry["id"] for entry in candidates]
         keys = {entry["id"]: str(entry.get("key", "")) for entry in candidates}
         fixed = {keys[candidate]: candidate for candidate in ids if keys[candidate] in FIXED_KEYS}
@@ -203,12 +211,19 @@ class Expert:
 
         blocked_ways = self._retry_blocked_ways(model, values)
 
-        def decision(choice: str, reason: str, admissible: list[str], confidence: str = "high") -> dict[str, Any]:
+        def decision(
+            choice: str,
+            reason: str,
+            admissible: list[str],
+            confidence: str = "high",
+            excluded: dict[str, str] | None = None,
+        ) -> dict[str, Any]:
             return {
                 "choice": choice,
                 "key": keys.get(choice),
                 "reason": reason,
-                "admissible": admissible,
+                "admissible": list(admissible),
+                "excluded": dict(excluded or {}),
                 "confidence": confidence,
                 "blocked_ways": sorted(blocked_ways),
             }
@@ -216,6 +231,33 @@ class Expert:
         def open_way(candidate: str) -> bool:
             value = values[candidate]
             return value["function"] is None or f"{value['function']}:{value['target']}:{value['approach']}" not in blocked_ways
+
+        def executable(options: list[str]) -> tuple[list[str], dict[str, str]]:
+            """적합 후보 가운데 지금 고를 수 있는 것과, 뺀 것의 이유. 선택에만 쓴다."""
+            usable: list[str] = []
+            excluded: dict[str, str] = {}
+            for candidate in options:
+                value = values[candidate]
+                if not open_way(candidate):
+                    excluded[candidate] = "retry_blocked"
+                elif value["function"] == "push" and not self._push_allowed(value):
+                    excluded[candidate] = "push_direction"
+                elif value["function"] == "push" and not self._contact_point_free(
+                    state, value["target"], _PUSH_VECTORS[str(value["approach"])]
+                ):
+                    excluded[candidate] = "contact_point"
+                else:
+                    usable.append(candidate)
+            return usable, excluded
+
+        def fallback(admissible: list[str], excluded: dict[str, str]) -> dict[str, Any]:
+            """고를 수 있는 것이 없다: 적합 후보가 아예 없으면 `goal_candidate_missing`, 있는데 실행기
+            사정이면 그 이유로 `hold` (신뢰도 low). 적합 집합은 줄이지 않는다."""
+            choice = fixed.get("hold", ids[0])
+            if not admissible:
+                return decision(choice, "goal_candidate_missing", [], confidence="low")
+            reason = "way_retry_blocked" if "retry_blocked" in excluded.values() else "not_executable"
+            return decision(choice, reason, admissible, confidence="low", excluded=excluded)
 
         if gates["q_done"]["value"]:
             choice = fixed.get("hold", ids[0])
@@ -236,14 +278,17 @@ class Expert:
             # 목표 영역이 있으면 거기에, 아니면 아무 영역에.
             places = [
                 candidate for candidate in ids
-                if values[candidate]["function"] == "place" and values[candidate]["target"] == holding and open_way(candidate)
+                if values[candidate]["function"] == "place" and values[candidate]["target"] == holding
             ]
             if places:
-                if committed_id in places:
-                    return decision(committed_id, "keep_commitment", places)
-                in_zone = [candidate for candidate in places if values[candidate]["destination"] == zone]
-                choice = self._preferred(in_zone or places, values, keys)
-                return decision(choice, "release_held_object", places)
+                usable, excluded = executable(places)
+                if committed_id in usable:
+                    return decision(committed_id, "keep_commitment", places, excluded=excluded)
+                if not usable:
+                    return fallback(places, excluded)
+                in_zone = [candidate for candidate in usable if values[candidate]["destination"] == zone]
+                choice = self._preferred(in_zone or usable, values, keys)
+                return decision(choice, "release_held_object", places, excluded=excluded)
 
         realising = [
             candidate
@@ -252,7 +297,6 @@ class Expert:
             and values[candidate]["target"] == target
             and values[candidate]["destination"] == zone
             and target not in goal.forbidden
-            and open_way(candidate)
         ]
         blockers = self._descent_blockers(state, goal) if holding is None else set()
 
@@ -267,45 +311,49 @@ class Expert:
                 pushes = self._blocker_pushes(ids, values, state, goal)
             else:
                 pushes = []
-            pushes = [candidate for candidate in pushes if open_way(candidate)]
-            if committed_id in pushes:
+            usable, excluded = executable(pushes)
+            if committed_id in usable:
                 if value["path_clear"] or has_via:
-                    return decision(committed_id, "keep_commitment", realising + pushes)
-                choice = self._preferred(pushes, values, keys, push_order=True)
+                    return decision(committed_id, "keep_commitment", realising + pushes, excluded=excluded)
+                choice = self._preferred(usable, values, keys, push_order=True)
                 reason = "keep_commitment" if choice == committed_id else "push_redirect"
-                return decision(choice, reason, realising + pushes)
+                return decision(choice, reason, realising + pushes, excluded=excluded)
 
         if realising:
-            if committed_id in realising:
+            usable, excluded = executable(realising)
+            if committed_id in usable:
                 # 파지가 막혔고 경유점도 없으면(하강 구간의 이웃) 평범한 이웃을 대상에서 밀어낸다 —
                 # "밀기는 파지가 불가능할 때만". 물러났다 다가가는 반복을 끊는다.
                 value = values[committed_id]
                 if not value["path_clear"] and not has_via and holding is None and self.goal_config.get("push_blockers", True):
-                    pushes = [c for c in self._blocker_pushes(ids, values, state, goal) if open_way(c)]
-                    if pushes:
-                        choice = self._preferred(pushes, values, keys, push_order=True)
-                        return decision(choice, "push_blocker", realising + pushes)
-                return decision(committed_id, "keep_commitment", realising)
+                    pushes = self._blocker_pushes(ids, values, state, goal)
+                    usable_pushes, push_excluded = executable(pushes)
+                    excluded = {**excluded, **push_excluded}
+                    if usable_pushes:
+                        choice = self._preferred(usable_pushes, values, keys, push_order=True)
+                        return decision(choice, "push_blocker", realising + pushes, excluded=excluded)
+                    return decision(committed_id, "keep_commitment", realising + pushes, excluded=excluded)
+                return decision(committed_id, "keep_commitment", realising, excluded=excluded)
+            if not usable:
+                # 실행기 사정(재시도 차단)으로 지금은 고를 수 없다. 차단은 한 틱이므로 기다린다 — 적합
+                # 집합 밖의 밀기로 갈아타지 않는다(라벨의 정답이 적합 집합 밖에 서면 안 된다).
+                return fallback(realising, excluded)
             preferred_function = "place" if holding == target else "grasp"
             choice = self._preferred(
-                [c for c in realising if values[c]["function"] == preferred_function] or realising, values, keys
+                [c for c in usable if values[c]["function"] == preferred_function] or usable, values, keys
             )
-            return decision(choice, "goal_place" if values[choice]["function"] == "place" else "goal_grasp", realising)
+            return decision(
+                choice, "goal_place" if values[choice]["function"] == "place" else "goal_grasp", realising, excluded=excluded
+            )
 
         pushes = self._pushes_toward_zone(ids, values, state, target, zone) if self.goal_config.get(
             "push_when_grasp_unavailable", True
         ) else []
-        pushes = [candidate for candidate in pushes if open_way(candidate)]
-        if pushes:
-            choice = self._preferred(pushes, values, keys, push_order=True)
-            return decision(choice, "push_toward_zone", pushes)
-
-        choice = fixed.get("hold", ids[0])
-        if blocked_ways and any(
-            values[candidate]["target"] == target and not open_way(candidate) for candidate in ids
-        ):
-            return decision(choice, "way_retry_blocked", [choice], confidence="low")
-        return decision(choice, "goal_candidate_missing", [choice], confidence="low")
+        usable, excluded = executable(pushes)
+        if usable:
+            choice = self._preferred(usable, values, keys, push_order=True)
+            return decision(choice, "push_toward_zone", pushes, excluded=excluded)
+        return fallback(pushes, excluded)
 
     def _retry_blocked_ways(self, model: dict[str, Any], values: dict[str, dict[str, Any]]) -> set[str]:
         """직전 틱의 실패가 한계 횟수를 넘긴 방식(`기능:대상:접근`). 하네스가 이 틱에 그 방식을 막는다
@@ -353,7 +401,8 @@ class Expert:
         target: str | None,
         zone: str | None,
     ) -> list[str]:
-        """대상을 목표 영역 쪽으로 미는 후보. 한 구간을 민 예측 자세가 영역까지의 거리를 문턱 이상 줄여야 한다."""
+        """대상을 목표 영역 쪽으로 미는 후보(의미 적합성: 목적지 조건). 한 구간을 민 예측 자세가 영역까지의
+        거리를 문턱 이상 줄여야 한다. 실행기 역량·접촉점 도달성은 여기서 보지 않는다 — 선택의 몫이다."""
         if target is None or zone is None:
             return []
         entry = next((item for item in state.get("objects") or () if str(item["id"]) == target), None)
@@ -366,10 +415,10 @@ class Expert:
         improving: list[str] = []
         for candidate in ids:
             value = values[candidate]
-            if value["function"] != "push" or value["target"] != target or not self._push_allowed(value):
+            if value["function"] != "push" or value["target"] != target:
                 continue
             vector = _PUSH_VECTORS.get(str(value["approach"]))
-            if vector is None or not self._contact_point_free(state, target, vector):
+            if vector is None:
                 continue
             predicted = [pose[0] + vector[0] * self.push_segment_mm, pose[1] + vector[1] * self.push_segment_mm]
             gain = now - _zone_distance_mm(predicted, bounds)
@@ -420,7 +469,8 @@ class Expert:
         state: dict[str, Any],
         goal: Goal,
     ) -> list[str]:
-        """막는 이웃을 대상에서 멀어지게 미는 후보 (한 구간을 민 예측 자세가 거리를 문턱 이상 벌려야 한다)."""
+        """막는 이웃을 대상에서 멀어지게 미는 후보(의미 적합성: 지시를 위한 밀기). 한 구간을 민 예측 자세가
+        거리를 문턱 이상 벌려야 한다. 실행기 역량·접촉점 도달성은 여기서 보지 않는다 — 선택의 몫이다."""
         target = self._target(state, goal)
         blockers = self._descent_blockers(state, goal)
         if target is None or not blockers:
@@ -431,10 +481,10 @@ class Expert:
         improving: list[str] = []
         for candidate in ids:
             value = values[candidate]
-            if value["function"] != "push" or value["target"] not in blockers or not self._push_allowed(value):
+            if value["function"] != "push" or value["target"] not in blockers:
                 continue
             vector = _PUSH_VECTORS.get(str(value["approach"]))
-            if vector is None or not self._contact_point_free(state, value["target"], vector):
+            if vector is None:
                 continue
             pose = poses[value["target"]]
             predicted = [pose[0] + vector[0] * self.push_segment_mm, pose[1] + vector[1] * self.push_segment_mm]

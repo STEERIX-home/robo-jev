@@ -321,6 +321,30 @@ def test_the_cap_keeps_every_function_and_destination():
     assert spread["destinations"]["kept"] == spread["destinations"]["feasible"]
 
 
+def test_the_accounting_counts_destinations_per_target():
+    """상한의 붕괴는 **대상별**로 일어난다(3c-1 보고서 E1 미완료의 원인): 전체로는 모든 목적지가 남아도 한 대상의
+    목적지가 하나만 남을 수 있다. 회계는 대상마다 남은/실행 가능한 목적지 수를 적는다."""
+    request = harness().build_request(crowded_scene(), None, None)
+    destinations = request["harness"]["accounting"]["spread"]["destinations"]
+    by_target = destinations["by_target"]
+    parts = [key.split(":") for key in keys_of(request) if ":" in key]
+    assert set(by_target) == {f"o{i}" for i in range(8)}
+    for target, entry in by_target.items():
+        kept = {part[3] for part in parts if part[1] == target and part[0] == "grasp"}
+        assert entry["kept"] == len(kept)
+        assert entry["feasible"] == 3  # 세 영역 모두 실행 가능하다
+        assert entry["kept"] <= entry["feasible"]
+    collapsed = [target for target, entry in by_target.items() if entry["kept"] < entry["feasible"]]
+    assert collapsed, "이 장면에서는 상한이 대상별 목적지를 줄인다"
+    assert destinations["targets_collapsed"] == len(collapsed)
+
+    # 상한에 걸리지 않으면 대상마다 목적지가 온전하다.
+    request = harness().build_request(observation(), None, None)
+    destinations = request["harness"]["accounting"]["spread"]["destinations"]
+    assert destinations["targets_collapsed"] == 0
+    assert all(entry["kept"] == entry["feasible"] for entry in destinations["by_target"].values())
+
+
 def test_the_cap_reserves_the_committed_candidate():
     """현재 commitment의 후보는 실행 가능하기만 하면 상한과 무관하게 남는다."""
     key = "grasp:o7:top:z2:slow"
