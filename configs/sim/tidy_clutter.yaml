@@ -39,6 +39,13 @@ objects:
   density: 500.0
   friction: [0.95, 0.005, 0.0001]
   min_separation_mm: 85               # 중심 간 최소 거리
+  # 금지 접촉 물체가 낀 쌍의 최소 간격은 따로다. 하네스는 금지 물체를 "외접 반지름 + planner.margin_mm +
+  # planner.forbidden_margin_mm"의 장애물로 보므로(configs/harness/robot.yaml), 그 안에 이웃이 놓이면
+  # 채택 → hold+forbidden_segment → forbidden_blocked가 되풀이된다. 85mm는 기본 한계(외접 반지름 + 25 ≈
+  # 79mm, 가장 큰 원통)에 5mm 남짓만 남긴다. 수치는 복사하지 않고 하네스 설정에서 읽는다 — 위반한 금지
+  # 물체만 다시 놓으므로 위반이 없는 seed의 장면은 그대로다.
+  forbidden_separation:
+    harness_config: configs/harness/robot.yaml
   spawn_x_mm: [-260, 60]              # 테이블 중심 기준
   spawn_y_mm: [-280, 280]
   spawn_attempts: 400

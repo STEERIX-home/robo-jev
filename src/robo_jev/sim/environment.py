@@ -619,6 +619,25 @@ class Environment:
                 self._grasp_pose_mm[held] = [position[i] - ee[i] for i in range(3)]
         self._holding = held
 
+    def _structured_goal(self, instruction, shape_labels: dict[str, str]) -> dict[str, Any]:
+        """지시의 구조화된 목표. 텍스트 옆에 붙는 참조 id뿐이며 자세·참값은 없다.
+
+        `forbidden_refs`·`fragile_refs`는 장면의 속성 물체다. 지시가 "건드리지 마라"로 부른
+        물체(`Instruction.protected`)는 취약 물체이므로 `fragile_refs`에 들어 있다.
+        """
+        assert self.plan is not None
+        objects = {obj.id: obj for obj in self.plan.objects}
+        target = objects.get(instruction.target) if instruction.target else None
+        return {
+            "target_ref": instruction.target,
+            "target_desc": target.describe(shape_labels) if target is not None else None,
+            "zone_ref": instruction.zone,
+            "forbidden_refs": [obj.id for obj in self.plan.objects if "forbidden" in obj.attributes],
+            "fragile_refs": [obj.id for obj in self.plan.objects if "fragile" in obj.attributes],
+            "version": int(instruction.version),
+            "text": instruction.text,
+        }
+
     def _observation(self, ack: dict[str, Any] | None) -> dict[str, Any]:
         assert self.plan is not None
         ratios = self._visibility()
@@ -663,6 +682,10 @@ class Environment:
                 "t_ms": int(instruction.sim_ms),
                 "text": instruction.text,
             },
+            # 구조화된 목표 (docs/08 §3.2 `goal`): 지시가 가리키는 대상·목적지와 장면의 금지·취약
+            # 물체 id. 상위 작업 지능(L3)이나 장면 명세가 넘기는 자리이며, 앞단 어댑터가 이것을
+            # **추적 중인 물체로 제한해** 상태에 싣는다 — 아직 본 적 없는 id는 텍스트로만 남는다.
+            "goal": self._structured_goal(instruction, shape_labels),
             "objects": objects,
             # 영역 경계도 물체·말단과 같은 로봇 기준 좌표계다. 장면 설정은 테이블 중심 기준으로
             # 적으므로 여기서 옮긴다 — 한 관측 안에 두 좌표계가 섞이면 "영역 안"을 판정할 수 없다.

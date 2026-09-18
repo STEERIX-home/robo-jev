@@ -62,9 +62,19 @@ class Zone:
 
 @dataclass(frozen=True)
 class Instruction:
+    """지시 하나. 텍스트와 함께 **구조화된 목표**를 든다 (docs/08 §3.2 `goal`).
+
+    `target`·`zone`은 지시가 가리키는 물체·영역의 id, `protected`는 지시가 "건드리지 마라"로
+    부른 물체의 id다. 계획은 지시를 만들 때 이미 알고 있으므로 텍스트를 다시 파싱하지
+    않는다. 세 필드는 선택이다 — 없는 옛 snapshot도 읽힌다.
+    """
+
     version: int
     sim_ms: int
     text: str
+    target: str | None = None
+    zone: str | None = None
+    protected: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -118,7 +128,10 @@ class ScenePlan:
                 for obj in data["objects"]
             ),
             zones=tuple(Zone(**tuples(zone, "bounds_mm")) for zone in data["zones"]),
-            instructions=tuple(Instruction(**step) for step in data["instructions"]),
+            instructions=tuple(
+                Instruction(**tuples(step, "protected")) if "protected" in step else Instruction(**step)
+                for step in data["instructions"]
+            ),
             disturbances=tuple(
                 Disturbance(**tuples(item, "delta_mm")) for item in data["disturbances"]
             ),
@@ -244,7 +257,84 @@ def _sample_objects(settings: dict[str, Any], rng: np.random.Generator) -> tuple
             )
         )
 
-    return _assign_attributes(objects, spec, rng)
+    with_attributes = _assign_attributes(objects, spec, rng)
+    return _enforce_forbidden_separation(with_attributes, spec, rng, separation)
+
+
+def _forbidden_margins_mm(spec: dict[str, Any]) -> tuple[float, float] | None:
+    """(planner.margin_mm, planner.forbidden_margin_mm) — 하네스 설정에서 읽는다. 설정이 없으면 규칙도 없다."""
+    section = spec.get("forbidden_separation")
+    if not section:
+        return None
+    import yaml
+
+    from robo_jev.sim.controller import resolve_config_path
+
+    planner = yaml.safe_load(
+        resolve_config_path(section["harness_config"]).read_text(encoding="utf-8")
+    )["planner"]
+    return float(planner["margin_mm"]), float(planner["forbidden_margin_mm"])
+
+
+def _required_separation_mm(
+    a: SceneObject, b: SceneObject, base: float, margins: tuple[float, float] | None
+) -> float:
+    """두 물체의 최소 중심 간격(xy). 금지 접촉 물체가 끼면 하네스가 그 물체를 보는 장애물 반지름이다:
+    외접 반지름 + planner.margin_mm + planner.forbidden_margin_mm (robot.py `_first_blocker`)."""
+    required = base
+    if margins is None:
+        return required
+    margin, forbidden_margin = margins
+    for member in (a, b):
+        if "forbidden" in member.attributes:
+            circumradius = math.dist((0.0, 0.0, 0.0), member.half_size_mm)
+            required = max(required, circumradius + margin + forbidden_margin)
+    return required
+
+
+def _enforce_forbidden_separation(
+    objects: tuple[SceneObject, ...],
+    spec: dict[str, Any],
+    rng: np.random.Generator,
+    base: float,
+) -> tuple[SceneObject, ...]:
+    """금지 접촉 물체가 낀 쌍의 간격을 보장한다 (3b 리뷰 (a)).
+
+    속성은 자세 뒤에 정해지므로 여기서 **위반한 금지 물체만** 다시 놓는다. 위반이 없는 seed는 난수를
+    더 쓰지 않아 장면·일정이 그대로다 — 계보를 지키려는 선택이다. 놓을 자리가 없으면 설정의 모순이므로
+    그 자리에서 멈춘다(조용히 좁은 간격을 두지 않는다).
+    """
+    margins = _forbidden_margins_mm(spec)
+    if margins is None:
+        return objects
+    placed = list(objects)
+    x_low, x_high = spec["spawn_x_mm"]
+    y_low, y_high = spec["spawn_y_mm"]
+    attempts = int(spec["spawn_attempts"])
+
+    def far_enough(candidate: SceneObject, index: int) -> bool:
+        return all(
+            math.dist(candidate.pos_mm[:2], other.pos_mm[:2])
+            >= _required_separation_mm(candidate, other, base, margins)
+            for position, other in enumerate(placed)
+            if position != index
+        )
+
+    for index, obj in enumerate(placed):
+        if "forbidden" not in obj.attributes or far_enough(obj, index):
+            continue
+        for _ in range(attempts):
+            x, y = int(rng.integers(x_low, x_high + 1)), int(rng.integers(y_low, y_high + 1))
+            moved = SceneObject(**{**asdict(obj), "pos_mm": (x, y, obj.pos_mm[2])})
+            if far_enough(moved, index):
+                placed[index] = moved
+                break
+        else:
+            raise RuntimeError(
+                f"금지 물체 {obj.id}를 이웃에서 {attempts}번 안에 떼어 놓지 못했다 — "
+                "간격·범위 설정과 하네스의 planner 여유를 확인하라"
+            )
+    return tuple(placed)
 
 
 def _assign_attributes(
@@ -309,7 +399,10 @@ def _sample_instructions(
         zone=zone.desc,
         fragile=fragile.describe(labels) if fragile else "취약한 물체",
     )
-    steps = [Instruction(version=1, sim_ms=0, text=text)]
+    protected = (fragile.id,) if fragile else ()
+    steps = [
+        Instruction(version=1, sim_ms=0, text=text, target=first.id, zone=zone.id, protected=protected)
+    ]
 
     if not spec.get("enabled", False):
         return tuple(steps)
@@ -332,6 +425,10 @@ def _sample_instructions(
                 shape2=labels[second.shape],
                 zone=zone.desc,
             ),
+            target=second.id,
+            zone=zone.id,
+            # v2는 제약을 다시 말하지 않지만 v1의 보호 물체는 그대로다 — 지시는 덧붙는다 (docs/08 §3.1).
+            protected=protected,
         )
     )
     return tuple(steps)

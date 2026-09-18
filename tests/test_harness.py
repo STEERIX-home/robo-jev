@@ -6,6 +6,7 @@
 """
 
 import copy
+import math
 
 import pytest
 import yaml
@@ -1528,6 +1529,36 @@ def test_a_target_beside_a_forbidden_object_is_still_reachable_directly():
     assert request["harness"]["candidates"][candidate_id(GRASP)]["phase"] == "grasp"
     out = hrn.compose(request, probe_answers(request, GRASP), out["commitment"], PERIOD_MS)
     assert out["command"]["path"]["kind"] == "direct" and out["command"]["phase"] == "grasp"
+
+
+def test_a_grasp_point_inside_the_base_sphere_of_a_forbidden_object_still_holds():
+    """끝점 예외의 거울 검사 (3b 리뷰 (b)): 예외는 **넓힌** 여유만 벗긴다. 목표점이 금지 물체의 기본
+    구(외접 반지름 + margin) 안이면 어떤 경로로도 갈 수 없으므로 hold + `forbidden_segment`이고
+    실행기는 정지 전이한다 — 파지점 63.9mm vs 한계 78.1mm."""
+    from robo_jev.perception.pointworld import circumradius_mm
+
+    scene = observation(objects=[
+        obj("o0", (300, 0, -80)),
+        obj("o1", (300, 60, -80), colour="blue", attributes=["forbidden"]),
+    ])
+    scene["robot"]["ee_pos_mm"] = [300, 0, 0]  # 파지점 80mm 안 → grasp 국면
+    hrn = harness()
+    request = hrn.build_request(scene, None, None)
+    geometry = request["harness"]["candidates"][candidate_id(GRASP)]
+    assert geometry["phase"] == "grasp"
+    forbidden = next(entry for entry in scene["objects"] if entry["id"] == "o1")
+    base_limit = circumradius_mm(forbidden["obb_mm"]) + PLANNER["margin_mm"]
+    inside = math.dist(geometry["target_mm"], forbidden["pos_mm"])
+    assert inside < base_limit, (inside, base_limit)
+
+    out = hrn.compose(request, probe_answers(request, GRASP), None, 0)
+    command = out["command"]
+    assert command["path"]["kind"] == "hold"
+    assert command["constraints"]["forbidden_segment"] is True
+    assert [r["reason"] for r in out["records"] if r["kind"] == "conflict"] == ["forbidden_segment"]
+    assert out["adopted"]["path_kind"] == "hold" and out["adopted"]["waypoint"] is None
+    ack = controller_at(scene).apply(command, 0)
+    assert ack["stop_transition"] is True and ack["reason"] == "transition_collision"
 
 
 def walled_scene(**blocker_over) -> dict:

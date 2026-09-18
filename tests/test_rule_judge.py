@@ -246,19 +246,126 @@ def test_an_incomplete_instruction_is_reported():
     ],
 )
 def test_instruction_completeness_is_about_the_text_not_the_scene(text, complete):
-    """`q_instr`은 지시 텍스트의 완결성이다: 어휘로 풀리는 대상·목적지·제약 (docs/08 §4)."""
+    """`q_instr`은 지시 텍스트의 완결성이다: 어휘로 풀리는 대상·목적지·제약 (docs/08 §4).
+
+    텍스트 근사 경로(구조화된 목표가 없는 틱)의 검사다. 아무 물체도 보이지 않으면 상태에 설명이
+    없으므로 어휘를 **따로 준다** — 기본 기준군은 어휘 설정을 요구하지 않는다(3c-1, 아래 검사).
+    """
     scene = observation(instruction={"version": 1, "t_ms": 0, "text": text})
     for entry in scene["objects"]:
         entry.update(visible=False, visible_ratio=0.0)  # 아무것도 보이지 않아도 답은 같다
+    judge = RuleJudge(CONFIG, vocabulary_config=SIM)
+    result = judge(request_for(scene))
+    assert result["q_instr"] == (CONFIDENCE["high"] if complete else CONFIDENCE["low"])
+
+
+# --------------------------------------------------------------------------
+# 구조화된 목표 (3c-1): 텍스트 파싱 없이 판정하고, 어휘 설정은 필요 없다
+# --------------------------------------------------------------------------
+
+
+def structured_scene(*, target_ref="o0", target_desc="red 상자", zone_ref="zoneL", forbidden_refs=(), **over):
+    scene = observation(**over)
+    scene["goal"] = {
+        "target_ref": target_ref,
+        "target_desc": target_desc,
+        "zone_ref": zone_ref,
+        "forbidden_refs": list(forbidden_refs),
+        "fragile_refs": ["o2"],
+        "version": 1,
+        "text": scene["instruction"]["text"],
+    }
+    return scene
+
+
+def test_the_judge_config_no_longer_requires_a_vocabulary():
+    assert "vocabulary_config" not in load_rule_judge_config()
+    assert RuleJudge(load_rule_judge_config()).vocabulary_phrases == ()
+
+
+@pytest.mark.parametrize(
+    ("goal", "complete"),
+    [
+        ({}, True),
+        ({"zone_ref": None}, False),  # 목적지가 없다
+        ({"target_ref": None, "target_desc": None}, False),  # 대상이 없다
+        ({"forbidden_refs": ["o0"]}, False),  # 대상이 금지 물체다 — 모순
+        ({"zone_ref": "zoneX"}, False),  # 상태에 없는 영역이다
+    ],
+)
+def test_structured_goal_fields_decide_instruction_completeness(goal, complete):
+    """구조화된 목표가 있으면 `q_instr`은 그 필드로만 판정한다 — 어휘가 아니다."""
+    scene = structured_scene(**goal)
     result = rule_judge(request_for(scene))
     assert result["q_instr"] == (CONFIDENCE["high"] if complete else CONFIDENCE["low"])
 
 
+def test_a_complete_structured_goal_is_complete_whatever_is_visible():
+    """가시성은 `q_instr`의 근거가 아니다 (docs/08 §4). 아무것도 안 보여도 지시는 완결됐다."""
+    scene = structured_scene()
+    for entry in scene["objects"]:
+        entry.update(visible=False, visible_ratio=0.0)
+    result = rule_judge(request_for(scene))
+    assert result["q_instr"] == CONFIDENCE["high"]
+    assert result["q_observe"] == CONFIDENCE["high"]  # 대상을 아직 못 봤으니 관측이다
+
+
+def test_a_structured_target_that_is_not_yet_tracked_asks_for_observation_not_a_text_guess():
+    """구조화된 대상이 아직 보이지 않으면 텍스트가 부르는 다른 물체로 바꿔 타지 않는다."""
+    scene = structured_scene(target_ref="o1", target_desc="blue 상자")
+    scene["instruction"]["text"] = "red 상자 대신 blue 상자를 왼쪽 정리 영역으로 먼저 옮겨라"
+    scene["goal"]["text"] = scene["instruction"]["text"]
+    scene["objects"][1].update(visible=False, visible_ratio=0.0)  # blue 상자를 본 적 없다
+    request = request_for(scene)
+    assert request["request"]["state"]["goal"]["target_ref"] is None
+    result = rule_judge(request)
+    assert result["q_instr"] == CONFIDENCE["high"]
+    assert result["q_observe"] == CONFIDENCE["high"]
+    keys = {entry["id"]: entry["key"] for entry in request["request"]["candidates"]["q_main"]}
+    on_red = sum(p for cid, p in result["q_main"].items() if ":o0:" in keys[cid])
+    assert on_red < 0.1  # red 상자는 대상이 아니다
+
+
+def test_the_structured_goal_drives_the_main_decision():
+    scene = structured_scene(target_ref="o1", target_desc="blue 상자")
+    request = request_for(scene)
+    result = rule_judge(request)
+    keys = {entry["id"]: entry["key"] for entry in request["request"]["candidates"]["q_main"]}
+    best = max(result["q_main"], key=result["q_main"].get)
+    assert keys[best].startswith("grasp:o1:top:zoneL:")
+
+
+def test_the_text_fallback_still_resolves_the_d0_fixture():
+    """구조화된 목표가 없는 틱(D0 fixture)은 상태의 물체 설명으로 텍스트를 푼다 — 어휘 설정 없이."""
+    record = read_jsonl(D0_STREAMS)[0]
+    tick = record["ticks"][0]
+    assert "target_desc" not in tick["request"]["state"]["goal"]
+    judge = RuleJudge(load_rule_judge_config())
+    result = judge(tick)
+    assert result["q_instr"] == CONFIDENCE["high"]
+    keys = {entry["id"]: entry["key"] for entry in tick["request"]["candidates"]["q_main"]}
+    best = max(result["q_main"], key=result["q_main"].get)
+    assert ":o7:" in keys[best]  # "빨간 컵"
+
+
 def test_an_unseen_target_asks_for_observation_not_for_a_replan():
-    """docs/10 검토 1: 대상이 아직 관측되지 않은 것은 지시의 문제가 아니라 관측의 문제다."""
+    """docs/10 검토 1: 대상이 아직 관측되지 않은 것은 지시의 문제가 아니라 관측의 문제다.
+
+    구조화된 목표에서는 `target_desc`가 대상을 나르므로 어휘 없이 판정된다. 텍스트 근사 경로는
+    본 적 없는 물체의 이름을 상태에서 얻을 수 없으므로 어휘를 따로 줘야 같은 답이 나온다.
+    """
     scene = observation()
     scene["objects"][0].update(visible=False, visible_ratio=0.0)  # 지시의 대상(red 상자)을 본 적 없다
-    result = rule_judge(request_for(scene))
+    structured = copy.deepcopy(scene)
+    structured["goal"] = {
+        "target_ref": "o0", "target_desc": "red 상자", "zone_ref": "zoneL", "forbidden_refs": [],
+        "fragile_refs": ["o2"], "version": 1, "text": scene["instruction"]["text"],
+    }
+    result = rule_judge(request_for(structured))
+    assert result["q_instr"] == CONFIDENCE["high"]
+    assert result["q_observe"] == CONFIDENCE["high"]
+
+    result = RuleJudge(CONFIG, vocabulary_config=SIM)(request_for(scene))
     assert result["q_instr"] == CONFIDENCE["high"]
     assert result["q_observe"] == CONFIDENCE["high"]
 
@@ -445,6 +552,9 @@ def test_instruction_wording_round_trips_to_the_resolved_target():
     from robo_jev.sim.scene import build_plan
 
     labels = dict(SIM["objects"]["shape_labels"])
+    # 텍스트 근사 경로다(구조화된 목표 없음). "건드리지 마라"의 주어가 보이지 않는 틱도 있으므로
+    # 장면 어휘를 준다 — 실제 파이프라인은 구조화된 목표를 쓴다 (3c-1).
+    judge = RuleJudge(CONFIG, vocabulary_config=SIM)
     for seed in range(1, 9):
         plan = build_plan(SIM, seed, "E1")
         text = plan.instructions[0].text
@@ -468,7 +578,7 @@ def test_instruction_wording_round_trips_to_the_resolved_target():
         goal = request["request"]["state"]["goal"]
         assert goal["target_ref"] == named[0].id == described[named[0].describe(labels)]
         assert goal["target_zone"] in {z.id for z in plan.zones}
-        result = rule_judge(request)
+        result = judge(request)
         assert result["q_instr"] == CONFIDENCE["high"]
         best = max(result["q_main"], key=result["q_main"].get)
         key = candidate_for(request, next(k for k in keys_of(request) if candidate_id(k) == best))["key"]

@@ -70,6 +70,13 @@ def named_target(objects, text: str) -> str | None:
     return max(mentioned)[1] if mentioned else None
 
 
+def _tracked_only(refs, tracked_ids: set[str], by_attribute: list[str]) -> list[str]:
+    """구조화된 참조 목록을 추적 중인 물체로 제한하고, 속성으로 아는 것을 합친다 (순서 유지)."""
+    kept = [str(ref) for ref in (refs or ()) if str(ref) in tracked_ids]
+    kept.extend(ref for ref in by_attribute if ref not in kept)
+    return kept
+
+
 def segment_point_distance_mm(start, end, point) -> float:
     """선분과 점 사이의 최단 거리."""
     segment = [b - a for a, b in zip(start, end)]
@@ -547,12 +554,16 @@ class GroundTruthAdapter:
     def _goal(self, observation: dict[str, Any], instances: list[TrackedInstance]) -> dict[str, Any]:
         """지시와 구조화된 제약 (docs/08 §3.2 `goal`).
 
-        구조화된 목표(`observation["goal"]`)가 오면 그것을 쓴다 — 실제 경로에서는 상위
-        작업 지능(L3)이나 장면 명세가 대상·목적지·금지를 넘긴다. 없으면 D1 어댑터가
-        관측 가능한 정보로 푼다: **추적 중인** 물체 가운데 금지 속성이 붙은 것이 금지 접촉이고,
-        목표 영역은 지시문이 부르는 영역이며, 대상은 지시문이 **마지막으로 부른 평범한
-        물체**다(지시가 바뀌면 새 대상이 뒤에 온다: "A 대신 B를 먼저 옮겨라"). 아직 본 적
-        없는 물체는 참조하지 않는다 — 그 제약은 지시 텍스트가 나르고, 물체가 보이면 채워진다.
+        구조화된 목표(`observation["goal"]`: `target_ref`·`target_desc`·`zone_ref`·
+        `forbidden_refs`·`fragile_refs`·`version`·`text`)가 오면 그것을 쓴다 — 실제 경로에서는
+        상위 작업 지능(L3)이나 장면 명세가 대상·목적지·금지를 넘긴다. 참조는 **추적 중인 물체로
+        제한한다**: 아직 본 적 없는 id는 상태에 없으므로 가리킬 수 없고, `target_desc`와 텍스트가
+        그것을 나르다가 물체가 보이면 채워진다. 상태의 `goal`에 `target_desc`가 있으면 구조화된
+        경로다(판단기·전문가가 이것으로 두 경로를 가른다).
+
+        없으면 D1 어댑터가 관측 가능한 정보로 푼다: 추적 중인 물체 가운데 금지 속성이 붙은 것이
+        금지 접촉이고, 목표 영역은 지시문이 부르는 영역이며, 대상은 지시문이 **마지막으로 부른
+        평범한 물체**다(지시가 바뀌면 새 대상이 뒤에 온다: "A 대신 B를 먼저 옮겨라").
         """
         instruction = observation.get("instruction") or {}
         text = str(instruction.get("text", ""))
@@ -563,8 +574,23 @@ class GroundTruthAdapter:
             {"id": inst.track_id, "desc": inst.desc, "attributes": list(inst.attributes)}
             for inst in instances
         ]
+        tracked_ids = {entry["id"] for entry in tracked}
         forbidden = [entry["id"] for entry in tracked if "forbidden" in entry["attributes"]]
         fragile = [entry["id"] for entry in tracked if "fragile" in entry["attributes"]]
+
+        if "target_desc" in given or "zone_ref" in given:
+            target = given.get("target_ref")
+            return {
+                "text": str(given.get("text", text)),
+                "version": int(given.get("version", instruction.get("version", 1))),
+                "t_ms": int(instruction.get("t_ms", 0)),
+                "target_ref": str(target) if target is not None and str(target) in tracked_ids else None,
+                "target_desc": given.get("target_desc"),
+                "target_zone": given.get("zone_ref"),
+                "forbidden_contact": _tracked_only(given.get("forbidden_refs"), tracked_ids, forbidden),
+                "fragile": _tracked_only(given.get("fragile_refs"), tracked_ids, fragile),
+            }
+
         goal = {
             "text": text,
             "version": int(instruction.get("version", 1)),

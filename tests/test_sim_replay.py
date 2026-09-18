@@ -281,6 +281,36 @@ def test_instruction_changes_at_the_scheduled_time(env):
     assert [event["kind"] for event in observation["events"]].count("instruction_changed") == 1
 
 
+def test_the_observation_carries_the_structured_goal(env):
+    """docs/08 §3.2 `goal`: 지시 텍스트 옆에 구조화된 목표(대상·목적지·금지·취약 id)가 있다.
+
+    reset과 지시 변경 틱에서 바뀐다. 앞단 어댑터는 이것을 추적 중인 물체로 제한해 상태에 싣는다
+    (`test_pointworld.py`).
+    """
+    observation = env.reset(seed=6)
+    plan = env.plan
+    goal = observation["goal"]
+    labels = dict(CONFIG["objects"]["shape_labels"])
+    objects = {obj.id: obj for obj in plan.objects}
+    assert set(goal) == {"target_ref", "target_desc", "zone_ref", "forbidden_refs", "fragile_refs", "version", "text"}
+    assert goal["version"] == 1 and goal["text"] == observation["instruction"]["text"]
+    assert goal["target_ref"] == plan.instructions[0].target
+    assert goal["target_desc"] == objects[goal["target_ref"]].describe(labels)
+    assert goal["zone_ref"] == plan.instructions[0].zone
+    assert goal["forbidden_refs"] == [obj.id for obj in plan.objects if "forbidden" in obj.attributes]
+    assert goal["fragile_refs"] == [obj.id for obj in plan.objects if "fragile" in obj.attributes]
+
+    change = next(step for step in plan.instructions if step.version > 1)
+    while observation["sim_time_ms"] < change.sim_ms:
+        assert observation["goal"]["version"] == 1
+        observation = env.step(HOLD)
+    goal = observation["goal"]
+    assert goal["version"] == 2 and goal["text"] == change.text
+    assert goal["target_ref"] == change.target != plan.instructions[0].target
+    assert goal["target_desc"] == objects[change.target].describe(labels)
+    assert goal["zone_ref"] == change.zone
+
+
 # --------------------------------------------------------------------------
 # 관측 스키마 (docs/08 §3.2)
 # --------------------------------------------------------------------------

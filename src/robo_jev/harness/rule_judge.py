@@ -23,6 +23,7 @@ from __future__ import annotations
 import copy
 import math
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -36,13 +37,16 @@ from robo_jev.sim.controller import load_controller_config, resolve_config_path
 __all__ = [
     "DEFAULT_CONFIG_PATH",
     "RULE_JUDGE_VERSION",
+    "Goal",
     "RuleJudge",
+    "candidate_values",
     "load_rule_judge_config",
+    "read_goal",
     "rule_judge",
 ]
 
 #: 규칙 버전. 레코드의 `versions.rules`에 들어간다.
-RULE_JUDGE_VERSION = "rj0.2"
+RULE_JUDGE_VERSION = "rj0.3"
 
 DEFAULT_CONFIG_PATH = "configs/harness/rule_judge_v0.yaml"
 
@@ -60,11 +64,118 @@ def load_rule_judge_config(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, 
     return yaml.safe_load(resolve_config_path(path).read_text(encoding="utf-8"))
 
 
+# --------------------------------------------------------------------------
+# 목표 읽기 — 기준군과 전문가가 같은 규칙으로 읽는다 (docs/08 §3.2 `goal`)
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Goal:
+    """상태의 `goal`을 읽은 것.
+
+    `structured`가 참이면 상태에 구조화된 목표(`target_desc`가 있는 형태 — 3c-1의 환경·어댑터
+    경로)가 있어서 텍스트를 파싱하지 않았다. 거짓이면 텍스트 근사 경로다(D0 fixture 등):
+    대상은 상태의 물체 설명이 지시문에 나오는 것 가운데 마지막으로 불린 평범한 물체다.
+    `target_ref`는 **추적 중인** 물체만 가리킨다. 구조화된 목표의 대상이 아직 보이지 않으면
+    `target_ref`는 없고 `target_desc`만 있다 — 그것은 관측의 문제이지 지시의 문제가 아니다.
+    """
+
+    text: str
+    version: int
+    structured: bool
+    target_ref: str | None
+    target_desc: str | None
+    zone: str | None
+    forbidden: tuple[str, ...]
+    fragile: tuple[str, ...]
+
+
+def read_goal(state: dict[str, Any]) -> Goal:
+    goal = state.get("goal") or {}
+    objects = state.get("objects") or ()
+    text = str(goal.get("text") or "")
+    structured = "target_desc" in goal
+    target_ref = goal.get("target_ref")
+    if not structured and not target_ref:
+        target_ref = named_target(objects, text)
+    if target_ref is not None and not any(str(entry["id"]) == str(target_ref) for entry in objects):
+        target_ref = None
+    return Goal(
+        text=text,
+        version=int(goal.get("version", 1)),
+        structured=structured,
+        target_ref=str(target_ref) if target_ref is not None else None,
+        target_desc=str(goal["target_desc"]) if goal.get("target_desc") else None,
+        zone=str(goal["target_zone"]) if goal.get("target_zone") else None,
+        forbidden=tuple(str(item) for item in goal.get("forbidden_contact") or ()),
+        fragile=tuple(str(item) for item in goal.get("fragile") or ()),
+    )
+
+
+def candidate_values(entry: dict[str, Any], request: dict[str, Any] | None = None) -> dict[str, Any]:
+    """후보 하나의 의미 조각과 기하 값.
+
+    하네스 블록(`request["harness"]`)이 있으면 그 값을, 없으면 모델이 보는 `derived` 문자열을
+    읽는다 — 그래서 다른 도구가 만든 틱(D0 fixture 등)에도 답할 수 있다. 전문가는 블록을
+    주지 않고 부른다(모델 입력만 본다).
+    """
+    parts = str(entry.get("key", "")).split(":")
+    semantic = (
+        {
+            "function": parts[0],
+            "target": parts[1],
+            "approach": parts[2],
+            "destination": parts[3],
+            "profile": parts[4],
+        }
+        if len(parts) == 5
+        else {
+            "function": None,
+            "target": None,
+            "approach": None,
+            "destination": None,
+            "profile": None,
+        }
+    )
+    block = ((request or {}).get("harness") or {}).get("candidates") or {}
+    geometry = block.get(entry["id"])
+    if geometry is not None:
+        return {
+            **semantic,
+            "reach_ok": bool(geometry["reach_ok"]),
+            "clearance_mm": float(geometry["clearance_mm"]),
+            "distance_mm": float(geometry["distance_mm"]),
+            "path_clear": bool(geometry["path_clear"]),
+            "blocker": geometry.get("blocker"),
+            "geometry_age_ms": float(geometry.get("geometry_age_ms", 0)),
+            "action_mm": geometry.get("action_mm"),
+        }
+
+    text = str(entry.get("derived", ""))
+    found: dict[str, str] = {}
+    for match in _DERIVED.finditer(text):
+        found.update({key: value for key, value in match.groupdict().items() if value})
+    return {
+        **semantic,
+        "reach_ok": found.get("reach", "ok") == "ok",
+        "clearance_mm": float(found.get("clearance", 0.0)),
+        "distance_mm": float(found.get("distance", 0.0)),
+        "path_clear": found.get("path", "clear") == "clear",
+        "blocker": None,
+        "geometry_age_ms": float(found.get("geom", 0.0)),
+        "action_mm": None,
+    }
+
+
 class RuleJudge:
     """요청 하나 → 10개 답. 상태가 없고 결정적이다.
 
-    실행기·하네스·장면과 공유하는 값(속도·힘 수준 수, 기하 나이 문턱, 어휘)은 복사하지 않고
-    그 설정 파일을 읽는다. 검사에서 바꿔 끼울 수 있게 dict로도 받는다.
+    실행기·하네스와 공유하는 값(속도·힘 수준 수, 기하 나이 문턱)은 복사하지 않고 그 설정
+    파일을 읽는다. 검사에서 바꿔 끼울 수 있게 dict로도 받는다.
+
+    지시의 대상·목적지·제약은 상태의 **구조화된 목표**로 읽는다(:func:`read_goal`). 텍스트를
+    파싱하는 것은 구조화된 목표가 없는 틱(D0 fixture 등)의 근사이고, 그때의 어휘는 상태의 물체
+    설명이다 — 장면 설정의 어휘(`vocabulary_config`)는 선택이며 기본 설정은 요구하지 않는다.
     """
 
     def __init__(
@@ -87,10 +198,12 @@ class RuleJudge:
         self.force_levels = [str(index) for index in range(len(controller["force_levels"]))]
         harness = harness_config or load_harness_config(self.config["harness_config"])
         self.max_geometry_age_ms = float(harness["candidates"]["max_geometry_age_ms"])
-        vocabulary = vocabulary_config or yaml.safe_load(
-            resolve_config_path(self.config["vocabulary_config"]).read_text(encoding="utf-8")
-        )
-        self.object_phrases = self._object_phrases(vocabulary)
+        # 텍스트 근사 경로의 추가 어휘. 설정 파일이 `vocabulary_config`를 적었을 때만 읽는다.
+        if vocabulary_config is None and self.config.get("vocabulary_config"):
+            vocabulary_config = yaml.safe_load(
+                resolve_config_path(self.config["vocabulary_config"]).read_text(encoding="utf-8")
+            )
+        self.vocabulary_phrases = self._object_phrases(vocabulary_config) if vocabulary_config else ()
         self.constraint_markers = [
             str(marker) for marker in (self.config.get("instruction") or {}).get("constraint_markers") or ()
         ]
@@ -105,6 +218,13 @@ class RuleJudge:
         shapes = [str(label) for label in dict(spec["shape_labels"]).values()]
         return tuple(f"{colour} {shape}" for colour in colours for shape in shapes)
 
+    def _phrases(self, state: dict[str, Any]) -> tuple[str, ...]:
+        """텍스트 근사 경로의 물체 구절: 상태의 물체 설명 + (있으면) 어휘 설정."""
+        described = tuple(
+            str(entry["desc"]) for entry in state.get("objects") or () if entry.get("desc")
+        )
+        return described + tuple(phrase for phrase in self.vocabulary_phrases if phrase not in described)
+
     @classmethod
     def from_config_path(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> RuleJudge:
         return cls(load_rule_judge_config(path))
@@ -116,10 +236,8 @@ class RuleJudge:
         state = model["state"]
         candidates = list(model["candidates"]["q_main"])
         paths = list(model["candidates"].get("q_path") or [])
-        values = {
-            entry["id"]: self._values(entry, request) for entry in candidates
-        }
-        goal = state.get("goal") or {}
+        values = {entry["id"]: candidate_values(entry, request) for entry in candidates}
+        goal = read_goal(state)
         commitment = model.get("commitment")
         phase = str((commitment or {}).get("phase", "none"))
         if phase not in PHASES:
@@ -138,60 +256,6 @@ class RuleJudge:
             "q_force": self._force(phase),
         }
 
-    # -- 후보 값 ------------------------------------------------------------
-
-    def _values(self, entry: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
-        """후보 하나의 기하 값과 의미 조각.
-
-        하네스 블록이 있으면 그것을, 없으면 모델이 보는 `derived` 문자열을 읽는다.
-        """
-        parts = str(entry.get("key", "")).split(":")
-        semantic = (
-            {
-                "function": parts[0],
-                "target": parts[1],
-                "approach": parts[2],
-                "destination": parts[3],
-                "profile": parts[4],
-            }
-            if len(parts) == 5
-            else {
-                "function": None,
-                "target": None,
-                "approach": None,
-                "destination": None,
-                "profile": None,
-            }
-        )
-        block = (request.get("harness") or {}).get("candidates") or {}
-        geometry = block.get(entry["id"])
-        if geometry is not None:
-            return {
-                **semantic,
-                "reach_ok": bool(geometry["reach_ok"]),
-                "clearance_mm": float(geometry["clearance_mm"]),
-                "distance_mm": float(geometry["distance_mm"]),
-                "path_clear": bool(geometry["path_clear"]),
-                "blocker": geometry.get("blocker"),
-                "geometry_age_ms": float(geometry.get("geometry_age_ms", 0)),
-                "action_mm": geometry.get("action_mm"),
-            }
-
-        text = str(entry.get("derived", ""))
-        found: dict[str, str] = {}
-        for match in _DERIVED.finditer(text):
-            found.update({key: value for key, value in match.groupdict().items() if value})
-        return {
-            **semantic,
-            "reach_ok": found.get("reach", "ok") == "ok",
-            "clearance_mm": float(found.get("clearance", 0.0)),
-            "distance_mm": float(found.get("distance", 0.0)),
-            "path_clear": found.get("path", "clear") == "clear",
-            "blocker": None,
-            "geometry_age_ms": float(found.get("geom", 0.0)),
-            "action_mm": None,
-        }
-
     # -- 주 결정 ------------------------------------------------------------
 
     def _main(
@@ -199,11 +263,10 @@ class RuleJudge:
         candidates: list[dict[str, Any]],
         values: dict[str, dict[str, Any]],
         state: dict[str, Any],
-        goal: dict[str, Any],
+        goal: Goal,
         model: dict[str, Any],
     ) -> dict[str, float]:
-        target = self._target(state, goal)
-        goal_target = str(target["id"]) if target else None
+        goal_target = goal.target_ref
         blockers = {
             values[entry["id"]]["blocker"]
             for entry in candidates
@@ -244,7 +307,7 @@ class RuleJudge:
         self,
         key: str,
         value: dict[str, Any],
-        goal: dict[str, Any],
+        goal: Goal,
         goal_target: str | None,
         blockers: set[str],
     ) -> bool:
@@ -252,14 +315,17 @@ class RuleJudge:
         if key in FIXED_KEYS:
             return True
         target, function = value["target"], value["function"]
-        if target in (goal.get("forbidden_contact") or ()):
+        if target in goal.forbidden:
             return False
         if function == "push":
             # 목표 대상으로 가는 길을 막는 물체만 치운다.
             return target in blockers
         if goal_target and target != goal_target:
             return False
-        if goal.get("target_zone") and value["destination"] not in (goal["target_zone"], "none"):
+        if goal_target is None and goal.structured:
+            # 구조화된 대상이 아직 보이지 않는다 — 다른 물체로 바꿔 타지 않는다 (관측이 먼저다).
+            return False
+        if goal.zone and value["destination"] not in (goal.zone, "none"):
             return False
         return True
 
@@ -295,21 +361,17 @@ class RuleJudge:
     def _truth(self, answer: bool) -> float:
         return float(self.confidence["high" if answer else "low"])
 
-    def _target(self, state: dict[str, Any], goal: dict[str, Any]) -> dict[str, Any] | None:
-        """지시가 가리키는 물체. 구조화된 `target_ref`가 먼저이고, 없으면 이름으로 푼다."""
+    @staticmethod
+    def _target(state: dict[str, Any], goal: Goal) -> dict[str, Any] | None:
+        """지시가 가리키는 물체 (추적 중일 때만)."""
         objects = state.get("objects") or ()
-        reference = goal.get("target_ref") or named_target(objects, str(goal.get("text", "")))
-        return next((entry for entry in objects if str(entry["id"]) == reference), None)
+        return next((entry for entry in objects if str(entry["id"]) == goal.target_ref), None)
 
-    def _goal_satisfied(self, state: dict[str, Any], goal: dict[str, Any]) -> bool:
+    def _goal_satisfied(self, state: dict[str, Any], goal: Goal) -> bool:
         """목표 영역 포함으로 판정한다. 모델의 답이 아니라 관측으로 본다."""
         target = self._target(state, goal)
         zone = next(
-            (
-                entry
-                for entry in state.get("zones") or ()
-                if str(entry["id"]) == goal.get("target_zone")
-            ),
+            (entry for entry in state.get("zones") or () if str(entry["id"]) == goal.zone),
             None,
         )
         if target is None or zone is None:
@@ -320,24 +382,34 @@ class RuleJudge:
         x, y = float(target["pose_mm"][0]), float(target["pose_mm"][1])
         return min(x0, x1) <= x <= max(x0, x1) and min(y0, y1) <= y <= max(y0, y1)
 
-    def _instruction_complete(self, state: dict[str, Any], goal: dict[str, Any]) -> bool:
-        """지시 텍스트가 완결됐는가 (docs/08 §4 `q_instr`) — 대상의 현재 가시성과 무관하다.
+    def _instruction_complete(self, state: dict[str, Any], goal: Goal) -> bool:
+        """지시가 완결됐는가 (docs/08 §4 `q_instr`) — 대상의 현재 가시성과 무관하다.
 
-        대상이 이름으로 불렸는가(구조화된 `target_ref`가 있거나 어휘의 "<색> <형상>" 구절이
-        있는가), 목적지가 있는가(`target_zone`이거나 영역 설명이 텍스트에 있는가), 제약 표지
-        앞에 어휘 구절이 있는가(없으면 "그것은 건드리지 마라"처럼 풀 수 없는 제약이다).
+        구조화된 목표가 있으면 그 필드로만 본다: 대상이 지목됐고(`target_desc`나 `target_ref`),
+        목적지가 상태의 영역이며, 대상이 금지 물체가 아니다(모순). 텍스트 근사 경로에서는
+        대상이 이름으로 불렸는가(상태의 물체 설명·어휘 구절), 목적지가 있는가(`target_zone`이거나
+        영역 설명이 텍스트에 있는가), 제약 표지 앞에 구절이 있는가("그것은 건드리지 마라"처럼
+        풀 수 없는 제약이 아닌가)를 본다.
         """
-        text = str(goal.get("text") or "")
+        zones = state.get("zones") or ()
+        if goal.structured:
+            target_named = bool(goal.target_desc or goal.target_ref)
+            destination_known = goal.zone is not None and any(
+                str(zone.get("id")) == goal.zone for zone in zones
+            )
+            consistent = goal.target_ref is None or goal.target_ref not in goal.forbidden
+            return target_named and destination_known and consistent
+
+        text = goal.text
         if not text:
             return False
         mentions = sorted(
             (position, phrase)
-            for phrase in self.object_phrases
+            for phrase in self._phrases(state)
             if (position := text.find(phrase)) >= 0
         )
-        target_named = bool(goal.get("target_ref")) or bool(mentions)
-        zones = state.get("zones") or ()
-        destination_named = bool(goal.get("target_zone")) or any(
+        target_named = bool(goal.target_ref) or bool(mentions)
+        destination_named = bool(goal.zone) or any(
             str(zone.get("desc", "")) and str(zone["desc"]) in text for zone in zones
         )
         constraints_parseable = all(
@@ -360,7 +432,7 @@ class RuleJudge:
         between = text[position + len(phrase) : at].strip()
         return phrase if len(between) <= 2 else None
 
-    def _needs_observation(self, state: dict[str, Any], goal: dict[str, Any], phase: str) -> bool:
+    def _needs_observation(self, state: dict[str, Any], goal: Goal, phase: str) -> bool:
         """관측을 더 얻어야 하는가 (docs/08 §4 `q_observe`).
 
         지시의 대상이 아직 관측되지 않았거나 대상 기하가 문턱보다 오래됐을 때다. 가시 비율만으로는
@@ -391,7 +463,7 @@ class RuleJudge:
             fails = 1
         return fails <= int(self.thresholds["retry_max_same_approach"])
 
-    def _must_stop(self, state: dict[str, Any], goal: dict[str, Any]) -> bool:
+    def _must_stop(self, state: dict[str, Any], goal: Goal) -> bool:
         if float(state["robot"].get("contact_n") or 0.0) > float(self.thresholds["stop_force_n"]):
             return True
         if any(
@@ -401,7 +473,7 @@ class RuleJudge:
         ee = [float(value) for value in state["robot"]["ee_pose_mm"]]
         limit = float(self.thresholds["stop_forbidden_mm"])
         for entry in state.get("objects") or ():
-            if str(entry["id"]) not in (goal.get("forbidden_contact") or ()):
+            if str(entry["id"]) not in goal.forbidden:
                 continue
             if math.dist(ee, [float(value) for value in entry["pose_mm"]]) <= limit:
                 return True

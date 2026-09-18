@@ -347,6 +347,65 @@ def test_goal_references_only_tracked_objects():
     assert goal["target_ref"] == "o0" and goal["forbidden_contact"] == ["o1"]
 
 
+def structured_goal(**over) -> dict:
+    """`Environment._structured_goal`이 관측에 싣는 형태."""
+    goal = {
+        "target_ref": "o0",
+        "target_desc": "빨간 상자",
+        "zone_ref": "zoneL",
+        "forbidden_refs": ["o1"],
+        "fragile_refs": [],
+        "version": 1,
+        "text": "빨간 상자를 왼쪽 정리 영역으로 옮기고 파란 원통은 건드리지 마라",
+    }
+    goal.update(over)
+    return goal
+
+
+def test_a_structured_goal_passes_through_restricted_to_tracked_instances():
+    """관측의 구조화된 목표(3c-1)는 텍스트 파싱 없이 상태의 `goal`이 된다 — 단, 참조는 **추적
+    중인 물체**로 제한한다(본 적 없는 id는 `target_desc`·텍스트로만 남고, 보이면 채워진다)."""
+    adapter = GroundTruthAdapter(PERCEPTION)
+    hidden = observation(goal=structured_goal())
+    hidden["instruction"]["text"] = hidden["goal"]["text"]
+    hidden["objects"][0].update(visible=False, visible_ratio=0.0, desc="빨간 상자")
+    hidden["objects"][1].update(visible=False, visible_ratio=0.0, attributes=["forbidden"], desc="파란 원통")
+    goal = adapter.reconstruct(hidden).goal
+
+    assert goal["target_ref"] is None  # 아직 보지 못했다
+    assert goal["target_desc"] == "빨간 상자"  # 무엇을 찾는지는 안다
+    assert goal["target_zone"] == "zoneL"
+    assert goal["forbidden_contact"] == [] and goal["fragile"] == []
+    assert goal["text"] == hidden["goal"]["text"] and goal["version"] == 1
+
+    seen = copy.deepcopy(hidden)
+    seen["sim_time_ms"] = PERCEPTION["geom_period_ms"]
+    for entry in seen["objects"]:
+        entry.update(visible=True, visible_ratio=1.0)
+    goal = adapter.reconstruct(seen).goal
+    assert goal["target_ref"] == "o0" and goal["forbidden_contact"] == ["o1"]
+    assert goal["target_desc"] == "빨간 상자" and goal["target_zone"] == "zoneL"
+
+
+def test_the_structured_goal_wins_over_the_text_approximation():
+    """텍스트가 마지막으로 부르는 물체와 구조화된 대상이 다르면 구조화된 쪽이다."""
+    adapter = GroundTruthAdapter(PERCEPTION)
+    scene = observation(goal=structured_goal(target_ref="o0", target_desc="빨간 상자", forbidden_refs=[]))
+    scene["objects"][0]["desc"] = "빨간 상자"
+    scene["objects"][1].update(desc="파란 원통", attributes=[])
+    scene["instruction"]["text"] = "빨간 상자 말고 파란 원통 옆에 있는 것을 왼쪽 정리 영역으로 옮겨라"
+    scene["goal"]["text"] = scene["instruction"]["text"]
+    goal = adapter.reconstruct(scene).goal
+    assert goal["target_ref"] == "o0" and goal["target_desc"] == "빨간 상자"
+
+
+def test_without_a_structured_goal_the_state_goal_has_no_target_desc():
+    """텍스트 근사 경로(D0 fixture 등)는 `target_desc`를 만들지 않는다 — 판단기가 두 경로를 가른다."""
+    adapter = GroundTruthAdapter(PERCEPTION)
+    goal = adapter.reconstruct(observation()).goal
+    assert "target_desc" not in goal
+
+
 # --------------------------------------------------------------------------
 # 사건은 관측된 변위에서만 만든다 (docs/08 §3.2 `events[]`)
 # --------------------------------------------------------------------------
