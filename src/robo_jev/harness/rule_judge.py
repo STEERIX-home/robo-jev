@@ -28,9 +28,10 @@ from typing import Any
 
 import yaml
 
-from robo_jev.harness.robot import parse_exec_history
+from robo_jev.contracts import PHASES
+from robo_jev.harness.robot import FIXED_KEYS, load_harness_config, parse_exec_history
 from robo_jev.perception.pointworld import named_target
-from robo_jev.sim.controller import resolve_config_path
+from robo_jev.sim.controller import load_controller_config, resolve_config_path
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
@@ -41,11 +42,9 @@ __all__ = [
 ]
 
 #: 규칙 버전. 레코드의 `versions.rules`에 들어간다.
-RULE_JUDGE_VERSION = "rj0.1"
+RULE_JUDGE_VERSION = "rj0.2"
 
 DEFAULT_CONFIG_PATH = "configs/harness/rule_judge_v0.yaml"
-
-_FIXED_KEYS = ("observe", "hold", "replan")
 
 #: 후보 설명의 기하 값 (`reach ok, clr 41mm, d 320mm, path clear, geom 120ms`).
 _DERIVED = re.compile(
@@ -53,7 +52,8 @@ _DERIVED = re.compile(
     r"path (?P<path>clear|blocked)|geom (?P<geom>-?\d+)ms"
 )
 
-_PHASES = ("approach", "grasp", "lift", "transport", "place", "push", "none")
+#: 기하 나이 대신 하네스의 `max_geometry_age_ms`가 관측 문턱인 국면 (docs/08 §4 `q_observe`).
+_CONTACT_PHASES = ("grasp", "place")
 
 
 def load_rule_judge_config(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
@@ -61,15 +61,49 @@ def load_rule_judge_config(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, 
 
 
 class RuleJudge:
-    """요청 하나 → 10개 답. 상태가 없고 결정적이다."""
+    """요청 하나 → 10개 답. 상태가 없고 결정적이다.
 
-    def __init__(self, config: dict[str, Any] | None = None) -> None:
+    실행기·하네스·장면과 공유하는 값(속도·힘 수준 수, 기하 나이 문턱, 어휘)은 복사하지 않고
+    그 설정 파일을 읽는다. 검사에서 바꿔 끼울 수 있게 dict로도 받는다.
+    """
+
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        controller_config: dict[str, Any] | None = None,
+        harness_config: dict[str, Any] | None = None,
+        vocabulary_config: dict[str, Any] | None = None,
+    ) -> None:
         self.config = copy.deepcopy(config or load_rule_judge_config())
         self.version = str(self.config.get("version", RULE_JUDGE_VERSION))
         self.main = self.config["main"]
         self.confidence = self.config["confidence"]
         self.thresholds = self.config["thresholds"]
         self.profiles = self.config["profiles"]
+
+        controller = controller_config or load_controller_config(self.config["controller_config"])
+        self.speed_levels = [str(index) for index in range(len(controller["speed_levels_m_s"]))]
+        self.force_levels = [str(index) for index in range(len(controller["force_levels"]))]
+        harness = harness_config or load_harness_config(self.config["harness_config"])
+        self.max_geometry_age_ms = float(harness["candidates"]["max_geometry_age_ms"])
+        vocabulary = vocabulary_config or yaml.safe_load(
+            resolve_config_path(self.config["vocabulary_config"]).read_text(encoding="utf-8")
+        )
+        self.object_phrases = self._object_phrases(vocabulary)
+        self.constraint_markers = [
+            str(marker) for marker in (self.config.get("instruction") or {}).get("constraint_markers") or ()
+        ]
+
+    @staticmethod
+    def _object_phrases(vocabulary: dict[str, Any]) -> tuple[str, ...]:
+        """지시문이 물체를 부르는 "<색> <형상>" 구절 전부 (장면 설정의 palette × shape_labels)."""
+        spec = vocabulary["objects"]
+        colours: list[str] = []
+        for entry in spec["palette"]:
+            colours.extend(str(entry[key]) for key in ("ko", "name") if entry.get(key))
+        shapes = [str(label) for label in dict(spec["shape_labels"]).values()]
+        return tuple(f"{colour} {shape}" for colour in colours for shape in shapes)
 
     @classmethod
     def from_config_path(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> RuleJudge:
@@ -88,14 +122,14 @@ class RuleJudge:
         goal = state.get("goal") or {}
         commitment = model.get("commitment")
         phase = str((commitment or {}).get("phase", "none"))
-        if phase not in _PHASES:
+        if phase not in PHASES:
             phase = "none"
 
         return {
             "q_main": self._main(candidates, values, state, goal, model),
             "q_done": self._truth(self._goal_satisfied(state, goal)),
             "q_instr": self._truth(self._instruction_complete(state, goal)),
-            "q_observe": self._truth(self._needs_observation(state, goal, values)),
+            "q_observe": self._truth(self._needs_observation(state, goal, phase)),
             "q_retry": self._truth(self._retry_ok(model)),
             "q_stop": self._truth(self._must_stop(state, goal)),
             "q_gripper": self._gripper(state, phase),
@@ -213,7 +247,7 @@ class RuleJudge:
         blockers: set[str],
     ) -> bool:
         """의미 적합성 — 지시·목적지·금지 조건 (docs/08 §7)."""
-        if key in _FIXED_KEYS:
+        if key in FIXED_KEYS:
             return True
         target, function = value["target"], value["function"]
         if target in (goal.get("forbidden_contact") or ()):
@@ -229,7 +263,7 @@ class RuleJudge:
 
     def _cost(self, key: str, value: dict[str, Any], failed: str | None) -> float:
         """고정 가중 기하 비용. 가중치·기준값은 설정에 있다 (docs/02 §9)."""
-        if key in _FIXED_KEYS:
+        if key in FIXED_KEYS:
             return float(self.main["fixed_cost"][key])
         weights = self.main["weights"]
         references = self.main["references"]
@@ -285,33 +319,75 @@ class RuleJudge:
         return min(x0, x1) <= x <= max(x0, x1) and min(y0, y1) <= y <= max(y0, y1)
 
     def _instruction_complete(self, state: dict[str, Any], goal: dict[str, Any]) -> bool:
-        """대상·목적지가 하나로 풀리는가 (docs/08 §4 `q_instr`)."""
-        return bool(goal.get("text")) and self._target(state, goal) is not None and bool(
-            goal.get("target_zone")
-        )
+        """지시 텍스트가 완결됐는가 (docs/08 §4 `q_instr`) — 대상의 현재 가시성과 무관하다.
 
-    def _needs_observation(
-        self, state: dict[str, Any], goal: dict[str, Any], values: dict[str, dict[str, Any]]
-    ) -> bool:
+        대상이 이름으로 불렸는가(구조화된 `target_ref`가 있거나 어휘의 "<색> <형상>" 구절이
+        있는가), 목적지가 있는가(`target_zone`이거나 영역 설명이 텍스트에 있는가), 제약 표지
+        앞에 어휘 구절이 있는가(없으면 "그것은 건드리지 마라"처럼 풀 수 없는 제약이다).
+        """
+        text = str(goal.get("text") or "")
+        if not text:
+            return False
+        mentions = sorted(
+            (position, phrase)
+            for phrase in self.object_phrases
+            if (position := text.find(phrase)) >= 0
+        )
+        target_named = bool(goal.get("target_ref")) or bool(mentions)
+        zones = state.get("zones") or ()
+        destination_named = bool(goal.get("target_zone")) or any(
+            str(zone.get("desc", "")) and str(zone["desc"]) in text for zone in zones
+        )
+        constraints_parseable = all(
+            self._constraint_subject(text, marker, mentions) is not None
+            for marker in self.constraint_markers
+            if marker in text
+        )
+        return target_named and destination_named and constraints_parseable
+
+    @staticmethod
+    def _constraint_subject(
+        text: str, marker: str, mentions: list[tuple[int, str]]
+    ) -> str | None:
+        """제약 표지 바로 앞의 어휘 구절. 사이에 조사 정도만 있어야 한다("그것은 …"은 풀 수 없다)."""
+        at = text.find(marker)
+        before = [(position, phrase) for position, phrase in mentions if position < at]
+        if not before:
+            return None
+        position, phrase = before[-1]
+        between = text[position + len(phrase) : at].strip()
+        return phrase if len(between) <= 2 else None
+
+    def _needs_observation(self, state: dict[str, Any], goal: dict[str, Any], phase: str) -> bool:
+        """관측을 더 얻어야 하는가 (docs/08 §4 `q_observe`).
+
+        지시의 대상이 아직 관측되지 않았거나 대상 기하가 문턱보다 오래됐을 때다. 가시 비율만으로는
+        요구하지 않는다. 파지·놓기 국면과 파지 중(팔이 대상을 가린다)에는 하네스의 실행 가능성
+        문턱(`max_geometry_age_ms`)이 기준이다 — 들고 있는 물체의 기하 나이는 0이다.
+        """
         target = self._target(state, goal)
         if target is None:
             return True
-        if float(target.get("visible_ratio", 1.0)) < float(
-            self.thresholds["observe_visible_ratio"]
-        ):
-            return True
-        return float(target.get("age_ms", 0)) > float(self.thresholds["observe_geom_age_ms"])
+        age = float(target.get("age_ms", 0))
+        contact = phase in _CONTACT_PHASES or state["robot"].get("holding") == target["id"]
+        limit = self.max_geometry_age_ms if contact else float(self.thresholds["observe_geom_age_ms"])
+        return age > limit
 
     def _retry_ok(self, model: dict[str, Any]) -> bool:
         """직전 실패와 같은 방식의 재시도가 적절한가.
 
-        기준군이 보는 것은 재입력된 실행 이력뿐이다(docs/08 §3.3). 실패가 한 번이면
-        같은 방식을 한 번 더 해 볼 수 있고, 실패가 없으면 이 질문의 근거도 없다.
+        기준군이 보는 것은 재입력된 실행 이력뿐이다(docs/08 §3.3). 같은 방식의 연속 실패
+        (`fails=`)가 `retry_max_same_approach` 안이면 한 번 더 해 볼 수 있고, 실패가 없으면 이
+        질문의 근거도 없다. 횟수를 적지 않은 이력(다른 도구의 틱)은 첫 실패로 본다.
         """
         history = parse_exec_history(model.get("exec_history"))
         if not history or history.get("ack") in (None, "ok", "none"):
             return False
-        return int(self.thresholds["retry_max_same_approach"]) >= 1
+        try:
+            fails = max(1, int(history.get("fails", 1)))
+        except ValueError:
+            fails = 1
+        return fails <= int(self.thresholds["retry_max_same_approach"])
 
     def _must_stop(self, state: dict[str, Any], goal: dict[str, Any]) -> bool:
         if float(state["robot"].get("contact_n") or 0.0) > float(self.thresholds["stop_force_n"]):
@@ -379,11 +455,11 @@ class RuleJudge:
         level = int(self.profiles["speed_by_phase"][phase])
         if level and self._near_fragile(state, commitment, values):
             level = min(level, int(self.profiles["fragile_speed_cap"]))
-        return self._spread(str(level), [str(index) for index in range(4)])
+        return self._spread(str(min(level, len(self.speed_levels) - 1)), self.speed_levels)
 
     def _force(self, phase: str) -> dict[str, float]:
         level = int(self.profiles["force_by_phase"][phase])
-        return self._spread(str(level), [str(index) for index in range(3)])
+        return self._spread(str(min(level, len(self.force_levels) - 1)), self.force_levels)
 
     def _near_fragile(
         self,

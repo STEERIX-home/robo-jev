@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import copy
-from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +27,7 @@ __all__ = [
     "REQUIRED_VERSIONS",
     "aggregate",
     "append_tick",
+    "default_question_set",
     "default_versions",
     "finalize",
     "new_episode",
@@ -41,12 +41,12 @@ REQUIRED_VERSIONS = ("harness", "controller", "rules", "serializer", "extractor"
 _HARNESS_BLOCK = "harness"
 
 
-@lru_cache(maxsize=1)
 def default_versions() -> dict[str, str]:
-    """설정과 모듈 상수에서 읽은 기본 버전.
+    """설정과 모듈 상수에서 읽은 기본 버전. 부를 때마다 설정을 다시 읽는다.
 
     하네스·규칙·추출기는 코드가, 컨트롤러·serializer는 설정이 단일 출처다. 한 군데서
-    모아야 레코드의 `versions`가 실제로 돌아간 것을 가리킨다.
+    모아야 레코드의 `versions`가 실제로 돌아간 것을 가리킨다. 캐시하지 않는다 — 한 과정
+    안에서 설정을 바꾸면 그 뒤의 레코드는 바뀐 버전을 적어야 한다.
     """
     import yaml
 
@@ -69,6 +69,14 @@ def default_versions() -> dict[str, str]:
     }
 
 
+def default_question_set() -> str:
+    """기본 하네스 설정의 질문 세트 id. 하네스(앞단·설정 전체)를 만들지 않고 설정만 읽는다."""
+    from robo_jev.harness.robot import load_harness_config
+
+    config = load_harness_config()
+    return str(config["question_set_id"][str(config.get("language", "ko"))])
+
+
 def new_episode(
     episode_id: str,
     scene_family: str,
@@ -81,9 +89,7 @@ def new_episode(
     if not instructions:
         raise ValueError("prefix에는 시작 지시가 하나 이상 있어야 한다")
     if question_set is None:
-        from robo_jev.harness.robot import RobotHarness
-
-        question_set = RobotHarness.from_config_path().question_set_id()
+        question_set = default_question_set()
     return {
         "schema_version": SCHEMA_STREAM,
         "episode_id": str(episode_id),

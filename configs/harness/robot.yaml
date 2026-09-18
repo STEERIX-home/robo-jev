@@ -7,7 +7,7 @@
 # 실행기와 공유하는 수치(수명·속도 수준·힘 수준·그리퍼 폭·도달 범위)는 여기 **복사하지
 # 않는다**. 컨트롤러 설정이 그 단일 출처이고 하네스가 그것을 읽는다 — 두 곳에 적으면
 # 언젠가 어긋나고, 그때 하네스는 컨트롤러가 거절할 명령을 만든다.
-version: h0.1
+version: h0.2
 controller_config: configs/controller/osc_v0.yaml
 
 # 질문 세트 v0 (docs/08 §4). 세트는 하네스 버전으로 고정하고 후보만 틱마다 바뀐다.
@@ -62,7 +62,12 @@ perception:
     occluded: 0.55
   points_visible: 480        # 점군 점 수 요약
   points_occluded: 60
-  moving_window_ms: 1000     # 외란 사건 뒤 이 시간 동안은 '이동 대상'으로 본다
+  # 물체 이동 사건은 **관측된 변위**(두 기하 갱신 사이의 자세 차이)에서만 만든다
+  # (docs/08 §3.2 `events[]`). 문턱은 자세 정밀도 이상이어야 한다 — 정밀도 안의 흔들림은 이동이 아니다.
+  moved_threshold_mm: 8
+  moving_window_ms: 1000     # 관측된 이동 뒤 이 시간 동안은 '이동 대상'으로 본다
+  # 시뮬레이터만 아는 사건. 상태에 넣지 않고 레코드의 evidence로만 보낸다 (docs/08 §3.2 `events[]`).
+  evidence_only_events: [disturbance_applied]
   graspable_faces:           # 형상별 파지 가능 면 (앞단이 표면에서 뽑는 값의 자리)
     box: [top, side]
     cylinder: [top, side]
@@ -72,18 +77,23 @@ perception:
 candidates:
   max: 32                    # K≤32
   reserved: 3                # observe·hold·replan은 상한 안에서 자리를 예약한다
-  faces: [top, side]
+  # 접근 유형. v0 실행기는 손목 회전이 없어(손가락은 로봇 기준 y축으로 열린다) 옆에서 미끄러져
+  # 들어가는 `side` 파지가 물리적으로 성립하지 않는다 — 위에서 내려오는 `top`만 연다. 앞단의
+  # 파지 가능 면(`perception.graspable_faces`)은 그대로이고, 손목 제어가 붙으면 여기에 `side`를 더한다.
+  faces: [top]
   push_directions: ["+x", "-x", "+y", "-y"]
   profiles: [slow, fast]     # 운동 프로파일. 의미 키의 마지막 칸이다
   profile_speed_level:
     slow: 1
     fast: 2
-  min_visible_ratio: 0.4     # 이보다 덜 보이는 물체는 **실행 불가**다 (적합성이 아니라 가능성)
-  max_geometry_age_ms: 500   # 이보다 오래된 기하의 물체로는 후보를 만들지 않는다
-  approach_clearance_mm: 60  # 접근 지점의 여유 (윗면 위 / 옆면 밖)
-  grasp_clearance_mm: 12     # 실제 파지 지점의 여유
-  side_clearance_mm: 40      # side 접근 지점의 옆면 밖 거리
-  place_height_mm: 60        # 놓기 목표의 작업면 위 높이
+  # 실행 가능성은 **기하 나이**로만 정한다 (docs/08 §3.2). 가시 비율은 정보다. 파지·놓기·밀기
+  # 국면(팔이 대상을 가린다)과 들고 있는 물체는 이 문턱을 적용하지 않는다.
+  max_geometry_age_ms: 500
+  approach_clearance_mm: 60  # 접근 지점의 여유 (윗면 위)
+  # 파지점: 그립 사이트가 물체 윗면 **아래** 이만큼. Panda 손가락 패드는 그립 사이트 기준
+  # 아래 4mm·위 12mm에 걸쳐 있으므로 윗면 위에서 닫으면 아무것도 잡지 못한다 (측정값).
+  grasp_depth_mm: 10
+  place_clearance_mm: 10     # 놓기점: 든 물체의 바닥이 작업면 위 이만큼 오는 높이
   push_contact_mm: 30        # 밀기 접촉점의 물체 표면 밖 거리
   push_segment_mm: 80        # 밀기 한 구간의 길이 (완료 판정에도 쓴다)
 
@@ -142,10 +152,15 @@ compose:
   observe_ticks: 3           # 관측·보류 후보의 완료 판정 (무한 반복 방지)
   hold_ticks: 3
 
-# 국면 판정 (docs/08 §3.2 `commitment`의 국면).
+# 국면 판정과 국면별 목표점 (docs/08 §3.2 `commitment`의 국면, §5.6).
+#   approach → 접근점, grasp → 파지점, lift → 현재 XY에서 이동 높이까지 수직 상승,
+#   transport → 목적지 위 접근점(이동 높이 유지), place → 놓기점으로 하강, push → 접촉점·밀기 구간.
+# 이동 높이 = max(현재 말단 높이, 목적지 접근점 높이, 작업면 위에 놓인 물체를 파지점에서
+# `lift_height_mm`만큼 든 높이). 들고 있는 물체의 바닥이 작업면 위 물체(≤80mm)를 넘는다.
 phases:
-  grasp_distance_mm: 80      # 파지 자세에 이만큼 들어오면 approach → grasp
-  lift_height_mm: 120        # 집은 뒤 이만큼 올리면 lift → transport
+  grasp_distance_mm: 80      # 파지점에 이만큼 들어오면 approach → grasp
+  lift_height_mm: 120        # 파지점에서 이만큼 올린 높이가 이동 높이
+  height_tolerance_mm: 15    # 이동 높이에 이만큼 들어오면 lift → transport (추종 오차 흡수)
   place_tolerance_mm: 60     # 목적지 중심에 이만큼 들어오면 transport → place
   push_contact_mm: 40        # 접촉점에 이만큼 들어오면 approach → push
 

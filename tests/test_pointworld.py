@@ -46,6 +46,7 @@ OBJECT_FIELDS = (
     "pose_mm",
     "quat",
     "precision_mm",
+    "pose_source",
     "obb_mm",
     "top_mm",
     "graspable_faces",
@@ -295,6 +296,208 @@ def test_an_object_that_was_never_observed_is_not_in_the_state():
 
     assert [obj["id"] for obj in state["objects"]] == ["o0"]
     assert adapter.evidence()["occluded_true_poses"] == {"o1": [120, 200, -80]}
+
+
+def test_hidden_attributes_never_reach_the_state():
+    """가려진 물체의 속성·크기·설명이 참값에서 바뀌어도 상태는 마지막 관측을 말한다.
+
+    자세만이 아니라 앞단이 관측으로만 알 수 있는 모든 필드가 경계 안에 있어야 한다
+    (docs/08 §3.2 "가려진 물체의 참값은 넣지 않는다").
+    """
+    plain, tampered = GroundTruthAdapter(PERCEPTION), GroundTruthAdapter(PERCEPTION)
+    first = observation()
+    plain.reconstruct(first)
+    tampered.reconstruct(first)
+
+    hidden = occluded(observation(), pos_mm=(120, 200, -80))
+    hidden["sim_time_ms"] = 400
+    changed = copy.deepcopy(hidden)
+    changed["objects"][1].update(
+        attributes=["forbidden"], obb_mm=[90, 90, 90], colour="black", desc="검은 원통", shape="box"
+    )
+
+    expected = extract(plain.reconstruct(hidden), plain.robot(hidden), now_ms=400)
+    actual = extract(tampered.reconstruct(changed), tampered.robot(changed), now_ms=400)
+    assert actual == expected
+    assert actual["objects"][1]["attributes"] == ["fragile"]
+    assert actual["goal"]["forbidden_contact"] == []
+
+
+def test_goal_references_only_tracked_objects():
+    """구조화된 목표는 앞단이 추적하는 물체만 가리킨다 (본 적 없는 금지·취약 물체는 텍스트로만 남는다)."""
+    adapter = GroundTruthAdapter(PERCEPTION)
+    never_seen = observation()
+    never_seen["objects"][1].update(
+        visible=False, visible_ratio=0.0, attributes=["forbidden"], desc="파란 원통"
+    )
+    never_seen["objects"][0].update(visible=False, visible_ratio=0.0, desc="빨간 상자")
+    never_seen["instruction"]["text"] = "빨간 상자를 왼쪽 정리 영역으로 옮기고 파란 원통은 건드리지 마라"
+    goal = adapter.reconstruct(never_seen).goal
+
+    assert goal["target_ref"] is None  # 아직 보지 못한 대상은 참조할 수 없다
+    assert goal["forbidden_contact"] == [] and goal["fragile"] == []
+    assert goal["target_zone"] == "zoneL"  # 영역은 작업 공간의 표시라 언제나 안다
+    assert "파란 원통" in goal["text"]  # 제약은 지시 텍스트가 계속 나른다
+
+    seen = copy.deepcopy(never_seen)
+    seen["sim_time_ms"] = PERCEPTION["geom_period_ms"]
+    for entry in seen["objects"]:
+        entry.update(visible=True, visible_ratio=1.0)
+    goal = adapter.reconstruct(seen).goal
+    assert goal["target_ref"] == "o0" and goal["forbidden_contact"] == ["o1"]
+
+
+# --------------------------------------------------------------------------
+# 사건은 관측된 변위에서만 만든다 (docs/08 §3.2 `events[]`)
+# --------------------------------------------------------------------------
+
+
+def disturbed(source: dict, object_id: str = "o1") -> dict:
+    copied = copy.deepcopy(source)
+    copied["events"] = [{"kind": "disturbance_applied", "object": object_id, "sim_ms": copied["sim_time_ms"]}]
+    return copied
+
+
+def test_a_hidden_disturbance_changes_nothing_the_model_sees():
+    """docs/10 I5: 가려진 물체의 시뮬레이터 외란은 자세·사건·이동·파생 값 어디에도 새지 않는다."""
+    plain, hidden_world = GroundTruthAdapter(PERCEPTION), GroundTruthAdapter(PERCEPTION)
+    first = observation()
+    plain.reconstruct(first)
+    hidden_world.reconstruct(first)
+
+    quiet = occluded(observation(), pos_mm=(120, 200, -80))
+    quiet["tick"], quiet["sim_time_ms"] = 1, 100
+    moved = disturbed(occluded(observation(), pos_mm=(650, 220, -80)))
+    moved["tick"], moved["sim_time_ms"] = 1, 100
+
+    expected = extract(plain.reconstruct(quiet), plain.robot(quiet), now_ms=100)
+    actual = extract(hidden_world.reconstruct(moved), hidden_world.robot(moved), now_ms=100)
+
+    assert actual["objects"] == expected["objects"]
+    assert actual["events"] == expected["events"] == []
+    assert actual["derived"] == expected["derived"]
+    assert hidden_world.moving("o1") is False
+    assert actual == expected
+    # 시뮬레이터의 사건은 근거로만 남는다.
+    assert hidden_world.evidence()["simulator_events"] == moved["events"]
+
+
+def test_observed_displacement_becomes_an_object_moved_event():
+    adapter = GroundTruthAdapter(PERCEPTION)
+    adapter.reconstruct(observation())
+    period = PERCEPTION["geom_period_ms"]
+
+    still = observation(sim_time_ms=period)
+    still["objects"][1]["pos_mm"] = [121, 201, -80]  # 정밀도 안의 흔들림
+    state = extract(adapter.reconstruct(still), adapter.robot(still), now_ms=period)
+    assert state["events"] == []
+    assert adapter.moving("o1") is False
+
+    shifted = observation(sim_time_ms=2 * period)
+    shifted["objects"][1]["pos_mm"] = [160, 230, -80]
+    state = extract(adapter.reconstruct(shifted), adapter.robot(shifted), now_ms=2 * period)
+    assert [event["kind"] for event in state["events"]] == ["object_moved"]
+    event = state["events"][0]
+    assert event["object"] == "o1" and event["displacement_mm"] >= PERCEPTION["moved_threshold_mm"]
+    assert adapter.moving("o1") is True
+
+    # 사건은 관측된 틱에만 한 번이다. 이동 대상 표시는 창 안에서만 유지된다.
+    later = observation(sim_time_ms=3 * period)
+    later["objects"][1]["pos_mm"] = [160, 230, -80]
+    state = extract(adapter.reconstruct(later), adapter.robot(later), now_ms=3 * period)
+    assert state["events"] == []
+    assert adapter.moving("o1") is True
+    much_later = observation(sim_time_ms=3 * period + PERCEPTION["moving_window_ms"] + period)
+    much_later["objects"][1]["pos_mm"] = [160, 230, -80]
+    adapter.reconstruct(much_later)
+    assert adapter.moving("o1") is False
+
+
+def test_an_object_that_moved_while_hidden_reports_the_move_when_reobserved():
+    adapter = GroundTruthAdapter(PERCEPTION)
+    adapter.reconstruct(observation())
+    period = PERCEPTION["geom_period_ms"]
+
+    hidden = disturbed(occluded(observation(), pos_mm=(650, 220, -80)))
+    hidden["sim_time_ms"] = period
+    state = extract(adapter.reconstruct(hidden), adapter.robot(hidden), now_ms=period)
+    assert state["events"] == []
+
+    back = observation(sim_time_ms=2 * period)
+    back["objects"][1].update(pos_mm=[650, 220, -80], last_seen_ms=2 * period)
+    state = extract(adapter.reconstruct(back), adapter.robot(back), now_ms=2 * period)
+    moves = [event for event in state["events"] if event["kind"] == "object_moved"]
+    assert len(moves) == 1 and moves[0]["object"] == "o1"
+    assert state["objects"][1]["pose_mm"] == [650, 220, -80]
+    assert state["objects"][1]["reid"] == [f"reacquired:{2 * period}"]
+
+    again = observation(sim_time_ms=3 * period)
+    again["objects"][1].update(pos_mm=[650, 220, -80], last_seen_ms=3 * period)
+    assert extract(adapter.reconstruct(again), adapter.robot(again), now_ms=3 * period)["events"] == []
+
+
+def test_the_moved_threshold_is_at_least_the_pose_precision():
+    broken = copy.deepcopy(PERCEPTION)
+    broken["moved_threshold_mm"] = PERCEPTION["precision_mm"]["visible"] - 1
+    with pytest.raises(ValueError, match="moved_threshold_mm"):
+        GroundTruthAdapter(broken)
+
+
+def test_visibility_on_a_stale_geometry_tick_does_not_hide_the_reacquisition():
+    """기하가 갱신되지 않은 틱의 가시성은 추적 상태를 바꾸지 않는다 — 다음 갱신 틱에 재식별이 난다."""
+    adapter = GroundTruthAdapter(PERCEPTION)
+    period = PERCEPTION["geom_period_ms"]
+    adapter.reconstruct(observation())
+    hidden = occluded(observation(), pos_mm=(120, 200, -80))
+    hidden["sim_time_ms"] = period
+    adapter.reconstruct(hidden)
+
+    glimpse = observation(sim_time_ms=period + period // 2)  # 기하 갱신 사이의 틱
+    assert adapter.reconstruct(glimpse).instances[1].reid == ()
+
+    fresh = observation(sim_time_ms=2 * period)
+    fresh["objects"][1]["last_seen_ms"] = 2 * period
+    assert adapter.reconstruct(fresh).instances[1].reid == (f"reacquired:{2 * period}",)
+
+
+def test_graspable_faces_come_from_the_last_fresh_observation():
+    """팔이 대상을 가리는 파지 국면에서 파지면이 사라지면 후보가 사라진다 — 가시 비율은 정보다."""
+    adapter = GroundTruthAdapter(PERCEPTION)
+    adapter.reconstruct(observation())
+    covered = observation(sim_time_ms=PERCEPTION["geom_period_ms"])
+    covered["objects"][0].update(visible=False, visible_ratio=0.0)
+    instance = adapter.reconstruct(covered).instances[0]
+    assert "top" in instance.graspable_faces
+    assert instance.visible_ratio == 0.0
+
+
+# --------------------------------------------------------------------------
+# 파지 중인 물체 — 자세는 말단에서 (docs/08 §3.2 `objects[]`)
+# --------------------------------------------------------------------------
+
+
+def test_a_held_object_takes_its_pose_from_the_end_effector():
+    adapter = GroundTruthAdapter(PERCEPTION)
+    adapter.reconstruct(observation())
+    period = PERCEPTION["geom_period_ms"]
+
+    grasped = observation(sim_time_ms=period)
+    grasped["robot"].update(ee_pos_mm=[300, 0, -70], holding="o0")
+    grasped["objects"][0].update(visible=False, visible_ratio=0.0)
+    adapter.reconstruct(grasped)
+
+    lifted = observation(sim_time_ms=period + 100)
+    lifted["robot"].update(ee_pos_mm=[300, 0, 50], holding="o0")
+    lifted["objects"][0].update(visible=False, visible_ratio=0.0, pos_mm=[999, 999, 999])
+    state = extract(adapter.reconstruct(lifted), adapter.robot(lifted), now_ms=period + 100)
+    held = state["objects"][0]
+    assert held["pose_mm"][:2] == [300, 0]
+    assert held["pose_mm"][2] == 50 - (-70 - (-80))  # 파지 시점의 말단 기준 오프셋을 유지한다
+    assert held["age_ms"] == 0 and held["last_seen_ms"] == period + 100
+    assert held["pose_source"] == "proprio"
+    assert state["events"] == []  # 들고 움직인 것은 외란이 아니다
+    assert adapter.moving("o0") is False
+    assert state["objects"][1]["pose_source"] == "geom"
 
 
 def test_adapter_remembers_the_pose_it_last_saw():

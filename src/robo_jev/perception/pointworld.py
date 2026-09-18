@@ -112,6 +112,9 @@ class TrackedInstance:
     reid: tuple[str, ...] = ()
     attributes: tuple[str, ...] = ()
     moving: bool = False
+    #: 자세의 출처. `geom`은 3D 재구성, `proprio`는 파지 중인 물체를 말단 자세에서 채운 것이다
+    #: (docs/08 §3.2 "파지 중인 물체의 자세는 말단 자세에서 채운다").
+    pose_source: str = "geom"
 
     @property
     def radius_mm(self) -> float:
@@ -235,6 +238,7 @@ def _object_entry(instance: TrackedInstance, now_ms: int) -> dict[str, Any]:
         "pose_mm": _round_mm(instance.pose_mm),
         "quat": [float(value) for value in instance.quat],
         "precision_mm": int(instance.precision_mm),
+        "pose_source": str(instance.pose_source),
         "obb_mm": [int(value) for value in instance.obb_mm],
         "top_mm": int(instance.top_mm),
         "graspable_faces": list(instance.graspable_faces),
@@ -290,12 +294,15 @@ def _object_derived(
 class GroundTruthAdapter:
     """시뮬레이터 관측 → :class:`Reconstruction` (D1의 앞단).
 
-    참값을 그대로 흘리지 않는다. 세 가지를 앞단처럼 흉내 낸다.
+    참값을 그대로 흘리지 않는다. 네 가지를 앞단처럼 흉내 낸다.
 
     1. **가시성.** 시뮬레이터의 광선 검사(`visible`·`visible_ratio`)를 그대로 쓴다.
-       안 보이는 물체는 자세를 갱신하지 않고 마지막으로 본 자세와 그 시각만 남긴다.
+       안 보이는 물체는 자세·크기·속성을 갱신하지 않고 마지막으로 본 것과 그 시각만 남긴다.
     2. **정밀도.** 자세 오차 범위는 설정의 공칭값이다(참값과 무관).
     3. **갱신 주기.** 기하는 `geom_period_ms`마다만 갱신된다. 로봇 고유 감각은 매 틱이다.
+       파지 중인 물체의 자세는 말단 자세에서 채운다(고유 감각, 기하 나이 0).
+    4. **사건.** 물체 이동 사건은 두 기하 갱신 사이의 **관측된 변위**에서만 만든다.
+       시뮬레이터의 외란 발생 사건(`evidence_only_events`)은 상태에 넣지 않고 근거로만 남긴다.
 
     에피소드마다 하나를 만든다 — 마지막으로 본 자세를 기억하기 때문이다.
     """
@@ -309,50 +316,89 @@ class GroundTruthAdapter:
         self.points_visible = int(config["points_visible"])
         self.points_occluded = int(config["points_occluded"])
         self.moving_window_ms = int(config["moving_window_ms"])
+        self.moved_threshold_mm = float(config["moved_threshold_mm"])
+        if self.moved_threshold_mm < float(self.precision_mm["visible"]):
+            raise ValueError(
+                "moved_threshold_mm는 자세 정밀도 이상이어야 한다: "
+                f"{self.moved_threshold_mm} < precision_mm.visible {self.precision_mm['visible']}"
+            )
+        self.evidence_only_events = tuple(str(kind) for kind in config.get("evidence_only_events") or ())
         self.faces_by_class = {key: tuple(value) for key, value in config["graspable_faces"].items()}
         self.max_graspable_width_mm = float(config["max_graspable_width_mm"])
 
         self._tracks: dict[str, dict[str, Any]] = {}
         self._geom_ms: int | None = None
+        self._sim_ms: int = 0
         self._moved_ms: dict[str, int] = {}
         self._hidden: dict[str, list[int]] = {}
+        self._sim_events: list[dict[str, Any]] = []
+        self._surface_mm: int | None = None
 
     # -- 재구성 -------------------------------------------------------------
 
     def reconstruct(self, observation: dict[str, Any]) -> Reconstruction:
         """관측 하나를 재구성 결과로 옮긴다. 가려진 물체의 참값은 버린다."""
         sim_ms = int(observation["sim_time_ms"])
+        self._sim_ms = sim_ms
         fresh = self._geom_ms is None or sim_ms - self._geom_ms >= self.geom_period_ms
         if fresh:
             self._geom_ms = sim_ms
-        for event in observation.get("events") or ():
-            if event.get("kind") == "disturbance_applied" and event.get("object"):
-                self._moved_ms[str(event["object"])] = sim_ms
 
+        # 시뮬레이터만 아는 사건은 근거로 가고, 나머지(실행기 사건·지시 변경·접촉)는 그대로 지난다.
+        events: list[dict[str, Any]] = []
+        self._sim_events = []
+        for event in observation.get("events") or ():
+            if str(event.get("kind", "")) in self.evidence_only_events:
+                self._sim_events.append(copy.deepcopy(event))
+            else:
+                events.append(copy.deepcopy(event))
+
+        robot = observation["robot"]
+        holding = robot.get("holding")
+        ee = [float(value) for value in robot["ee_pos_mm"]]
         self._hidden = {}
         instances = []
+        moved: list[dict[str, Any]] = []
         for entry in observation["objects"]:
-            instance = self._track(entry, sim_ms, fresh=fresh)
+            instance = self._track(
+                entry, sim_ms, fresh=fresh, held=(holding == str(entry["id"])), ee=ee, moved=moved
+            )
             if instance is not None:
                 instances.append(instance)
+        events.extend(moved)
+
         return Reconstruction(
             instances=tuple(instances),
-            scene=self._scene(observation, instances),
+            scene=self._scene(observation, instances, holding),
             zones=tuple(copy.deepcopy(zone) for zone in observation.get("zones") or ()),
-            goal=self._goal(observation),
-            events=tuple(copy.deepcopy(event) for event in observation.get("events") or ()),
+            goal=self._goal(observation, instances),
+            events=tuple(events),
             geom_ms=int(self._geom_ms or 0),
             tick=int(observation.get("tick", 0)),
             sim_ms=sim_ms,
             source="ground-truth",
         )
 
-    def _track(self, entry: dict[str, Any], sim_ms: int, *, fresh: bool) -> TrackedInstance | None:
+    def _track(
+        self,
+        entry: dict[str, Any],
+        sim_ms: int,
+        *,
+        fresh: bool,
+        held: bool,
+        ee: list[float],
+        moved: list[dict[str, Any]],
+    ) -> TrackedInstance | None:
         """물체 하나의 추적 상태를 갱신한다. 한 번도 본 적 없으면 `None`.
 
-        자세는 **보이는 동안 기하가 갱신된 틱에만** 새로 쓴다. 그래서 본 적 없는 물체는
-        앞단이 아무 자세도 모르고(상태에서 빠지고), 가려진 물체는 마지막으로 본 자세에
-        머문다. 지금의 참값은 :meth:`evidence`로만 나간다.
+        자세·크기·속성·파지면은 **보이는 동안 기하가 갱신된 틱에만** 새로 쓴다. 그래서 본 적
+        없는 물체는 앞단이 아무것도 모르고(상태에서 빠지고), 가려진 물체는 마지막으로 본
+        것에 머문다. 추적 상태의 `visible`은 "마지막 기하 갱신에서 보였는가"이며 갱신 사이의
+        틱은 그것을 바꾸지 않는다 — 그래야 재식별이 다음 갱신 틱에 난다. 지금의 참값은
+        :meth:`evidence`로만 나간다.
+
+        파지 중인 물체는 말단 자세에서 채운다: 파지가 시작된 틱의 (마지막 관측 자세 − 말단)
+        오프셋을 붙들고 매 틱 말단에 더한다. 들고 움직인 것은 이동 사건이 아니다.
         """
         object_id = str(entry["id"])
         visible = bool(entry.get("visible", True))
@@ -363,54 +409,98 @@ class GroundTruthAdapter:
             # 가려진 물체의 지금 참값은 근거로만 남기고 상태로는 보내지 않는다.
             self._hidden[object_id] = [int(value) for value in entry["pos_mm"]]
 
+        if known is None and not (visible and fresh):
+            return None  # 앞단이 모르는 물체다. 참값으로 채우지 않는다
+
         reid: tuple[str, ...] = ()
-        if visible and fresh:
+        source = "geom"
+        if held and known is not None:
+            offset = known.get("held_offset")
+            if offset is None:
+                offset = [float(value) - e for value, e in zip(known["pose_mm"], ee)]
+            pose = tuple(int(round(e + o)) for e, o in zip(ee, offset))
+            quat = tuple(known["quat"])
+            last_seen = sim_ms
+            source = "proprio"
+            appearance = known["appearance"]
+            track = {**known, "pose_mm": pose, "last_seen_ms": last_seen, "held_offset": offset}
+        elif visible and fresh:
             pose = tuple(int(value) for value in entry["pos_mm"])
             quat = tuple(float(value) for value in entry["quat"])
             last_seen = min(int(entry.get("last_seen_ms", sim_ms)), sim_ms)
-            if known is not None and not known["visible"]:
-                reid = (f"reacquired:{sim_ms}",)
-        elif known is None:
-            return None  # 앞단이 모르는 물체다. 참값으로 채우지 않는다
+            appearance = self._appearance(entry, ratio)
+            if known is not None:
+                if not known["visible"]:
+                    reid = (f"reacquired:{sim_ms}",)
+                displacement = math.dist(pose, known["pose_mm"])
+                if known.get("held_offset") is None and displacement >= self.moved_threshold_mm:
+                    self._moved_ms[object_id] = sim_ms
+                    moved.append(
+                        {
+                            "kind": "object_moved",
+                            "sim_ms": sim_ms,
+                            "object": object_id,
+                            "displacement_mm": int(round(displacement)),
+                        }
+                    )
+            track = {
+                "pose_mm": pose,
+                "quat": quat,
+                "last_seen_ms": last_seen,
+                "visible": True,
+                "appearance": appearance,
+                "held_offset": None,
+            }
         else:
             pose = tuple(known["pose_mm"])
             quat = tuple(known["quat"])
             last_seen = int(known["last_seen_ms"])
+            appearance = known["appearance"]
+            track = {**known, "held_offset": None}
+            if fresh:
+                track["visible"] = False
+        self._tracks[object_id] = track
 
-        self._tracks[object_id] = {
-            "pose_mm": pose,
-            "quat": quat,
-            "last_seen_ms": last_seen,
-            "visible": visible,
-        }
-
-        obb = tuple(int(value) for value in entry["obb_mm"])
-        state = "visible" if visible else "occluded"
+        obb = appearance["obb_mm"]
+        state = "occluded" if (not visible and source == "geom") else "visible"
         return TrackedInstance(
             track_id=object_id,
-            desc=self._describe(entry),
-            cls=str(entry.get("class") or entry.get("shape") or "object"),
+            desc=appearance["desc"],
+            cls=appearance["cls"],
             pose_mm=pose,
             quat=quat,
             precision_mm=int(self.precision_mm[state]),
             obb_mm=obb,
             top_mm=int(pose[2]) + obb[2] // 2,
-            graspable_faces=self._faces(entry, obb, ratio),
+            graspable_faces=appearance["faces"],
             surface_conf=float(self.surface_conf[state]),
             visible_ratio=ratio,
             points=self.points_visible if visible else self.points_occluded,
             last_seen_ms=last_seen,
-            observed_now=visible,
+            observed_now=visible or source == "proprio",
             reid=reid,
-            attributes=tuple(entry.get("attributes") or ()),
-            moving=sim_ms - self._moved_ms.get(object_id, -10**9) <= self.moving_window_ms,
+            attributes=appearance["attributes"],
+            moving=self.moving(object_id),
+            pose_source=source,
         )
+
+    def _appearance(self, entry: dict[str, Any], ratio: float) -> dict[str, Any]:
+        """관측된 틱에 앞단이 읽는 외양. 가려진 동안은 이 사본이 그대로 남는다."""
+        obb = tuple(int(value) for value in entry["obb_mm"])
+        return {
+            "desc": self._describe(entry),
+            "cls": str(entry.get("class") or entry.get("shape") or "object"),
+            "obb_mm": obb,
+            "faces": self._faces(entry, obb, ratio),
+            "attributes": tuple(entry.get("attributes") or ()),
+        }
 
     def _faces(self, entry: dict[str, Any], obb: tuple[int, int, int], ratio: float) -> tuple[str, ...]:
         """파지 가능 면. 표면을 못 본 물체의 윗면은 파지면으로 내지 않는다.
 
         v0에서는 두 면 모두 **수평 폭**으로 판정한다 — 평행 그리퍼가 닫히는 방향이
-        어느 면에서든 수평이기 때문이다.
+        어느 면에서든 수평이기 때문이다. 관측된 틱의 값이며 가려진 동안은 유지된다
+        (가시 비율은 실행 가능성의 기준이 아니다, docs/08 §3.2).
         """
         faces = self.faces_by_class.get(str(entry.get("class") or entry.get("shape")), ())
         if min(obb[0], obb[1]) > self.max_graspable_width_mm:
@@ -427,9 +517,14 @@ class GroundTruthAdapter:
         cls = entry.get("class") or entry.get("shape") or "물체"
         return f"{colour} {cls}" if colour else str(cls)
 
-    def _scene(self, observation: dict[str, Any], instances: list[TrackedInstance]) -> SceneSummary:
-        """자유 공간 요약. 관측된 자세에서만 계산한다."""
-        surface = min((int(inst.pose_mm[2]) - inst.obb_mm[2] // 2 for inst in instances), default=0)
+    def _scene(
+        self, observation: dict[str, Any], instances: list[TrackedInstance], holding: str | None
+    ) -> SceneSummary:
+        """자유 공간 요약. 관측된 자세에서만 계산한다. 들고 있는 물체는 작업면을 말하지 않는다."""
+        resting = [inst for inst in instances if inst.track_id != holding]
+        if resting:
+            self._surface_mm = min(int(inst.pose_mm[2]) - inst.obb_mm[2] // 2 for inst in resting)
+        surface = self._surface_mm if self._surface_mm is not None else 0
         gaps = [
             math.dist(a.pose_mm, b.pose_mm) - a.radius_mm - b.radius_mm
             for index, a in enumerate(instances)
@@ -446,35 +541,32 @@ class GroundTruthAdapter:
             clearance_mm=int(round(clearance)),
         )
 
-    def _goal(self, observation: dict[str, Any]) -> dict[str, Any]:
+    def _goal(self, observation: dict[str, Any], instances: list[TrackedInstance]) -> dict[str, Any]:
         """지시와 구조화된 제약 (docs/08 §3.2 `goal`).
 
         구조화된 목표(`observation["goal"]`)가 오면 그것을 쓴다 — 실제 경로에서는 상위
         작업 지능(L3)이나 장면 명세가 대상·목적지·금지를 넘긴다. 없으면 D1 어댑터가
-        관측 가능한 정보로 푼다: 금지 속성이 붙은 물체가 금지 접촉이고, 목표 영역은
-        지시문이 부르는 영역이며, 대상은 지시문이 **마지막으로 부른 평범한 물체**다
-        (지시가 바뀌면 새 대상이 뒤에 온다: "A 대신 B를 먼저 옮겨라").
+        관측 가능한 정보로 푼다: **추적 중인** 물체 가운데 금지 속성이 붙은 것이 금지 접촉이고,
+        목표 영역은 지시문이 부르는 영역이며, 대상은 지시문이 **마지막으로 부른 평범한
+        물체**다(지시가 바뀌면 새 대상이 뒤에 온다: "A 대신 B를 먼저 옮겨라"). 아직 본 적
+        없는 물체는 참조하지 않는다 — 그 제약은 지시 텍스트가 나르고, 물체가 보이면 채워진다.
         """
         instruction = observation.get("instruction") or {}
         text = str(instruction.get("text", ""))
         zones = observation.get("zones") or ()
         given = dict(observation.get("goal") or {})
 
-        forbidden = [
-            str(entry["id"])
-            for entry in observation["objects"]
-            if "forbidden" in (entry.get("attributes") or ())
+        tracked = [
+            {"id": inst.track_id, "desc": inst.desc, "attributes": list(inst.attributes)}
+            for inst in instances
         ]
-        fragile = [
-            str(entry["id"])
-            for entry in observation["objects"]
-            if "fragile" in (entry.get("attributes") or ())
-        ]
+        forbidden = [entry["id"] for entry in tracked if "forbidden" in entry["attributes"]]
+        fragile = [entry["id"] for entry in tracked if "fragile" in entry["attributes"]]
         goal = {
             "text": text,
             "version": int(instruction.get("version", 1)),
             "t_ms": int(instruction.get("t_ms", 0)),
-            "target_ref": given.get("target_ref") or self._named_target(observation, text),
+            "target_ref": given.get("target_ref") or named_target(tracked, text),
             "target_zone": given.get("target_zone")
             or next((zone["id"] for zone in zones if str(zone.get("desc", "")) in text), None),
             "forbidden_contact": given.get("forbidden_contact") or forbidden,
@@ -483,13 +575,6 @@ class GroundTruthAdapter:
         if "priority" in given:
             goal["priority"] = given["priority"]
         return goal
-
-    def _named_target(self, observation: dict[str, Any], text: str) -> str | None:
-        """지시문이 부르는 대상. 설명은 이 어댑터가 상태에 실을 것과 같은 말로 맞춘다."""
-        described = [
-            {**entry, "desc": self._describe(entry)} for entry in observation["objects"]
-        ]
-        return named_target(described, text)
 
     # -- 로봇 고유 감각 -----------------------------------------------------
 
@@ -513,9 +598,14 @@ class GroundTruthAdapter:
     # -- 근거 ---------------------------------------------------------------
 
     def evidence(self) -> dict[str, Any]:
-        """마지막 재구성에서 **버린** 참값. 레코드의 `evidence` 자리에만 쓴다."""
-        return {"occluded_true_poses": copy.deepcopy(self._hidden), "source": "ground-truth"}
+        """마지막 재구성에서 **버린** 참값과 시뮬레이터 사건. 레코드의 `evidence` 자리에만 쓴다."""
+        return {
+            "occluded_true_poses": copy.deepcopy(self._hidden),
+            "simulator_events": copy.deepcopy(self._sim_events),
+            "source": "ground-truth",
+        }
 
     def moving(self, object_id: str) -> bool:
-        """외란으로 최근에 움직인 대상인가 (기하 나이 허용치를 가른다)."""
-        return object_id in self._moved_ms
+        """관측된 이동이 `moving_window_ms` 안에 있는 대상인가 (기하 나이 허용치를 가른다)."""
+        moved_ms = self._moved_ms.get(object_id)
+        return moved_ms is not None and self._sim_ms - moved_ms <= self.moving_window_ms

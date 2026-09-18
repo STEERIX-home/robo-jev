@@ -152,7 +152,8 @@ def test_candidates_combine_function_target_approach_destination_profile():
     request = harness().build_request(observation(), None, None)
     keys = keys_of(request)
     assert "grasp:o0:top:zoneL:slow" in keys
-    assert "grasp:o0:side:zoneL:fast" in keys
+    assert "grasp:o0:top:zoneL:fast" in keys
+    assert "push:o0:+x:none:slow" in keys
     for key in keys:
         if key in ("observe", "hold", "replan"):
             continue
@@ -209,19 +210,58 @@ def test_unreachable_combinations_are_removed():
     assert request["harness"]["accounting"]["dropped"]["unreachable"] > 0
 
 
-def test_objects_that_are_not_observed_enough_are_not_candidate_targets():
+def test_feasibility_follows_geometry_age_not_visibility():
+    """가시 비율은 정보이지 실행 가능성의 기준이 아니다 — 기하 나이가 기준이다 (docs/08 §3.2)."""
     hrn = harness()
     hrn.build_request(observation(), None, None)  # 처음에는 다 보인다
 
-    hidden = observation(tick=2, sim_time_ms=200)
-    hidden["objects"][1].update(visible=False, visible_ratio=0.1)
-    request = hrn.build_request(hidden, None, None)
+    covered = observation(tick=2, sim_time_ms=200)
+    covered["objects"][1].update(visible=False, visible_ratio=0.1)
+    request = hrn.build_request(covered, None, None)
+    assert any(":o1:" in key for key in keys_of(request)), "가려졌을 뿐 기하는 새것이다"
+    assert "occluded" not in request["harness"]["accounting"]["dropped"]
+    assert request["harness"]["accounting"]["dropped"]["stale"] == 0
+
+    stale_ms = CANDIDATES["max_geometry_age_ms"] + 300
+    stale = observation(tick=stale_ms // PERIOD_MS, sim_time_ms=stale_ms)
+    stale["objects"][1].update(visible=False, visible_ratio=0.1)
+    request = hrn.build_request(stale, None, None)
     assert not any(":o1:" in key for key in keys_of(request))
-    assert request["harness"]["accounting"]["dropped"]["occluded"] > 0
+    assert request["harness"]["accounting"]["dropped"]["stale"] > 0
 
 
-def test_candidate_cap_and_inclusion_rate():
-    """상한을 넘으면 정답을 모르는 채로 줄이고 포함률을 기록한다 (docs/02 §3)."""
+def test_a_held_target_is_never_stale():
+    """들고 있는 물체의 자세는 말단에서 온다(나이 0) — 팔이 가려도 후보가 남는다."""
+    hrn = harness()
+    hrn.build_request(observation(), None, None)
+    stale_ms = CANDIDATES["max_geometry_age_ms"] + 300
+    carrying = observation(tick=stale_ms // PERIOD_MS, sim_time_ms=stale_ms)
+    carrying["robot"].update(holding="o0", ee_pos_mm=[300, 0, -40])
+    carrying["objects"][0].update(visible=False, visible_ratio=0.0)
+    request = hrn.build_request(carrying, None, None)
+    assert "grasp:o0:top:zoneL:slow" in keys_of(request)
+    assert request["harness"]["candidates"][candidate_id("grasp:o0:top:zoneL:slow")]["geometry_age_ms"] == 0
+
+
+def test_a_target_in_the_grasp_phase_is_kept_while_the_arm_hides_it():
+    """파지 국면에서 팔이 대상을 가려 기하가 늙어도 후보는 사라지지 않는다 (docs/08 §3.2)."""
+    hrn = harness()
+    hrn.build_request(observation(), None, None)
+    stale_ms = CANDIDATES["max_geometry_age_ms"] + 300
+    descending = observation(tick=stale_ms // PERIOD_MS, sim_time_ms=stale_ms)
+    descending["robot"].update(ee_pos_mm=[300, 0, -20])  # 접근 지점 아래, 파지 지점 근처
+    descending["objects"][0].update(visible=False, visible_ratio=0.0)
+    request = hrn.build_request(descending, None, None)
+    geometry = request["harness"]["candidates"].get(candidate_id("grasp:o0:top:zoneL:slow"))
+    assert geometry is not None and geometry["phase"] == "grasp"
+    assert not any(key.startswith("push:o0:") for key in keys_of(request)), "접촉 전의 밀기는 늙은 기하로 만들지 않는다"
+
+
+def test_candidate_cap_and_kept_ratio():
+    """상한을 넘으면 정답을 모르는 채로 줄이고 목록 보존 비율을 기록한다 (docs/02 §3).
+
+    `kept_ratio`는 목록 보존 비율이다. 정답 포함률은 라벨과 대조해 오프라인으로 잰다.
+    """
     crowd = [obj(f"o{index}", (140 + 30 * index, -300 + 70 * index, -80)) for index in range(10)]
     request = harness().build_request(observation(objects=crowd), None, None)
     accounting = request["harness"]["accounting"]
@@ -229,8 +269,12 @@ def test_candidate_cap_and_inclusion_rate():
     assert len(request["request"]["candidates"]["q_main"]) <= CANDIDATES["max"]
     assert accounting["kept"] < accounting["feasible"]
     assert accounting["capped"] is True
-    assert accounting["inclusion_rate"] == pytest.approx(accounting["kept"] / accounting["feasible"])
+    assert "inclusion_rate" not in accounting
+    assert accounting["kept_ratio"] == pytest.approx(accounting["kept"] / accounting["feasible"])
     assert accounting["dropped"]["cap"] == accounting["feasible"] - accounting["kept"]
+    assert set(accounting["spread"]) == {"targets", "functions", "approaches", "destinations"}
+    for dimension in accounting["spread"].values():
+        assert 0 < dimension["kept"] <= dimension["feasible"]
 
 
 def test_the_cap_keeps_a_spread_of_targets():
@@ -239,6 +283,66 @@ def test_the_cap_keeps_a_spread_of_targets():
     request = harness().build_request(observation(objects=crowd), None, None)
     targets = {key.split(":")[1] for key in keys_of(request) if ":" in key}
     assert len(targets) >= 6
+
+
+def crowded_scene(**over) -> dict:
+    """docs/10 I3의 장면: 보이는 물체 8개, 영역 3개, 지시는 o7 → z2."""
+    objects = [
+        obj(f"o{i}", (100 + (i % 4) * 120, -180 + (i // 4) * 360, -80), colour=f"c{i}")
+        for i in range(8)
+    ]
+    zones = [
+        {"id": f"z{j}", "desc": f"zone{j}", "bounds_mm": [-150, j * 100, 100, j * 100 + 80]}
+        for j in range(3)
+    ]
+    return observation(
+        objects=objects,
+        zones=zones,
+        instruction={"version": 1, "t_ms": 0, "text": "c7 상자를 zone2로 옮겨라"},
+        **over,
+    )
+
+
+def test_the_cap_keeps_every_function_and_destination():
+    """docs/10 I3: 상한이 기능·목적지를 통째로 지우면 안 된다 — 각 차원의 값이 하나는 남는다."""
+    request = harness().build_request(crowded_scene(), None, None)
+    accounting = request["harness"]["accounting"]
+    assert accounting["capped"] is True
+    parts = [key.split(":") for key in keys_of(request) if ":" in key]
+
+    feasible_functions = {"grasp", "push"}
+    assert {part[0] for part in parts} == feasible_functions
+    assert {part[3] for part in parts if part[0] == "grasp"} == {"z0", "z1", "z2"}
+    assert {part[2] for part in parts if part[0] == "push"} == set(CANDIDATES["push_directions"])
+    assert len({part[1] for part in parts}) == 8
+    spread = accounting["spread"]
+    assert spread["functions"]["kept"] == spread["functions"]["feasible"]
+    assert spread["destinations"]["kept"] == spread["destinations"]["feasible"]
+
+
+def test_the_cap_reserves_the_committed_candidate():
+    """현재 commitment의 후보는 실행 가능하기만 하면 상한과 무관하게 남는다."""
+    key = "grasp:o7:top:z2:slow"
+    hrn = harness()
+    without = hrn.build_request(crowded_scene(), None, None)
+    commitment = {
+        "action_ref": candidate_id(key), "key": key, "phase": "approach", "held_ticks": 2,
+        "last_switch_tick": 0, "goal_version": 1, "challenger": None, "challenger_ticks": 0,
+        "stop_ticks": 0,
+    }
+    with_commitment = hrn.build_request(crowded_scene(tick=1, sim_time_ms=PERIOD_MS), None, commitment)
+    assert key in keys_of(with_commitment)
+    assert with_commitment["request"]["commitment"]["action_ref"] == candidate_id(key)
+    assert with_commitment["harness"]["commitment_invalid"] is False
+    assert len(with_commitment["request"]["candidates"]["q_main"]) <= CANDIDATES["max"]
+    # 예약은 답을 모르는 채로 한다: commitment 없이 만든 목록과 같은 크기다.
+    assert len(keys_of(with_commitment)) == len(keys_of(without))
+
+
+def test_pruning_is_deterministic_and_answer_agnostic():
+    first = harness().build_request(crowded_scene(), None, None)
+    second = harness().build_request(crowded_scene(), None, None)
+    assert keys_of(first) == keys_of(second)
 
 
 def test_candidate_generation_does_not_use_hidden_truth():
@@ -291,11 +395,13 @@ def blocked_scene() -> dict:
     )
 
 
+BLOCKED = "grasp:o0:top:zoneL:slow"
+
+
 def test_the_local_planner_produces_real_waypoints_around_a_blocker():
     """`via`는 플래너가 실제로 만든 경유점이다 — 컨트롤러는 좌표 없는 via를 거절한다."""
     blocked = blocked_scene()
-    key = "grasp:o0:side:zoneL:slow"
-    commitment = {"action_ref": candidate_id(key), "key": key, "phase": "approach"}
+    commitment = {"action_ref": candidate_id(BLOCKED), "key": BLOCKED, "phase": "approach"}
     request = harness().build_request(blocked, None, commitment)
 
     vias = [entry for entry in request["request"]["candidates"]["q_path"] if entry["kind"] == "via"]
@@ -311,9 +417,24 @@ def test_the_local_planner_produces_real_waypoints_around_a_blocker():
 
 def test_blocked_direct_path_is_reported_in_the_candidate_values():
     request = harness().build_request(blocked_scene(), None, None)
-    geometry = request["harness"]["candidates"][candidate_for(request, "grasp:o0:side:zoneL:slow")["id"]]
+    geometry = request["harness"]["candidates"][candidate_for(request, BLOCKED)["id"]]
     assert geometry["path_clear"] is False
     assert geometry["blocker"] == "o5"
+    assert "path blocked" in candidate_for(request, BLOCKED)["derived"]
+
+
+def test_path_clear_describes_the_segment_of_the_candidates_phase():
+    """`path_clear`는 그 후보의 국면에서 **실제로 명령할 구간**을 말한다 (docs/08 §3.2 `derived[]`).
+
+    접근 지점까지는 막혔어도, 이미 파지 국면에 들어온 후보의 구간(말단→파지점)은 비어 있다.
+    """
+    scene = blocked_scene()
+    scene["robot"]["ee_pos_mm"] = [400, 0, 20]  # 대상 바로 위, 파지 지점 근처
+    request = harness().build_request(scene, None, None)
+    geometry = request["harness"]["candidates"][candidate_id(BLOCKED)]
+    assert geometry["phase"] == "grasp"
+    assert geometry["path_clear"] is True and geometry["blocker"] is None
+    assert geometry["target_mm"] == geometry["action_mm"]
 
 
 def test_aux_questions_reference_the_tick_start_commitment():
@@ -494,6 +615,7 @@ def committed(hrn: RobotHarness, key: str, scene: dict | None = None, **over) ->
     scene = scene if scene is not None else observation()
     request = hrn.build_request(scene, None, None)
     geometry = request["harness"]["candidates"][candidate_id(key)]
+    target = next(item for item in request["request"]["state"]["objects"] if item["id"] == geometry["target_ref"])
     commitment = {
         "action_ref": candidate_id(key),
         "key": key,
@@ -504,7 +626,8 @@ def committed(hrn: RobotHarness, key: str, scene: dict | None = None, **over) ->
         "challenger": None,
         "challenger_ticks": 0,
         "stop_ticks": 0,
-        "start_pose_mm": [300, 0, -80],
+        "start_pose_mm": list(target["pose_mm"]),
+        "start_clearance_mm": geometry["clearance_mm"],
     }
     commitment.update(over)
     return commitment
@@ -709,10 +832,11 @@ def test_a_goal_version_change_releases_the_commitment():
 
 
 def test_an_invalidated_commitment_is_released():
-    """후보 목록에서 사라진 행동은 무효다 (대상이 안 보이게 된 경우)."""
+    """후보 목록에서 사라진 행동은 무효다 (대상의 기하가 허용치 너머로 늙은 경우)."""
     hrn = harness()
     commitment = committed(hrn, GRASP)
-    gone = observation(tick=1, sim_time_ms=PERIOD_MS)
+    stale_ms = CANDIDATES["max_geometry_age_ms"] + PERIOD_MS
+    gone = observation(tick=stale_ms // PERIOD_MS, sim_time_ms=stale_ms)
     gone["objects"][0].update(visible=False, visible_ratio=0.0)
     request, out = step(hrn, gone, answers(probabilities(**{OTHER.replace(":", "__"): 1.0})), commitment)
 
@@ -836,17 +960,25 @@ def test_aux_answers_apply_while_the_commitment_holds():
 
 
 def test_aux_answers_are_discarded_on_the_switch_tick():
-    """전환 틱에는 네 답을 버리고 새 후보의 초기 프로파일을 쓴다 (docs/08 §5.4)."""
+    """전환 틱에는 네 답을 버리고 새 후보의 초기 프로파일을 쓴다 (docs/08 §5.4).
+
+    그리퍼도 예외가 아니다(docs/10 I4): 현재 닫혀 있고 이전 commitment 기준의 답이 `open`이면
+    명령은 `closed`(현재 상태)이고 실제 실행기도 개방 이벤트를 내지 않는다.
+    """
     hrn = harness()
-    commitment = committed(hrn, GRASP, challenger=candidate_id(OTHER), challenger_ticks=M - 1)
+    scene = observation()
+    scene["robot"].update(gripper_mm=CONTROLLER["gripper"]["closed_mm"])
+    scene["exec"] = {"seq": 3, "gripper": "closed"}
+    commitment = committed(hrn, GRASP, scene, challenger=candidate_id(OTHER), challenger_ticks=M - 1)
     _, out = step(
         hrn,
-        observation(),
+        scene,
         answers(
             probabilities(**{GRASP.replace(":", "__"): 0.2, OTHER.replace(":", "__"): 0.9}),
             q_speed={"3": 1.0},
             q_force={"2": 1.0},
             q_path={"ph": 1.0},
+            q_gripper={"open": 1.0},
         ),
         commitment,
     )
@@ -854,7 +986,40 @@ def test_aux_answers_are_discarded_on_the_switch_tick():
     assert out["adopted"]["speed"] == COMPOSE["initial_profile"]["speed_level"]
     assert out["adopted"]["force"] == COMPOSE["initial_profile"]["force_level"]
     assert out["adopted"]["path"] == "p0"
-    assert "aux_discarded" in count_records(out["records"])
+    assert out["adopted"]["gripper"] == out["command"]["gripper"] == "closed"
+    assert count_records(out["records"])["aux_discarded"] == 1
+    assert "gripper_change" not in count_records(out["records"])
+
+    ctrl = Controller.from_config_path(CONTROLLER_CONFIG)
+    ctrl.reset(ee_pos_mm=[0, 0, 200], ee_quat=[0.0, 0.0, 0.0, 1.0],
+               gripper_mm=CONTROLLER["gripper"]["closed_mm"], now_ms=0)
+    ctrl.observe({"holding": None, "gripper_load_n": 0.0, "target_distance_mm": 0.0, "contact_force_n": 0.0})
+    ack = ctrl.apply(out["command"], now_ms=0)
+    assert ack["applied"] is True
+    assert ack["gripper_event"] is None
+    assert ctrl.gripper_desired == "closed"
+
+
+def test_an_aux_answer_outside_the_candidates_is_recorded_as_missing():
+    """후보 밖의 부가 답은 무시하되 `missing_answer`로 적는다 (q_main과 같은 규칙)."""
+    hrn = harness()
+    commitment = committed(hrn, GRASP)
+    _, out = step(
+        hrn,
+        observation(),
+        answers(
+            probabilities(**{GRASP.replace(":", "__"): 1.0}),
+            q_path={"p9": 1.0},
+            q_speed={"7": 1.0},
+            q_force={"0": 1.0},
+            q_gripper={"open": 1.0},
+        ),
+        commitment,
+    )
+    missing = [record["question"] for record in out["records"] if record["kind"] == "missing_answer"]
+    assert missing == ["q_path", "q_speed"]
+    assert out["adopted"]["speed"] == COMPOSE["initial_profile"]["speed_level"]
+    assert out["adopted"]["path"] == "p0"
 
 
 def test_speed_is_capped_next_to_a_fragile_object():
@@ -898,42 +1063,130 @@ def test_a_pending_gripper_wait_is_recorded():
 def test_a_via_answer_carries_the_planner_waypoint_into_the_command():
     hrn = harness()
     scene = blocked_scene()
-    key = "grasp:o0:side:zoneL:slow"
-    commitment = committed(hrn, key, scene)
-    request, out = step(hrn, scene, answers(probabilities(**{key.replace(":", "__"): 1.0}), q_path={"p1": 1.0}), commitment)
+    commitment = committed(hrn, BLOCKED, scene)
+    request, out = step(hrn, scene, answers(probabilities(**{BLOCKED.replace(":", "__"): 1.0}), q_path={"p1": 1.0}), commitment)
 
     assert out["command"]["path"]["kind"] == "via"
     assert out["command"]["path"]["waypoint_ref"] == "w1"
     assert out["command"]["path"]["waypoint_mm"] == request["harness"]["waypoints"]["w1"]["pos_mm"]
+    assert out["adopted"]["path"] == "p1"
+
+    # 실제 실행기는 그 경유점으로 움직인다.
+    ctrl = Controller.from_config_path(CONTROLLER_CONFIG)
+    start = scene["robot"]["ee_pos_mm"]
+    ctrl.reset(ee_pos_mm=start, ee_quat=[0.0, 0.0, 0.0, 1.0], gripper_mm=80, now_ms=0)
+    ctrl.observe({"ee_pos_mm": list(start), "nearest_obstacle_mm": 300.0, "holding": None})
+    # 하네스는 10Hz로 다시 발행한다. 여기서는 lease를 길게 줘 한 명령으로 도착까지 본다.
+    ack = ctrl.apply({**out["command"], "lease_until": 5000}, now_ms=0)
+    assert ack["applied"] is True and ack["path"] == "via" and ack["executor"] == "MOVE_EE"
+    setpoint = None
+    for step_ms in range(20, 3000, 20):
+        setpoint = ctrl.advance(step_ms)
+    waypoint = out["command"]["path"]["waypoint_mm"]
+    assert setpoint["ee_pos_mm"] == pytest.approx(waypoint, abs=1.0)
+
+
+def moved_target_scene(hrn: RobotHarness, *, key: str = GRASP) -> tuple[dict, dict]:
+    """대상이 관측된 변위로 '이동 대상'이 된 뒤, 기하가 갱신되지 않은 틱.
+
+    기하 갱신 주기(200ms)마다 자세를 두 번 보고(0ms, 200ms — 40mm 이동), 390ms의 틱은 아직 새
+    기하가 없어 대상 기하의 나이가 190ms다 (docs/10 I6의 값).
+    """
+    hrn.build_request(observation(), None, None)
+    period = CONFIG["perception"]["geom_period_ms"]
+    shifted = observation(tick=period // PERIOD_MS, sim_time_ms=period)
+    shifted["objects"][0]["pos_mm"] = [340, 0, -80]
+    hrn.build_request(shifted, None, None)
+
+    request_ms = 2 * period - 10
+    scene = observation(tick=request_ms // PERIOD_MS, sim_time_ms=request_ms)
+    scene["objects"][0]["pos_mm"] = [340, 0, -80]
+    commitment = {
+        "action_ref": candidate_id(key), "key": key, "phase": "approach", "held_ticks": 2,
+        "last_switch_tick": 0, "goal_version": 1, "challenger": None, "challenger_ticks": 0,
+        "stop_ticks": 0, "start_pose_mm": [340, 0, -80],
+    }
+    return scene, commitment
 
 
 def test_stale_geometry_sends_the_chosen_candidate_to_the_observe_branch():
     """선택된 후보의 기하가 허용치를 넘으면 적용하지 않고 관측 분기로 보낸다 (docs/08 §5.0).
 
-    외란으로 움직인 대상의 허용치는 200ms다. 후보로 남을 만큼은 보이지만(옆면) 기하가
-    그보다 오래된 틱을 만든다.
+    관측된 변위로 '이동 대상'이 된 물체의 허용치는 200ms다. 요청 시점의 나이는 190ms지만
+    답이 100ms 뒤에 오면 적용 시각의 나이는 290ms다 (docs/10 I6).
     """
     hrn = harness()
-    hrn.build_request(
-        observation(events=[{"kind": "disturbance_applied", "object": "o0", "sim_ms": 0}]), None, None
-    )
-    stale_ms = CONTROLLER["lifetime"]["geometry_age_moving_ms"] + PERIOD_MS
-    scene = observation(tick=stale_ms // PERIOD_MS, sim_time_ms=stale_ms)
-    scene["objects"][0].update(visible=False, visible_ratio=0.5)
+    scene, commitment = moved_target_scene(hrn)
+    request = hrn.build_request(scene, None, commitment)
+    geometry = request["harness"]["candidates"][candidate_id(GRASP)]
+    assert geometry["geometry_age_ms"] == 190 and geometry["moving"] is True
 
-    key = "grasp:o0:side:zoneL:slow"
-    commitment = {
-        "action_ref": candidate_id(key), "key": key, "phase": "approach", "held_ticks": 2,
-        "last_switch_tick": 0, "goal_version": 1, "challenger": None, "challenger_ticks": 0,
-        "stop_ticks": 0,
-    }
-    request, out = step(hrn, scene, answers(probabilities(**{key.replace(":", "__"): 1.0})), commitment)
-
-    assert request["harness"]["candidates"][candidate_id(key)]["geometry_age_ms"] == stale_ms
-    assert [r["kind"] for r in out["records"] if r["kind"] == "geometry_age"] == ["geometry_age"]
+    out = hrn.compose(request, answers(probabilities(**{GRASP.replace(":", "__"): 1.0})), commitment, scene["sim_time_ms"] + 100)
+    assert [r for r in out["records"] if r["kind"] == "geometry_age"][0]["age_ms"] == 290
     assert out["gate"] == "observe"
     assert out["adopted"]["main"] == candidate_id("observe")
     assert out["commitment"] is None
+    assert count_records(out["records"]).get("switch") is None, "관측으로 보낸 틱에 전환 기록이 남았다"
+    assert count_records(out["records"])["release"] == 1
+
+    prompt = hrn.compose(request, answers(probabilities(**{GRASP.replace(":", "__"): 1.0})), commitment, scene["sim_time_ms"])
+    assert prompt["gate"] is None and prompt["command"]["geometry_observed_at"] == 200
+    assert prompt["command"]["geometry_age_ms"] == 190
+
+
+def test_the_real_controller_measures_geometry_age_at_apply_time():
+    """docs/10 I6: 요청 시 190ms였던 기하는 100ms 뒤에 적용하면 290ms다 — 실행기가 관측을 요청한다."""
+    hrn = harness()
+    scene, commitment = moved_target_scene(hrn)
+    request = hrn.build_request(scene, None, commitment)
+    out = hrn.compose(request, answers(probabilities(**{GRASP.replace(":", "__"): 1.0})), commitment, scene["sim_time_ms"])
+    assert out["command"]["target_moving"] is True
+
+    ctrl = Controller.from_config_path(CONTROLLER_CONFIG)
+    ctrl.reset(ee_pos_mm=[0, 0, 200], ee_quat=[0.0, 0.0, 0.0, 1.0], gripper_mm=80, now_ms=0)
+    ctrl.observe({"holding": None})
+    late = ctrl.apply(out["command"], now_ms=scene["sim_time_ms"] + 100)
+    assert late["applied"] is False
+    assert late["reason"] == "geometry_age" and late["request_observation"] is True
+
+    ctrl = Controller.from_config_path(CONTROLLER_CONFIG)
+    ctrl.reset(ee_pos_mm=[0, 0, 200], ee_quat=[0.0, 0.0, 0.0, 1.0], gripper_mm=80, now_ms=0)
+    ctrl.observe({"holding": None})
+    assert ctrl.apply(out["command"], now_ms=scene["sim_time_ms"])["applied"] is True
+
+
+def test_the_grasp_phase_is_exempt_from_the_geometry_age_gate():
+    """파지·놓기 국면과 파지 중에는 기하 나이 대신 readiness가 시점을 정한다 (docs/08 §5.0)."""
+    hrn = harness()
+    scene, commitment = moved_target_scene(hrn)
+    scene["robot"]["ee_pos_mm"] = [340, 0, -30]  # 파지 지점 바로 위
+    request = hrn.build_request(scene, None, commitment)
+    geometry = request["harness"]["candidates"][candidate_id(GRASP)]
+    assert geometry["phase"] == "grasp" and geometry["geometry_age_ms"] == 190
+
+    out = hrn.compose(request, answers(probabilities(**{GRASP.replace(":", "__"): 1.0})), commitment, scene["sim_time_ms"] + 100)
+    assert out["gate"] is None
+    assert "geometry_age" not in count_records(out["records"])
+    assert out["command"]["phase"] == "grasp"
+
+    ctrl = Controller.from_config_path(CONTROLLER_CONFIG)
+    ctrl.reset(ee_pos_mm=[340, 0, -30], ee_quat=[0.0, 0.0, 0.0, 1.0], gripper_mm=80, now_ms=0)
+    ctrl.observe({"holding": None, "target_distance_mm": 10.0})
+    ack = ctrl.apply(out["command"], now_ms=scene["sim_time_ms"] + 100)
+    assert ack["applied"] is True and ack["request_observation"] is False
+
+
+def test_a_redirect_to_observe_leaves_no_phantom_switch_records():
+    """관측으로 보낸 틱에 주 결정이 남긴 전환·유지 기록이 섞이면 안 된다 (해제는 한 번)."""
+    hrn = harness()
+    scene, _ = moved_target_scene(hrn)
+    request = hrn.build_request(scene, None, None)
+    out = hrn.compose(request, answers(probabilities(**{GRASP.replace(":", "__"): 1.0})), None, scene["sim_time_ms"] + 100)
+    counts = count_records(out["records"])
+    assert out["gate"] == "observe"
+    assert "switch" not in counts and "hold" not in counts
+    assert "release" not in counts  # commitment가 없었으니 해제할 것도 없다
+    assert counts["geometry_age"] == 1 and counts["gate"] == 1 and counts["aux_discarded"] == 1
 
 
 @pytest.mark.parametrize(("key", "executor"), [("observe", "OBSERVE"), ("replan", "REQUEST_REPLAN"), ("hold", "HOLD")])
@@ -968,14 +1221,281 @@ def test_the_command_carries_the_documented_contract_fields():
 
 
 def test_records_count_every_composition_event():
+    """대본대로 돌린 여섯 틱의 기록 종류별 건수가 정확히 맞아야 한다 (docs/08 §5 "충돌 건수")."""
+    hrn = harness()
+    totals: dict[str, int] = {}
+    commitment = None
+    history = None
+    script = [
+        # 틱 0: commitment 없음 → 즉시 채택 (switch 1, aux_discarded 1)
+        (answers(probabilities(**{GRASP.replace(":", "__"): 1.0})), None),
+        # 틱 1: 같은 답 → 유지 (hold 1)
+        (answers(probabilities(**{GRASP.replace(":", "__"): 1.0})), None),
+        # 틱 2: 도전자 δ 초과 1틱째 → 유지 (hold 1)
+        (answers(probabilities(**{GRASP.replace(":", "__"): 0.2, OTHER.replace(":", "__"): 0.8})), None),
+        # 틱 3: 같은 도전자 2틱째 → 전환 (switch 1, aux_discarded 1)
+        (answers(probabilities(**{GRASP.replace(":", "__"): 0.2, OTHER.replace(":", "__"): 0.8})), None),
+        # 틱 4: 직전 실패 + 재시도 거부 → 같은 방식 차단·해제·재채택 (retry_blocked 1, release 1, switch 1, aux_discarded 1)
+        (answers(probabilities(**{OTHER.replace(":", "__"): 0.9, THIRD.replace(":", "__"): 0.1}), q_retry=0.0),
+         failed_history(OTHER)),
+        # 틱 5: 늦은 응답 → 폐기 (discarded 1)
+        (answers(probabilities(**{THIRD.replace(":", "__"): 1.0}), meta={"observed_at": -10_000}), None),
+    ]
+    for tick, (results, forced_history) in enumerate(script):
+        scene = observation(tick=tick, sim_time_ms=tick * PERIOD_MS)
+        request = hrn.build_request(scene, forced_history or history, commitment)
+        out = hrn.compose(request, results, commitment, tick * PERIOD_MS)
+        for kind, count in count_records(out["records"]).items():
+            totals[kind] = totals.get(kind, 0) + count
+        for record in out["records"]:
+            assert isinstance(record["kind"], str) and set(record) >= {"kind"}
+        commitment = out["commitment"]
+        history = {"adopted": out["adopted"], "ack": {"applied": True}, "gate": out["gate"]}
+
+    assert totals["switch"] == 3
+    assert totals["hold"] == 2
+    assert totals["release"] == 1
+    assert totals["retry_blocked"] == 1
+    assert totals["discarded"] == 1
+    assert totals["aux_discarded"] == 3
+    assert "gate" not in totals and "stop" not in totals and "conflict" not in totals
+
+
+def test_a_commitment_without_a_goal_version_is_released_as_stale():
+    """목표 버전을 모르는 commitment는 지금 목표에 대한 것이라고 볼 수 없다 — 해제한다."""
     hrn = harness()
     commitment = committed(hrn, GRASP)
+    del commitment["goal_version"]
     _, out = step(hrn, observation(), answers(probabilities(**{GRASP.replace(":", "__"): 1.0})), commitment)
-    counts = count_records(out["records"])
-    assert counts.get("hold") == 1
-    for record in out["records"]:
-        assert set(record) >= {"kind"}
-        assert isinstance(record["kind"], str)
+    assert [r["reason"] for r in out["records"] if r["kind"] == "release"] == ["goal_version"]
+    assert out["switch"] is True
+    assert out["commitment"]["goal_version"] == 1
+
+
+def test_a_drifted_target_releases_the_commitment():
+    """같은 의미 키라도 연속 파라미터가 허용 오차를 넘으면 같은 후보가 아니다 (docs/02 §4).
+
+    대상의 자세가 채택 시점에서 `tolerance.distance_mm`보다 멀어졌거나(외란), 대상 주변의
+    여유가 `tolerance.clearance_mm`보다 달라졌으면 commitment를 해제하고 다시 고른다.
+    """
+    hrn = harness()
+    commitment = committed(hrn, GRASP)
+    tolerance = COMPOSE["tolerance"]
+    period = CONFIG["perception"]["geom_period_ms"]  # 자세는 기하 갱신 틱에만 바뀐다
+
+    # 가장 가까운 이웃(o1)을 도는 접선 방향으로 허용 오차 안만큼 움직인다 — 여유는 그대로다.
+    nudged = observation(tick=period // PERIOD_MS, sim_time_ms=period)
+    nudged["objects"][0]["pos_mm"] = [341, 19, -80]
+    _, out = step(hrn, nudged, answers(probabilities(**{GRASP.replace(":", "__"): 1.0})), commitment)
+    assert "release" not in count_records(out["records"])
+
+    shoved = observation(tick=2 * period // PERIOD_MS, sim_time_ms=2 * period)
+    shoved["objects"][0]["pos_mm"] = [300 + tolerance["distance_mm"] + 5, 0, -80]
+    _, out = step(hrn, shoved, answers(probabilities(**{GRASP.replace(":", "__"): 1.0})), commitment)
+    release = [r for r in out["records"] if r["kind"] == "release"]
+    assert [r["reason"] for r in release] == ["drifted"]
+    assert release[0]["parameter"] == "distance_mm"
+    assert out["commitment"]["held_ticks"] == 0  # 다시 채택했다
+
+    crowded = observation(tick=3 * period // PERIOD_MS, sim_time_ms=3 * period)
+    crowded["objects"][1]["pos_mm"] = [300, 100, -80]  # 이웃이 대상 옆으로 왔다 → 여유가 줄었다
+    _, out = step(hrn, crowded, answers(probabilities(**{GRASP.replace(":", "__"): 1.0})), commitment)
+    release = [r for r in out["records"] if r["kind"] == "release"]
+    assert [r["reason"] for r in release] == ["drifted"]
+    assert release[0]["parameter"] == "clearance_mm"
+
+
+def test_a_missing_destination_zone_is_a_conflict_not_a_crash():
+    """다른 도구의 틱에서 목적지 영역이 없으면 `StopIteration`이 아니라 충돌 기록이다 (docs/10 검토 6)."""
+    record = copy.deepcopy(read_jsonl(D0_STREAMS)[0])
+    tick = next(item for item in record["ticks"] if item["request"]["state"]["robot"].get("holding"))
+    commitment = tick["request"]["commitment"]
+    for zone in tick["request"]["state"]["zones"]:
+        zone["id"] = "zoneX"
+    out = harness().compose(
+        tick, answers({commitment["action_ref"]: 1.0}), {**commitment, "goal_version": 1}, tick["sim_ms"]
+    )
+    assert out["command"] is not None
+    assert out["command"]["path"]["kind"] == "hold"
+    conflicts = [r for r in out["records"] if r["kind"] == "conflict"]
+    assert [r["reason"] for r in conflicts] == ["destination_missing"]
+
+
+# --------------------------------------------------------------------------
+# docs/10 회귀 — 실제로 명령할 구간과 국면별 목표점
+# --------------------------------------------------------------------------
+
+
+def probe_answers(request: dict, key: str, **extra) -> dict:
+    """docs/10 probe.py의 답: 규칙 답 위에 `key`를 확정하고 부가 답은 direct·1·회피·open이다."""
+    result = rule_judge(request)
+    result.update(
+        q_main={candidate_id(key): 1.0}, q_done=0.0, q_instr=1.0, q_observe=0.0, q_stop=0.0,
+        q_retry=1.0, q_path={"p0": 1.0}, q_speed={"1": 1.0}, q_force={"0": 1.0},
+        q_gripper={"open": 1.0},
+    )
+    result.update(extra)
+    return result
+
+
+def i1_scene(**blocker_over) -> dict:
+    """docs/10 I1: 말단 [0,0,200], 대상 o0 [400,0,0], 장애물 o1 [200,0,140]."""
+    return observation(objects=[obj("o0", (400, 0, 0)), obj("o1", (200, 0, 140), colour="blue", **blocker_over)])
+
+
+def controller_at(scene: dict, *, closed: bool = False) -> Controller:
+    ctrl = Controller.from_config_path(CONTROLLER_CONFIG)
+    robot = scene["robot"]
+    ctrl.reset(
+        ee_pos_mm=robot["ee_pos_mm"], ee_quat=robot["ee_quat"],
+        gripper_mm=CONTROLLER["gripper"]["closed_mm"] if closed else robot["gripper_mm"],
+        now_ms=scene["sim_time_ms"],
+    )
+    ctrl.observe({"ee_pos_mm": list(robot["ee_pos_mm"]), "holding": robot.get("holding"),
+                  "gripper_load_n": 0.0, "target_distance_mm": 0.0, "contact_force_n": 0.0,
+                  "nearest_obstacle_mm": 300.0})
+    return ctrl
+
+
+def test_a_known_blocker_is_never_sent_as_direct():
+    """docs/10 I1: 막힌 direct는 보내지 않는다 — 첫 경유 경로로 바꾸고 이유를 적는다 (docs/08 §5.4, §5.6)."""
+    scene = i1_scene()
+    hrn = harness()
+    request = hrn.build_request(scene, None, None)
+    geometry = request["harness"]["candidates"][candidate_id(GRASP)]
+    assert geometry["path_clear"] is False and geometry["blocker"] == "o1"
+
+    # 전환 틱: 초기 프로파일의 direct도 같은 규칙을 따른다.
+    out = hrn.compose(request, probe_answers(request, GRASP), None, 0)
+    command = out["command"]
+    assert command["path"]["kind"] == "via"
+    assert command["path"]["waypoint_mm"] is not None
+    assert command["path"]["target_mm"] == [400, 0, 92]
+    assert command["path"]["waypoint_mm"] != [400, 0, 92]
+    conflicts = [r for r in out["records"] if r["kind"] == "conflict"]
+    assert conflicts and conflicts[0]["reason"] == "path_blocked" and conflicts[0]["blocker"] == "o1"
+    assert conflicts[0]["resolution"] == "via"
+    ack = controller_at(scene).apply(command, 0)
+    assert ack["applied"] is True and ack["path"] == "via"
+
+    # 유지 틱: 모델이 direct라고 답해도 마찬가지다.
+    commitment = out["commitment"]
+    later = i1_scene(tick=1, sim_time_ms=PERIOD_MS)
+    request = hrn.build_request(later, {"adopted": out["adopted"], "ack": ack, "gate": None}, commitment)
+    out = hrn.compose(request, probe_answers(request, GRASP), commitment, PERIOD_MS)
+    assert out["command"]["path"]["kind"] == "via"
+    assert out["adopted"]["path"] == "p1"
+    assert [r["reason"] for r in out["records"] if r["kind"] == "conflict"] == ["path_blocked"]
+
+
+def test_a_blocked_direct_with_no_detour_holds():
+    """경유점도 없으면 hold와 충돌 기록이다 (docs/08 §5.4)."""
+    walled = observation(objects=[
+        obj("o0", (400, 0, 0)),
+        obj("o1", (200, 0, 140), colour="blue"),
+        obj("o2", (200, 160, 140), colour="green"),
+        obj("o3", (200, -160, 140), colour="grey"),
+        obj("o4", (200, 0, 300), colour="pink"),
+    ])
+    hrn = harness()
+    request = hrn.build_request(walled, None, None)
+    out = hrn.compose(request, probe_answers(request, GRASP), None, 0)
+    assert out["command"]["path"]["kind"] == "hold"
+    assert out["command"]["path"].get("target_mm") is None
+    conflicts = [r for r in out["records"] if r["kind"] == "conflict"]
+    assert conflicts[0]["reason"] == "path_blocked" and conflicts[0]["resolution"] == "hold"
+    assert controller_at(walled).apply(out["command"], 0)["executor"] == "HOLD"
+
+
+def test_a_forbidden_blocker_produces_a_forbidden_segment_and_a_stop_transition():
+    """docs/10 I1 (금지 물체): 금지 접촉 물체가 구간에 걸리면 `forbidden_segment`로 실행기가 정지 전이한다."""
+    scene = i1_scene(attributes=["forbidden"])
+    hrn = harness()
+    request = hrn.build_request(scene, None, None)
+    assert request["request"]["state"]["goal"]["forbidden_contact"] == ["o1"]
+    out = hrn.compose(request, probe_answers(request, GRASP), None, 0)
+    command = out["command"]
+
+    assert command["constraints"]["forbidden_segment"] is True
+    assert command["path"]["kind"] != "direct"
+    conflicts = [r for r in out["records"] if r["kind"] == "conflict"]
+    assert conflicts[0]["reason"] == "forbidden_segment" and conflicts[0]["blocker"] == "o1"
+
+    ctrl = controller_at(scene)
+    ack = ctrl.apply(command, 0)
+    assert ack["stop_transition"] is True
+    assert ack["reason"] == "transition_collision"
+    assert ack["applied"] is False
+    assert ctrl.advance(20)["executor"] == "HOLD"
+
+
+def i2_scene(ee=(300, 0, 0)) -> dict:
+    """docs/10 I2: o0을 든 말단 [300,0,0], 목적지 영역은 다른 곳. 작업면은 o1이 말해 준다."""
+    scene = observation(objects=[obj("o0", (300, 0, -80)), obj("o1", (200, 220, -80), colour="blue")])
+    scene["robot"].update(ee_pos_mm=list(ee), holding="o0", gripper_mm=20)
+    scene["exec"] = {"seq": 1, "gripper": "closed"}
+    return scene
+
+
+def test_lift_rises_vertically_then_transport_keeps_the_height_then_place_descends():
+    """docs/10 I2: 국면별 목표점 (docs/08 §5.6) — lift는 현재 XY에서 수직 상승, transport는 높이 유지, place는 하강."""
+    hrn = harness()
+    lift = i2_scene()
+    request = hrn.build_request(lift, None, None)
+    out = hrn.compose(request, probe_answers(request, GRASP), None, 0)
+    command = out["command"]
+    assert command["phase"] == "lift"
+    assert command["path"]["target_mm"][:2] == [300, 0]
+    transport_z = command["path"]["target_mm"][2]
+    assert transport_z > 0
+    assert command["gripper"] == "closed"  # 전환 틱: 현재 상태 유지
+    assert controller_at(lift, closed=True).apply(command, 0)["applied"] is True
+
+    commitment = out["commitment"]
+    raised = i2_scene(ee=(300, 0, transport_z))
+    raised.update(tick=1, sim_time_ms=PERIOD_MS)
+    request = hrn.build_request(raised, None, commitment)
+    out = hrn.compose(request, probe_answers(request, GRASP), commitment, PERIOD_MS)
+    assert out["command"]["phase"] == "transport"
+    assert out["command"]["path"]["target_mm"] == [30, 240, transport_z]
+
+    commitment = out["commitment"]
+    nearby = i2_scene(ee=(30 + CONFIG["phases"]["place_tolerance_mm"] + 10, 240, transport_z))
+    nearby.update(tick=2, sim_time_ms=2 * PERIOD_MS)
+    request = hrn.build_request(nearby, None, commitment)
+    out = hrn.compose(request, probe_answers(request, GRASP), commitment, 2 * PERIOD_MS)
+    assert out["command"]["phase"] == "transport", "허용 오차 밖에서는 아직 내려가지 않는다"
+    assert out["command"]["path"]["target_mm"][2] == transport_z
+
+    commitment = out["commitment"]
+    above = i2_scene(ee=(40, 235, transport_z))
+    above.update(tick=3, sim_time_ms=3 * PERIOD_MS)
+    request = hrn.build_request(above, None, commitment)
+    out = hrn.compose(request, probe_answers(request, GRASP), commitment, 3 * PERIOD_MS)
+    assert out["command"]["phase"] == "place"
+    place_target = out["command"]["path"]["target_mm"]
+    assert place_target[:2] == [30, 240] and place_target[2] < transport_z
+    assert controller_at(above, closed=True).apply(out["command"], 3 * PERIOD_MS)["applied"] is True
+
+
+def test_the_controller_opens_only_at_the_place_point():
+    """놓기 국면의 open readiness는 말단이 놓기점에 와야 한다 (docs/08 §4 "release readiness")."""
+    ctrl = Controller.from_config_path(CONTROLLER_CONFIG)
+    ctrl.reset(ee_pos_mm=[30, 240, 60], ee_quat=[0.0, 0.0, 0.0, 1.0],
+               gripper_mm=CONTROLLER["gripper"]["closed_mm"], now_ms=0)
+    ctrl.observe({"ee_pos_mm": [30, 240, 60], "holding": "o0", "gripper_load_n": 0.0})
+    place = {
+        "seq": 1, "observed_at": 0, "issued_at": 0, "action_ref": "c1", "phase": "place",
+        "path": {"kind": "direct", "target_ref": "o0", "target_mm": [30, 240, -48]},
+        "speed_level": 1, "force_level": "light", "gripper": "open", "stop": False,
+    }
+    far = ctrl.apply(place, now_ms=0)
+    assert far["applied"] is True and far["gripper_event"] is None
+    assert far["gripper_wait"] == "readiness"
+
+    ctrl.observe({"ee_pos_mm": [30, 240, -48 + CONTROLLER["gripper"]["open_readiness_distance_mm"] - 1]})
+    near = ctrl.apply({**place, "seq": 2, "observed_at": 20, "issued_at": 20}, now_ms=20)
+    assert near["gripper_event"] is not None
 
 
 @pytest.mark.parametrize("boolean", [1.0, {"true": 0.9, "false": 0.1}, {"false": 0.1}])
@@ -1050,6 +1570,37 @@ def test_new_episode_assigns_the_split_from_the_scene_family():
     assert record["schema_version"] == "stream-v0"
     assert record["prefix"]["question_set"] == harness().question_set_id()
     assert record["ticks"] == []
+
+
+def test_new_episode_reads_the_question_set_without_building_a_harness(monkeypatch):
+    """질문 세트 id는 설정에서 읽는다 — 앞단까지 딸린 하네스를 만들 이유가 없다."""
+    from robo_jev.data import episode as episode_module
+    from robo_jev.harness import robot as robot_module
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("new_episode가 RobotHarness를 만들었다")
+
+    monkeypatch.setattr(robot_module.RobotHarness, "__init__", refuse)
+    record = new_episode("ep-0001b", "scene-family-031", instructions=[INSTRUCTION])
+    assert record["prefix"]["question_set"] == CONFIG["question_set_id"][CONFIG["language"]]
+    assert episode_module.default_question_set() == record["prefix"]["question_set"]
+
+
+def test_default_versions_follow_the_config_on_disk(monkeypatch):
+    """`default_versions`는 캐시하지 않는다 — 설정이 바뀌면 다음 호출이 그것을 적는다."""
+    from robo_jev.data import episode as episode_module
+    from robo_jev.sim import controller as controller_module
+
+    before = episode_module.default_versions()
+    original = controller_module.load_controller_config
+
+    def patched(path):
+        return {**original(path), "version": "c-test"}
+
+    monkeypatch.setattr(controller_module, "load_controller_config", patched)
+    after = episode_module.default_versions()
+    assert before["controller"] != "c-test"
+    assert after["controller"] == "c-test"
 
 
 def test_append_tick_keeps_the_four_outputs_separate_and_drops_the_harness_block():

@@ -4,19 +4,33 @@
 형식으로 답하는가, 그 답이 같은 조합 규칙을 그대로 통과하는가. 답은 결정적이어야 한다.
 """
 
+import copy
 import json
 
 import pytest
 import yaml
-from helpers import D0_STREAMS, HARNESS_CONFIG, RULE_JUDGE_CONFIG, read_jsonl
-from test_harness import GRASP, answers, blocked_scene, candidate_for, harness, keys_of, obj, observation
+from helpers import CONTROLLER_CONFIG, D0_STREAMS, HARNESS_CONFIG, RULE_JUDGE_CONFIG, SIM_CONFIG, read_jsonl
+from test_harness import (
+    BLOCKED,
+    GRASP,
+    PERIOD_MS,
+    answers,
+    blocked_scene,
+    candidate_for,
+    harness,
+    keys_of,
+    obj,
+    observation,
+)
 
 from robo_jev.contracts import QUESTION_SET_V0
 from robo_jev.harness.robot import candidate_id
-from robo_jev.harness.rule_judge import RULE_JUDGE_VERSION, RuleJudge, rule_judge
+from robo_jev.harness.rule_judge import RULE_JUDGE_VERSION, RuleJudge, load_rule_judge_config, rule_judge
 
 CONFIG = yaml.safe_load(RULE_JUDGE_CONFIG.read_text(encoding="utf-8"))
 HARNESS = yaml.safe_load(HARNESS_CONFIG.read_text(encoding="utf-8"))
+CONTROLLER = yaml.safe_load(CONTROLLER_CONFIG.read_text(encoding="utf-8"))
+SIM = yaml.safe_load(SIM_CONFIG.read_text(encoding="utf-8"))
 CONFIDENCE = CONFIG["confidence"]
 PROFILES = CONFIG["profiles"]
 
@@ -60,16 +74,31 @@ def test_the_rule_judge_answers_every_question_in_the_model_format():
     for question_id in BOOLEANS:
         assert 0.0 <= result[question_id] <= 1.0
     assert set(result["q_gripper"]) == {"open", "closed"}
-    assert set(result["q_speed"]) == {"0", "1", "2", "3"}
-    assert set(result["q_force"]) == {"0", "1", "2"}
+    assert set(result["q_speed"]) == {str(index) for index in range(len(CONTROLLER["speed_levels_m_s"]))}
+    assert set(result["q_force"]) == {str(index) for index in range(len(CONTROLLER["force_levels"]))}
     assert set(result["q_path"]) == {entry["id"] for entry in request["request"]["candidates"]["q_path"]}
     for question_id in ("q_main", "q_gripper", "q_path", "q_speed", "q_force"):
         assert sum(result[question_id].values()) == pytest.approx(1.0)
 
 
+def test_speed_and_force_levels_come_from_the_controller_config():
+    """수준의 개수는 실행기 설정이 단일 출처다 — 코드의 `range(4)`가 아니다."""
+    controller = copy.deepcopy(CONTROLLER)
+    controller["speed_levels_m_s"] = [0.0, 0.05, 0.1, 0.25, 0.5]
+    controller["force_levels"]["crush"] = {"impedance_kp": 30.0, "contact_allowance_n": 80.0}
+    judge = RuleJudge(CONFIG, controller_config=controller)
+    result = judge(request_for())
+    assert set(result["q_speed"]) == {"0", "1", "2", "3", "4"}
+    assert set(result["q_force"]) == {"0", "1", "2", "3"}
+
+
 def test_the_answers_are_deterministic():
+    """새로 만든 기준군(설정 재적재)에 직렬화를 거친 같은 요청을 주면 같은 답이다."""
     request = request_for()
-    assert rule_judge(request) == rule_judge(request)
+    fresh = RuleJudge(load_rule_judge_config())
+    reloaded = json.loads(json.dumps(request, ensure_ascii=False))
+    assert rule_judge(request) == fresh(reloaded)
+    assert json.dumps(rule_judge(request), sort_keys=True) == json.dumps(fresh(reloaded), sort_keys=True)
 
 
 def test_it_answers_a_d0_tick_in_the_same_shape_as_the_model_output():
@@ -150,15 +179,22 @@ def test_a_blocking_object_may_be_pushed_out_of_the_way():
 
 
 def test_cheaper_geometry_gets_more_mass():
-    """같은 대상의 두 접근 중 거리가 가까운 쪽이 더 높은 확률을 받는다."""
-    request = request_for()
+    """같은 대상의 적합한 접근들 중 거리가 가까운 쪽이 더 높은 확률을 받는다.
+
+    길을 막는 물체의 밀기는 네 방향이 모두 적합하다. 말단에 가까운 접촉점이 이긴다.
+    """
+    request = request_for(blocked_scene())
     result = rule_judge(request)
     geometry = request["harness"]["candidates"]
-    top = candidate_id("grasp:o0:top:zoneL:slow")
-    side = candidate_id("grasp:o0:side:zoneL:slow")
-    nearer, farther = (
-        (top, side) if geometry[top]["distance_mm"] < geometry[side]["distance_mm"] else (side, top)
-    )
+    pushes = {
+        entry["id"]: geometry[entry["id"]]["distance_mm"]
+        for entry in request["request"]["candidates"]["q_main"]
+        if entry["key"].startswith("push:o5:") and entry["key"].endswith(":slow")
+    }
+    assert len(pushes) >= 2
+    nearer = min(pushes, key=pushes.get)
+    farther = max(pushes, key=pushes.get)
+    assert pushes[nearer] < pushes[farther]
     assert result["q_main"][nearer] > result["q_main"][farther]
 
 
@@ -199,13 +235,72 @@ def test_an_incomplete_instruction_is_reported():
     assert rule_judge(request_for())["q_instr"] == CONFIDENCE["high"]
 
 
-def test_an_occluded_target_asks_for_observation():
+@pytest.mark.parametrize(
+    ("text", "complete"),
+    [
+        ("빨간 상자를 왼쪽 정리 영역으로 옮기고 파란 원통은 건드리지 마라", True),
+        ("빨간 상자 대신 파란 원통를 왼쪽 정리 영역으로 먼저 옮겨라", True),
+        ("빨간 상자를 옮겨라", False),  # 목적지가 없다
+        ("왼쪽 정리 영역으로 옮겨라", False),  # 대상이 없다
+        ("빨간 상자를 왼쪽 정리 영역으로 옮기고 그것은 건드리지 마라", False),  # 제약을 어휘로 풀 수 없다
+    ],
+)
+def test_instruction_completeness_is_about_the_text_not_the_scene(text, complete):
+    """`q_instr`은 지시 텍스트의 완결성이다: 어휘로 풀리는 대상·목적지·제약 (docs/08 §4)."""
+    scene = observation(instruction={"version": 1, "t_ms": 0, "text": text})
+    for entry in scene["objects"]:
+        entry.update(visible=False, visible_ratio=0.0)  # 아무것도 보이지 않아도 답은 같다
+    result = rule_judge(request_for(scene))
+    assert result["q_instr"] == (CONFIDENCE["high"] if complete else CONFIDENCE["low"])
+
+
+def test_an_unseen_target_asks_for_observation_not_for_a_replan():
+    """docs/10 검토 1: 대상이 아직 관측되지 않은 것은 지시의 문제가 아니라 관측의 문제다."""
+    scene = observation()
+    scene["objects"][0].update(visible=False, visible_ratio=0.0)  # 지시의 대상(red 상자)을 본 적 없다
+    result = rule_judge(request_for(scene))
+    assert result["q_instr"] == CONFIDENCE["high"]
+    assert result["q_observe"] == CONFIDENCE["high"]
+
+
+def test_observation_follows_geometry_age_not_the_visible_ratio():
+    """가시 비율만으로는 관측을 요구하지 않는다. 기하가 문턱보다 늙어야 한다."""
     hrn = harness()
     hrn.build_request(observation(), None, None)
-    scene = observation(tick=1, sim_time_ms=100)
-    scene["objects"][0].update(visible=False, visible_ratio=0.2)
-    assert rule_judge(hrn.build_request(scene, None, None))["q_observe"] == CONFIDENCE["high"]
+    covered = observation(tick=1, sim_time_ms=100)
+    covered["objects"][0].update(visible=False, visible_ratio=0.2)
+    assert rule_judge(hrn.build_request(covered, None, None))["q_observe"] == CONFIDENCE["low"]
+
+    stale_ms = CONFIG["thresholds"]["observe_geom_age_ms"] + PERIOD_MS
+    stale = observation(tick=stale_ms // PERIOD_MS, sim_time_ms=stale_ms)
+    stale["objects"][0].update(visible=False, visible_ratio=0.2)
+    assert rule_judge(hrn.build_request(stale, None, None))["q_observe"] == CONFIDENCE["high"]
     assert rule_judge(request_for())["q_observe"] == CONFIDENCE["low"]
+
+
+def test_the_arm_hiding_the_target_in_the_grasp_phase_is_not_a_lack_of_observation():
+    """파지·놓기 국면과 파지 중에는 `max_geometry_age_ms` 안이면 관측을 요구하지 않는다 (docs/08 §4)."""
+    hrn = harness()
+    first = hrn.build_request(observation(), None, None)
+    commitment = {
+        "action_ref": candidate_id(GRASP), "key": GRASP, "phase": "grasp", "held_ticks": 4,
+        "last_switch_tick": 0, "goal_version": 1,
+    }
+    stale_ms = CONFIG["thresholds"]["observe_geom_age_ms"] + PERIOD_MS
+    assert stale_ms <= HARNESS["candidates"]["max_geometry_age_ms"]
+    descending = observation(tick=stale_ms // PERIOD_MS, sim_time_ms=stale_ms)
+    descending["robot"]["ee_pos_mm"] = [300, 0, -30]
+    descending["objects"][0].update(visible=False, visible_ratio=0.0)
+    request = hrn.build_request(descending, None, commitment)
+    assert request["request"]["commitment"]["phase"] == "grasp"
+    assert rule_judge(request)["q_observe"] == CONFIDENCE["low"]
+
+    carrying = observation(tick=stale_ms // PERIOD_MS + 1, sim_time_ms=stale_ms + PERIOD_MS)
+    carrying["robot"].update(ee_pos_mm=[300, 0, 40], holding="o0")
+    carrying["objects"][0].update(visible=False, visible_ratio=0.0)
+    request = hrn.build_request(carrying, None, {**commitment, "phase": "lift"})
+    assert rule_judge(request)["q_observe"] == CONFIDENCE["low"]
+    assert first["request"]["state"]["goal"]["target_ref"] == "o0"
 
 
 def test_contact_force_over_the_limit_asks_for_a_stop():
@@ -224,6 +319,37 @@ def test_retry_is_only_appropriate_after_a_first_failure():
     }
     assert rule_judge(hrn.build_request(observation(), failed, None))["q_retry"] == CONFIDENCE["high"]
     assert rule_judge(request_for())["q_retry"] == CONFIDENCE["low"]
+
+
+def test_retry_stops_after_the_configured_number_of_same_way_failures():
+    """`thresholds.retry_max_same_approach`가 실패 이력의 연속 횟수를 실제로 다스린다."""
+    limit = CONFIG["thresholds"]["retry_max_same_approach"]
+    hrn = harness()
+    failed = {
+        "adopted": {"main": candidate_id(GRASP), "phase": "approach", "path": "p0", "speed": 1,
+                    "force": 0, "gripper": "open", "stop": False},
+        "ack": {"seq": 1, "applied": False, "reason": "collision"},
+    }
+    verdicts = []
+    for tick in range(limit + 2):
+        request = hrn.build_request(observation(tick=tick, sim_time_ms=tick * PERIOD_MS), failed, None)
+        assert f"fails={tick + 1}" in request["request"]["exec_history"]
+        verdicts.append(rule_judge(request)["q_retry"])
+    assert verdicts[:limit] == [CONFIDENCE["high"]] * limit
+    assert verdicts[limit:] == [CONFIDENCE["low"]] * 2
+
+    # 한 번 성공하면 횟수는 처음으로 돌아간다.
+    succeeded = {**failed, "ack": {"seq": 9, "applied": True}}
+    request = hrn.build_request(observation(tick=9, sim_time_ms=900), succeeded, None)
+    assert "fails=0" in request["request"]["exec_history"]
+    request = hrn.build_request(observation(tick=10, sim_time_ms=1000), failed, None)
+    assert rule_judge(request)["q_retry"] == CONFIDENCE["high"]
+
+    # 다른 방식의 실패는 따로 센다.
+    other = copy.deepcopy(failed)
+    other["adopted"]["main"] = candidate_id("push:o0:+x:none:slow")
+    request = hrn.build_request(observation(tick=11, sim_time_ms=1100), other, None)
+    assert "fails=1" in request["request"]["exec_history"]
 
 
 def test_aux_answers_follow_the_commitment_phase():
@@ -256,7 +382,7 @@ def test_the_path_is_direct_unless_it_is_blocked():
     request, _ = committed_request()
     assert max(rule_judge(request)["q_path"], key=rule_judge(request)["q_path"].get) == "p0"
 
-    blocked, _ = committed_request("grasp:o0:side:zoneL:slow", scene=blocked_scene())
+    blocked, _ = committed_request(BLOCKED, scene=blocked_scene())
     choice = max(rule_judge(blocked)["q_path"], key=rule_judge(blocked)["q_path"].get)
     kinds = {entry["id"]: entry["kind"] for entry in blocked["request"]["candidates"]["q_path"]}
     assert kinds[choice] == "via"
@@ -282,6 +408,44 @@ def test_the_rule_answers_go_through_the_same_composition_rules():
         commitment = out["commitment"]
         history = {"adopted": out["adopted"], "ack": {"applied": True}, "gate": out["gate"]}
     assert commitment is not None and commitment["key"].startswith("grasp:o0:")
+
+
+def test_instruction_wording_round_trips_to_the_resolved_target():
+    """3a의 `desc`: 지시문이 부르는 이름 ↔ 상태의 물체 설명 ↔ 풀린 대상이 한 바퀴 맞아야 한다.
+
+    장면 설명·지시 템플릿·앞단 설명이 같은 어휘를 쓰는지 실제 장면 생성기로 본다.
+    """
+    from robo_jev.sim.scene import build_plan
+
+    labels = dict(SIM["objects"]["shape_labels"])
+    for seed in range(1, 9):
+        plan = build_plan(SIM, seed, "E1")
+        text = plan.instructions[0].text
+        described = {obj.describe(labels): obj.id for obj in plan.objects}
+        named = [obj for obj in plan.objects if text.startswith(obj.describe(labels))]
+        assert len(named) == 1, f"seed {seed}: 지시가 부르는 물체가 하나가 아니다: {text}"
+
+        # 상한에 걸리지 않도록 지시가 부르는 물체와 속성 물체만 놓는다 — 보는 것은 어휘의 왕복이다.
+        shown = [named[0]] + [o for o in plan.objects if o.attributes][:2]
+        scene = observation(
+            instruction={"version": 1, "t_ms": 0, "text": text},
+            objects=[
+                obj(o.id, (300 + 40 * index, -200 + 120 * index, -80), colour=o.colour,
+                    desc=o.describe(labels), attributes=list(o.attributes), shape=o.shape,
+                    obb_mm=list(o.obb_mm))
+                for index, o in enumerate(shown)
+            ],
+            zones=[{"id": z.id, "desc": z.desc, "bounds_mm": list(z.bounds_mm)} for z in plan.zones],
+        )
+        request = request_for(scene)
+        goal = request["request"]["state"]["goal"]
+        assert goal["target_ref"] == named[0].id == described[named[0].describe(labels)]
+        assert goal["target_zone"] in {z.id for z in plan.zones}
+        result = rule_judge(request)
+        assert result["q_instr"] == CONFIDENCE["high"]
+        best = max(result["q_main"], key=result["q_main"].get)
+        key = candidate_for(request, next(k for k in keys_of(request) if candidate_id(k) == best))["key"]
+        assert key.split(":")[1] == named[0].id, f"seed {seed}: 기준군이 지시의 대상을 고르지 않았다: {key}"
 
 
 def test_the_rule_baseline_is_stable_under_the_hysteresis():

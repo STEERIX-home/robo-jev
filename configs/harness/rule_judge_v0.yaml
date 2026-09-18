@@ -3,7 +3,20 @@
 # 모델 자리에 들어가 **같은 요청**을 받고 **같은 형식**으로 10개 답을 낸다. 가중치와
 # 임계값은 여기에 고정해 공개하고 레코드의 `versions.rules`에 버전을 적는다. 이 기준군이
 # 어떤 조건 층에서 모델과 같은 성공률을 내면 그 층에서는 모델의 기여를 주장하지 않는다.
-version: rj0.1
+version: rj0.2
+
+# 실행기·하네스와 공유하는 값은 복사하지 않고 그 설정을 읽는다 (단일 출처).
+#   controller_config → 속도·힘 수준의 개수 (`q_speed`·`q_force`의 후보 수)
+#   harness_config    → `candidates.max_geometry_age_ms` (접촉 국면·파지 중의 관측 문턱)
+#   vocabulary_config → 지시 완결성 판정의 어휘 (물체 색·형상 이름, `objects.palette`·`shape_labels`)
+controller_config: configs/controller/osc_v0.yaml
+harness_config: configs/harness/robot.yaml
+vocabulary_config: configs/sim/tidy_clutter.yaml
+
+# 지시 완결성 (docs/08 §4 `q_instr`): 텍스트 자체의 문제만 본다 — 대상의 가시성과 무관하다.
+# 대상은 어휘의 "<색> <형상>" 구절, 목적지는 상태의 영역 설명, 제약은 표지 앞에 어휘 구절이 있어야 한다.
+instruction:
+  constraint_markers: ["건드리지 마라"]
 
 # 주 결정 — 적합성 필터 → 고정 가중 기하 비용 → 결정적 분포.
 main:
@@ -36,11 +49,14 @@ confidence:
   choice_mass: 0.9
 
 thresholds:
-  observe_geom_age_ms: 400        # 대상 기하가 이보다 오래되면 관측
-  observe_visible_ratio: 0.5      # 대상이 이보다 덜 보이면 관측
+  # 관측 (docs/08 §4 `q_observe`): 지시의 대상이 아직 관측되지 않았거나 대상 기하가 이보다 오래되면.
+  # 가시 비율만으로는 요구하지 않는다. 파지·놓기 국면과 파지 중(팔이 대상을 가린다)에는 하네스의
+  # `candidates.max_geometry_age_ms`가 문턱이다.
+  observe_geom_age_ms: 400
   stop_force_n: 25.0              # 접촉력이 이보다 크면 정지
   stop_forbidden_mm: 40           # 금지 물체가 말단에서 이보다 가까우면 정지
-  retry_max_same_approach: 1      # 같은 접근 유형의 재시도 허용 횟수
+  # 같은 방식(기능·대상·접근)의 연속 실패가 이 횟수 안이면 재시도 적절. 실행 이력의 `fails=`를 읽는다.
+  retry_max_same_approach: 1
   fragile_proximity_mm: 120       # 취약 물체가 이 안이면 속도를 한 단계 내린다
 
 # 국면별 프로파일. 부가 질문은 commitment의 국면 기준으로 답한다 (docs/08 §4).
