@@ -476,6 +476,22 @@ def test_graspable_faces_come_from_the_last_fresh_observation():
 # --------------------------------------------------------------------------
 
 
+def test_the_work_surface_survives_when_the_only_known_object_is_held():
+    """놓인 물체가 없으면 마지막으로 안 작업면을 쓴다 — 들고 있는 물체가 작업면을 말하지는 않는다."""
+    adapter = GroundTruthAdapter(PERCEPTION)
+    alone = observation()
+    alone["objects"] = alone["objects"][:1]
+    alone["robot"].update(holding="o0", ee_pos_mm=[300, 0, 0])
+    first = adapter.reconstruct(alone)
+    assert first.scene.work_surface_mm == -80 - 32  # 첫 관측에서는 아직 놓여 있던 자세다
+
+    lifted = copy.deepcopy(alone)
+    lifted["sim_time_ms"] = PERCEPTION["geom_period_ms"]
+    lifted["robot"]["ee_pos_mm"] = [300, 0, 100]
+    lifted["objects"][0]["pos_mm"] = [300, 0, 20]
+    assert adapter.reconstruct(lifted).scene.work_surface_mm == -80 - 32
+
+
 def test_a_held_object_takes_its_pose_from_the_end_effector():
     adapter = GroundTruthAdapter(PERCEPTION)
     adapter.reconstruct(observation())

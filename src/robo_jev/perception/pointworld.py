@@ -524,6 +524,9 @@ class GroundTruthAdapter:
         resting = [inst for inst in instances if inst.track_id != holding]
         if resting:
             self._surface_mm = min(int(inst.pose_mm[2]) - inst.obb_mm[2] // 2 for inst in resting)
+        elif self._surface_mm is None and instances:
+            # 아는 물체가 들고 있는 것뿐이면 그 첫 관측(아직 놓여 있던 자세)의 바닥이 작업면이다.
+            self._surface_mm = min(int(inst.pose_mm[2]) - inst.obb_mm[2] // 2 for inst in instances)
         surface = self._surface_mm if self._surface_mm is not None else 0
         gaps = [
             math.dist(a.pose_mm, b.pose_mm) - a.radius_mm - b.radius_mm
