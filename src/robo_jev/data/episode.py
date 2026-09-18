@@ -42,6 +42,11 @@ __all__ = [
 
 #: 레코드가 반드시 적어야 하는 버전 (docs/08 §8). `expert`는 전문가 에피소드에만 붙는다. `config_digest`는
 #: 레코드를 만든 설정 묶음의 지문이다 — 버전 문자열을 올리지 않은 수치 변경도 레코드에 남긴다.
+#:
+#: `serializer`는 **레코드 직렬화**의 버전이다: 환경·하네스가 관측을 레코드의 상태로 적는 규약(상태 스키마,
+#: mm/ms 정수·quaternion 자릿수 — configs/sim/tidy_clutter.yaml의 `version`, `s0.2`). 모델이 그 레코드를
+#: 토큰으로 바꾸는 **토큰 직렬화**의 버전(:data:`robo_jev.model.serialize.TOKEN_SERIALIZER_VERSION`, `ts…`)은
+#: 별개이며 학습 manifest에 적힌다. 둘은 따로 올라간다.
 REQUIRED_VERSIONS = ("harness", "controller", "rules", "serializer", "extractor", "config_digest")
 
 #: `config_digest`에 들어가는 설정과 그 순서. 컨트롤러 설정은 하네스 설정이 가리키는 파일이다.

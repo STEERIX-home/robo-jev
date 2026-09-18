@@ -76,8 +76,8 @@ __all__ = [
     "QUATERNION_DECIMALS",
     "QUESTION_SETS",
     "SECTION_ORDER",
-    "SERIALIZER_VERSION",
     "TIME_UNIT",
+    "TOKEN_SERIALIZER_VERSION",
     "WINDOW_TICKS",
     "candidate_line",
     "serialize_request",
@@ -86,8 +86,15 @@ __all__ = [
 
 LAYOUTS = ("state_first", "stream_l1a")
 
-#: 레코드의 `versions.serializer`와 같은 값 (configs/sim/tidy_clutter.yaml). 서식 규칙을 바꾸면 함께 올린다.
-SERIALIZER_VERSION = "s0.2"
+#: **토큰 직렬화**의 버전 — 이 모듈이 정하는 텍스트 서식·구간·표지·position 규칙의 버전이다. 결과 layout의
+#: ``serializer``와 학습 manifest의 ``serializer_version``에 적힌다. 토큰 형식이 바뀌면(표지 선언 줄, L0 표지,
+#: 필드 순서 …) 여기서 올린다.
+#:
+#: 레코드의 ``versions.serializer``(`s0.2`, configs/sim/tidy_clutter.yaml의 `version`)와는 **다른 것**이다 — 그것은
+#: 환경·하네스가 상태를 레코드로 적는 **레코드 직렬화**(상태 스키마·mm/ms 정수·quaternion 자릿수)의 버전이고
+#: :mod:`robo_jev.data.episode` 가 적는다. 4b가 토큰 형식을 바꿨을 때 두 형식이 `s0.2` 한 문자열을 나눠 가졌던
+#: 일을 되풀이하지 않도록 이름부터 가른다(`ts…` 대 `s…`).
+TOKEN_SERIALIZER_VERSION = "ts0.3"
 POSITION_UNIT = "mm"
 QUATERNION_DECIMALS = 2
 TIME_UNIT = "ms"
@@ -395,7 +402,7 @@ def _serialize_state_first(
     out.update(
         {
             "layout": "state_first",
-            "serializer": SERIALIZER_VERSION,
+            "serializer": TOKEN_SERIALIZER_VERSION,
             "request_id": request.get("request_id"),
             "question_ids": [spec["id"] for spec in questions],
             "state_end": state_end,
@@ -667,7 +674,7 @@ def _serialize_stream(projected: dict, tokenizer: Any, *, window_ticks: int) -> 
     out.update(
         {
             "layout": "stream_l1a",
-            "serializer": SERIALIZER_VERSION,
+            "serializer": TOKEN_SERIALIZER_VERSION,
             "question_set": question_set_id,
             "question_ids": question_ids,
             "window_ticks": window_ticks,

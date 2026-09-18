@@ -72,7 +72,7 @@ from robo_jev.contracts import QUESTION_SET_V0
 from robo_jev.loss import judgment_loss, question_losses
 from robo_jev.model.hybrid import DEFAULT_CONFIG
 from robo_jev.model.judge import Judge
-from robo_jev.model.serialize import SERIALIZER_VERSION
+from robo_jev.model.serialize import TOKEN_SERIALIZER_VERSION
 from robo_jev.model.stream import StreamState
 from robo_jev.model.tokenizer import WhitespaceTokenizer, load_tokenizer
 from robo_jev.sampler import (
@@ -560,7 +560,7 @@ def git_revision() -> dict[str, Any] | None:
 
 
 def build_manifest(config: dict, items: list[Item], model: Judge) -> dict[str, Any]:
-    """checkpoint에 함께 적는 것: 데이터 manifest 참조, serializer·질문 세트 버전, git SHA, 모델 fixture."""
+    """checkpoint에 함께 적는 것: 데이터 manifest 참조, 토큰 직렬화·질문 세트 버전, git SHA, 모델 fixture."""
     manifest_path = Path(config["dataset_manifest"])
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     return {
@@ -572,7 +572,7 @@ def build_manifest(config: dict, items: list[Item], model: Judge) -> dict[str, A
             "splits": list(config["splits"]),
             "records": {"single": sum(i.kind == "single" for i in items), "stream": sum(i.kind == "stream" for i in items)},
         },
-        "serializer_version": SERIALIZER_VERSION,
+        "serializer_version": TOKEN_SERIALIZER_VERSION,  # 토큰 직렬화의 버전 (레코드의 versions.serializer와 다른 것)
         "question_set": {"id": "qs-v0", "markers": {qid: spec["marker"] for qid, spec in QUESTION_SET_V0.items()}},
         "layouts": dict(config["layout"]),
         "tokenizer": config["tokenizer"],

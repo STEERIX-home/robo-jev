@@ -33,7 +33,7 @@ from typing import Any
 
 from robo_jev.data.episode import append_tick, new_episode
 from robo_jev.harness.robot import RobotHarness, candidate_id, load_harness_config
-from robo_jev.model.serialize import SERIALIZER_VERSION, serialize_request, state_lines
+from robo_jev.model.serialize import TOKEN_SERIALIZER_VERSION, serialize_request, state_lines
 from robo_jev.model.tokenizer import (
     FETCH_SCRIPT,
     MANIFEST_NAME,
@@ -520,7 +520,7 @@ def main(argv: list[str] | None = None) -> int:
 
     report = {
         "tokenizer": meta,
-        "serializer": SERIALIZER_VERSION,
+        "serializer": TOKEN_SERIALIZER_VERSION,
         "estimates": {key: list(value) if isinstance(value, tuple) else value for key, value in ESTIMATES.items()},
         "streams": measure_streams(tokenizer, read_jsonl(D0_STREAMS)),
         "singles": measure_singles(tokenizer, read_jsonl(D0)),

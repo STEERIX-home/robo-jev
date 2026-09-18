@@ -161,6 +161,8 @@ class Environment:
         )  # 설정은 값이다. 아래에서 프로파일 병합으로만 바뀐다.
         self.profile = profile or str(self.config["default_profile"])
         self.settings = merge_profile(self.config, self.profile)
+        # 레코드 직렬화(관측 → 레코드 상태의 규약)의 버전 — 레코드의 `versions.serializer`·`versions.sim`. 모델의
+        # 토큰 직렬화 버전(`robo_jev.model.serialize.TOKEN_SERIALIZER_VERSION`)과는 다른 것이다.
         self.serializer_version = str(self.config.get("version", "s0"))
         # docs/08 §3.2의 직렬화 규약. 자릿수는 serializer 버전과 함께 고정한다.
         self.quaternion_decimals = int(self.settings["serialization"]["quaternion_decimals"])

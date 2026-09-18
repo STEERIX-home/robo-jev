@@ -18,9 +18,9 @@ from robo_jev.model.serialize import (
     LAYOUTS,
     POSITION_UNIT,
     QUATERNION_DECIMALS,
-    SERIALIZER_VERSION,
     STATE_FIRST_MARKER,
     TIME_UNIT,
+    TOKEN_SERIALIZER_VERSION,
     WINDOW_TICKS,
     serialize_request,
 )
@@ -111,7 +111,22 @@ def test_format_rules_match_the_serializer_config():
         rules["quaternion_decimals"],
         rules["time_unit"],
     )
-    assert SERIALIZER_VERSION == config["version"]
+
+
+def test_the_token_serializer_has_its_own_version_apart_from_the_record_serializer(single, stream, tokenizer):
+    """토큰 직렬화(텍스트·표지·position 규칙)의 버전은 `TOKEN_SERIALIZER_VERSION`(`ts…`)이고, 레코드의
+    `versions.serializer`(장면 설정의 `version`, `s…` — 상태 스키마·서식의 버전)와는 다른 것이다. 4b가 토큰 형식을
+    바꿨을 때(표지 선언 줄, L0 표지 A) 두 형식이 한 문자열을 나눠 갖는 일이 다시 없도록 둘을 묶지 않는다."""
+    from robo_jev.model import serialize as serialize_module
+
+    config = yaml.safe_load(SIM_CONFIG.read_text(encoding="utf-8"))
+    assert TOKEN_SERIALIZER_VERSION == "ts0.3"
+    assert TOKEN_SERIALIZER_VERSION.startswith("ts") and str(config["version"]).startswith("s")
+    assert TOKEN_SERIALIZER_VERSION != config["version"]
+    assert not hasattr(serialize_module, "SERIALIZER_VERSION")  # 옛 이름은 뜻이 둘이라 없앴다
+    assert serialize_request(single, tokenizer)["serializer"] == TOKEN_SERIALIZER_VERSION
+    assert serialize_request(stream, tokenizer, layout="stream_l1a")["serializer"] == TOKEN_SERIALIZER_VERSION
+    assert stream["versions"]["serializer"] != TOKEN_SERIALIZER_VERSION  # 레코드의 값은 레코드 직렬화의 것
 
 
 def test_positions_are_mm_integers_quaternions_two_decimals_times_ms_integers(single, tokenizer):
