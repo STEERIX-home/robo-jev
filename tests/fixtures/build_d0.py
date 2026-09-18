@@ -688,6 +688,10 @@ def single_request_records() -> list[dict]:
 # ==========================================================================
 
 
+#: 가려진 물체의 관측 가시 비율. 참값은 `evidence.occluded_true_poses`에만 둔다.
+OCCLUDED_VISIBLE_RATIO = 0.35
+
+
 @dataclass(frozen=True)
 class SceneObject:
     id: str
@@ -696,6 +700,13 @@ class SceneObject:
     graspable_faces: tuple[str, ...] = ()
     pushable: bool = False
     fragile: bool = False
+    #: 가려진 물체만 갖는다. 관측 자세와 다른 **참값**이며 모델 입력에는 절대 넣지 않는다.
+    occluded_true_pose: tuple[int, int, int] | None = None
+
+    @property
+    def visible_ratio(self) -> float:
+        """가려진 물체만 부분 관측이다. 두 필드가 따로 놀지 않게 여기서 파생한다."""
+        return OCCLUDED_VISIBLE_RATIO if self.occluded_true_pose is not None else 1.0
 
 
 @dataclass(frozen=True)
@@ -735,6 +746,17 @@ STEP_MM = 25
 SURFACE_Z_MM = 742  # 작업면 위의 물체 높이. 말단 목표는 물체 자세가 아니라 이 값을 기준으로 잡는다.
 GEOM_PERIOD_MS = 100  # 3D 재구성이 한 틱 뒤처져 들어온다 (docs/08 §3.2)
 STALE_OBSERVE_MS = 300  # 기하 나이가 이보다 크면 관측 게이트를 켠다
+
+GRIPPER_OPEN_MM = 80
+GRIPPER_CLOSED_MM = 20
+#: 들고 있는 물체가 말단 아래 매달리는 거리. 파지 시 말단 높이 = 물체 z + 이 값.
+CARRY_OFFSET_MM = 20
+#: 물체 높이 (`obb_mm[2]`). 파지 판정의 높이 상한을 물체 윗면에서 잰다.
+OBJECT_HEIGHT_MM = 95
+#: 파지 판정 여유. 말단이 물체 윗면 + 이 값보다 위에 있으면 아직 잡을 수 없다.
+GRASP_CLEARANCE_MM = 30
+#: 물체를 들고 있을 수 있는 국면.
+CARRY_PHASES = ("grasp", "lift", "transport", "place")
 
 
 class CandidateIds:
@@ -809,6 +831,23 @@ def _ee_goal(
 
 def _distance_mm(a: list[int] | tuple[int, ...], b: list[int] | tuple[int, ...]) -> int:
     return int(round(sum((int(p) - int(q)) ** 2 for p, q in zip(a, b)) ** 0.5))
+
+
+def _grasp_pose(pose: list[int]) -> tuple[int, int, int]:
+    """물체를 잡은 순간의 말단 자세. 물체는 여기서 `CARRY_OFFSET_MM`만큼 아래에 있다."""
+    return (pose[0], pose[1], pose[2] + CARRY_OFFSET_MM)
+
+
+def _can_grasp(ee: list[int], pose: list[int]) -> bool:
+    """말단이 물체에 닿았는가 — 해제 쪽 검사와 대칭인 파지 쪽 검사.
+
+    말단이 파지 자세에서 한 걸음 안에 들어왔고(세 축 모두) 물체 윗면 가까이 내려왔을
+    때만 파지가 성립한다. 이 검사가 없으면 그리퍼가 닫히는 순간 멀리 있는 물체가
+    말단으로 순간이동한다.
+    """
+    within_one_step = all(abs(a - b) <= STEP_MM for a, b in zip(ee, _grasp_pose(pose)))
+    below_object_top = ee[2] <= pose[2] + OBJECT_HEIGHT_MM + GRASP_CLEARANCE_MM
+    return within_one_step and below_object_top
 
 
 def _segment_at(script: EpisodeScript, tick: int) -> Segment:
@@ -1145,6 +1184,7 @@ def _build_episode(script: EpisodeScript) -> dict:
     gripper_windows = {t for switch in gripper_switch_ticks for t in (switch - 1, switch, switch + 1)}
     switch_ticks: list[int] = []
     ticks: list[dict] = []
+    carried_ticks = 0
 
     for t in range(script.n_ticks):
         segment = _segment_at(script, t)
@@ -1196,8 +1236,35 @@ def _build_episode(script: EpisodeScript) -> dict:
                 else:
                     goal = _ee_goal(phase, target_pose, script.zone, contact_offset, push_axis)
                 ee = _step_toward(ee, goal)
+
+            # 파지·해제는 이 틱의 상태를 만들기 전에 판정한다. 그래야 상태가 스스로
+            # 모순되지 않는다(열린 그리퍼로 물체를 들고 있을 수 없다).
+            if holding is None:
+                if (
+                    segment.gripper == "closed"
+                    and phase in CARRY_PHASES
+                    and _can_grasp(ee, poses[script.target])
+                ):
+                    holding = script.target
+                    # 남은 한 걸음만큼 말단이 물체 위에 안착한다. 물체는 움직이지 않는다.
+                    ee = list(_grasp_pose(poses[holding]))
+            elif segment.gripper == "open":
+                if phase == "place":
+                    # 각본이 어긋나면(놓기 높이·목표 영역에 도달하기 전에 열면) 여기서 멈춘다.
+                    zone_x, zone_y = ZONE_CENTER[script.zone]
+                    assert ee[2] <= SURFACE_Z_MM + 70, (script.episode_id, t, "놓기 높이 미달", ee)
+                    assert abs(ee[0] - zone_x) <= 150 and abs(ee[1] - zone_y) <= 150, (
+                        script.episode_id,
+                        t,
+                        "목표 영역 밖에서 놓음",
+                        ee,
+                    )
+                poses[holding] = [ee[0], ee[1], SURFACE_Z_MM]
+                holding = None
+
             if holding is not None:
-                poses[holding] = [ee[0], ee[1], ee[2] - 20]  # 들고 있는 물체는 말단을 따라간다
+                # 들고 있는 물체는 말단을 따라간다.
+                poses[holding] = [ee[0], ee[1], ee[2] - CARRY_OFFSET_MM]
             elif at_contact:
                 poses[script.target] = [
                     target_pose[0] + (ee[0] - previous_ee[0]),
@@ -1230,11 +1297,11 @@ def _build_episode(script: EpisodeScript) -> dict:
                         "desc": obj.desc,
                         "pose_mm": list(poses[obj.id]),
                         "pose_sigma_mm": 3 + (2 if obj.fragile else 0),
-                        "obb_mm": [70, 70, 95],
-                        "top_mm": poses[obj.id][2] + 95,
+                        "obb_mm": [70, 70, OBJECT_HEIGHT_MM],
+                        "top_mm": poses[obj.id][2] + OBJECT_HEIGHT_MM,
                         "graspable_faces": list(obj.graspable_faces),
                         "surface_conf": 0.92,
-                        "visible_ratio": 1.0 if obj.id != "o5" else 0.35,
+                        "visible_ratio": obj.visible_ratio,
                         "last_seen_ms": last_geom_ms,
                         "attributes": ["fragile"] if obj.fragile else [],
                     }
@@ -1250,7 +1317,7 @@ def _build_episode(script: EpisodeScript) -> dict:
                 ],
                 "robot": {
                     "ee_pose_mm": list(ee),
-                    "gripper_mm": 20 if segment.gripper == "closed" else 80,
+                    "gripper_mm": GRIPPER_CLOSED_MM if segment.gripper == "closed" else GRIPPER_OPEN_MM,
                     "holding": holding,
                     "contact_n": 1.5 if phase in ("grasp", "place", "push") else 0.0,
                     "speed_mm_s": 0 if phase == "none" else 120,
@@ -1267,6 +1334,27 @@ def _build_episode(script: EpisodeScript) -> dict:
                     for obj in script.objects
                 ],
             }
+
+        # 상태가 스스로 모순되면 각본이 어긋난 것이다. 빌드를 여기서 멈춘다.
+        robot_state = state["robot"]
+        assert robot_state["holding"] is None or robot_state["gripper_mm"] == GRIPPER_CLOSED_MM, (
+            script.episode_id,
+            t,
+            "열린 그리퍼로 물체를 들고 있다",
+            robot_state,
+        )
+        if robot_state["holding"] is not None:
+            carried_ticks += 1
+            carried = next(
+                obj for obj in state["objects"] if obj["id"] == robot_state["holding"]
+            )
+            assert carried["pose_mm"] == [ee[0], ee[1], ee[2] - CARRY_OFFSET_MM], (
+                script.episode_id,
+                t,
+                "들고 있는 물체가 말단을 따라오지 않는다",
+                carried["pose_mm"],
+                ee,
+            )
 
         near_fragile = any(
             obj.fragile and _distance_mm(ee, poses[obj.id]) < 260 for obj in script.objects
@@ -1336,25 +1424,32 @@ def _build_episode(script: EpisodeScript) -> dict:
             }
         )
 
-        # 다음 틱 준비: 그리퍼가 닫힌 다음 틱부터 물체를 들고 있고, 열면 작업면에 놓인다.
-        if segment.gripper == "closed" and phase in ("grasp", "lift", "transport", "place") and holding is None:
-            holding = script.target
-        elif segment.gripper == "open" and holding is not None:
-            if phase == "place":
-                # 각본이 어긋나면(놓기 높이·목표 영역에 도달하기 전에 열면) 여기서 멈춘다.
-                zone_x, zone_y = ZONE_CENTER[script.zone]
-                assert ee[2] <= SURFACE_Z_MM + 70, (script.episode_id, t, "놓기 높이 미달", ee)
-                assert abs(ee[0] - zone_x) <= 150 and abs(ee[1] - zone_y) <= 150, (
-                    script.episode_id,
-                    t,
-                    "목표 영역 밖에서 놓음",
-                    ee,
-                )
-            poses[holding] = [ee[0], ee[1], SURFACE_Z_MM]
-            holding = None
         previous_adopted = adopted
         # 대조 쌍의 두 번째 틱은 hold로 실행됐으므로, 다음 틱에 원래 행동으로 돌아가는 것은 전환이다.
         previous_action_key = "hold" if contrast_second else segment.action_key
+
+    # 파지 검사가 너무 빡빡해 각본이 한 번도 물체를 잡지 못하면(조용한 무동작) 여기서 멈춘다.
+    wants_grasp = any(
+        segment.gripper == "closed" and segment.phase in CARRY_PHASES for segment in script.segments
+    )
+    assert wants_grasp == (carried_ticks > 0), (
+        script.episode_id,
+        "그리퍼를 닫는 각본인데 한 번도 파지하지 못했다" if wants_grasp else "각본에 없는 파지가 생겼다",
+    )
+    assert holding is None, (script.episode_id, "에피소드가 물체를 든 채로 끝났다", holding)
+
+    # 가려진 참값은 그 장면에 실제로 있는 물체에 대해서만 적는다.
+    evidence = {
+        "expert_log": f"{script.episode_id}: 각본 전문가 (build_d0.py)",
+        "rollouts": "키프레임 틱의 event_results에 요약",
+    }
+    occluded_true_poses = {
+        obj.id: list(obj.occluded_true_pose)
+        for obj in script.objects
+        if obj.occluded_true_pose is not None
+    }
+    if occluded_true_poses:
+        evidence["occluded_true_poses"] = occluded_true_poses
 
     return {
         "schema_version": "stream-v0",
@@ -1387,11 +1482,7 @@ def _build_episode(script: EpisodeScript) -> dict:
                 "notes": script.notes,
             },
         },
-        "evidence": {
-            "expert_log": f"{script.episode_id}: 각본 전문가 (build_d0.py)",
-            "rollouts": "키프레임 틱의 event_results에 요약",
-            "occluded_true_poses": {"o5": [-210, 205, 741]},
-        },
+        "evidence": evidence,
     }
 
 
@@ -1421,7 +1512,13 @@ def episode_scripts() -> list[EpisodeScript]:
     cup = SceneObject("o7", "빨간 컵", (310, -40, 742), graspable_faces=("top", "side"))
     glass = SceneObject("o3", "유리잔", (150, 120, 742), graspable_faces=("side",), fragile=True)
     box = SceneObject("o4", "나무 상자", (-120, 210, 742), pushable=True)
-    hidden = SceneObject("o5", "가려진 통", (-210, 200, 742), graspable_faces=("top",))
+    hidden = SceneObject(
+        "o5",
+        "가려진 통",
+        (-210, 200, 742),
+        graspable_faces=("top",),
+        occluded_true_pose=(-210, 205, 741),
+    )
 
     return [
         EpisodeScript(

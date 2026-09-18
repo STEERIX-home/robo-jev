@@ -5,51 +5,21 @@ fixture는 `tests/fixtures/build_d0.py`가 만든다. 여기서는 (1) 빌더가
 본다. 사람 검수는 별개이며 manifest의 `reviewed_by`로 관리한다.
 """
 
-import functools
 import hashlib
-import importlib.util
 import json
-import sys
-from pathlib import Path
 
 import pytest
+from conftest import D0_MANIFEST, FIXTURES, all_keys, load_builder
 
-from robo_jev.contracts import NON_INPUT_FIELDS, QUESTION_SET_V0, model_input, validate_record
+from robo_jev.contracts import (
+    FORBIDDEN_REQUEST_KEYS,
+    NON_INPUT_FIELDS,
+    QUESTION_SET_V0,
+    model_input,
+    validate_record,
+)
 
-FIXTURES = Path(__file__).parent / "fixtures"
-D0 = FIXTURES / "d0.jsonl"
-D0_STREAMS = FIXTURES / "d0_streams.jsonl"
-D0_MANIFEST = FIXTURES / "d0_manifest.json"
-
-
-@functools.lru_cache(maxsize=1)
-def _load_builder():
-    """빌더는 패키지가 아니라 스크립트라서 경로로 불러온다."""
-    spec = importlib.util.spec_from_file_location("build_d0", FIXTURES / "build_d0.py")
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module  # dataclass가 자기 모듈을 찾을 수 있어야 한다
-    spec.loader.exec_module(module)
-    return module
-
-
-def _read_jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
-
-
-@pytest.fixture(scope="module")
-def manifest() -> dict:
-    return json.loads(D0_MANIFEST.read_text(encoding="utf-8"))
-
-
-@pytest.fixture(scope="module")
-def singles() -> list[dict]:
-    return _read_jsonl(D0)
-
-
-@pytest.fixture(scope="module")
-def streams() -> list[dict]:
-    return _read_jsonl(D0_STREAMS)
+# `manifest`·`singles`·`streams` fixture와 경로·빌더 도우미는 tests/conftest.py에 있다.
 
 
 # --------------------------------------------------------------------------
@@ -59,7 +29,7 @@ def streams() -> list[dict]:
 
 def test_builder_is_deterministic(tmp_path):
     """다시 만들면 세 파일 모두 같은 바이트가 나온다."""
-    builder = _load_builder()
+    builder = load_builder()
     rebuilt_manifest = builder.build_all(tmp_path)
 
     for name in ("d0.jsonl", "d0_streams.jsonl", "d0_manifest.json"):
@@ -85,7 +55,7 @@ def test_manifest_records_review_is_pending(manifest):
 
 
 def test_builder_question_ids_match_the_contract():
-    builder = _load_builder()
+    builder = load_builder()
     assert list(builder.QUESTION_IDS_V0) == list(QUESTION_SET_V0)
 
 
@@ -112,21 +82,11 @@ def test_every_stream_record_is_valid(streams):
             pytest.fail(f"d0_streams.jsonl line {index}: {error}")
 
 
-def _all_keys(node) -> set[str]:
-    keys: set[str] = set()
-    if isinstance(node, dict):
-        for key, value in node.items():
-            keys.add(key)
-            keys |= _all_keys(value)
-    elif isinstance(node, list):
-        for value in node:
-            keys |= _all_keys(value)
-    return keys
-
-
 def test_model_input_of_every_record_excludes_non_input_fields(singles, streams):
     for record in singles + streams:
-        assert _all_keys(model_input(record)).isdisjoint(NON_INPUT_FIELDS)
+        keys = all_keys(model_input(record))
+        assert keys.isdisjoint(NON_INPUT_FIELDS)
+        assert keys.isdisjoint(FORBIDDEN_REQUEST_KEYS)  # 가려진 참값 키까지
 
 
 def test_first_line_is_choice_with_valid_set(singles):
@@ -164,7 +124,7 @@ def test_single_requests_include_multiple_valid_answers(singles):
 
 def test_single_requests_include_a_not_applicable_answer(singles):
     """정보 부족·해당 없음 후보가 정답인 건이 있어야 한다."""
-    builder = _load_builder()
+    builder = load_builder()
     not_applicable = [
         record
         for record in singles
@@ -305,6 +265,108 @@ def test_stream_has_a_commitment_contrast_pair(streams):
         assert first_main["candidate_ids"] != second_main["candidate_ids"]
         pairs.append(marks)
     assert pairs
+
+
+def test_stream_holding_implies_a_closed_gripper(streams):
+    """물체를 들고 있다고 적힌 틱은 그리퍼가 닫혀 있어야 한다."""
+    builder = load_builder()
+    for record in streams:
+        for tick in record["ticks"]:
+            robot = tick["request"]["state"]["robot"]
+            if robot["holding"] is None:
+                continue
+            assert robot["gripper_mm"] == builder.GRIPPER_CLOSED_MM, (
+                record["episode_id"],
+                tick["t"],
+                robot,
+            )
+
+
+def test_stream_non_carried_object_never_rises(streams):
+    """들려 있지 않은 물체는 저절로 떠오르지 않는다 (틱 사이 z 단조 검사)."""
+    for record in streams:
+        for previous, tick in zip(record["ticks"], record["ticks"][1:]):
+            before = {
+                obj["id"]: obj["pose_mm"] for obj in previous["request"]["state"]["objects"]
+            }
+            holding = tick["request"]["state"]["robot"]["holding"]
+            for obj in tick["request"]["state"]["objects"]:
+                if obj["id"] == holding:
+                    continue
+                assert obj["pose_mm"][2] <= before[obj["id"]][2], (
+                    record["episode_id"],
+                    tick["t"],
+                    obj["id"],
+                    before[obj["id"]],
+                    obj["pose_mm"],
+                )
+
+
+def test_stream_objects_do_not_jump_when_grasped(streams):
+    """파지가 성립하는 틱에도 물체가 순간이동하지 않는다 (말단이 물체에 닿아야 파지된다)."""
+    grasps = 0
+    for record in streams:
+        for previous, tick in zip(record["ticks"], record["ticks"][1:]):
+            holding = tick["request"]["state"]["robot"]["holding"]
+            if holding is None or previous["request"]["state"]["robot"]["holding"] == holding:
+                continue
+            grasps += 1
+            before = next(
+                obj for obj in previous["request"]["state"]["objects"] if obj["id"] == holding
+            )
+            after = next(obj for obj in tick["request"]["state"]["objects"] if obj["id"] == holding)
+            assert after["pose_mm"] == before["pose_mm"], (
+                record["episode_id"],
+                tick["t"],
+                before["pose_mm"],
+                after["pose_mm"],
+            )
+    assert grasps >= 3
+
+
+def test_stream_carried_object_tracks_the_end_effector(streams):
+    """들고 있는 물체는 말단 바로 아래에 붙어 따라온다."""
+    builder = load_builder()
+    carried = 0
+    for record in streams:
+        for tick in record["ticks"]:
+            robot = tick["request"]["state"]["robot"]
+            holding = robot["holding"]
+            if holding is None:
+                continue
+            carried += 1
+            pose = next(
+                obj["pose_mm"] for obj in tick["request"]["state"]["objects"] if obj["id"] == holding
+            )
+            ee = robot["ee_pose_mm"]
+            assert pose[:2] == ee[:2], (record["episode_id"], tick["t"], pose, ee)
+            assert pose[2] == ee[2] - builder.CARRY_OFFSET_MM, (
+                record["episode_id"],
+                tick["t"],
+                pose,
+                ee,
+            )
+    assert carried >= 100
+
+
+def test_stream_occlusion_fields_only_describe_objects_in_the_scene(streams):
+    """가려짐은 그 장면에 있는 물체에만 쓴다 (에피소드마다 하드코딩하지 않는다)."""
+    with_occlusion = 0
+    for record in streams:
+        scene_ids = {obj["id"] for obj in record["ticks"][0]["request"]["state"]["objects"]}
+        occluded = record["evidence"].get("occluded_true_poses", {})
+        assert set(occluded) <= scene_ids, (record["episode_id"], sorted(occluded))
+        with_occlusion += bool(occluded)
+        for tick in record["ticks"]:
+            for obj in tick["request"]["state"]["objects"]:
+                partly_visible = obj["visible_ratio"] < 1.0
+                assert partly_visible == (obj["id"] in occluded), (
+                    record["episode_id"],
+                    tick["t"],
+                    obj["id"],
+                    obj["visible_ratio"],
+                )
+    assert with_occlusion == 1  # ep-d0-003만 가려진 물체를 가진다
 
 
 def test_stream_object_poses_stay_on_the_workspace(streams):
