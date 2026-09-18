@@ -252,7 +252,8 @@ def generate_episode(
             "profile": profile,
             "origin_group": group,
             "family": family_signature(plan),
-            "policy": {"name": type(policy).__name__, "version": str(getattr(policy, "version", "unknown"))},
+            # 정책 클라이언트(`data.dagger.PolicyClient`)는 감싼 정책의 이름을 `name`으로 든다.
+            "policy": {"name": str(getattr(policy, "name", type(policy).__name__)), "version": str(getattr(policy, "version", "unknown"))},
             "label_source": expert.label_source,
             "config_sha256": config_digest(config),
             "sim_config": sim_config,
