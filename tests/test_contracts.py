@@ -9,8 +9,10 @@ import json
 from pathlib import Path
 
 import pytest
+from conftest import all_keys
 
 from robo_jev.contracts import (
+    FORBIDDEN_REQUEST_KEYS,
     NON_INPUT_FIELDS,
     QUESTION_SET_V0,
     model_input,
@@ -390,6 +392,20 @@ def test_unknown_question_type_is_rejected():
         validate_record(record)
 
 
+def test_missing_required_request_field_is_rejected():
+    record = single_record()
+    del record["request"]["state"]
+    with pytest.raises(ValueError, match=r"request\.state"):
+        validate_record(record)
+
+
+def test_duplicate_question_ids_are_rejected():
+    record = single_record()
+    record["request"]["questions"].append(copy.deepcopy(record["request"]["questions"][0]))
+    with pytest.raises(ValueError, match=r"request\.questions\[1\]\.id"):
+        validate_record(record)
+
+
 def test_label_structure_inside_request_is_rejected():
     """정답 구조가 입력 영역에 섞이면 거절한다."""
     record = single_record()
@@ -398,10 +414,48 @@ def test_label_structure_inside_request_is_rejected():
         validate_record(record)
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"question_id": "q_target", "candidate_ids": ["c91"]},
+        {"question_id": "q_target", "answer": "c91"},
+        {"question_id": "q_target", "probabilities": {"c91": 1.0}},
+        {"question_id": "q_target", "successes": 7},
+        {"question_id": "q_target", "kind": "valid_set"},
+    ],
+    ids=["candidate_ids", "answer", "probabilities", "successes", "kind"],
+)
+def test_partial_label_structure_inside_request_is_rejected(payload):
+    """`kind`가 없어도 `question_id` + 정답 모양이면 라벨 유출이다."""
+    record = single_record()
+    record["request"]["state"]["hint"] = payload
+    with pytest.raises(ValueError, match=r"request\.state\.hint"):
+        validate_record(record)
+
+
 def test_non_input_field_inside_request_is_rejected():
     record = single_record()
     record["request"]["evidence"] = {"rule_trace": "…"}
     with pytest.raises(ValueError, match=r"request\.evidence"):
+        validate_record(record)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["labels", "provenance", "evidence", "split", "usage", "model_output", "adopted", "ack", "true_state", "occluded_true_poses"],
+)
+def test_nested_non_input_field_inside_request_is_rejected(field):
+    """허용 목록은 재귀여야 한다: request 안쪽 어디에 숨겨도 걸러야 한다."""
+    record = single_record()
+    record["request"]["state"][field] = {"future_success": True}
+    with pytest.raises(ValueError, match=rf"request\.state\.{field}"):
+        validate_record(record)
+
+
+def test_non_input_field_deep_inside_request_is_rejected():
+    record = single_record()
+    record["request"]["questions"][0]["criteria"][1]["evidence"] = {"rule_trace": "…"}
+    with pytest.raises(ValueError, match=r"request\.questions\[0\]\.criteria\[1\]\.evidence"):
         validate_record(record)
 
 
@@ -573,21 +627,44 @@ def test_instruction_versions_must_increase():
         validate_record(record)
 
 
+def test_unknown_key_inside_a_tick_request_is_rejected():
+    record = stream_record()
+    record["ticks"][0]["request"]["hint"] = {"best": "c3"}
+    with pytest.raises(ValueError, match=r"ticks\[0\]\.request\.hint"):
+        validate_record(record)
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["labels", "provenance", "evidence", "adopted", "ack", "true_state", "occluded_true_poses"],
+)
+def test_nested_non_input_field_inside_a_tick_request_is_rejected(field):
+    record = stream_record()
+    record["ticks"][1]["request"]["state"][field] = {"o7": [310, -40, 742]}
+    with pytest.raises(ValueError, match=rf"ticks\[1\]\.request\.state\.{field}"):
+        validate_record(record)
+
+
+def test_non_input_field_inside_tick_candidates_is_rejected():
+    record = stream_record()
+    record["ticks"][0]["request"]["candidates"]["q_main"][2]["evidence"] = {"future_success": True}
+    with pytest.raises(ValueError, match=r"ticks\[0\]\.request\.candidates\.q_main\[2\]\.evidence"):
+        validate_record(record)
+
+
+def test_partial_label_structure_inside_a_tick_request_is_rejected():
+    record = stream_record()
+    record["ticks"][0]["request"]["state"]["robot"]["hint"] = {
+        "question_id": "q_main",
+        "candidate_ids": ["c3"],
+    }
+    with pytest.raises(ValueError, match=r"ticks\[0\]\.request\.state\.robot\.hint"):
+        validate_record(record)
+
+
 # --------------------------------------------------------------------------
 # 정보 경계
 # --------------------------------------------------------------------------
-
-
-def _all_keys(node) -> set[str]:
-    keys: set[str] = set()
-    if isinstance(node, dict):
-        for key, value in node.items():
-            keys.add(key)
-            keys |= _all_keys(value)
-    elif isinstance(node, list):
-        for value in node:
-            keys |= _all_keys(value)
-    return keys
 
 
 def test_model_input_of_single_request_is_allow_listed():
@@ -612,7 +689,8 @@ def test_model_input_of_stream_is_allow_listed():
 @pytest.mark.parametrize("factory", [single_record, stream_record], ids=["single", "stream"])
 def test_model_input_excludes_non_input_fields(factory):
     got = model_input(factory())
-    assert _all_keys(got).isdisjoint(NON_INPUT_FIELDS)
+    assert all_keys(got).isdisjoint(NON_INPUT_FIELDS)
+    assert all_keys(got).isdisjoint(FORBIDDEN_REQUEST_KEYS)  # 가려진 참값 키까지
 
 
 @pytest.mark.parametrize("factory", [single_record, stream_record], ids=["single", "stream"])
@@ -650,6 +728,40 @@ def test_hidden_truth_change_keeps_model_input_byte_identical(factory):
 def test_model_input_rejects_unknown_schema_version():
     with pytest.raises(ValueError, match="schema_version"):
         model_input({"schema_version": "nope"})
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"schema_version": "judgment-v0"},
+        {"schema_version": "judgment-v0", "request": "nope"},
+        {"schema_version": "judgment-v0", "request": None},
+    ],
+    ids=["missing", "string", "null"],
+)
+def test_model_input_rejects_a_record_without_a_usable_request(record):
+    """request가 없거나 dict가 아니면 조용히 빈 입력을 만들지 않고 경로가 붙은 오류를 낸다."""
+    with pytest.raises(ValueError, match=r"^request: "):
+        model_input(record)
+
+
+@pytest.mark.parametrize(
+    "record",
+    [
+        {"schema_version": "stream-v0", "prefix": {}},
+        {"schema_version": "stream-v0", "prefix": {}, "ticks": {"t": 0}},
+    ],
+    ids=["missing", "dict"],
+)
+def test_model_input_rejects_a_stream_without_usable_ticks(record):
+    with pytest.raises(ValueError, match=r"^ticks: "):
+        model_input(record)
+
+
+def test_model_input_rejects_a_tick_without_a_usable_request():
+    record = {"schema_version": "stream-v0", "prefix": {}, "ticks": [{"t": 0}]}
+    with pytest.raises(ValueError, match=r"^ticks\[0\]\.request: "):
+        model_input(record)
 
 
 def test_question_set_v0_has_the_fixed_ids():

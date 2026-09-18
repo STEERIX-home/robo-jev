@@ -24,6 +24,7 @@ from typing import Any, NoReturn
 
 __all__ = [
     "AUX_QUESTIONS",
+    "FORBIDDEN_REQUEST_KEYS",
     "LABEL_CONFIDENCE_LEVELS",
     "LABEL_KINDS",
     "NON_INPUT_FIELDS",
@@ -65,6 +66,14 @@ NON_INPUT_FIELDS = (
     "origin_group",
     "versions",
 )
+
+#: `request` 안 **어느 깊이에도** 나타나면 안 되는 키. 비입력 필드에 가려진 참값
+#: (`true_state`·`occluded_true_poses`)을 더한 것이다. 상태 안에 중첩해 숨기는 것도
+#: 유출이므로 재귀로 본다 (`request.state.evidence`, `ticks[3].request.state.provenance`).
+FORBIDDEN_REQUEST_KEYS = NON_INPUT_FIELDS + ("true_state", "occluded_true_poses")
+
+#: 라벨을 알아보는 표지. `question_id`와 함께 있으면 정답이 섞인 것이다.
+_LABEL_ANSWER_KEYS = ("kind", "candidate_ids", "answer", "probabilities", "successes")
 
 #: 부가 질문. 라벨은 그 틱의 commitment에 조건화된다 (docs/08 §7).
 AUX_QUESTIONS = ("q_gripper", "q_path", "q_speed", "q_force")
@@ -187,8 +196,14 @@ def _need_one_of(node: Any, path: str, allowed: tuple[str, ...]) -> str:
 
 
 def _is_label_shaped(node: Any) -> bool:
-    """라벨 구조인가 — 라벨은 항상 `question_id`와 `kind`를 함께 가진다."""
-    return isinstance(node, dict) and "question_id" in node and "kind" in node
+    """라벨 구조인가.
+
+    라벨은 `question_id`와 정답을 함께 가진다. `kind`가 빠진 조각(예:
+    `{"question_id": "q_target", "candidate_ids": [...]}`)도 정답을 흘리므로 라벨로 본다.
+    """
+    return isinstance(node, dict) and "question_id" in node and any(
+        key in node for key in _LABEL_ANSWER_KEYS
+    )
 
 
 def _reject_label_leak(node: Any, path: str) -> None:
@@ -197,24 +212,37 @@ def _reject_label_leak(node: Any, path: str) -> None:
     실행 이력·채택 결과 자리에 라벨을 그대로 복사해 넣는 실수("실행 이력과 라벨의
     혼동")를 잡는다.
     """
+    _scan_input_area(node, path, forbidden_keys=())
+
+
+def _scan_input_area(node: Any, path: str, *, forbidden_keys: tuple[str, ...]) -> None:
+    """모델 입력 영역을 재귀로 훑어 라벨 구조와 비입력 키를 잡는다.
+
+    경로는 끝까지 붙인다: `request.state.evidence`,
+    `ticks[3].request.state.provenance`, `request.questions[0].criteria[1].evidence`.
+    """
     if _is_label_shaped(node):
-        _fail(path, "라벨 구조(question_id+kind)가 모델 입력 영역에 들어 있다")
+        _fail(path, "라벨 구조(question_id+정답)가 모델 입력 영역에 들어 있다")
     if isinstance(node, dict):
         for key, value in node.items():
-            _reject_label_leak(value, f"{path}.{key}")
+            child = f"{path}.{key}"
+            if key in forbidden_keys:
+                _fail(child, f"모델 입력에 들어갈 수 없는 필드다 (비입력: {list(forbidden_keys)})")
+            _scan_input_area(value, child, forbidden_keys=forbidden_keys)
     elif isinstance(node, list):
         for index, value in enumerate(node):
-            _reject_label_leak(value, f"{path}[{index}]")
+            _scan_input_area(value, f"{path}[{index}]", forbidden_keys=forbidden_keys)
 
 
 def _check_request_fields(request: dict, path: str, allowed: tuple[str, ...]) -> None:
+    """`request`의 허용 목록 검사. 맨 위 키만이 아니라 안쪽까지 재귀로 본다."""
     for key in request:
         if key not in allowed:
             _fail(f"{path}.{key}", f"request의 허용 필드가 아니다 (허용: {list(allowed)})")
     for key in allowed:
         if key not in request:
             _fail(f"{path}.{key}", "request에 필요한 필드가 없다")
-    _reject_label_leak(request, path)
+    _scan_input_area(request, path, forbidden_keys=FORBIDDEN_REQUEST_KEYS)
 
 
 # --------------------------------------------------------------------------
@@ -655,12 +683,16 @@ def _pick(node: dict, fields: tuple[str, ...]) -> dict:
 
 
 def _single_request_input(record: dict) -> dict:
-    request = record.get("request", {})
+    request = _need_dict(record.get("request"), "request")
     questions = []
-    for question in request.get("questions", []):
+    for index, question in enumerate(_need_list(request.get("questions", []), "request.questions")):
+        question_path = f"request.questions[{index}]"
+        _need_dict(question, question_path)
         allowed = _pick(question, _QUESTION_FIELDS)
+        criteria_path = f"{question_path}.criteria"
         allowed["criteria"] = [
-            _pick(criterion, _CRITERION_FIELDS) for criterion in question.get("criteria", [])
+            _pick(_need_dict(criterion, f"{criteria_path}[{position}]"), _CRITERION_FIELDS)
+            for position, criterion in enumerate(_need_list(question.get("criteria", []), criteria_path))
         ]
         questions.append(allowed)
     allowed_request = _pick(request, ("request_id", "state"))
@@ -670,13 +702,17 @@ def _single_request_input(record: dict) -> dict:
 
 def _stream_input(record: dict) -> dict:
     ticks = []
-    for tick in record.get("ticks", []):
+    for index, tick in enumerate(_need_list(record.get("ticks"), "ticks")):
+        tick_path = f"ticks[{index}]"
+        _need_dict(tick, tick_path)
         allowed_tick = _pick(tick, _TICK_FIELDS)
-        allowed_tick["request"] = _pick(tick.get("request", {}), _STREAM_REQUEST_FIELDS)
+        allowed_tick["request"] = _pick(
+            _need_dict(tick.get("request"), f"{tick_path}.request"), _STREAM_REQUEST_FIELDS
+        )
         ticks.append(allowed_tick)
     return {
         "schema_version": record["schema_version"],
-        "prefix": _pick(record.get("prefix", {}), _PREFIX_FIELDS),
+        "prefix": _pick(_need_dict(record.get("prefix", {}), "prefix"), _PREFIX_FIELDS),
         "ticks": ticks,
     }
 
@@ -685,7 +721,10 @@ def model_input(record: dict) -> dict:
     """모델이 볼 수 있는 부분만 허용 목록으로 추려 새 dict로 돌려준다.
 
     원본은 건드리지 않는다. 라벨·근거·분할·모델 출력·채택 결과·ACK는 어떤 경로로도
-    통과하지 못한다. 검증된 레코드를 받는다고 가정한다.
+    통과하지 못한다 — 중첩된 자리(`request.state.evidence`)까지 막는 것은
+    :func:`validate_record`의 재귀 검사이고, 이 함수는 그 위의 순수한 투영이다.
+    검증된 레코드를 받는다고 가정하되, `request`·`ticks`가 없거나 모양이 다르면
+    조용히 빈 입력을 만들지 않고 경로가 붙은 `ValueError`를 낸다.
     """
     _need_dict(record, "record")
     schema_version = _need_one_of(
