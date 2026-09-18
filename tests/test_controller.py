@@ -206,6 +206,101 @@ def test_stop_bypasses_blend_with_a_fixed_deceleration():
     assert stopped["speed_mm_s"] == pytest.approx(0.0)
 
 
+def test_hold_procedure_ends_when_a_command_is_accepted():
+    """HOLD 절차는 걸쇠가 아니다. 새 명령을 받으면 풀리고, 다음 만료는 다시 사건을 낸다."""
+    lease_ms = LIFETIME["lease_ms"]
+    hold_after = LIFETIME["hold_after_stale_ms"]
+    ctrl = controller()
+    ctrl.apply(move(seq=1, now_ms=0), now_ms=0)
+    for now in range(0, lease_ms + hold_after + 1, PERIOD_MS):
+        held = ctrl.advance(now)
+    assert held["executor"] == "HOLD"
+    assert held["holding_after_stale"] is True
+    assert [event["kind"] for event in ctrl.drain_events()].count("hold_entered") == 1
+
+    resumed_at = lease_ms + hold_after + PERIOD_MS
+    assert ctrl.apply(move(seq=2, now_ms=resumed_at), now_ms=resumed_at)["applied"] is True
+    moving = ctrl.advance(resumed_at)
+    assert moving["executor"] == "MOVE_EE"
+    assert moving["holding_after_stale"] is False, "HOLD 표시가 팔이 움직이는데도 남아 있다"
+
+    second_lease = resumed_at + lease_ms
+    for now in range(resumed_at, second_lease + hold_after + 1, PERIOD_MS):
+        again = ctrl.advance(now)
+    assert again["executor"] == "HOLD"
+    assert [event["kind"] for event in ctrl.drain_events()].count("hold_entered") == 1, (
+        "두 번째 HOLD 진입이 조용히 일어났다"
+    )
+
+
+def test_stop_during_deceleration_records_its_own_transition():
+    """이미 감속 중이어도 새 정지는 그 자체로 전이다 — 사건과 ACK가 남아야 한다."""
+    lease_ms = LIFETIME["lease_ms"]
+    ctrl = controller()
+    ctrl.apply(move(seq=1, now_ms=0), now_ms=0)
+    for now in range(0, lease_ms + PERIOD_MS + 1, PERIOD_MS):
+        decelerating = ctrl.advance(now)
+    assert decelerating["stopping"] is True
+    assert decelerating["executor"] == "MOVE_EE"
+    ctrl.drain_events()
+
+    stop_at = lease_ms + 2 * PERIOD_MS
+    ack = ctrl.apply(move(seq=2, now_ms=stop_at, stop=True), now_ms=stop_at)
+    events = ctrl.drain_events()
+
+    transitions = [event for event in events if event["kind"] == "stop_transition"]
+    assert len(transitions) == 1, f"감속 중 정지가 사건을 남기지 않았다: {events}"
+    assert transitions[0]["cause"] == "command"
+    assert [event["kind"] for event in events].count("hold_entered") == 1
+
+    assert ack["executor"] == ctrl.advance(stop_at)["executor"] == "HOLD"
+
+
+def test_stop_ack_matches_the_exec_record():
+    """ACK가 말하는 실행기·경로는 실행 기록이 말할 것과 같아야 한다."""
+    ctrl = controller()
+    ack = ctrl.apply(move(seq=1, stop=True), now_ms=0)
+    setpoint = ctrl.advance(0)
+    assert ack["executor"] == setpoint["executor"]
+    assert ack["path"] == ctrl.state_dict()["path_kind"]
+
+
+def test_transition_collision_stop_records_its_event():
+    ctrl = controller()
+    ctrl.apply(move(seq=1, now_ms=0), now_ms=0)
+    for i in range(BLEND_MS // PERIOD_MS + 1):
+        ctrl.advance(i * PERIOD_MS)
+    ctrl.drain_events()
+
+    blocked = move(seq=2, now_ms=BLEND_MS, target_mm=(600, 300, 200))
+    blocked["constraints"] = {"forbidden_segment": True}
+    ack = ctrl.apply(blocked, now_ms=BLEND_MS)
+    events = ctrl.drain_events()
+
+    transitions = [event for event in events if event["kind"] == "stop_transition"]
+    assert len(transitions) == 1
+    assert transitions[0]["cause"] == "transition_collision"
+    assert ack["executor"] == ctrl.advance(BLEND_MS)["executor"] == "HOLD"
+
+
+def test_force_reflex_during_deceleration_escalates_to_hold():
+    """lease 만료 감속 중에 힘 한계를 넘으면 그 자리에서 HOLD다 — 1초를 기다리지 않는다."""
+    lease_ms = LIFETIME["lease_ms"]
+    ctrl = controller()
+    ctrl.apply(move(seq=1, now_ms=0), now_ms=0)
+    for now in range(0, lease_ms + PERIOD_MS + 1, PERIOD_MS):
+        ctrl.advance(now)
+    ctrl.drain_events()
+
+    ctrl.observe(sensors(contact_force_n=REFLEX["force_limit_n"] + 5.0))
+    reflex = ctrl.advance(lease_ms + 2 * PERIOD_MS)
+
+    assert reflex["executor"] == "HOLD"
+    kinds = [event["kind"] for event in ctrl.drain_events()]
+    assert kinds.count("reflex_stop") == 1
+    assert kinds.count("hold_entered") == 1
+
+
 def test_stop_survives_a_late_observation():
     """정지는 반사와 같은 우선순위다 — 수명 검사가 그것을 버리면 안 된다 (docs/08 §6)."""
     ctrl = controller()
@@ -329,11 +424,32 @@ def test_stop_holds_the_grasp():
     assert ctrl.advance(PERIOD_MS)["gripper"] == "closed"
 
 
-def test_stop_still_accepts_a_close():
-    """유지해야 하는 것은 파지다. 정지 중에 더 쥐는 것은 막지 않는다."""
+def test_stop_tick_does_not_apply_the_gripper_answer():
+    """docs/08 §5 1항: 정지가 참이면 **다른 답은 이 틱에 적용하지 않는다**.
+
+    파지 중이 아니어서 `hold_grasp`가 걸리지 않을 때도 마찬가지다 — 정지 틱의 그리퍼 답은
+    다음 틱에 다시 판단한다.
+    """
     ctrl = controller(target_distance_mm=0.0)
     ack = ctrl.apply(move(seq=1, stop=True, gripper="closed"), now_ms=0)
-    assert ack["gripper_event"] is not None
+
+    assert ack["applied"] is True
+    assert ack["stop_transition"] is True
+    assert ack["gripper_event"] is None
+    assert ack["gripper_wait"] == "stop_tick"
+    assert ctrl.advance(0)["gripper"] == "open", "정지 틱에 그리퍼가 움직였다"
+    assert [event["kind"] for event in ctrl.drain_events()].count("gripper_wait") == 1
+
+
+def test_the_tick_after_a_stop_applies_the_gripper_answer():
+    """보류지 폐기가 아니다 — 정지 틱이 지나면 같은 답이 그대로 실행된다."""
+    ctrl = controller(target_distance_mm=0.0)
+    ctrl.apply(move(seq=1, stop=True, gripper="closed"), now_ms=0)
+    ctrl.advance(0)
+
+    resumed = ctrl.apply(move(seq=2, now_ms=PERIOD_MS, gripper="closed"), now_ms=PERIOD_MS)
+    assert resumed["gripper_event"] is not None
+    assert ctrl.advance(PERIOD_MS)["gripper"] == "closed"
 
 
 def test_proximity_reflex_slows_without_stopping():

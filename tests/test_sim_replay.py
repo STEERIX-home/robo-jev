@@ -188,6 +188,7 @@ def test_disturbances_fire_by_sim_time_not_by_step_count(tmp_path):
     horizon_ms = None
     logs = {}
     steps = {}
+    applied_events = {}
     for control_hz in (fast_hz, slow_hz):
         env = Environment(config_path=str(write_config(tmp_path, control_hz=control_hz)))
         try:
@@ -198,17 +199,45 @@ def test_disturbances_fire_by_sim_time_not_by_step_count(tmp_path):
                 raw = env.plan.disturbances[0].sim_ms + 400
                 horizon_ms = -(-raw // slow_period_ms) * slow_period_ms
             count = 0
+            seen = []
             while env.sim_time_ms < horizon_ms:
                 observation = env.step(HOLD)
                 count += 1
-            logs[control_hz] = schedule_of(observation)
+                seen.extend(
+                    (event["sim_ms"], event["scheduled_ms"])
+                    for event in observation["events"]
+                    if event["kind"] == "disturbance_applied"
+                )
+            logs[control_hz] = observation["disturbance_log"]
             steps[control_hz] = count
+            applied_events[control_hz] = seen
         finally:
             env.close()
 
     fast, slow = fast_hz, slow_hz
     assert steps[fast] == 2 * steps[slow], f"step 호출 수가 달라지지 않았다: {steps}"
-    assert logs[fast] and logs[fast] == logs[slow], f"같은 모의 시각에 나지 않았다: {logs}"
+    assert logs[fast], "검사 구간에 외란이 하나도 없다"
+
+    # 예정 시각은 seed가 정한다 — 주기가 달라도 같다.
+    scheduled = {rate: [entry["sim_ms"] for entry in log] for rate, log in logs.items()}
+    assert scheduled[fast] == scheduled[slow], f"예정 시각이 주기에 끌려갔다: {scheduled}"
+
+    # 적용 시각은 주기 경계다. 제어 주기가 일정 격자보다 굵으면 예정 시각 **직후의**
+    # 경계에서 적용되므로 최대 한 주기만큼 늦을 수 있다.
+    for rate, log in logs.items():
+        period_ms = 1000 // rate
+        for entry in log:
+            assert entry["applied_ms"] % period_ms == 0
+            assert 0 <= entry["applied_ms"] - entry["sim_ms"] < period_ms
+    assert all(
+        entry["applied_ms"] == entry["sim_ms"] for entry in logs[fast]
+    ), "격자와 같은 주기에서는 예정 시각 그대로 적용돼야 한다"
+
+    # 사건의 `sim_ms`는 적용 시각이고, 예정 시각은 `scheduled_ms`로 따로 실린다.
+    for rate, applied in applied_events.items():
+        assert applied == [
+            (entry["applied_ms"], entry["sim_ms"]) for entry in logs[rate]
+        ], f"사건과 로그가 어긋난다 ({rate}Hz)"
 
 
 def test_disturbance_moves_the_object_and_reports_an_event(env):
@@ -224,6 +253,8 @@ def test_disturbance_moves_the_object_and_reports_an_event(env):
     assert observation["sim_time_ms"] == first.sim_ms
     entry = observation["disturbance_log"][0]
     assert entry["sim_ms"] == first.sim_ms
+    # 기본 프로파일에서는 제어 주기와 일정 격자가 같아 예정 시각에 그대로 적용된다.
+    assert entry["applied_ms"] == first.sim_ms
     assert entry["object"] == first.object
     assert [event["kind"] for event in observation["events"]].count("disturbance_applied") == 1
 
@@ -417,9 +448,9 @@ def test_snapshot_is_standard_json(env):
     def reject(constant):
         raise AssertionError(f"snapshot에 {constant}가 들어 있다")
 
-    text = gzip.decompress(state).decode("utf-8")
-    parsed = json.loads(text, parse_constant=reject)
-    assert "Infinity" not in text and "NaN" not in text
+    # 본문 문자열을 훑지 않는다 — base64로 실린 배열이 우연히 "NaN"·"Infinity"를 담을 수
+    # 있어 거짓 실패가 난다. 비표준 토큰인지는 파서가 판정할 일이다.
+    parsed = json.loads(gzip.decompress(state).decode("utf-8"), parse_constant=reject)
     assert parsed["controller"]["sensors"]["nearest_obstacle_mm"] is not None
 
 
@@ -533,6 +564,12 @@ def test_exec_record_separates_deceleration_from_the_hold_procedure(env):
     assert observation["exec"]["hold_after_stale"] is True
     assert observation["exec"]["executor"] == "HOLD"
     assert [event["kind"] for event in observation["events"]].count("hold_entered") == 1
+
+    # 새 명령을 받으면 절차가 끝난다. 팔이 움직이는데 HOLD라고 적혀 있으면 안 된다.
+    resumed = env.step({"kind": "MOVE_EE", "target_mm": [500, 40, 200]})
+    assert resumed["exec"]["hold_after_stale"] is False
+    assert resumed["exec"]["executor"] == "MOVE_EE"
+    assert resumed["exec"]["stop"] is False
 
 
 def test_a_stale_simulator_macro_is_caught(env, monkeypatch):

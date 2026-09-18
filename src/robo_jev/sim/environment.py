@@ -421,13 +421,17 @@ class Environment:
 
         self.disturbance_log.append(
             {
+                # `sim_ms`는 **예정** 시각이다. seed가 정한 값이므로 제어 주기를 바꿔도 같다.
                 "sim_ms": int(item.sim_ms),
+                # `applied_ms`는 실제로 적용된 주기 경계다. 제어 주기가 일정 격자보다 굵으면
+                # 예정 시각 **직후의** 경계가 되므로 둘이 달라질 수 있다.
+                "applied_ms": int(self.sim_time_ms),
                 "object": item.object,
                 "delta_mm": [int(item.delta_mm[0]), int(item.delta_mm[1])],
                 "delta_yaw_deg": round(float(item.delta_yaw_deg), 2),
             }
         )
-        self._emit("disturbance_applied", object=item.object)
+        self._emit("disturbance_applied", object=item.object, scheduled_ms=int(item.sim_ms))
 
     def _emit(self, kind: str, **fields: Any) -> None:
         if kind not in _EVENT_KINDS:

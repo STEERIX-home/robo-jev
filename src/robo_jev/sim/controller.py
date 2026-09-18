@@ -438,19 +438,17 @@ class Controller:
                 self._refresh_lease(normalised)
             else:
                 self._record("stop_late", seq=seq, reason=lifetime_fault)
-            # 그리퍼 답은 정지 중에도 본다. 다만 `stop.hold_grasp`가 참이고 파지 중이면
-            # 해제는 기다린다 — 감속하며 물체를 놓으면 그대로 떨어뜨린다.
-            event_id, wait = self._set_gripper(normalised["gripper"])
             return self._ack(
                 seq,
-                "HOLD",
+                # 하드코딩하지 않는다. ACK가 말하는 실행기·경로는 실행 기록이 말할 것과
+                # 같은 값이어야 하고, 그것은 `_begin_stop`이 방금 정했다.
+                self.executor,
                 applied=True,
                 stop_transition=True,
                 reason=lifetime_fault,
                 stale=lifetime_fault == "observation_late",
-                gripper_event=event_id,
-                gripper_wait=wait,
-                path="hold",
+                gripper_wait=self._stop_tick_gripper(normalised["gripper"]),
+                path=self.path_kind,
             )
 
         # 3. 나머지 명령은 수명 검사에서 멈춘다. 늦은 응답에는 lease가 새로 붙지 않고,
@@ -476,7 +474,11 @@ class Controller:
             self._begin_stop("transition_collision")
             self._record("rejected", seq=seq, reason="transition_collision")
             return self._ack(
-                seq, executor, stop_transition=True, reason="transition_collision"
+                seq,
+                self.executor,
+                stop_transition=True,
+                reason="transition_collision",
+                path=self.path_kind,
             )
 
         # 6. 채택. 목표 속도를 100ms 동안 보간한다.
@@ -546,27 +548,34 @@ class Controller:
         self.blend_from_speed_mm_s = self.speed_mm_s
         self.blend_start_ms = self.now_ms
         self.commanded_speed_mm_s = self.speed_levels_mm_s[normalised["speed_level"]]
+        # 명령을 받아들이면 정지도 HOLD 절차도 끝난다. 표시를 내려야 다음 만료의 진입이
+        # 다시 사건으로 보인다 — 걸쇠로 남으면 팔이 움직이는데도 HOLD라고 기록된다.
         self.stopping = False
+        self.holding_after_stale = False
 
     # ------------------------------------------------------------------
     # 그리퍼
     # ------------------------------------------------------------------
 
+    def _stop_tick_gripper(self, desired: str | None) -> str | None:
+        """정지 틱의 그리퍼 답은 적용하지 않는다. 기다린 사유를 돌려준다.
+
+        docs/08 §5 1항은 정지 틱에 "다른 답은 이 틱에 적용하지 않는다"고 못박는다. 폐기가
+        아니라 보류이므로 다음 틱에 같은 답이 오면 그때 실행된다. 파지 중이면 사유를
+        `stop_holds_grasp`로 구분해, docs/08 §6의 "정지 전이 … 파지 중이면 유지"가 실제로
+        걸렸다는 것을 기록에 남긴다(설정 `stop.hold_grasp`).
+        """
+        if desired is None or desired == self.gripper_desired:
+            return None
+        holding = self.sensors.get("holding") is not None
+        reason = "stop_holds_grasp" if self.hold_grasp_on_stop and holding else "stop_tick"
+        self._record("gripper_wait", desired=desired, reason=reason)
+        return reason
+
     def _set_gripper(self, desired: str | None) -> tuple[str | None, str | None]:
         """원하는 상태가 바뀔 때만 이벤트 하나. 같은 상태가 반복돼도 다시 나지 않는다."""
         if desired is None or desired == self.gripper_desired:
             return None, None
-
-        # docs/08 §6 "정지 전이 … 파지 중이면 유지". 멈추는 중에 파지를 푸는 명령은
-        # 물체를 떨어뜨리므로 기다린다.
-        if (
-            self.stopping
-            and self.hold_grasp_on_stop
-            and desired == "open"
-            and self.sensors.get("holding") is not None
-        ):
-            self._record("gripper_wait", desired=desired, reason="stop_holds_grasp")
-            return None, "stop_holds_grasp"
 
         reason = self._gripper_readiness(desired)
         if reason is not None:
@@ -597,7 +606,9 @@ class Controller:
     # advance — 명령이 없어도 매 주기 돈다
     # ------------------------------------------------------------------
 
-    def _begin_stop(self, cause: str, at_ms: int | None = None, *, hold: bool = True) -> None:
+    def _begin_stop(
+        self, cause: str, at_ms: int | None = None, *, hold: bool = True, fresh: bool = True
+    ) -> None:
         """감속 프로파일을 건다.
 
         `at_ms`는 감속이 **시작된 시각**이다. lease 만료는 주기가 그것을 알아차린
@@ -607,12 +618,20 @@ class Controller:
         `hold`는 이것이 곧 HOLD 절차인지를 가른다. 명령 정지·반사·전환 구간 충돌은
         그 자리에서 HOLD다. lease 만료는 아니다 — docs/08 §6은 "감속 정지"와 "1초 이상
         지속되면 HOLD 절차"를 나눠 적으므로, 감속 중에는 하던 행동이 실행 기록에 남는다.
+
+        `fresh`는 이 호출이 **새 전이**인지, 이미 걸린 조건을 다시 알아차린 것인지를
+        가른다. lease 만료는 stale인 동안 주기마다 다시 오므로 새 전이가 아니다(사건을
+        되풀이하면 안 된다). 명령 정지·전환 구간 충돌·반사의 발생은 감속 중에 와도
+        그 자체로 새 전이다 — 사건을 남기고 HOLD로 올린다.
         """
-        if self.stopping:
+        if self.stopping and not fresh:
             return
+        if not self.stopping:
+            # 감속의 시작점. 이미 감속 중이면 프로파일을 새로 깔지 않는다 —
+            # 그러면 현재 속도에서 다시 시작해 정지가 느려진다.
+            self.decel_start_ms = self.now_ms if at_ms is None else int(at_ms)
+            self.decel_from_speed_mm_s = self.speed_mm_s
         self.stopping = True
-        self.decel_start_ms = self.now_ms if at_ms is None else int(at_ms)
-        self.decel_from_speed_mm_s = self.speed_mm_s
         if hold:
             self._enter_hold()
         self.path_kind = "hold"
@@ -621,7 +640,11 @@ class Controller:
         self._record("stop_transition", cause=cause)
 
     def _enter_hold(self) -> None:
-        """HOLD 절차에 든다. 사건은 들어갈 때 한 번만 난다."""
+        """HOLD 절차에 든다. 사건은 **들어갈 때마다** 한 번씩 난다.
+
+        나가는 자리는 `_adopt`다 — 새 명령을 받으면 절차가 끝나므로 표시를 내린다.
+        그래야 다음 만료의 진입이 다시 사건으로 보인다.
+        """
         self.executor = "HOLD"
         if not self.holding_after_stale:
             self.holding_after_stale = True
@@ -636,7 +659,9 @@ class Controller:
             # 되풀이하지 않도록 발생(onset)에서만 적는다.
             if not self.force_reflex_active:
                 self._record("reflex_stop", force_n=float(self.sensors["contact_force_n"]))
-            self._begin_stop("reflex_force")
+            # 힘 한계의 **발생**은 감속 중에 와도 새 전이다 — 그 자리에서 HOLD로 올린다.
+            # 그 뒤로 힘이 계속 걸려 있는 동안은 같은 조건을 다시 알아차린 것뿐이다.
+            self._begin_stop("reflex_force", fresh=not self.force_reflex_active)
             factor = 0.0
         self.force_reflex_active = over_force
         nearest = self.sensors.get("nearest_obstacle_mm")
@@ -669,7 +694,10 @@ class Controller:
                 self.stale = True
                 self.stale_since_ms = self.lease_until
                 self._record("stale", lease_until=int(self.lease_until), reason="lease_expired")
-            self._begin_stop("lease_expired", at_ms=self.stale_since_ms, hold=False)
+            # stale인 동안 주기마다 다시 온다. 새 전이가 아니므로 사건을 되풀이하지 않는다.
+            self._begin_stop(
+                "lease_expired", at_ms=self.stale_since_ms, hold=False, fresh=False
+            )
             since = int(self.stale_since_ms if self.stale_since_ms is not None else self.lease_until)
             if self.now_ms - since >= self.hold_after_stale_ms:
                 self._enter_hold()
