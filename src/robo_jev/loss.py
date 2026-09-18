@@ -32,7 +32,8 @@
 **mask와 정규화.** 라벨이 없는 질문, ``mask: false`` 라벨, 근거 없는 사건 라벨은 아무것도
 기여하지 않고 gradient도 받지 않는다. 라벨의 ``weight``(기본 1)로
 ``L_state = Σ_i w_i L_i / Σ_i w_i``를 만들고, ``L_batch``는 유효 라벨이 하나라도 있는 상태들의
-평균이다. 유효 라벨이 전혀 없으면 0(스칼라)이다.
+평균이다. 유효 라벨이 전혀 없으면 주어진 logits에 이어진 0(스칼라)이다 — `.backward()`가 되고
+gradient는 전부 0이다(상태별 microbatch에서 한 상태가 통째로 mask인 경우, docs/03 §5).
 """
 
 from __future__ import annotations
@@ -162,8 +163,23 @@ def question_losses(outputs: dict, labels: dict) -> list[dict[str, dict[str, Any
     return result
 
 
+def _graph_zero(outputs: dict) -> torch.Tensor:
+    """주어진 logits에 이어진 0 — backward가 되고 gradient는 전부 0이다.
+
+    상태별 microbatch(docs/03 §5)에서 한 상태의 라벨이 전부 mask·근거 없음이면 손실이 0인데,
+    `torch.zeros(())`는 그래프가 없어 `.backward()`가 실패한다. logits가 하나도 없을 때만
+    그래프 없는 0을 돌려준다.
+    """
+    zero: torch.Tensor | None = None
+    for state in outputs["logits"]:
+        for logits in state.values():
+            term = 0.0 * logits.float().sum()
+            zero = term if zero is None else zero + term
+    return torch.zeros(()) if zero is None else zero
+
+
 def judgment_loss(outputs: dict, labels: dict) -> torch.Tensor:
-    """상태 평균 손실 (모듈 설명 참조). 유효 라벨이 없으면 0."""
+    """상태 평균 손실 (모듈 설명 참조). 유효 라벨이 없으면 logits에 이어진 0."""
     state_losses: list[torch.Tensor] = []
     for entries in question_losses(outputs, labels):
         total_weight = sum(entry["weight"] for entry in entries.values())
@@ -172,5 +188,5 @@ def judgment_loss(outputs: dict, labels: dict) -> torch.Tensor:
         weighted = sum(entry["weight"] * entry["loss"] for entry in entries.values())
         state_losses.append(weighted / total_weight)
     if not state_losses:
-        return torch.zeros(())
+        return _graph_zero(outputs)
     return torch.stack(state_losses).mean()

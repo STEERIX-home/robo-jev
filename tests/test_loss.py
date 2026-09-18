@@ -4,12 +4,15 @@
 NLL, 결측 mask, 상태별 정규화, `unknown` 후보를 정규화에서 빼는 부분 라벨 손실.
 """
 
+import copy
 import math
 
 import pytest
 import torch
 
 from robo_jev.loss import judgment_loss, label_loss, question_losses
+from robo_jev.model.serialize import serialize_request
+from robo_jev.model.tokenizer import WhitespaceTokenizer
 
 
 def softmax(values: list[float]) -> list[float]:
@@ -193,6 +196,29 @@ def test_states_without_any_valid_label_do_not_dilute_the_mean():
     assert loss.item() == pytest.approx(-math.log(softmax([1.0, 2.0])[0]), rel=1e-5, abs=1e-6)
     nothing = judgment_loss(batch(empty), labelled([]))
     assert nothing.item() == 0.0 and nothing.shape == ()
+    # 상태별 microbatch(docs/03 §5)에서 한 상태의 라벨이 전부 mask면 여기로 온다 — backward가
+    # 되어야 하고 gradient는 0이어야 한다.
+    nothing.backward()
+    assert nothing.grad_fn is not None
+    assert torch.equal(empty["logits"]["a"].grad, torch.zeros(2))
+
+
+def test_all_masked_labels_still_give_a_differentiable_zero():
+    out = state({"a": [1.0, 2.0], "b": [0.3, -0.3]}, {"a": ["c0", "c1"], "b": ["true", "false"]})
+    labels = [
+        {"question_id": "a", "kind": "single", "answer": "c0", "mask": False},
+        {"question_id": "b", "kind": "event", "event_id": "e0", "successes": 0, "failures": 0, "censored": 2},
+    ]
+    loss = judgment_loss(batch(out), labelled(labels))
+    assert loss.item() == 0.0 and loss.requires_grad
+    loss.backward()
+    for logits in out["logits"].values():
+        assert torch.equal(logits.grad, torch.zeros_like(logits))
+
+
+def test_no_logits_at_all_gives_a_plain_zero():
+    loss = judgment_loss({"logits": [{}], "candidates": [{}]}, labelled([]))
+    assert loss.item() == 0.0 and loss.shape == () and not loss.requires_grad
 
 
 def test_label_weights_scale_inside_the_state():
@@ -240,3 +266,85 @@ def test_logits_and_candidates_must_agree():
     out = {"logits": {"a": torch.zeros(3)}, "candidates": {"a": ["c0", "c1"]}}
     with pytest.raises(ValueError, match="candidates"):
         judgment_loss(batch(out), labelled([{"question_id": "a", "kind": "single", "answer": "c0"}]))
+
+
+# --------------------------------------------------------------------------
+# 4a ↔ 4b 인수: 실제 D0 레코드의 직렬화 결과(candidate_mapping)와 실제 라벨을 그대로 잇는다
+# --------------------------------------------------------------------------
+
+
+def judge_like_outputs(mapping: dict[str, list[str]], seed: int) -> dict[str, torch.Tensor]:
+    """Judge가 낼 모양: 질문 → 요청 순서 후보 logits. 값은 무작위다."""
+    generator = torch.Generator().manual_seed(seed)
+    return {
+        qid: torch.randn(len(ids), generator=generator).requires_grad_(True) for qid, ids in mapping.items()
+    }
+
+
+def contributing(labels: list[dict], mapping: dict[str, list[str]]) -> set[str]:
+    """gradient가 0이 아닐 라벨의 질문 id.
+
+    mask=false, 근거 없는 사건, 그리고 허용 집합 A ∪ unknown이 후보 전부인 valid_set(전환 틱의
+    `q_gripper` 두 상태 허용처럼 손실이 항등적으로 0인 라벨)은 뺀다.
+    """
+    active: set[str] = set()
+    for label in labels:
+        if label.get("mask", True) is False:
+            continue
+        if label["kind"] == "event" and label["successes"] + label["failures"] == 0:
+            continue
+        if label["kind"] == "valid_set":
+            allowed = set(label["candidate_ids"]) | set(label.get("unknown", []))
+            if allowed >= set(mapping[label["question_id"]]):
+                continue
+        active.add(label["question_id"])
+    return active
+
+
+def test_serialized_d0_single_requests_feed_the_loss(singles):
+    tokenizer = WhitespaceTokenizer()
+    with_labels = 0
+    for index, record in enumerate(singles):
+        out = serialize_request(record, tokenizer)
+        logits = judge_like_outputs(out["candidate_mapping"], seed=index)
+        labels = record.get("labels", [])
+        loss = judgment_loss(
+            {"logits": [logits], "candidates": [out["candidate_mapping"]]}, {"labels": [labels]}
+        )
+        assert loss.shape == () and torch.isfinite(loss) and loss.requires_grad
+        loss.backward()
+        active = contributing(labels, out["candidate_mapping"])
+        with_labels += bool(active)
+        for qid, tensor in logits.items():
+            if qid in active:
+                assert tensor.grad is not None and torch.isfinite(tensor.grad).all()
+                assert tensor.grad.abs().sum() > 0
+            else:
+                assert tensor.grad is None or torch.equal(tensor.grad, torch.zeros_like(tensor))
+    assert with_labels > 0
+
+
+def test_serialized_d0_stream_ticks_feed_the_loss(streams):
+    record = copy.deepcopy(streams[0])
+    out = serialize_request(record, WhitespaceTokenizer(), layout="stream_l1a")
+    per_tick = [judge_like_outputs(tick["candidate_mapping"], seed=tick["index"]) for tick in out["ticks"]]
+    loss = judgment_loss(
+        {"logits": per_tick, "candidates": [tick["candidate_mapping"] for tick in out["ticks"]]},
+        {"labels": [tick.get("labels", []) for tick in record["ticks"]]},
+    )
+    assert loss.shape == () and torch.isfinite(loss) and loss.item() > 0
+    loss.backward()
+    for tick, serialized, logits in zip(record["ticks"], out["ticks"], per_tick):
+        active = contributing(tick.get("labels", []), serialized["candidate_mapping"])  # 라벨 있는 질문만 gradient
+        for qid, tensor in logits.items():
+            if qid in active:
+                assert tensor.grad is not None and tensor.grad.abs().sum() > 0
+            else:
+                assert tensor.grad is None or torch.equal(tensor.grad, torch.zeros_like(tensor))
+
+    first = out["ticks"][0]  # 한 틱만 떼어도 같은 경로다
+    one = judgment_loss(
+        {"logits": [judge_like_outputs(first["candidate_mapping"], seed=99)], "candidates": [first["candidate_mapping"]]},
+        {"labels": [record["ticks"][0]["labels"]]},
+    )
+    assert one.shape == () and torch.isfinite(one) and one.requires_grad
