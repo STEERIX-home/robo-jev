@@ -185,6 +185,17 @@ class GatedDeltaNetLayer(nn.Module):
 
     # -- 조각 계산 --
 
+    def _conv(self, seq: Tensor) -> Tensor:
+        """depthwise causal conv: ``seq [B, C, K-1+T]`` → ``[B, C, T]`` — 창을 펼쳐 가중치와 곱하고 더한다.
+
+        grouped ``F.conv1d``와 같은 계산이지만 창을 ``unfold``로 펼쳐 곱·합한다. ``step``의 한 토큰 창
+        계산·transient 경로의 gather 계산과 **같은 op**라 세 경로가 비트 단위로 같고, grouped conv1d의
+        스레드 동기화 고정 비용(10 스레드에서 호출당 3.5ms, 입력 길이와 무관)이 없다(Task 5 보고 §4.4).
+        conv1d와는 합산 순서가 달라 FP32 잡음(≈1e-6) 안에서 같다(검사).
+        """
+        windows = seq.unfold(2, self.kernel, 1)  # [B, C, T, K] (view)
+        return (windows * self.conv_weight[None, :, None, :]).sum(dim=-1) + self.conv_bias[None, :, None]
+
     def _split(self, mixed: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """conv 뒤의 채널 ``[..., C]`` → q ``[..., H, dk]``, k, v ``[..., H, dv]`` (정규화 포함)."""
         H, dk, dv = self.heads, self.head_k, self.head_v
@@ -249,7 +260,7 @@ class GatedDeltaNetLayer(nn.Module):
             if tuple(transient.shape) != (T,):
                 raise ValueError(f"transient: [T]={T}이어야 한다 (받은 모양: {tuple(transient.shape)})")
         if transient is None or not bool(transient.any()):
-            conv = F.conv1d(seq, self.conv_weight[:, None, :], self.conv_bias, groups=self.channels)
+            conv = self._conv(seq)
             history = seq[:, :, -(K - 1) :]
         else:
             # 토큰 t의 창 = 마지막 K-1개의 **남는(non-transient)** 토큰 + 자기 자신

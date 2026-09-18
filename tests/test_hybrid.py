@@ -117,6 +117,44 @@ def test_delta_step_by_step_matches_whole_sequence(delta_layer):
     assert final["recurrent"].shape == (2, 2, 8, 8) and final["conv"].shape == (2, 3 * 8 * 2, 3)
 
 
+def test_delta_conv_stage_matches_grouped_conv1d_within_fp32_and_the_step_window_exactly(delta_layer):
+    """conv 단계 = 창을 unfold로 펼쳐 곱하고 더한 것 (Task 5 수정 라운드 1, Minor 2).
+
+    이전 경로(grouped ``F.conv1d`` — 여기 검사에만 남긴다)와는 합산 순서·FMA가 달라 FP32 잡음 안에서만
+    같다(어느 정식화도 conv1d와 비트 단위로 같지 않음을 실측: unfold-sum·순차 합·einsum·matmul 모두
+    ≈1e-6). 대신 ``step``의 한 토큰 창 계산·transient 경로의 gather 계산과는 **같은 op**라 비트 단위로
+    같다 — 그 성질을 여기서 고정한다.
+    """
+    import torch.nn.functional as F
+
+    layer = delta_layer
+    C, K = layer.channels, layer.kernel
+    generator = torch.Generator().manual_seed(7)
+    for batch, length in ((1, 1), (3, 5), (2, 200)):
+        seq = torch.randn(batch, C, K - 1 + length, generator=generator)
+        old = F.conv1d(seq, layer.conv_weight[:, None, :], layer.conv_bias, groups=C)  # 이전 경로 (검사에만)
+        new = layer._conv(seq)
+        assert new.shape == old.shape == (batch, C, length)
+        torch.testing.assert_close(new, old, rtol=1e-6, atol=1e-5)
+        assert (new - old).abs().max() < 5e-6
+        # step의 창 계산과 비트 단위로 같다
+        for t in range(length):
+            window = seq[:, :, t : t + K]
+            by_step = (window * layer.conv_weight).sum(dim=-1) + layer.conv_bias
+            assert torch.equal(new[:, :, t], by_step)
+        # transient 경로(gather)와도 같다
+        index = torch.tensor([[t + k for k in range(K)] for t in range(length)], dtype=torch.long)
+        gathered = seq[:, :, index]
+        by_gather = (gathered * layer.conv_weight[None, :, None, :]).sum(dim=-1) + layer.conv_bias[None, :, None]
+        assert torch.equal(new, by_gather)
+    # transient 표지가 전부 False인 forward는 표지 없는 forward와 비트 단위로 같다
+    x = torch.randn(2, 9, 16, generator=generator)
+    state = random_delta_state(layer, 2, seed=3)
+    plain, plain_state = layer(x, state)
+    flagged, flagged_state = layer(x, state, transient=torch.zeros(9, dtype=torch.bool))
+    assert torch.equal(plain, flagged) and torch.equal(plain_state["conv"], flagged_state["conv"])
+
+
 def test_delta_forward_never_writes_the_input_state_in_place(delta_layer):
     x = torch.randn(1, 5, 16)
     state = random_delta_state(delta_layer, 1, seed=3)
