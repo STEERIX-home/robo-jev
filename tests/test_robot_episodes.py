@@ -110,12 +110,16 @@ def test_smoke_records_pass_the_contract_and_the_automatic_qa(smoke):
 
 
 def test_smoke_e0_completes_with_a_one_second_tail(smoke):
+    """꼬리는 안정된 완료 1초다: 마지막 11틱이 모두 done 게이트다."""
     record = smoke["records"][("E0", 17)]
     outcome = record["provenance"]["outcome"]
     assert outcome["done"] is True and outcome["target_inside_zone"] is True and outcome["holding"] is None
     assert outcome["terminated"] == "done_tail"
-    assert len(record["ticks"]) == outcome["done_tick"] + 1 + CONFIG["episode"]["tail_ticks_after_done"]
-    assert record["ticks"][-1]["usage"]["gate"] == "done"
+    tail = CONFIG["episode"]["tail_ticks_after_done"]
+    assert len(record["ticks"]) == outcome["done_tick"] + 1 + tail
+    assert all(tick["usage"]["gate"] == "done" for tick in record["ticks"][-(tail + 1):])
+    assert record["ticks"][-(tail + 2)]["usage"]["gate"] != "done"
+    assert outcome["first_done_tick"] == outcome["done_tick"]
 
 
 def test_smoke_records_are_split_by_family_and_carry_provenance_and_versions(smoke):
@@ -270,12 +274,15 @@ def test_aggregate_counts_gates_stops_and_switches_per_episode(smoke):
     counts = aggregate(records)
     assert counts["episodes"] == 2
     assert counts["gates"].get("done", 0) >= CONFIG["episode"]["tail_ticks_after_done"] + 1
-    assert set(counts) >= {"ticks", "questions", "labels", "splits", "gates", "stops", "switches", "conflicts", "per_episode"}
+    assert set(counts) >= {"ticks", "questions", "labels", "splits", "gates", "stops", "switches", "main_changes", "conflicts", "per_episode"}
     per = {entry["episode_id"]: entry for entry in counts["per_episode"]}
     e0 = per[episode_id("E0", 17)]
     assert e0["switches"] >= 1 and e0["ticks"] == len(smoke["records"][("E0", 17)]["ticks"])
+    # 채택된 주 결정이 실제로 바뀐 틱: 첫 채택 … 파지 → done 게이트의 hold — 게이트 꼬리는 한 번만 센다.
+    assert 1 <= e0["main_changes"] <= 3
     assert sum(entry["switches"] for entry in per.values()) == counts["switches"]
     assert sum(entry["stops"] for entry in per.values()) == counts["stops"]
+    assert sum(entry["main_changes"] for entry in per.values()) == counts["main_changes"]
 
 
 def test_the_manifest_has_the_documented_schema(smoke):
@@ -294,7 +301,7 @@ def test_the_manifest_has_the_documented_schema(smoke):
     assert set(manifest["bytes"]) == {"total", "per_episode_mean_mb", "per_tick_mean_kb"}
     assert set(manifest["timing"]) >= {"wall_s_per_episode_mean", "episodes_per_hour", "projected_hours_for_target", "target_episodes"}
     assert manifest["timing"]["episodes_per_hour"] > 0
-    assert set(manifest["decisions"]) == {"gates", "stops", "switches", "conflicts", "per_episode"}
+    assert set(manifest["decisions"]) == {"gates", "stops", "switches", "main_changes", "conflicts", "per_episode"}
     assert len(manifest["files"]) == 2
     for entry in manifest["files"]:
         assert set(entry) == {"path", "episode_id", "profile", "seed", "split", "origin_group", "done", "ticks", "bytes", "sha256"}

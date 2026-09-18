@@ -89,6 +89,7 @@ class Expert:
         self.push_segment_mm = float(harness["candidates"]["push_segment_mm"])
         self.push_contact_mm = float(harness["candidates"]["push_contact_mm"])
         self.planner_margin_mm = float(harness["planner"]["margin_mm"])
+        self.forbidden_margin_mm = float(harness["planner"]["forbidden_margin_mm"])
 
     @classmethod
     def from_config_path(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> Expert:
@@ -644,14 +645,21 @@ class Expert:
         return {"choice": choice, "kind": "hold", "reason": "blocked_no_detour", "alternatives": []}
 
     def _hand_inside_obstacle(self, state: dict[str, Any], value: dict[str, Any]) -> bool:
-        """말단이 대상·든 물체가 아닌 물체의 외접 구 + 여유 안에 있는가 (모든 구간이 시작점에서 막힌다)."""
+        """말단이 대상·든 물체가 아닌 물체의 장애물 구 안에 있는가 (모든 구간이 시작점에서 막힌다).
+
+        하네스와 같은 반지름이다: 외접 구 + 여유, 금지 접촉 물체는 `forbidden_margin_mm`만큼 더.
+        """
         ee = [float(item) for item in state["robot"]["ee_pose_mm"]]
         skip = {str(value.get("target")), str(state["robot"].get("holding"))}
+        forbidden = set(read_goal(state).forbidden)
         for entry in state.get("objects") or ():
             if str(entry["id"]) in skip:
                 continue
             centre = [float(item) for item in entry["pose_mm"]]
-            if math.dist(ee, centre) < circumradius_mm(entry["obb_mm"]) + self.planner_margin_mm:
+            limit = circumradius_mm(entry["obb_mm"]) + self.planner_margin_mm
+            if str(entry["id"]) in forbidden or "forbidden" in (entry.get("attributes") or ()):
+                limit += self.forbidden_margin_mm
+            if math.dist(ee, centre) < limit:
                 return True
         return False
 

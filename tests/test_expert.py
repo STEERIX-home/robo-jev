@@ -563,6 +563,26 @@ def test_blocked_without_a_detour_holds_unless_the_hand_itself_is_inside_an_obst
     assert out["expert_meta"]["aux"]["path"]["reason"] == "hand_inside_obstacle"
 
 
+def test_retreat_when_the_hand_holding_the_target_sits_inside_a_forbidden_objects_inflated_sphere():
+    """금지 물체는 하네스에 `forbidden_margin_mm`만큼 더 큰 장애물이다. 파지 뒤 물체가 그쪽으로 밀려
+    들기 구간의 시작점이 그 넓힌 구 안에 들면 어떤 경유점도 없다(E0 seed 110의 들기 정지). 손이 그
+    안에 있으면 물러난다 — 기본 여유로만 보면 '안'이 아니어서 영영 기다린다."""
+    obs = scene(objects=[
+        obj("o0", (474, 97, -85), obb_mm=[54, 54, 32]),
+        obj("o2", (505, -23, -84), colour="green", obb_mm=[42, 44, 56], attributes=["forbidden"]),
+    ])
+    obs["goal"].update(forbidden_refs=["o2"], fragile_refs=[])
+    obs["robot"].update(ee_pos_mm=[474, 97, -80], holding="o0", gripper_mm=30)
+    request, commitment = committed_request(GRASP.replace("o0:top:zoneL", "o0:top:zoneL"), obs=obs)
+    assert request["request"]["commitment"]["phase"] == "lift"
+    derived = next(e["derived"] for e in request["request"]["candidates"]["q_main"] if e["key"] == GRASP)
+    assert "path blocked" in derived
+    kinds = {entry["id"]: entry["kind"] for entry in request["request"]["candidates"]["q_path"]}
+    out = expert().act(request, commitment, obs)
+    assert kinds[top(out["q_path"])] == "retreat"
+    assert out["expert_meta"]["aux"]["path"]["reason"] == "hand_inside_obstacle"
+
+
 def test_a_clear_approach_outranks_a_larger_gain_for_a_blocker_push():
     """접촉점이 닿을 수 있는 방향들 가운데서는 접근이 비어 있는 쪽이 먼저다(이득은 그다음). 후보 설명의
     `path`만 바꿔 순위 규칙을 본다: −x의 접근만 비어 있으면 키 순으로 앞서는 +x 대신 −x다."""

@@ -18,7 +18,8 @@
 4. `done` 게이트 뒤 1초(10틱)의 꼬리까지, 아니면 30초까지 돈다.
 
 레코드는 :func:`robo_jev.contracts.validate_record`를 지나야 하고, 한 에피소드가 JSONL 한 줄
-(`episodes/<id>.jsonl`)이며 `manifest.json`이 편수·틱·프로파일별·split별·버전·시간을 적는다.
+(`episodes/<id>/streams.jsonl` — 자동 QA가 찾는 이름)이며 `manifest.json`이 편수·틱·프로파일별·
+split별·버전·시간을 적는다.
 """
 
 from __future__ import annotations
@@ -189,7 +190,9 @@ def generate_episode(
         harness = RobotHarness(harness_config)
         commitment = None
         history = None
-        done_tick = None
+        done_tick = None  # 지금 이어지는 done 연속 구간의 첫 틱
+        first_done_tick = None
+        done_streak = 0
         terminated = "max_ticks"
         expert_meta: list[dict[str, Any]] = []
         ticks = 0
@@ -220,9 +223,18 @@ def generate_episode(
             ticks = tick + 1
             commitment = out["commitment"]
             history = {"adopted": out["adopted"], "ack": ack, "gate": out["gate"]}
-            if out["gate"] == "done" and done_tick is None:
-                done_tick = tick
-            if done_tick is not None and tick - done_tick >= tail_ticks:
+            # 꼬리는 **안정된** 완료 1초다: done 게이트가 이어지는 동안만 센다. 파지 판정이 한 틱 흔들리거나
+            # 외란이 대상을 영역 밖으로 밀면 연속이 끊기고 에피소드는 계속된다.
+            if out["gate"] == "done":
+                done_streak += 1
+                if done_tick is None:
+                    done_tick = tick
+                if first_done_tick is None:
+                    first_done_tick = tick
+            else:
+                done_streak = 0
+                done_tick = None
+            if done_streak >= tail_ticks + 1:
                 terminated = "done_tail"
                 break
             if scene.get("episode_over"):
@@ -231,7 +243,8 @@ def generate_episode(
 
         _tolerate_gripper_transitions(record, int((expert.label_config or {}).get("gripper_transition_tolerance_ticks", 0)))
         wall_s = time.perf_counter() - started
-        outcome = _outcome(scene, plan, env, done_tick, ticks, terminated)
+        outcome = _outcome(scene, plan, env, done_tick if terminated == "done_tail" else None, ticks, terminated)
+        outcome["first_done_tick"] = first_done_tick
         versions = {"expert": expert.version, "generator": GENERATOR_VERSION, "sim": env.serializer_version}
         provenance = {
             "generator": GENERATOR_VERSION,
@@ -313,7 +326,8 @@ def _outcome(scene: dict[str, Any], plan: ScenePlan, env: Any, done_tick: int | 
 
 
 def episode_path(out: Path, profile: str, seed: int) -> Path:
-    return out / "episodes" / f"{episode_id(profile, seed)}.jsonl"
+    """`episodes/<id>/streams.jsonl` — 자동 QA(`python -m robo_jev.data.validate`)가 찾는 이름이다."""
+    return out / "episodes" / episode_id(profile, seed) / "streams.jsonl"
 
 
 def write_episode(record: dict[str, Any], out: Path) -> Path:
@@ -329,7 +343,7 @@ def read_episodes(out: Path) -> list[tuple[Path, dict[str, Any]]]:
     if not folder.is_dir():
         return []
     found = []
-    for path in sorted(folder.glob("*.jsonl")):
+    for path in sorted(folder.glob("*/streams.jsonl")):
         for line in path.read_text(encoding="utf-8").splitlines():
             if line.strip():
                 found.append((path, json.loads(line)))
@@ -423,6 +437,7 @@ def build_manifest(
             "gates": counts["gates"],
             "stops": counts["stops"],
             "switches": counts["switches"],
+            "main_changes": counts["main_changes"],
             "conflicts": counts["conflicts"],
             "per_episode": counts["per_episode"],
         },

@@ -179,12 +179,14 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
     게이트·정지·전환·충돌 횟수 (docs/02 §9의 결정 안정성 지표의 재료).
 
     게이트는 틱의 `usage.gate`(생성기가 적는다)에서, 정지·전환은 `adopted`에서, 충돌은
-    `usage.records.conflict`에서 센다. 셋 다 비입력 필드다.
+    `usage.records.conflict`에서 센다. 셋 다 비입력 필드다. `switches`는 하네스가 전환 틱이라고
+    적은 것(게이트 틱과 hold 재채택도 들어간다)이고, `main_changes`는 채택된 주 결정이 직전 틱과
+    다른 틱 수다 — 결정 안정성 지표(docs/02 §9)에 가까운 쪽은 후자다.
     """
     episodes = ticks = questions = labels = 0
     splits: dict[str, int] = {}
     gates: dict[str, int] = {}
-    stops = switches = conflicts = 0
+    stops = switches = conflicts = main_changes = 0
     per_episode: list[dict[str, Any]] = []
     for record in records:
         if record.get("schema_version") != SCHEMA_STREAM:
@@ -199,8 +201,10 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
             "gates": {},
             "stops": 0,
             "switches": 0,
+            "main_changes": 0,
             "conflicts": 0,
         }
+        previous_main: str | None = None
         for tick in record.get("ticks") or ():
             ticks += 1
             summary["ticks"] += 1
@@ -215,11 +219,17 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
                 summary["stops"] += 1
             if adopted.get("switch"):
                 summary["switches"] += 1
+            main = adopted.get("main")
+            if previous_main is not None and main is not None and main != previous_main:
+                summary["main_changes"] += 1
+            if main is not None:
+                previous_main = main
             summary["conflicts"] += int((usage.get("records") or {}).get("conflict", 0))
         for gate, count in summary["gates"].items():
             gates[gate] = gates.get(gate, 0) + count
         stops += summary["stops"]
         switches += summary["switches"]
+        main_changes += summary["main_changes"]
         conflicts += summary["conflicts"]
         summary["gates"] = dict(sorted(summary["gates"].items()))
         per_episode.append(summary)
@@ -232,6 +242,7 @@ def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
         "gates": dict(sorted(gates.items())),
         "stops": stops,
         "switches": switches,
+        "main_changes": main_changes,
         "conflicts": conflicts,
         "per_episode": per_episode,
     }
