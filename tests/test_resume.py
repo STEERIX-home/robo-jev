@@ -6,8 +6,9 @@
 누적 gradient·상태는 tensor 그대로 저장·복원된다). 에피소드 **구간 도중**의 중단(구간 위치와 넘겨받은
 공통 상태의 복원)도 같은 기준으로 본다.
 
-검사용 설정은 에피소드를 20틱(2초)으로 잘라 1초 구간 둘로 나누고, 로봇 토큰 비중 0.7로 두어 두 번째
-에피소드가 재개한 뒤(step 17)에 뽑히게 한다 — 재개한 프로세스가 구간 학습도 실제로 지난다.
+step마다 로봇 스트림 단위(에피소드)와 비로봇 단위(토큰 예산까지 묶은 단일 요청들)가 둘 다 들므로
+(docs/04 §2) 검사용 설정은 에피소드를 4틱(0.4초)으로 잘라 0.2초 구간 둘로 나눈다 — 20 step 모두가
+구간 학습·재개를 지난다.
 """
 
 import copy
@@ -45,18 +46,18 @@ def base_config(root) -> dict:
         "dataset_manifest": str(D0_MANIFEST),
         "splits": ["train"],
         "tokenizer": "whitespace",
-        "stream_chunk_seconds": 1,
+        "stream_chunk_seconds": 0.2,
         "stream_window_ticks": 30,
-        "stream_max_ticks": 20,
+        "stream_max_ticks": 4,
         "trainable": "text_backbone_and_readout",
         "gradient_accumulation": 2,
         "microbatch_states_per_rank": 1,
+        "nonrobot_tokens_per_unit": 512,
         "max_steps": 20,
         "warmup_ratio": 0.1,
         "seed": 17,
         "torch_threads": 1,
         "artifacts_dir": str(root / "runs"),
-        "sampler": {"robot_token_share": 0.7},
     }
 
 
@@ -126,8 +127,9 @@ def continuous(root) -> dict:
     assert summary["status"] == "completed" and summary["step"] == 20
     state = load_checkpoint(summary["checkpoint"])
     metrics = metrics_of(root, "continuous-20")
-    stream_steps = [s["step"] for s in metrics["steps"] if s["items"]["stream"]]
-    assert stream_steps == [1, 17]  # 에피소드가 앞 절반과 뒤 절반에 하나씩
+    assert all(s["items"]["stream"] == 1 and s["items"]["single"] >= 3 for s in metrics["steps"])  # step마다 두 종류
+    assert all([u["kind"] for u in s["units"]] == ["stream", "single"] for s in metrics["steps"])
+    assert all(abs(s["loss_share"]["domain"]["robot"] - 0.6) < 1e-6 for s in metrics["steps"])
     return {"state": state, "metrics": metrics}
 
 
@@ -160,7 +162,8 @@ def test_resume_in_the_middle_of_an_episodes_chunk_sequence(root, continuous):
     assert progress is not None and progress["unit_index"] == 0 and progress["chunk_index"] == 1
     assert progress["units"][0]["kind"] == "stream" and len(progress["units"]) == 2
     carried = progress["carried_state"]
-    assert carried["tick"] == 9 and carried["position"] > 0 and carried["cache_ticks"].shape[0] == carried["kv"][0]["k"].shape[1]
+    assert carried["tick"] == 1 and carried["position"] > 0 and carried["cache_ticks"].shape[0] == carried["kv"][0]["k"].shape[1]
+    assert progress["shares"] == {"robot": 0.6, "non_robot": 0.4} and progress["denominators"]["non_robot"] >= 3
     assert not carried["delta"][0]["recurrent"].requires_grad
     assert progress["grads"] and all(torch.isfinite(g).all() for g in progress["grads"].values())
     assert progress["accumulators"]["chunks"] == 1 and progress["accumulators"]["items"] == {"single": 0, "stream": 1}

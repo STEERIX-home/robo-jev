@@ -28,6 +28,7 @@ from robo_jev.train import (
     lr_factor,
     plan_episode,
     resolve_config,
+    run_single_unit,
     run_stream_chunk,
     train,
 )
@@ -52,6 +53,7 @@ def tiny_config(tmp_path, **overrides) -> dict:
         "trainable": "text_backbone_and_readout",
         "gradient_accumulation": 2,
         "microbatch_states_per_rank": 1,
+        "nonrobot_tokens_per_unit": 512,
         "max_steps": 2,
         "warmup_ratio": 0.5,
         "seed": 17,
@@ -106,16 +108,75 @@ def test_full_training_step_gives_every_backbone_tensor_gradient_and_changes_it(
         after = snapshot(trainer.model)
         for name in before:
             assert not torch.equal(before[name], after[name]), name
-        assert metrics["items"] == {"single": 1, "stream": 1}  # 첫 단위는 에피소드(토큰 비중 0 < 0.6), 그다음 단일 요청
-        assert metrics["chunks"] == 3  # 20틱 에피소드 = 1초 구간 2개 + 단일 요청 1
+        # step = 로봇 단위(에피소드, 1초 구간 2개) + 비로봇 단위(512 토큰까지 묶은 단일 요청들, forward 1번)
+        assert [u["kind"] for u in metrics["units"]] == ["stream", "single"]
+        assert metrics["items"]["stream"] == 1 and metrics["items"]["single"] >= 3 and metrics["chunks"] == 3
+        assert metrics["units"][1]["tokens"] <= 512 and metrics["valid_states"]["single"] == metrics["items"]["single"]
         assert set(metrics["loss_by_type"]) <= {"choice", "boolean", "ordinal"}
-        assert abs(sum(metrics["loss_share"]["domain"].values()) - 1.0) < 1e-9
+        # 유효 loss 비중 0.6/0.4: 적용된 계수 질량이 정확히 그 값이고 step 손실 = 0.6·L_robot + 0.4·L_nonrobot
+        share = metrics["loss_share"]["domain"]
+        assert abs(share["robot"] - 0.6) < 1e-6 and abs(share["non_robot"] - 0.4) < 1e-6
+        assert metrics["shares"] == {"robot": 0.6, "non_robot": 0.4}
+        by_domain = metrics["loss_by_domain"]
+        assert metrics["loss"] == pytest.approx(0.6 * by_domain["robot"] + 0.4 * by_domain["non_robot"], rel=1e-6)
         assert abs(sum(metrics["loss_share"]["tick_class"].values()) - 1.0) < 1e-9
-        assert metrics["loss_share"]["material"]["existing"] == 1.0
+        assert metrics["loss_share"]["material"]["existing"] == pytest.approx(1.0)
+        contribution = metrics["loss_contribution"]["domain"]
+        assert abs(sum(contribution.values()) - 1.0) < 1e-9 and contribution["robot"] != pytest.approx(0.6, abs=1e-3)
         assert metrics["tokens"]["robot"] > metrics["tokens"]["non_robot"] > 0
         assert metrics["tokens"]["total"] == metrics["tokens"]["robot"] + metrics["tokens"]["non_robot"]
+        assert metrics["token_share"]["robot"] == pytest.approx(metrics["tokens"]["robot"] / metrics["tokens"]["total"])
         assert metrics["lr"]["backbone"] == pytest.approx(1e-5 * lr_factor(1, max_steps=1, warmup_ratio=0.5))
-        assert metrics["sampler"]["token_share"]["robot"] > 0.6
+        assert metrics["sampler"]["token_share"]["robot"] > 0.6  # 토큰 비중은 기록만 (에피소드가 크다)
+
+
+def test_every_step_mixes_robot_and_nonrobot_units(tmp_path):
+    """docs/04 §2 (판정 e086c90): optimizer step마다 로봇 스트림 단위와 비로봇 단위가 둘 다 든다."""
+    with Trainer(tiny_config(tmp_path, max_steps=3, gradient_accumulation=3, stream_max_ticks=4, stream_chunk_seconds=0.2)) as trainer:
+        for _ in range(3):
+            metrics = trainer.run_step()
+            kinds = [u["kind"] for u in metrics["units"]]
+            assert kinds == ["stream", "single", "stream"]
+            assert {"stream", "single"} <= set(kinds)
+            assert metrics["items"]["stream"] == 2 and metrics["items"]["single"] >= 3
+            assert abs(metrics["loss_share"]["domain"]["robot"] - 0.6) < 1e-6
+    with pytest.raises(ValueError, match="gradient_accumulation"):
+        Trainer(tiny_config(tmp_path, gradient_accumulation=1))
+
+
+def test_packed_nonrobot_unit_loss_equals_the_mean_of_singles_run_one_by_one(tmp_path):
+    """비로봇 단위(한 forward에 묶은 단일 요청들)의 손실 = 상태를 하나씩 돌린 손실의 평균 (FP32)."""
+    with Trainer(tiny_config(tmp_path, nonrobot_tokens_per_unit=600)) as trainer:
+        unit = trainer.sampler.draw("non_robot")
+        items = [trainer.items[index] for index in unit.items]
+        assert len(items) >= 4 and unit.tokens <= 600
+        packed = run_single_unit(trainer.model, items, scale=1.0 / len(items))
+        assert packed.stats["valid_states"] == len(items) and packed.loss.requires_grad
+        alone = [run_single_unit(trainer.model, [item], scale=1.0).value for item in items]
+        assert packed.value == pytest.approx(sum(alone) / len(alone), rel=1e-5, abs=1e-6)
+        for entry, value in zip(packed.stats["per_item"], alone):
+            assert entry["loss"] == pytest.approx(value, rel=1e-5, abs=1e-6)
+
+
+def one_sided_manifest(tmp_path, name: str) -> str:
+    """D0 manifest에서 파일 하나만 남긴 manifest (같은 sha256)."""
+    manifest = json.loads(D0_MANIFEST.read_text(encoding="utf-8"))
+    manifest["files"] = {name: manifest["files"][name]}
+    (tmp_path / name).write_bytes(D0_MANIFEST.with_name(name).read_bytes())
+    path = tmp_path / "one_sided.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    return str(path)
+
+
+def test_one_sided_data_gives_the_present_kind_the_whole_share(tmp_path):
+    singles_only = tiny_config(tmp_path, dataset_manifest=one_sided_manifest(tmp_path, "d0.jsonl"), gradient_accumulation=1, max_steps=1)
+    with Trainer(singles_only) as trainer:
+        metrics = trainer.run_step()
+        assert [u["kind"] for u in metrics["units"]] == ["single"] and metrics["items"]["stream"] == 0
+        assert metrics["shares"] == {"robot": 0.0, "non_robot": 1.0}
+        assert abs(metrics["loss_share"]["domain"]["non_robot"] - 1.0) < 1e-6 and metrics["loss_share"]["domain"]["robot"] == 0.0
+        assert metrics["loss"] == pytest.approx(metrics["loss_by_domain"]["non_robot"], rel=1e-6)
+        assert metrics["loss_by_domain"]["robot"] is None and metrics["loss_share"]["tick_class"] == {}
 
 
 # --------------------------------------------------------------------------
@@ -162,10 +223,11 @@ def episode(single_thread):
 def chunked(episode):
     """구간 0을 돌리고, 경계 상태를 detach(+ leaf로 gradient 관찰)해 구간 1을 이어 돌린 결과."""
     judge, item, plan = episode["judge"], episode["item"], episode["plan"]
-    first = run_stream_chunk(judge, item, plan.chunks[0], carried=None, plan=plan)
+    scale = 1.0 / plan.normaliser  # 에피소드 하나의 정규화된 손실 Σ w_t L_t / Σ w_t
+    first = run_stream_chunk(judge, item, plan.chunks[0], carried=None, plan=plan, scale=scale)
     first.state.delta[0]["recurrent"].retain_grad()
     carried = detach_stream_state(first.state, requires_grad=True)
-    second = run_stream_chunk(judge, item, plan.chunks[1], carried=carried, plan=plan)
+    second = run_stream_chunk(judge, item, plan.chunks[1], carried=carried, plan=plan, scale=scale)
     return {"first": first, "carried": carried, "second": second}
 
 
@@ -243,7 +305,8 @@ def test_branch_gradient_merges_into_the_carried_state_and_stops_at_the_detach_b
 def test_sum_of_chunk_losses_equals_the_whole_episode_loss(episode, chunked):
     """(c) 구간별 손실(에피소드 분모로 정규화)의 합 == 한 구간으로 돌린 에피소드 전체 손실 (FP32)."""
     judge, item = episode["judge"], episode["item"]
-    whole = run_stream_chunk(judge, item, (0, 100), carried=None, plan=episode["plan"])
+    plan = episode["plan"]
+    whole = run_stream_chunk(judge, item, (0, 100), carried=None, plan=plan, scale=1.0 / plan.normaliser)
     parts = chunked["first"].value + chunked["second"].value
     assert chunked["first"].value > 0 and chunked["second"].value > 0
     torch.testing.assert_close(torch.tensor(parts), torch.tensor(whole.value), **FP32)
@@ -252,6 +315,8 @@ def test_sum_of_chunk_losses_equals_the_whole_episode_loss(episode, chunked):
     by_class = whole.stats["loss_by_class"]
     assert set(by_class) <= {"steady", "event", "goal_change", "other"} and by_class["goal_change"] > 0
     assert abs(sum(by_class.values()) - whole.value) < 1e-6
+    assert whole.stats["weight_sum"] == pytest.approx(plan.normaliser) and whole.stats["loss_sum"] == pytest.approx(whole.value * plan.normaliser, rel=1e-6)
+    assert sum(whole.stats["weight_by_class"].values()) == pytest.approx(1.0)  # 적용된 계수 질량 (scale = 1/Σw)
 
 
 def test_layout_prefix_keeps_the_leading_ticks_and_the_prefix(episode):
@@ -294,6 +359,9 @@ def test_config_rejects_what_the_cpu_path_does_not_implement(tmp_path):
         ("optimizer", "sgd", "optimizer"),
         ("dtype", "bfloat16", "dtype"),
         ("gradient_accumulation", 0, "gradient_accumulation"),
+        ("microbatch_states_per_rank", 2, "microbatch_states_per_rank"),
+        ("robot_loss_share", 1.5, "robot_loss_share"),
+        ("nonrobot_tokens_per_unit", 0, "nonrobot_tokens_per_unit"),
         ("warmup_ratio", 1.5, "warmup_ratio"),
         ("layout", {"single": "stream_l1a"}, "layout"),
         ("unknown_key", 1, "unknown_key"),
@@ -310,16 +378,18 @@ def test_config_rejects_what_the_cpu_path_does_not_implement(tmp_path):
 
 
 def test_cli_runs_the_shipped_config_for_three_steps_and_writes_checkpoint_and_metrics(tmp_path):
-    """`python -m robo_jev.train --config configs/train/tiny_cpu.yaml` (max_steps 3; 검사 시간 때문에 에피소드는 20틱)."""
+    """`python -m robo_jev.train --config configs/train/tiny_cpu.yaml` (max_steps 3; 검사 시간 때문에 에피소드 20틱·묶음 512 토큰)."""
     shipped = REPO / "configs" / "train" / "tiny_cpu.yaml"
     loaded = yaml.safe_load(shipped.read_text(encoding="utf-8"))
-    assert loaded["max_steps"] == 30 and loaded["stream_chunk_seconds"] == 5 and loaded["stream_window_ticks"] == 30
+    assert loaded["stream_chunk_seconds"] == 5 and loaded["stream_window_ticks"] == 30 and loaded["stream_max_ticks"] is None
     assert loaded["trainable"] == "text_backbone_and_readout" and loaded["execution_backend"] == "independent_paths"
+    assert loaded["robot_loss_share"] == 0.6 and loaded["nonrobot_tokens_per_unit"] == 8192 and loaded["gradient_accumulation"] == 2
     result = subprocess.run(
         [
             sys.executable, "-m", "robo_jev.train", "--config", str(shipped),
             "--set", "max_steps=3", "--set", "run_id=cli-3", "--set", f"artifacts_dir={tmp_path / 'runs'}",
             "--set", "stream_max_ticks=20", "--set", "stream_chunk_seconds=1", "--set", "checkpoint_every=null",
+            "--set", "nonrobot_tokens_per_unit=512",
         ],  # fmt: skip
         capture_output=True, text=True, cwd=REPO,
     )
@@ -331,7 +401,8 @@ def test_cli_runs_the_shipped_config_for_three_steps_and_writes_checkpoint_and_m
     assert (run_dir / "checkpoint.pt").is_file() and (run_dir / "metrics.json").is_file()
     metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
     assert [m["step"] for m in metrics["steps"]] == [1, 2, 3] and metrics["status"] == "completed"
-    assert metrics["steps"][0]["items"] == {"single": 3, "stream": 1} and metrics["steps"][0]["chunks"] == 5
+    assert [u["kind"] for u in metrics["steps"][0]["units"]] == ["stream", "single"] and metrics["steps"][0]["chunks"] == 3
+    assert all(abs(m["loss_share"]["domain"]["robot"] - 0.6) < 1e-6 for m in metrics["steps"])
     assert metrics["manifest"]["serializer_version"] == "s0.2" and metrics["manifest"]["question_set"]["id"] == "qs-v0"
     assert metrics["manifest"]["dataset_manifest"]["sha256"] and metrics["manifest"]["git"]["sha"]
     assert metrics["config"]["max_steps"] == 3 and metrics["config"]["checkpoint_every"] == 3

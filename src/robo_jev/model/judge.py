@@ -17,9 +17,10 @@ logits의 k번째는 그 질문의 **요청 순서 k번째 후보**이고 id는 
 
 **두 실행 backend, 같은 readout.**
 
-* ``state_first`` (L0, P0) — 질문 i마다 ``S + T_i``를 **독립 causal 경로**로 실행한다. Q개 경로를 오른쪽
-  padding한 한 배치로 돌리며(causal이라 padding은 앞 토큰에 영향이 없다) position은 직렬화의 것
-  (T_i는 ``len(S)``부터)이다. 경로가 독립이므로 질문 단독/묶음의 logits·loss·gradient가 같다.
+* ``state_first`` (L0, P0) — 질문 i마다 ``S + T_i``를 **독립 causal 경로**로 실행한다. 배치의 모든 상태의
+  경로를 오른쪽 padding한 **한 배치, 한 forward**로 돌리며(causal이라 padding은 앞 토큰에 영향이 없다)
+  position은 직렬화의 것(T_i는 ``len(S)``부터)이다. 경로가 독립이므로 질문 단독/묶음, 상태 단독/묶음의
+  logits·loss·gradient가 같다(상태 묶음은 FP32 안에서).
 * ``stream_l1a`` (L1-a) — :func:`robo_jev.model.stream.replay_layout`으로 prefix → 틱 몸통 한 번 →
   결정 위치마다 일시적 분기(fork/step). 정적 후보의 ``h_c``는 prefix hidden(윈도우 밖으로 내보내지
   않는다), 동적 후보는 그 틱 몸통의 hidden이다. ``from_scratch=True``면 같은 layout을 한 번의 forward
@@ -217,17 +218,20 @@ class Judge(nn.Module):
         return owned[0], decision + 1
 
     def _state_first(self, states: list[dict]) -> dict[str, Any]:
-        logits_all: list[dict[str, Tensor]] = []
-        candidates_all: list[dict[str, list[str]]] = []
-        question_ids_all: list[list[str]] = []
+        """모든 상태의 질문 경로를 **한 번의** backbone forward로 (경로는 독립이라 한 배치에 묶인다).
+
+        비로봇 단위 = 토큰 예산까지 묶은 단일 요청 microbatch(docs/04 §2)가 forward 하나로 돈다. 상태를
+        따로 돌린 것과 FP32 안에서 같다(padding·batch 크기에 따른 matmul 반올림 차이).
+        """
+        paths: list[tuple[list[int], list[int]]] = []  # 모든 상태의 경로 (행 = 전역 index)
+        plan: list[tuple[dict, list[tuple[str, int, int, list[int]]], list[tuple[str, int, int]]]] = []
         for layout in states:
             if layout.get("layout") != "state_first":
                 raise ValueError(f"states: layout이 state_first가 아니다 ({layout.get('layout')!r})")
             tokens, positions = layout["tokens"], layout["position"]
             S = int(layout["state_end"])
-            paths: list[tuple[list[int], list[int]]] = []
-            readouts: list[tuple[str, int, list[int]]] = []  # (qid, decision local, boundary locals)
-            branch_paths: list[tuple[str, int]] = []  # (qid, readout local) — 참고군 R
+            readouts: list[tuple[str, int, int, list[int]]] = []  # (qid, row, decision local, boundary locals)
+            branch_paths: list[tuple[str, int, int]] = []  # (qid, row, readout local) — 참고군 R
             for branch, qid in enumerate(layout["question_ids"]):
                 decision = int(layout["decision_positions"][qid])
                 t_start, t_end = self._question_span(layout, branch, decision)
@@ -237,22 +241,28 @@ class Judge(nn.Module):
                 boundaries = [int(b) for b in layout["candidate_boundaries"][qid]]
                 if self.readout == "pointer":
                     paths.append((path_tokens, path_positions))
-                    readouts.append((qid, local(decision), [local(b) for b in boundaries]))
+                    readouts.append((qid, len(paths) - 1, local(decision), [local(b) for b in boundaries]))
                 else:
                     for boundary in boundaries:
                         start, end = candidate_span(layout, boundary)
                         reread = tokens[start:end]
                         extra = list(range(path_positions[-1] + 1, path_positions[-1] + 1 + len(reread)))
                         paths.append((path_tokens + reread, path_positions + extra))
-                        branch_paths.append((qid, len(path_tokens) + len(reread) - 1))
-            hidden = self._run_paths(paths)
+                        branch_paths.append((qid, len(paths) - 1, len(path_tokens) + len(reread) - 1))
+            plan.append((layout, readouts, branch_paths))
+        hidden = self._run_paths(paths)
+
+        logits_all: list[dict[str, Tensor]] = []
+        candidates_all: list[dict[str, list[str]]] = []
+        question_ids_all: list[list[str]] = []
+        for layout, readouts, branch_paths in plan:
             logits: dict[str, Tensor] = {}
             if self.readout == "pointer":
-                for row, (qid, decision, boundaries) in enumerate(readouts):
+                for qid, row, decision, boundaries in readouts:
                     logits[qid] = self.pointer_logits(hidden[row, decision], hidden[row, boundaries])
             else:
                 rows: dict[str, list[Tensor]] = {}
-                for row, (qid, last) in enumerate(branch_paths):
+                for qid, row, last in branch_paths:
                     rows.setdefault(qid, []).append(hidden[row, last])
                 for qid in layout["question_ids"]:
                     logits[qid] = self.branch_logits(torch.stack(rows[qid]))

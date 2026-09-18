@@ -9,15 +9,19 @@ manifest 순서·줄 순서로 읽고(sha256 대조), `split`으로 거른 뒤 �
 
 **두 sampler 축 (docs/04 §2, §7; docs/09).**
 
-* 로봇/비로봇 — **토큰**으로 관리한다(시작 60/40). 단위를 뽑을 때마다 지금까지의 실현 로봇 토큰
-  비중이 목표보다 낮으면 로봇, 아니면 비로봇을 고른다(단위 하나의 크기 안에서 목표를 따른다).
+* 로봇/비로봇 — step마다 **둘 다** 넣는다(판정 e086c90, docs/04 §2): :meth:`MixedSampler.draw_step` 이
+  로봇 단위(에피소드 하나 = TBPTT 구간열), 비로봇 단위(단일 요청을 ``nonrobot_tokens_per_unit``까지
+  묶은 microbatch), 로봇, … 을 번갈아 뽑는다. 60/40은 학습 loop가 **step의 유효 loss 비중**으로 건다
+  (``0.6·L_robot + 0.4·L_nonrobot``); sampler는 실현 토큰 비중을 기록만 한다. 누적 토큰 비중을 좇는
+  규칙은 쓰지 않는다 — 에피소드 하나가 단일 요청 수백 개의 토큰이라 스트림이 굶는다(Task 5 실측).
   레코드의 분야는 태그(`provenance.domain`, 기본: 스트림 = robot, 단일 요청 = non_robot)로 정한다.
 * 기존 자료/오류 계열/새 의미 계열 — `70/20/10`, 레코드의 provenance 태그(`provenance.material`,
   없으면 기존 자료)로 나눈다. 비어 있는 묶음은 재정규화하고(D0/D1에서는 뒤의 두 묶음이 비어 있을
   수 있다) 실현 비중을 기록한다 — 실패하지 않는다.
 
-한 단위는 에피소드 하나(스트림 = accumulation 단위, docs/03 §5) 또는 단일 요청 ``microbatch`` 개다.
-묶음 안에서는 epoch마다 섞어 한 번씩 뽑는다. 모든 무작위성은 seed로 만든 `random.Random` 하나에서
+한 단위는 에피소드 하나(스트림 = accumulation 단위, docs/03 §5) 또는 토큰 예산까지 묶은 단일 요청들이다
+(예산을 넘기는 레코드는 되돌려 다음 단위에 넣으므로 epoch 안에서 잃는 레코드가 없다). 묶음 안에서는
+epoch마다 섞어 한 번씩 뽑는다. 모든 무작위성은 seed로 만든 `random.Random` 하나에서
 나오고, :meth:`MixedSampler.state_dict` 가 위치(뽑은 수·묶음별 순서·cursor·epoch·실현 토큰·RNG)를
 기본 자료형으로 돌려주어 재개할 수 있다.
 
@@ -59,6 +63,7 @@ __all__ = [
     "tick_class",
     "tick_weights",
     "valid_label_ticks",
+    "valid_single",
 ]
 
 #: 로봇/비로봇 축 (docs/04 §2).
@@ -130,6 +135,14 @@ def load_items(
     """manifest의 파일들을 읽어 직렬화된 :class:`Item` 목록으로 (모듈 설명 참조).
 
     ``stream_max_ticks``는 CPU 검사용이다 — 에피소드를 앞 N틱으로 자른다(실제 학습에서는 `None`).
+
+    **레코드는 여기서 계약 검증을 지난다.** :func:`~robo_jev.model.serialize.serialize_request` 가 먼저
+    :func:`robo_jev.contracts.validate_record` 를 부르므로(입력 영역의 비입력 키·라벨 구조·후보 참조를
+    거절), 잘못된 레코드가 학습 loop에 닿기 전의 **유일한** 관문이 이 적재다 — 학습 loop는 layout과
+    라벨을 그대로 믿는다. manifest의 sha256 대조와 JSONL 읽기는 :mod:`robo_jev.data` 의 것
+    (`data/generate.py`의 `write_dataset`이 쓰는 manifest, `data/validate.py`의 `_read_jsonl`)과 **일부러
+    겹친다**: 학습 코드는 generator·QA를 import하지 않는다는 경계(docs/06 §1) 때문에 읽기 쪽을 여기
+    다시 둔다. 두 쪽의 manifest 형식(`files: {이름: {sha256, …}}`)이 바뀌면 같이 고친다.
     """
     manifest_file = Path(manifest_path)
     if not manifest_file.is_file():
@@ -263,8 +276,13 @@ def _label_contributes(label: dict) -> bool:
 
 
 def valid_label_ticks(record: dict) -> list[bool]:
-    """틱마다 기여하는 라벨이 하나라도 있는지 — 모델 없이 라벨만으로 (구간 정규화 분모에 쓴다)."""
+    """틱마다 기여하는 라벨이 하나라도 있는지 — 모델 없이 라벨만으로 (손실 정규화 분모에 쓴다)."""
     return [any(_label_contributes(label) for label in tick.get("labels", [])) for tick in record["ticks"]]
+
+
+def valid_single(record: dict) -> bool:
+    """단일 요청 레코드에 기여하는 라벨이 있는지 — 같은 규칙 (비로봇 상태 수에 쓴다)."""
+    return any(_label_contributes(label) for label in record.get("labels", []))
 
 
 # --------------------------------------------------------------------------
@@ -289,23 +307,25 @@ def _bucket(domain: str, material: str) -> str:
 
 
 class MixedSampler:
-    """두 축으로 단위를 뽑는 결정적·재개 가능한 sampler (모듈 설명 참조)."""
+    """두 축으로 단위를 뽑는 결정적·재개 가능한 sampler (모듈 설명 참조).
+
+    * :meth:`draw_step` — step의 단위들: 로봇, 비로봇, 로봇, … 번갈아(한쪽이 없으면 있는 쪽만).
+    * :meth:`draw` — 분야 하나의 단위: 스트림 분야면 에피소드 하나, 단일 요청 분야면
+      ``nonrobot_tokens_per_unit``까지 묶은 microbatch(예산을 넘기는 레코드는 되돌려 다음 단위에).
+    """
 
     def __init__(
         self,
         items: list[Item],
         *,
-        robot_token_share: float = 0.6,
         material_shares: dict[str, float] | None = None,
         seed: int = 0,
-        microbatch: int = 1,
+        nonrobot_tokens_per_unit: int = 8192,
     ) -> None:
         if not items:
             raise ValueError("items: 뽑을 레코드가 하나도 없다")
-        if not 0.0 <= float(robot_token_share) <= 1.0:
-            raise ValueError(f"robot_token_share: [0, 1] 안이어야 한다 (받은 값: {robot_token_share})")
-        if int(microbatch) < 1:
-            raise ValueError(f"microbatch: 1 이상이어야 한다 (받은 값: {microbatch})")
+        if int(nonrobot_tokens_per_unit) < 1:
+            raise ValueError(f"nonrobot_tokens_per_unit: 1 이상이어야 한다 (받은 값: {nonrobot_tokens_per_unit})")
         shares = dict(DEFAULT_MATERIAL_SHARES if material_shares is None else material_shares)
         unknown = [name for name in shares if name not in MATERIALS]
         if unknown:
@@ -318,9 +338,8 @@ class MixedSampler:
         self.items = {item.index: item for item in items}  # 단위는 item.index로 가리킨다 (목록 위치가 아니라)
         if len(self.items) != len(items):
             raise ValueError("items: index가 중복된 레코드가 있다")
-        self.robot_token_share = float(robot_token_share)
         self.material_shares = {name: float(shares.get(name, 0.0)) for name in MATERIALS}
-        self.microbatch = int(microbatch)
+        self.tokens_per_unit = int(nonrobot_tokens_per_unit)
         self.seed = int(seed)
 
         self.buckets: dict[str, list[int]] = {}
@@ -335,6 +354,7 @@ class MixedSampler:
                     "한 단위(에피소드 하나 / 단일 요청 microbatch)가 균일하다"
                 )
         self._kind_of_domain = {domain: next(iter(seen)) for domain, seen in kinds.items()}
+        self.domains: tuple[str, ...] = tuple(domain for domain in DOMAINS if domain in self._kind_of_domain)
 
         self.rng = random.Random(self.seed)
         self._drawn = 0
@@ -346,9 +366,6 @@ class MixedSampler:
 
     def _ordered_buckets(self) -> list[str]:
         return [_bucket(d, m) for d in DOMAINS for m in MATERIALS if _bucket(d, m) in self.buckets]
-
-    def _has(self, domain: str) -> bool:
-        return any(bucket.startswith(domain + "/") for bucket in self.buckets)
 
     def effective_material_shares(self, domain: str) -> dict[str, float]:
         """비어 있지 않은 묶음 위에서 재정규화한 70/20/10 (모두 0이면 균등)."""
@@ -370,16 +387,9 @@ class MixedSampler:
         cursor["cursor"] += 1
         return index
 
-    def _choose_domain(self) -> str:
-        total = sum(self._tokens.values())
-        if total > 0:
-            want_robot = self._tokens["robot"] < self.robot_token_share * total
-        else:
-            want_robot = self.robot_token_share > 0.0
-        domain = "robot" if want_robot else "non_robot"
-        if not self._has(domain):
-            domain = "non_robot" if domain == "robot" else "robot"
-        return domain
+    def _unread(self, bucket: str) -> None:
+        """방금 뽑은 레코드를 되돌린다 — 다음 단위의 그 묶음에서 먼저 나온다."""
+        self._cursors[bucket]["cursor"] -= 1
 
     def _choose_material(self, domain: str) -> str:
         shares = self.effective_material_shares(domain)
@@ -392,29 +402,46 @@ class MixedSampler:
                 return name
         return present[-1]
 
+    def _draw_one(self, domain: str) -> tuple[int, str]:
+        material = self._choose_material(domain)
+        return self._next_from(_bucket(domain, material)), material
+
     # -- 공개 API --
 
-    def draw(self) -> Unit:
-        """다음 accumulation 단위."""
-        domain = self._choose_domain()
+    def draw(self, domain: str) -> Unit:
+        """분야 `domain`의 다음 단위: 에피소드 하나(스트림) 또는 토큰 예산까지 묶은 단일 요청들."""
+        if domain not in self._kind_of_domain:
+            raise ValueError(f"domain: {list(self.domains)}에 없는 분야다 (받은 값: {domain!r})")
         kind = self._kind_of_domain[domain]
-        count = 1 if kind == "stream" else self.microbatch
         indices: list[int] = []
         materials: list[str] = []
-        for _ in range(count):
-            material = self._choose_material(domain)
-            bucket = _bucket(domain, material)
-            indices.append(self._next_from(bucket))
+        tokens = 0
+        while True:
+            index, material = self._draw_one(domain)
+            size = self.items[index].tokens
+            if indices and tokens + size > self.tokens_per_unit:
+                self._unread(_bucket(domain, material))  # 예산을 넘긴다 — 다음 단위로
+                break
+            indices.append(index)
             materials.append(material)
-            self._counts[bucket] += 1
-        tokens = sum(self.items[index].tokens for index in indices)
+            tokens += size
+            self._counts[_bucket(domain, material)] += 1
+            if kind == "stream" or tokens >= self.tokens_per_unit:
+                break
         self._tokens[domain] += tokens
         unit = Unit(index=self._drawn, kind=kind, domain=domain, items=indices, materials=materials, tokens=tokens)
         self._drawn += 1
         return unit
 
+    def draw_step(self, units: int) -> list[Unit]:
+        """한 step의 단위들: 로봇, 비로봇, 로봇, … 번갈아. 한 분야가 없으면 있는 분야만."""
+        if int(units) < 1:
+            raise ValueError(f"units: 1 이상이어야 한다 (받은 값: {units})")
+        order = [domain for domain in DOMAINS if domain in self._kind_of_domain]
+        return [self.draw(order[position % len(order)]) for position in range(int(units))]
+
     def realized(self) -> dict[str, Any]:
-        """실현 비중: 토큰(로봇/비로봇), 단위 수(분야·묶음), epoch, 재정규화한 목표."""
+        """실현 비중: 토큰(로봇/비로봇), 단위·레코드 수(분야·묶음), epoch, 재정규화한 목표."""
         total_tokens = sum(self._tokens.values())
         total_units = sum(self._counts.values())
         by_domain = {d: sum(n for b, n in self._counts.items() if b.startswith(d + "/")) for d in DOMAINS}
@@ -431,9 +458,7 @@ class MixedSampler:
                 "material": {m: (n / total_units if total_units else 0.0) for m, n in by_material.items()},
             },
             "epochs": {bucket: cursor["epoch"] for bucket, cursor in self._cursors.items()},
-            "effective_material_shares": {
-                d: self.effective_material_shares(d) for d in DOMAINS if self._has(d)
-            },
+            "effective_material_shares": {d: self.effective_material_shares(d) for d in self.domains},
         }
 
     def state_dict(self) -> dict[str, Any]:

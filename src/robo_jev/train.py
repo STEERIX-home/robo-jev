@@ -6,11 +6,15 @@
 (model은 :func:`build_model` 한 곳에서 만들고 loop는 ``model(batch)``·``loss.backward()``·
 :func:`clip_gradients`·``optimizer.step()`` 만 부른다).
 
-**한 step (docs/03 §5).** effective batch = ``gradient_accumulation × microbatch_states_per_rank`` 개의
-상태다. sampler가 step의 accumulation 단위들을 먼저 뽑고(단위 = 에피소드 하나 또는 단일 요청
-``microbatch``개), 단위마다 forward·backward를 누적한 뒤 clip → AdamW step → schedule step을 한 번
-한다. step의 손실은 상태(단일 요청)·에피소드의 평균이다: 단위의 기여 = ``L_item / N``, N = step의
-상태·에피소드 수. 그래서 accumulation은 loss 정규화를 바꾸지 않는다.
+**한 step (docs/03 §5, docs/04 §2 — 판정 e086c90).** step은 ``gradient_accumulation``개의 accumulation
+단위로 되어 있고 **로봇 스트림 단위(에피소드 하나 = TBPTT 구간열)와 비로봇 단위(단일 요청을
+``nonrobot_tokens_per_unit``까지 묶은 microbatch, P0 경로가 한 forward로 돈다)를 번갈아** 넣는다 — 한
+step에 두 종류가 다 든다. step 손실은 ``robot_loss_share·L_robot + (1 − robot_loss_share)·L_nonrobot``
+(시작 0.6/0.4)이다. ``L_robot``은 step의 로봇 상태(틱)들의 틱 종류 가중 평균 ``Σ_t w_t L_t / Σ_t w_t``,
+``L_nonrobot``은 step의 비로봇 상태들의 평균이다(둘 다 유효 라벨이 있는 상태만). 분모(step의 로봇 틱
+가중치 합, 비로봇 상태 수)는 라벨만으로 **단위를 돌리기 전에** 정하므로 accumulation이 이 식을 정확히
+재현한다: 단위의 기여 = 그 분야의 비중 / 그 분야의 분모 × (틱이면 ``w_t L_t``, 상태면 ``L_s``). 한 분야가
+step에 없으면(한쪽 데이터만) 있는 분야가 비중 1을 받는다.
 
 **truncated BPTT (docs/08 §8, docs/03 §5).** 에피소드는 모의 시각 기준 ``stream_chunk_seconds`` 구간으로
 나뉘고(:func:`episode_chunks`), 구간은 **같은 optimizer step 안에서** 차례로 forward·backward된다.
@@ -20,11 +24,12 @@ gradient만 경계에서 끊긴다. 에피소드 손실은 ``L_episode = Σ_t w_
 틱, ``w_t`` = 틱 종류의 가중치)이며, 구간의 손실은 그 부분합을 **에피소드 전체의 분모**로 정규화한
 것이라 구간 손실의 합 = 에피소드 손실이다. 한 에피소드 = accumulation 단위 하나.
 
-**sampler와 유효 loss 비중 (docs/04 §2).** :class:`robo_jev.sampler.MixedSampler` 가 로봇/비로봇을
-토큰으로, 기존 자료/오류 계열/새 의미 계열을 70/20/10으로 뽑고, 틱 종류 가중치가 정상 유지 틱을
-하향·이벤트/목표 변경 틱을 상향한다. step 지표에 loss·질문 타입별 loss·gradient norm·토큰 수와 함께
-**실현된 유효 loss 비중**(분야·묶음·틱 종류 = 그 축의 기여가 step 손실에서 차지하는 몫)과 sampler의
-실현 토큰 비중을 적는다.
+**sampler와 유효 loss 비중 (docs/04 §2).** :class:`robo_jev.sampler.MixedSampler` 가 두 종류를 번갈아
+뽑고 기존 자료/오류 계열/새 의미 계열을 70/20/10으로 나누며, 틱 종류 가중치가 정상 유지 틱을
+하향·이벤트/목표 변경 틱을 상향한다. step 지표에 loss·분야별 평균 loss·질문 타입별 loss·gradient
+norm·토큰 수와 함께 **실현 토큰 비중**과 **유효 loss 비중** 둘을 적는다: ``loss_share`` = 그 축이 step
+손실에서 실제로 받은 **계수 질량**(분야는 0.6/0.4 그대로 — 한쪽이 없으면 1.0; 묶음·틱 종류는 그
+안의 배분), ``loss_contribution`` = 그 축의 기여 **값**이 step 손실 값에서 차지하는 몫.
 
 **저장·재개 (docs/03 §5).** step 사이에서는 model/optimizer/scheduler/RNG/sampler 위치/config/manifest를,
 step 도중(구간 경계)에서는 여기에 진행 위치(단위·구간 index), 누적 gradient, 이어 붙일 공통 상태를
@@ -83,6 +88,7 @@ from robo_jev.sampler import (
     sha256_of,
     tick_class,
     valid_label_ticks,
+    valid_single,
 )
 
 __all__ = [
@@ -116,7 +122,6 @@ EXECUTION_BACKENDS = ("independent_paths",)  # P0. `shared_hybrid`(P1)는 state_
 OPTIMIZERS = ("adamw",)
 DEFAULT_TICK_WEIGHTS = {"steady": 0.25, "event": 2.0, "goal_change": 2.0, "other": 1.0}
 DEFAULT_SAMPLER = {
-    "robot_token_share": 0.6,
     "material_shares": dict(DEFAULT_MATERIAL_SHARES),
     "domain_tag": "provenance.domain",
     "material_tag": "provenance.material",
@@ -156,6 +161,8 @@ DEFAULTS: dict[str, Any] = {
     "warmup_ratio": 0.05,
     "microbatch_states_per_rank": 1,
     "gradient_accumulation": 4,
+    "robot_loss_share": 0.6,
+    "nonrobot_tokens_per_unit": 8192,
     "world_size": 1,
     "max_total_tokens": 8192,
     "max_state_tokens": 2048,
@@ -217,8 +224,10 @@ def resolve_config(config: dict) -> dict:
         _need(_is_number(out[key]) and out[key] >= 0, f"{key}: 0 이상의 수여야 한다 (받은 값: {out[key]!r})")
     _need(out["gradient_clip"] is None or (_is_number(out["gradient_clip"]) and out["gradient_clip"] > 0), f"gradient_clip: 양수이거나 null이어야 한다 (받은 값: {out['gradient_clip']!r})")
     _need(_is_number(out["warmup_ratio"]) and 0.0 <= out["warmup_ratio"] <= 1.0, f"warmup_ratio: [0, 1] 안이어야 한다 (받은 값: {out['warmup_ratio']!r})")
-    for key in ("microbatch_states_per_rank", "gradient_accumulation", "stream_window_ticks", "torch_threads"):
+    for key in ("gradient_accumulation", "stream_window_ticks", "torch_threads", "nonrobot_tokens_per_unit"):
         _need(_is_int(out[key]) and out[key] >= 1, f"{key}: 1 이상의 정수여야 한다 (받은 값: {out[key]!r})")
+    _need(out["microbatch_states_per_rank"] == 1, "microbatch_states_per_rank: rank의 accumulation 단위는 에피소드 하나 또는 토큰 예산(nonrobot_tokens_per_unit)까지 묶은 단일 요청 microbatch 하나다 — 1만 지원한다")
+    _need(_is_number(out["robot_loss_share"]) and 0.0 <= out["robot_loss_share"] <= 1.0, f"robot_loss_share: [0, 1] 안이어야 한다 (받은 값: {out['robot_loss_share']!r})")
     for key in ("max_total_tokens", "max_state_tokens", "stream_max_ticks", "model_vocab_size", "model_seed", "checkpoint_every"):
         _need(out[key] is None or (_is_int(out[key]) and out[key] >= 1), f"{key}: 1 이상의 정수이거나 null이어야 한다 (받은 값: {out[key]!r})")
     _need(out["stream_chunk_seconds"] is None or (_is_number(out["stream_chunk_seconds"]) and out["stream_chunk_seconds"] > 0), f"stream_chunk_seconds: 양수이거나 null(구간 없음)이어야 한다 (받은 값: {out['stream_chunk_seconds']!r})")
@@ -236,7 +245,6 @@ def resolve_config(config: dict) -> dict:
     if out["run_id"] is None:
         out["run_id"] = f"{out['run_name']}-{time.strftime('%Y%m%d-%H%M%S')}"
     _need(isinstance(out["run_id"], str) and out["run_id"], "run_id: 비어 있지 않은 문자열이어야 한다")
-    _need(_is_number(sampler["robot_token_share"]) and 0.0 <= sampler["robot_token_share"] <= 1.0, "sampler.robot_token_share: [0, 1] 안이어야 한다")
     _need(_is_int(sampler["steady_min_held_ticks"]) and sampler["steady_min_held_ticks"] >= 1, "sampler.steady_min_held_ticks: 1 이상의 정수여야 한다")
     weights = sampler["tick_weights"]
     _need(isinstance(weights, dict) and set(weights) == set(TICK_CLASSES), f"sampler.tick_weights: {list(TICK_CLASSES)} 네 종류의 가중치가 필요하다 (받은 값: {weights!r})")
@@ -435,30 +443,39 @@ def run_stream_chunk(
     plan: EpisodePlan,
     scale: float = 1.0,
 ) -> ChunkResult:
-    """에피소드 구간 ``[start, end)``의 forward와 손실 기여 ``scale × Σ_t w_t L_t / Σ_t w_t``.
+    """에피소드 구간 ``[start, end)``의 forward와 손실 기여 ``scale × Σ_t w_t L_t`` (유효 라벨이 있는 틱).
 
-    `carried`는 앞 구간이 넘긴(detach된) 공통 상태다(첫 구간은 `None` — prefix부터 읽는다). 돌려주는
-    ``state``는 이 구간 끝의 공통 상태로 그래프가 붙어 있다 — 다음 구간에 넘기기 전에 호출자가
-    :func:`detach_stream_state` 한다.
+    ``scale``은 호출자가 정한다 — 학습 loop는 ``로봇 비중 / step의 로봇 틱 가중치 합``, 에피소드 하나의
+    정규화된 손실은 ``1 / plan.normaliser``. `carried`는 앞 구간이 넘긴(detach된) 공통 상태다(첫 구간은
+    `None` — prefix부터 읽는다). 돌려주는 ``state``는 이 구간 끝의 공통 상태로 그래프가 붙어 있다 —
+    다음 구간에 넘기기 전에 호출자가 :func:`detach_stream_state` 한다.
     """
     start, end = chunk
     layout = item.layout
     outputs = judge({"layout": "stream_l1a", "stream": layout_prefix(layout, end), "state": carried, "start_tick": start})
     record = item.record
     total: Tensor | None = None
-    by_class: dict[str, float] = {}
+    loss_sum = 0.0  # Σ w_t L_t (scale 전)
+    weight_sum = 0.0  # Σ w_t (유효 틱)
+    value_by_class: dict[str, float] = {}
+    weight_by_class: dict[str, float] = {}
     by_type: dict[str, list[float]] = {}
     valid_ticks = 0
     for offset, index in enumerate(range(start, end)):
-        if not plan.valid[index] or plan.weights[index] <= 0 or plan.normaliser <= 0:
+        if not plan.valid[index] or plan.weights[index] <= 0:
             continue
         one = {"logits": [outputs["logits"][offset]], "candidates": [outputs["candidates"][offset]]}
         labels = {"labels": [record["ticks"][index].get("labels", [])]}
         tick_loss = judgment_loss(one, labels)
-        term = tick_loss * (plan.weights[index] / plan.normaliser * scale)
+        weight = plan.weights[index]
+        term = tick_loss * (weight * scale)
         total = term if total is None else total + term
         valid_ticks += 1
-        by_class[plan.classes[index]] = by_class.get(plan.classes[index], 0.0) + float(term.detach())
+        loss_sum += weight * float(tick_loss.detach())
+        weight_sum += weight
+        name = plan.classes[index]
+        value_by_class[name] = value_by_class.get(name, 0.0) + float(term.detach())
+        weight_by_class[name] = weight_by_class.get(name, 0.0) + weight * scale
         _add_type_losses(by_type, question_losses(one, labels)[0], item.question_types)
     tokens = (int(layout["prefix_end"]) if start == 0 else 0) + sum(
         int(t["end"]) - int(t["start"]) for t in layout["ticks"][start:end]
@@ -468,30 +485,44 @@ def run_stream_chunk(
         value=0.0 if total is None else float(total.detach()),
         state=outputs["state"],
         outputs=outputs,
-        stats={"tokens": tokens, "ticks": end - start, "valid_ticks": valid_ticks, "loss_by_class": by_class, "loss_by_type": by_type},
+        stats={
+            "tokens": tokens, "ticks": end - start, "valid_ticks": valid_ticks, "loss_sum": loss_sum,
+            "weight_sum": weight_sum, "loss_by_class": value_by_class, "weight_by_class": weight_by_class,
+            "loss_by_type": by_type,
+        },  # fmt: skip
     )
 
 
 def run_single_unit(judge: Judge, items: list[Item], *, scale: float = 1.0) -> ChunkResult:
-    """단일 요청 microbatch의 forward와 손실 기여 ``scale × Σ_state L_state`` (상태마다 따로 기록)."""
+    """단일 요청 microbatch(한 forward)의 손실 기여 ``scale × Σ_s L_s`` (유효 라벨이 있는 상태; 상태마다 기록)."""
     outputs = judge({"layout": "state_first", "states": [item.layout for item in items]})
     total: Tensor | None = None
     per_item: list[dict[str, Any]] = []
     by_type: dict[str, list[float]] = {}
+    valid_states = 0
     for position, item in enumerate(items):
+        if not valid_single(item.record):
+            per_item.append({"index": item.index, "valid": False, "loss": 0.0, "contribution": 0.0})
+            continue
         one = {"logits": [outputs["logits"][position]], "candidates": [outputs["candidates"][position]]}
         labels = {"labels": [item.record.get("labels", [])]}
         state_loss = judgment_loss(one, labels)
         term = state_loss * scale
         total = term if total is None else total + term
-        per_item.append({"index": item.index, "loss": float(term.detach())})
+        valid_states += 1
+        per_item.append(
+            {"index": item.index, "valid": True, "loss": float(state_loss.detach()), "contribution": float(term.detach())}
+        )
         _add_type_losses(by_type, question_losses(one, labels)[0], item.question_types)
     return ChunkResult(
         loss=total,
         value=0.0 if total is None else float(total.detach()),
         state=None,
         outputs=outputs,
-        stats={"tokens": sum(item.tokens for item in items), "per_item": per_item, "loss_by_type": by_type},
+        stats={
+            "tokens": sum(item.tokens for item in items), "states": len(items), "valid_states": valid_states,
+            "per_item": per_item, "loss_by_type": by_type,
+        },  # fmt: skip
     )
 
 
@@ -549,15 +580,19 @@ def build_manifest(config: dict, items: list[Item], model: Judge) -> dict[str, A
 
 def _new_accumulators() -> dict[str, Any]:
     return {
-        "loss": 0.0,
-        "loss_by_domain": {domain: 0.0 for domain in DOMAINS},
-        "loss_by_material": {material: 0.0 for material in MATERIALS},
-        "loss_by_class": {name: 0.0 for name in TICK_CLASSES},
+        "loss": 0.0,  # step 손실 값 = Σ 기여
+        "loss_sum": {domain: 0.0 for domain in DOMAINS},  # Σ w·L (정규화 전) → 분야 평균 = loss_sum / 분모
+        "weight": {domain: 0.0 for domain in DOMAINS},  # 적용된 계수 질량 Σ w × scale (= 유효 loss 비중)
+        "weight_by_material": {material: 0.0 for material in MATERIALS},
+        "weight_by_class": {name: 0.0 for name in TICK_CLASSES},
+        "value_by_domain": {domain: 0.0 for domain in DOMAINS},  # 기여 값
+        "value_by_material": {material: 0.0 for material in MATERIALS},
+        "value_by_class": {name: 0.0 for name in TICK_CLASSES},
         "loss_by_type": {},
         "tokens": {domain: 0 for domain in DOMAINS},
         "items": {"single": 0, "stream": 0},
+        "valid_states": {"single": 0, "stream": 0},  # 유효 라벨이 있는 단일 요청 상태 / 틱
         "chunks": 0,
-        "valid_ticks": 0,
         "seconds": 0.0,
     }
 
@@ -610,10 +645,13 @@ class Trainer:
             self.optimizer, lambda step: lr_factor(step, max_steps=max_steps, warmup_ratio=warmup)
         )
         self.sampler = MixedSampler(
-            self.items, robot_token_share=sampler_config["robot_token_share"],
-            material_shares=sampler_config["material_shares"], seed=seed,
-            microbatch=self.config["microbatch_states_per_rank"],
+            self.items, material_shares=sampler_config["material_shares"], seed=seed,
+            nonrobot_tokens_per_unit=self.config["nonrobot_tokens_per_unit"],
         )  # fmt: skip
+        if len(self.sampler.domains) == 2 and int(self.config["gradient_accumulation"]) < 2:
+            raise ValueError(
+                "gradient_accumulation: 로봇·비로봇 레코드가 둘 다 있으면 step마다 두 종류가 다 들어가야 하므로 2 이상이어야 한다 (docs/04 §2)"
+            )
         self.manifest = build_manifest(self.config, self.items, self.model)
         self.run_id: str = self.config["run_id"]
         self.step = 0
@@ -667,24 +705,60 @@ class Trainer:
             return run_stream_chunk(self.model, item, plan.chunks[chunk_index], carried=carried, plan=plan, scale=scale)
         return run_single_unit(self.model, [self.items[index] for index in unit.items], scale=scale)
 
-    def _record(self, unit: Unit, result: ChunkResult, acc: dict[str, Any]) -> None:
+    def _unit_weight(self, unit: Unit) -> float:
+        """단위의 상태 가중치 합 — 라벨만으로: 에피소드는 유효 틱의 종류 가중치 합, 단일 요청은 유효 상태 수."""
+        if unit.kind == "stream":
+            return float(self._plan(self.items[unit.items[0]]).normaliser)
+        return float(sum(1 for index in unit.items if valid_single(self.items[index].record)))
+
+    def _plan_step(self, units: list[Unit]) -> dict[str, Any]:
+        """분모·비중·scale을 단위를 돌리기 전에 정한다 (모듈 설명 참조)."""
+        denominators = {domain: 0.0 for domain in DOMAINS}
+        for unit in units:
+            denominators[unit.domain] += self._unit_weight(unit)
+        present = [domain for domain in DOMAINS if denominators[domain] > 0]
+        robot = float(self.config["robot_loss_share"])
+        configured = {"robot": robot, "non_robot": 1.0 - robot}
+        if len(present) == 2:
+            shares = dict(configured)
+        else:
+            shares = {domain: (1.0 if domain in present else 0.0) for domain in DOMAINS}
+        scales = {
+            domain: (shares[domain] / denominators[domain] if denominators[domain] > 0 else 0.0) for domain in DOMAINS
+        }
+        return {"denominators": denominators, "shares": shares, "scales": scales}
+
+    def _record(self, unit: Unit, result: ChunkResult, acc: dict[str, Any], scale: float) -> None:
         stats = result.stats
+        domain = unit.domain
         acc["loss"] += result.value
-        acc["loss_by_domain"][unit.domain] += result.value
-        acc["tokens"][unit.domain] += int(stats["tokens"])
+        acc["value_by_domain"][domain] += result.value
+        acc["tokens"][domain] += int(stats["tokens"])
         acc["chunks"] += 1
         for kind, (total, count) in stats["loss_by_type"].items():
             slot = acc["loss_by_type"].setdefault(kind, [0.0, 0])
             slot[0] += total
             slot[1] += count
         if unit.kind == "stream":
-            acc["loss_by_material"][unit.materials[0]] += result.value
-            acc["valid_ticks"] += int(stats["valid_ticks"])
+            material = unit.materials[0]
+            acc["loss_sum"][domain] += stats["loss_sum"]
+            acc["weight"][domain] += stats["weight_sum"] * scale
+            acc["weight_by_material"][material] += stats["weight_sum"] * scale
+            acc["value_by_material"][material] += result.value
+            acc["valid_states"]["stream"] += int(stats["valid_ticks"])
             for name, value in stats["loss_by_class"].items():
-                acc["loss_by_class"][name] += value
+                acc["value_by_class"][name] += value
+            for name, weight in stats["weight_by_class"].items():
+                acc["weight_by_class"][name] += weight
         else:
             for entry, material in zip(stats["per_item"], unit.materials):
-                acc["loss_by_material"][material] += entry["loss"]
+                if not entry["valid"]:
+                    continue
+                acc["loss_sum"][domain] += entry["loss"]
+                acc["weight"][domain] += scale
+                acc["weight_by_material"][material] += scale
+                acc["value_by_material"][material] += entry["contribution"]
+                acc["valid_states"]["single"] += 1
 
     def _should_stop(self, done: tuple[int, int]) -> bool:
         stop = self.config["stop_after"]
@@ -704,26 +778,26 @@ class Trainer:
         if self.step >= int(self.config["max_steps"]):
             raise RuntimeError(f"max_steps {self.config['max_steps']}에 이미 도달했다")
         if self.progress is None:
-            units = [self.sampler.draw() for _ in range(int(self.config["gradient_accumulation"]))]
+            units = self.sampler.draw_step(int(self.config["gradient_accumulation"]))
             self.progress = {
                 "units": units,
-                "n_items": sum(len(unit.items) for unit in units),
+                **self._plan_step(units),
                 "unit_index": 0,
                 "chunk_index": 0,
                 "carried": None,
                 "acc": _new_accumulators(),
             }
         progress = self.progress
-        scale = 1.0 / float(progress["n_items"])
         while progress["unit_index"] < len(progress["units"]):
             unit = progress["units"][progress["unit_index"]]
+            scale = float(progress["scales"][unit.domain])
             chunks = self._chunk_count(unit)
             started = time.perf_counter()
             done = (progress["unit_index"], progress["chunk_index"])
             result = self._run(unit, progress["chunk_index"], progress["carried"], scale)
             if result.loss is not None and result.loss.requires_grad:
                 result.loss.backward()
-            self._record(unit, result, progress["acc"])
+            self._record(unit, result, progress["acc"], scale)
             if unit.kind == "stream" and progress["chunk_index"] == 0:
                 progress["acc"]["items"]["stream"] += 1
             elif unit.kind == "single":
@@ -752,23 +826,31 @@ class Trainer:
         self.optimizer.zero_grad(set_to_none=True)
         self.step += 1
         acc = progress["acc"]
-        total = acc["loss"]
 
         def share(values: dict[str, float]) -> dict[str, float]:
             denominator = sum(values.values())
             return {key: (value / denominator if denominator > 0 else 0.0) for key, value in values.items()}
 
+        denominators = progress["denominators"]
+        tokens_total = sum(acc["tokens"].values())
         lrs = {group["name"].split("/")[0]: float(group["lr"]) for group in self.optimizer.param_groups}
         metrics = {
             "step": self.step,
-            "loss": total,
+            "loss": acc["loss"],
+            "loss_by_domain": {
+                domain: (acc["loss_sum"][domain] / denominators[domain] if denominators[domain] > 0 else None)
+                for domain in DOMAINS
+            },
             "loss_by_type": {kind: value / count for kind, (value, count) in acc["loss_by_type"].items() if count},
             "grad_norm": grad_norm,
             "lr": {"backbone": lrs.get("backbone"), "readout": lrs.get("readout")},
-            "tokens": {**acc["tokens"], "total": sum(acc["tokens"].values())},
+            "tokens": {**acc["tokens"], "total": tokens_total},
+            "token_share": {
+                domain: (acc["tokens"][domain] / tokens_total if tokens_total else 0.0) for domain in DOMAINS
+            },
             "items": dict(acc["items"]),
+            "valid_states": dict(acc["valid_states"]),
             "chunks": acc["chunks"],
-            "valid_ticks": acc["valid_ticks"],
             "units": [
                 {
                     "kind": unit.kind, "domain": unit.domain, "materials": list(unit.materials), "tokens": unit.tokens,
@@ -776,10 +858,16 @@ class Trainer:
                 }  # fmt: skip
                 for unit in progress["units"]
             ],
-            "loss_share": {
-                "domain": share(acc["loss_by_domain"]),
-                "material": share(acc["loss_by_material"]),
-                "tick_class": share(acc["loss_by_class"]) if acc["items"]["stream"] else {},
+            "shares": dict(progress["shares"]),
+            "loss_share": {  # 실제로 적용된 계수 질량 (분야는 합 1 = 0.6/0.4, 묶음·틱 종류는 그 안의 배분)
+                "domain": dict(acc["weight"]),
+                "material": share(acc["weight_by_material"]),
+                "tick_class": share(acc["weight_by_class"]) if acc["items"]["stream"] else {},
+            },
+            "loss_contribution": {  # 기여 값의 몫
+                "domain": share(acc["value_by_domain"]),
+                "material": share(acc["value_by_material"]),
+                "tick_class": share(acc["value_by_class"]) if acc["items"]["stream"] else {},
             },
             "sampler": self.sampler.realized(),
             "seconds": acc["seconds"] + (time.perf_counter() - started),
@@ -838,7 +926,9 @@ class Trainer:
             p = self.progress
             progress = {
                 "units": [asdict(unit) for unit in p["units"]],
-                "n_items": p["n_items"],
+                "denominators": dict(p["denominators"]),
+                "shares": dict(p["shares"]),
+                "scales": dict(p["scales"]),
                 "unit_index": p["unit_index"],
                 "chunk_index": p["chunk_index"],
                 "carried_state": None if p["carried"] is None else stream_state_to_dict(p["carried"]),
@@ -904,7 +994,9 @@ class Trainer:
                 named[name].grad = grad.clone().to(named[name].dtype)
             self.progress = {
                 "units": units,
-                "n_items": int(progress["n_items"]),
+                "denominators": {domain: float(v) for domain, v in progress["denominators"].items()},
+                "shares": {domain: float(v) for domain, v in progress["shares"].items()},
+                "scales": {domain: float(v) for domain, v in progress["scales"].items()},
                 "unit_index": int(progress["unit_index"]),
                 "chunk_index": int(progress["chunk_index"]),
                 "carried": None if carried is None else stream_state_from_dict(carried, self.model.backbone),

@@ -226,6 +226,33 @@ def test_state_first_logits_do_not_depend_on_other_questions_or_their_order(judg
         torch.testing.assert_close(out[qid], reference[qid], **FP32)
 
 
+def test_state_first_packs_every_state_into_one_backbone_forward(judge, singles, monkeypatch):
+    """여러 상태의 질문 경로를 한 번의 backbone forward로 (Task 5 수정 라운드 1: 비로봇 단위 = 토큰 예산까지 묶은 microbatch).
+
+    값은 상태를 따로 돌린 것과 FP32 안에서 같다(padding 길이·batch 크기가 달라 matmul 반올림이 다를
+    수 있어 비트 단위는 아니다 — 실측 max |Δz| ≈ 1e-6).
+    """
+    records = [copy.deepcopy(r) for r in singles[:12]]
+    calls = []
+    original = judge.backbone.forward
+
+    def counting(*args, **kwargs):
+        calls.append(args[0].shape)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(judge.backbone, "forward", counting)
+    packed = judge(state_batch(*records))
+    assert len(calls) == 1  # 상태 12개, forward 1번
+    rows = calls[0][0]
+    assert rows == sum(len(r["request"]["questions"]) for r in records)  # 질문 경로 수 (P0: 질문마다 경로 하나)
+    calls.clear()
+    for position, record in enumerate(records):
+        alone = judge(state_batch(record))["logits"][0]
+        for qid, logits in alone.items():
+            torch.testing.assert_close(packed["logits"][position][qid], logits, **FP32)
+    assert len(calls) == len(records)
+
+
 def test_state_first_batches_several_states(judge, singles):
     records = [copy.deepcopy(r) for r in singles[:3]]
     outputs = judge(state_batch(*records))

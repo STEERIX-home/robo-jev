@@ -1,9 +1,11 @@
 """sampler 검사 — 읽기 전용 적재, 틱 종류, 두 sampler 축(로봇/비로봇 토큰, 70/20/10), 결정성·재개 (docs/04 §2·§7, docs/06 Task 5).
 
-로봇/비로봇 비중은 상태 수가 아니라 **토큰**으로 관리하고(시작 60/40), 기존 자료/오류 계열/새 의미
-계열의 70/20/10은 별개의 축이다(레코드의 provenance 태그로 나눈다; D0/D1에서는 뒤의 두 묶음이
-비어 있을 수 있으므로 재정규화하고 실현 비중을 기록한다). 정상 유지 틱은 하향, 이벤트·목표 변경
-틱은 상향 가중하며 틱의 종류는 그 틱의 레코드·라벨에서만 정한다(미래 틱을 보지 않는다).
+step마다 로봇 스트림 단위(에피소드 하나)와 비로봇 단위(토큰 예산까지 묶은 단일 요청 microbatch)를
+**둘 다** 넣는다(docs/04 §2, 판정 e086c90) — 60/40은 학습 loop의 손실 비중이고 sampler는 두 종류를
+번갈아 뽑을 뿐이다. 기존 자료/오류 계열/새 의미 계열의 70/20/10은 별개의 축이다(레코드의 provenance
+태그로 나눈다; D0/D1에서는 뒤의 두 묶음이 비어 있을 수 있으므로 재정규화하고 실현 비중을 기록한다).
+정상 유지 틱은 하향, 이벤트·목표 변경 틱은 상향 가중하며 틱의 종류는 그 틱의 레코드·라벨에서만
+정한다(미래 틱을 보지 않는다).
 """
 
 import copy
@@ -22,6 +24,7 @@ from robo_jev.sampler import (
     tick_class,
     tick_weights,
     valid_label_ticks,
+    valid_single,
 )
 
 TICK_WEIGHTS = {"steady": 0.25, "event": 2.0, "goal_change": 2.0, "other": 1.0}
@@ -129,6 +132,15 @@ def test_valid_label_ticks_mirror_the_loss_mask_rules(streams):
     assert valid_label_ticks(record) == [True, False, False, False]
 
 
+def test_valid_single_mirrors_the_same_rules(singles):
+    record = copy.deepcopy(singles[0])
+    assert valid_single(record)
+    record["labels"] = [dict(l, mask=False) for l in record["labels"]]
+    assert not valid_single(record)
+    record["labels"] = []
+    assert not valid_single(record)
+
+
 # --------------------------------------------------------------------------
 # 두 축: 로봇/비로봇 토큰, 70/20/10 (재정규화)
 # --------------------------------------------------------------------------
@@ -139,49 +151,72 @@ def ids(units, items):
 
 
 def test_sampler_is_deterministic_under_seed_and_resumable_from_a_saved_position(items):
-    a = MixedSampler(items, seed=17)
-    b = MixedSampler(items, seed=17)
-    c = MixedSampler(items, seed=18)
-    drawn_a = [a.draw() for _ in range(60)]
-    drawn_b = [b.draw() for _ in range(60)]
+    a = MixedSampler(items, seed=17, nonrobot_tokens_per_unit=400)
+    b = MixedSampler(items, seed=17, nonrobot_tokens_per_unit=400)
+    c = MixedSampler(items, seed=18, nonrobot_tokens_per_unit=400)
+    drawn_a = [unit for _ in range(30) for unit in a.draw_step(2)]
+    drawn_b = [unit for _ in range(30) for unit in b.draw_step(2)]
     assert ids(drawn_a, items) == ids(drawn_b, items)
-    assert ids([c.draw() for _ in range(60)], items) != ids(drawn_a, items)
+    assert ids([unit for _ in range(30) for unit in c.draw_step(2)], items) != ids(drawn_a, items)
     assert [u.index for u in drawn_a] == list(range(60))
-    # 20개 뒤에 저장한 위치에서 새 sampler가 이어간다
-    fresh = MixedSampler(items, seed=17)
-    for _ in range(20):
-        fresh.draw()
+    # 10 step(20 단위) 뒤에 저장한 위치에서 새 sampler가 이어간다
+    fresh = MixedSampler(items, seed=17, nonrobot_tokens_per_unit=400)
+    for _ in range(10):
+        fresh.draw_step(2)
     position = fresh.state_dict()
-    resumed = MixedSampler(items, seed=17)
+    resumed = MixedSampler(items, seed=17, nonrobot_tokens_per_unit=400)
     resumed.load_state_dict(position)
     assert resumed.state_dict() == position and position["drawn"] == 20
-    assert ids([resumed.draw() for _ in range(40)], items) == ids(drawn_a[20:], items)
+    assert ids([unit for _ in range(20) for unit in resumed.draw_step(2)], items) == ids(drawn_a[20:], items)
     assert resumed.state_dict() == a.state_dict()
     # 위치는 저장 단위에 들어가는 기본 자료형뿐이다
     json.dumps(position)
 
 
-def test_robot_share_is_steered_by_tokens_and_realised_share_is_recorded(items):
-    sampler = MixedSampler(items, seed=3, robot_token_share=0.6)
-    first = sampler.draw()
-    assert first.kind == "stream" and first.domain == "robot"  # 0 < 0.6 → 로봇부터
-    units = [first] + [sampler.draw() for _ in range(400)]
+def test_every_step_alternates_robot_and_nonrobot_units_and_records_token_share(items):
+    """step의 단위는 로봇(에피소드), 비로봇(묶음), 로봇, … — 누적 토큰 비중을 좇지 않는다 (판정 e086c90)."""
+    sampler = MixedSampler(items, seed=3, nonrobot_tokens_per_unit=400)
+    for count in (2, 3, 4):
+        units = sampler.draw_step(count)
+        assert [u.domain for u in units] == ["robot", "non_robot", "robot", "non_robot"][:count]
+        assert [u.kind for u in units] == ["stream", "single", "stream", "single"][:count]
+        assert all(len(u.items) == 1 for u in units if u.kind == "stream")
+    with pytest.raises(ValueError, match="units"):
+        sampler.draw_step(0)
     realized = sampler.realized()
-    total = realized["tokens"]["robot"] + realized["tokens"]["non_robot"]
-    assert total == sum(u.tokens for u in units)
-    biggest = max(u.tokens for u in units)
-    assert abs(realized["token_share"]["robot"] - 0.6) <= biggest / total  # 단위 하나의 크기 안에서 목표를 따른다
-    assert realized["token_share"]["robot"] > 0.5
-    kinds = [u.kind for u in units]
-    assert kinds.count("stream") >= 2 and kinds.count("single") > 300
-    # 두 에피소드가 한 epoch를 이루고 다시 섞인다
-    assert realized["epochs"]["robot/existing"] >= 1
+    assert realized["tokens"]["robot"] > realized["tokens"]["non_robot"] > 0  # 기록만 한다
+    assert realized["token_share"]["robot"] + realized["token_share"]["non_robot"] == pytest.approx(1.0)
+    assert realized["drawn"] == 9 and realized["units"]["robot/existing"] == 5
+
+
+def test_nonrobot_units_pack_singles_up_to_the_token_budget_without_losing_items(items):
+    budget = 400
+    sampler = MixedSampler(items, seed=5, nonrobot_tokens_per_unit=budget)
+    packed = [sampler.draw("non_robot") for _ in range(12)]
+    singles = {item.index: item for item in items if item.kind == "single"}
+    for unit in packed:
+        assert unit.kind == "single" and unit.domain == "non_robot" and len(unit.items) >= 2
+        assert unit.tokens == sum(singles[i].tokens for i in unit.items) <= budget
+        assert len(unit.materials) == len(unit.items)
+    # 예산을 넘겨서 되돌려 둔 레코드는 다음 단위에 들어간다: 한 epoch 안에서 모든 단일 요청이 정확히 한 번
+    drawn = [i for unit in packed for i in unit.items]
+    first_epoch = drawn[: len(singles)]
+    assert sorted(first_epoch) == sorted(singles)
+    assert sampler.realized()["epochs"]["non_robot/existing"] >= 1
+    # 예산이 레코드 하나보다 작으면 그 레코드 하나로 단위를 만든다 (빈 단위는 없다)
+    tiny = MixedSampler(items, seed=5, nonrobot_tokens_per_unit=1)
+    unit = tiny.draw("non_robot")
+    assert len(unit.items) == 1 and unit.tokens > 1
+    with pytest.raises(ValueError, match="nonrobot_tokens_per_unit"):
+        MixedSampler(items, seed=5, nonrobot_tokens_per_unit=0)
+    with pytest.raises(ValueError, match="domain"):
+        sampler.draw("space")
 
 
 def test_material_axis_renormalises_over_empty_buckets_and_records_the_share(items):
-    sampler = MixedSampler(items, seed=5)
-    for _ in range(50):
-        sampler.draw()
+    sampler = MixedSampler(items, seed=5, nonrobot_tokens_per_unit=400)
+    for _ in range(25):
+        sampler.draw_step(2)
     realized = sampler.realized()
     assert set(realized["unit_share"]["material"]) == set(MATERIALS)
     assert realized["unit_share"]["material"]["existing"] == 1.0  # D0에는 기존 자료뿐 — 실패하지 않고 기록한다
@@ -195,43 +230,46 @@ def test_material_axis_follows_70_20_10_when_all_buckets_exist(items):
     for item in tagged:
         if item.kind == "single":
             item.material = rng.choice(MATERIALS)
-    sampler = MixedSampler(tagged, seed=7, robot_token_share=0.0)
+    sampler = MixedSampler(tagged, seed=7, nonrobot_tokens_per_unit=400)
     counts = {m: 0 for m in MATERIALS}
-    for _ in range(3000):
-        unit = sampler.draw()
+    total = 0
+    while total < 3000:
+        unit = sampler.draw("non_robot")
         assert unit.kind == "single"
-        counts[unit.materials[0]] += 1
-    assert abs(counts["existing"] / 3000 - 0.7) < 0.03
-    assert abs(counts["error_family"] / 3000 - 0.2) < 0.03
-    assert abs(counts["new_semantic_family"] / 3000 - 0.1) < 0.03
-    assert sampler.realized()["token_share"]["robot"] == 0.0
+        for material in unit.materials:
+            counts[material] += 1
+        total += len(unit.items)
+    assert abs(counts["existing"] / total - 0.7) < 0.03
+    assert abs(counts["error_family"] / total - 0.2) < 0.03
+    assert abs(counts["new_semantic_family"] / total - 0.1) < 0.03
 
 
-def test_sampler_handles_one_sided_data_and_microbatches(items):
+def test_sampler_handles_one_sided_data(items):
     singles_only = [item for item in items if item.kind == "single"]
-    sampler = MixedSampler(singles_only, seed=1, robot_token_share=0.6)
-    assert all(sampler.draw().kind == "single" for _ in range(10))
+    sampler = MixedSampler(singles_only, seed=1, nonrobot_tokens_per_unit=400)
+    assert sampler.domains == ("non_robot",)
+    assert all(u.kind == "single" for _ in range(3) for u in sampler.draw_step(2))  # 로봇이 없으면 전부 비로봇
     assert sampler.realized()["token_share"]["robot"] == 0.0
+    with pytest.raises(ValueError, match="domain"):
+        sampler.draw("robot")
     streams_only = [item for item in items if item.kind == "stream"]
-    sampler = MixedSampler(streams_only, seed=1, robot_token_share=0.0)
-    assert sampler.draw().kind == "stream"
+    sampler = MixedSampler(streams_only, seed=1)
+    assert sampler.domains == ("robot",)
+    assert [u.kind for u in sampler.draw_step(2)] == ["stream", "stream"]
     with pytest.raises(ValueError, match="items"):
         MixedSampler([], seed=1)
-    batched = MixedSampler(items, seed=2, microbatch=3)
-    units = [batched.draw() for _ in range(5)]
-    for unit in units:
-        if unit.kind == "single":
-            assert len(unit.items) == 3 and len(unit.materials) == 3
-            assert unit.tokens == sum(items[i].tokens for i in unit.items)
-        else:
-            assert len(unit.items) == 1
-    assert any(u.kind == "single" for u in units)
 
 
 def test_every_item_of_a_bucket_is_drawn_once_per_epoch(items):
-    sampler = MixedSampler(items, seed=9, robot_token_share=0.0)
-    drawn = [sampler.draw().items[0] for _ in range(32)]
-    assert sorted(drawn) == sorted(item.index for item in items if item.kind == "single")
-    second = [sampler.draw().items[0] for _ in range(32)]
-    assert sorted(second) == sorted(drawn) and second != drawn  # 다음 epoch는 다시 섞인다
-    assert sampler.realized()["epochs"]["non_robot/existing"] == 2
+    sampler = MixedSampler(items, seed=9)
+    drawn = [sampler.draw("robot").items[0] for _ in range(2)]
+    assert sorted(drawn) == sorted(item.index for item in items if item.kind == "stream")
+    second = [sampler.draw("robot").items[0] for _ in range(2)]
+    assert sorted(second) == sorted(drawn)
+    assert sampler.realized()["epochs"]["robot/existing"] == 2
+    many = MixedSampler(items, seed=9, nonrobot_tokens_per_unit=70)  # 대체로 하나씩
+    drawn = []
+    while len(drawn) < 64:
+        drawn.extend(many.draw("non_robot").items)
+    assert sorted(drawn[:32]) == sorted(item.index for item in items if item.kind == "single")
+    assert sorted(drawn[32:64]) == sorted(drawn[:32]) and drawn[32:64] != drawn[:32]  # 다음 epoch는 다시 섞인다
