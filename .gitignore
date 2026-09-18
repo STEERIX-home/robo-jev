@@ -1,0 +1,21 @@
+# scratch / tooling
+.superpowers/
+.worktrees/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+
+# data, checkpoints, caches (manifest와 작은 fixture만 추적)
+artifacts/
+data/
+checkpoints/
+*.parquet
+*.safetensors
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
