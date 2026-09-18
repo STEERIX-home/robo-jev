@@ -516,6 +516,37 @@ def test_training_code_does_not_import_generator_simulator_or_harness():
         assert forbidden not in loaded, loaded
 
 
+def test_trainer_applies_torch_threads_only_while_it_computes_and_never_leaks_it(tmp_path, monkeypatch):
+    """`torch_threads`는 run의 정체(재개의 비트 동일 조건)지만 프로세스 전역 상태다. Trainer는 그 값을 자기 계산
+    (구성·accumulate·apply·run) 안에서만 걸고 나올 때 되돌린다 — context manager 없이 만들어도, 생성이 실패해도 새지 않는다."""
+    import robo_jev.train as train_module
+
+    outside = torch.get_num_threads()
+    inside = 1 if outside != 1 else 2
+    seen: list[int] = []
+    original = train_module.run_single_unit
+
+    def recording(*args, **kwargs):
+        seen.append(torch.get_num_threads())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(train_module, "run_single_unit", recording)
+    trainer = Trainer(tiny_config(tmp_path, max_steps=1, torch_threads=inside))  # `with` 없이
+    assert torch.get_num_threads() == outside
+    metrics = trainer.run_step()
+    assert metrics["step"] == 1 and seen and set(seen) == {inside}
+    assert torch.get_num_threads() == outside
+    trainer.close()
+    assert torch.get_num_threads() == outside
+    with pytest.raises(ValueError, match="gradient_accumulation"):
+        Trainer(tiny_config(tmp_path, gradient_accumulation=1, torch_threads=inside))
+    assert torch.get_num_threads() == outside
+    with Trainer(tiny_config(tmp_path, max_steps=1, torch_threads=inside)) as scoped:
+        assert torch.get_num_threads() == outside  # 계산 밖에서는 바깥 값 그대로
+        scoped.run()
+    assert torch.get_num_threads() == outside and set(seen) == {inside}
+
+
 def test_train_function_returns_the_documented_result(tmp_path):
     threads_before = torch.get_num_threads()
     result = train(tiny_config(tmp_path, max_steps=1, run_id="fn-1"))

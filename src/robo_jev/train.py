@@ -43,6 +43,7 @@ step 도중(구간 경계)에서는 여기에 진행 위치(단위·구간 index
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import json
 import math
@@ -50,6 +51,7 @@ import random
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -658,23 +660,36 @@ def _new_accumulators() -> dict[str, Any]:
 
 
 class Trainer:
-    """설정 하나의 학습 상태 (모듈 설명 참조). context manager로 쓰면 스레드 수를 되돌린다.
+    """설정 하나의 학습 상태 (모듈 설명 참조).
 
     * :meth:`accumulate` — 현재 step의 accumulation 단위들(재개했으면 남은 것)을 forward·backward한다.
       끝나면 `True`, 중단 지점(`stop_after`·`max_wall_hours`)이면 진행 위치를 남기고 `False`.
     * :meth:`apply` — clip → optimizer step → schedule step, step 지표를 돌려준다.
     * :meth:`run` — `max_steps`까지 돌리고 checkpoint·metrics를 쓴다.
+
+    ``torch_threads``는 run의 정체(재개의 비트 동일은 같은 스레드 수에서만)지만 `torch.set_num_threads`는
+    프로세스 전역이다. 그래서 Trainer는 그 값을 **자기 계산 안에서만** 건다(:meth:`_threads` — 구성·accumulate·
+    apply·run·load)이고 나올 때 바깥 값을 되돌린다: context manager 없이 만들어도, 생성이 실패해도 프로세스의
+    스레드 수는 바뀌지 않는다. `with Trainer(...)`·:meth:`close` 는 그대로 쓸 수 있다(잡고 있는 전역 상태가 없다).
     """
 
     def __init__(self, config: dict, *, resume: str | Path | None = None) -> None:
         self.config = resolve_config(config)
-        self._threads_before = torch.get_num_threads()
-        torch.set_num_threads(int(self.config["torch_threads"]))
-        try:
+        with self._threads():
             self._build(resume)
-        except BaseException:
-            self.close()
-            raise
+
+    @contextlib.contextmanager
+    def _threads(self) -> Iterator[None]:
+        """설정의 `torch_threads`를 이 블록 안에서만 건다 — 나올 때 바깥 값으로 되돌린다 (중첩해도 된다)."""
+        before = torch.get_num_threads()
+        wanted = int(self.config["torch_threads"])
+        if wanted != before:
+            torch.set_num_threads(wanted)
+        try:
+            yield
+        finally:
+            if torch.get_num_threads() != before:
+                torch.set_num_threads(before)
 
     def _build(self, resume: str | Path | None) -> None:
         self._started = time.perf_counter()
@@ -725,7 +740,7 @@ class Trainer:
     # -- 수명 --
 
     def close(self) -> None:
-        torch.set_num_threads(self._threads_before)
+        """잡고 있는 프로세스 전역 상태가 없다 — 스레드 수는 계산 블록마다 되돌려진다. API 호환용."""
 
     def __enter__(self) -> Trainer:
         return self
@@ -837,6 +852,10 @@ class Trainer:
 
     def accumulate(self) -> bool:
         """현재 step의 남은 단위를 forward·backward한다. 끝나면 True, 중단 지점이면 False."""
+        with self._threads():
+            return self._accumulate()
+
+    def _accumulate(self) -> bool:
         if self.step >= int(self.config["max_steps"]):
             raise RuntimeError(f"max_steps {self.config['max_steps']}에 이미 도달했다")
         if self.progress is None:
@@ -878,6 +897,10 @@ class Trainer:
 
     def apply(self) -> dict[str, Any]:
         """clip → optimizer step → schedule step. step 지표를 돌려주고 history에 더한다."""
+        with self._threads():
+            return self._apply()
+
+    def _apply(self) -> dict[str, Any]:
         progress = self.progress
         if progress is None or progress["unit_index"] < len(progress["units"]):
             raise RuntimeError("apply: accumulate()가 끝나지 않았다")
@@ -947,6 +970,10 @@ class Trainer:
 
     def run(self) -> dict[str, Any]:
         """`max_steps`까지(또는 중단 지점까지) 돌리고 checkpoint·metrics.json을 쓴다."""
+        with self._threads():
+            return self._run_until_done()
+
+    def _run_until_done(self) -> dict[str, Any]:
         max_steps = int(self.config["max_steps"])
         every = int(self.config["checkpoint_every"])
         stop = self.config["stop_after"]
@@ -1025,6 +1052,10 @@ class Trainer:
 
     def load(self, path: str | Path) -> None:
         """checkpoint에서 이어간다. run의 정체(설정)가 다르면 거절한다."""
+        with self._threads():
+            self._load(path)
+
+    def _load(self, path: str | Path) -> None:
         state = load_checkpoint(path)
         saved = state["config"]
         differences = [
