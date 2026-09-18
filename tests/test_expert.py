@@ -648,6 +648,8 @@ def test_a_clear_approach_outranks_a_larger_gain_for_a_blocker_push():
     for entry in request["request"]["candidates"]["q_main"]:
         if entry["key"].startswith("push:o1:-x:"):
             entry["derived"] = entry["derived"].replace("path blocked", "path clear")
+        elif entry["key"].startswith("push:o1:+x:"):
+            entry["derived"] = entry["derived"].replace("path clear", "path blocked")
     out = expert().act(request, commitment, obs)
     assert key_of(request, top(out["q_main"])).startswith("push:o1:-x:none:")
 
@@ -793,7 +795,7 @@ class ForcedMain:
 
 def test_a_push_moves_the_object_with_closed_fingers_at_mid_height():
     """3c-1 측정에서 열린 손가락의 ±x 밀기는 120틱에 ≤5mm였다(물체가 손가락 사이로 빠진다). 주먹으로 물체
-    중간 높이를 밀면 E0 seed 5의 상자(34×32×32)가 4초 안에 한 구간(80mm)의 절반 이상 움직이고 접촉력은
+    중간 높이를 밀면 E0 seed 43의 상자 o1(34×56×42)이 4초 안에 한 구간(80mm)의 절반 이상 움직이고 접촉력은
     반사 한계 아래다."""
     from robo_jev.harness.robot import RobotHarness, load_harness_config
     from robo_jev.sim.environment import Environment
@@ -801,12 +803,12 @@ def test_a_push_moves_the_object_with_closed_fingers_at_mid_height():
     policy_expert = Expert()
     env = Environment(config_path=str(SIM_CONFIG), profile="E0")
     try:
-        scene = env.reset(seed=5)
-        target = next(entry for entry in scene["objects"] if entry["id"] == "o0")
+        scene = env.reset(seed=43)
+        target = next(entry for entry in scene["objects"] if entry["id"] == "o1")
         assert target["shape"] == "box"
         start = list(target["pos_mm"])
         hrn = RobotHarness(load_harness_config())
-        policy = ForcedMain(policy_expert, "push:o0:+x:none:slow")
+        policy = ForcedMain(policy_expert, "push:o1:+x:none:slow")
         commitment = history = None
         max_force, closed_ticks = 0.0, 0
         for _ in range(40):
@@ -819,12 +821,14 @@ def test_a_push_moves_the_object_with_closed_fingers_at_mid_height():
                 ack = scene["ack"] or ack
                 max_force = max(max_force, scene["robot"]["contact_force_n"])
             committed = request["request"]["commitment"]
-            if committed and committed["phase"] == "push":  # 부가 답은 틱 시작 시 commitment 기준이다
+            if committed and committed["phase"] == "push" and not out["adopted"]["stop"]:  # 부가 답은 틱 시작 시 commitment 기준
                 assert out["command"]["force_level"] == "push" and out["command"]["gripper"] == "closed"
-                assert abs(out["command"]["path"]["target_mm"][2] - start[2]) <= 2  # 중간 높이
+                surface = target["pos_mm"][2] - target["obb_mm"][2] // 2  # 놓인 물체의 바닥 = 작업면
+                height = max(start[2], surface + HARNESS["candidates"]["push_height_min_mm"])
+                assert abs(out["command"]["path"]["target_mm"][2] - height) <= 2  # 중간 높이 (작업면 위 최소 높이)
                 closed_ticks += int(scene["robot"]["gripper_mm"] < 20)
             commitment, history = out["commitment"], {"adopted": out["adopted"], "ack": ack, "gate": out["gate"]}
-        end = next(entry for entry in scene["objects"] if entry["id"] == "o0")["pos_mm"]
+        end = next(entry for entry in scene["objects"] if entry["id"] == "o1")["pos_mm"]
     finally:
         env.close()
     assert end[0] - start[0] >= HARNESS["candidates"]["push_segment_mm"] * 0.5, (start, end)

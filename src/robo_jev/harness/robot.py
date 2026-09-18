@@ -490,11 +490,15 @@ class RobotHarness:
         else:  # push
             vector = _PUSH_VECTORS[approach]
             contact = radius_xy + float(spec["push_contact_mm"])
-            approach_mm = [pose[0] - vector[0] * contact, pose[1] - vector[1] * contact, pose[2]]
+            # 물체 중간 높이로 밀되 작업면 위 최소 높이는 지킨다 — 닫힌 손가락 끝이 그립 사이트 아래 4mm에 있고
+            # 하강 끝의 추종 오차가 10mm쯤이라, 낮은 상자(32mm)의 중간 높이(16mm)에서는 손가락이 작업면을 친다.
+            surface = float(state["scene"].get("work_surface_mm", 0.0))
+            height = max(pose[2], surface + float(spec["push_height_min_mm"]))
+            approach_mm = [pose[0] - vector[0] * contact, pose[1] - vector[1] * contact, height]
             action_mm = [
                 approach_mm[0] + vector[0] * float(spec["push_segment_mm"]),
                 approach_mm[1] + vector[1] * float(spec["push_segment_mm"]),
-                pose[2],
+                height,
             ]
 
         if not (self._reachable(approach_mm) and self._reachable(action_mm)):
@@ -709,9 +713,19 @@ class RobotHarness:
                 and executing.get("phase") == "push"
                 and executing.get("action_ref") == action_ref
             )
-            if already or math.dist(ee, approach_mm) <= float(spec["push_contact_mm"]):
+            contact_mm = float(spec["push_contact_mm"])
+            # 밀기 국면에는 접촉점에서 **멈춘 뒤** 들어간다 — 하강 속도를 안은 채 임피던스가 밀기(부드러움)로
+            # 바뀌면 z가 15mm 처져 손가락이 작업면을 친다(3c-2 실측 113~144N).
+            settled = float(state["robot"].get("speed_mm_s") or 0.0) <= float(spec["push_entry_speed_mm_s"])
+            if already or (math.dist(ee, approach_mm) <= contact_mm and settled):
                 return "push", list(action_mm)
-            return "approach", list(approach_mm)
+            # 접촉점은 물체 옆 중간 높이다. 거기로 곧장 가면 직선이 물체 자신을 지난다(구간 대조는 대상을 뺀다 —
+            # 위에서 내려오는 파지에는 맞지만 옆 접촉에는 아니다; 첫 100 rollout에서 밀기 71건 중 59건이 접근 중
+            # 34~100N 충돌). 파지처럼 두 단계로 간다: 접촉점 **위**(윗면 + 접근 여유)로 먼저, xy가 맞으면 내려온다.
+            above = [approach_mm[0], approach_mm[1], float(entry["top_mm"]) + float(self.candidates_config["approach_clearance_mm"])]
+            if math.dist(ee[:2], approach_mm[:2]) <= contact_mm and ee[2] > approach_mm[2]:
+                return "approach", list(approach_mm)
+            return "approach", above
         if function == "place" or holding == object_id:
             if math.dist(ee[:2], action_mm[:2]) <= float(spec["place_tolerance_mm"]):
                 return "place", list(action_mm)

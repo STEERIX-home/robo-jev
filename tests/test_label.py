@@ -181,11 +181,17 @@ def test_a_candidate_the_followup_cannot_see_is_censored(e0_seed5):
     assert result["outcome"] == "censored" and result["reason"] == "candidate_unavailable"
 
 
-def test_a_push_rollout_measures_displacement_along_the_direction(e0_seed5):
-    scene = e0_seed5["scene"]
-    key = "push:o0:+x:none:slow"
+def test_a_push_rollout_measures_displacement_along_the_direction():
+    """E0 seed 43의 상자 o1(34×56×42)을 +x로 민다 — 시작 자세에서 3초 horizon 안에 반 구간(40mm)을 넘는다."""
+    env = Environment(config_path=str(SIM_CONFIG), profile="E0")
+    try:
+        scene = env.reset(seed=43)
+        snapshot = env.snapshot()
+    finally:
+        env.close()
+    key = "push:o1:+x:none:slow"
     event = event_for(key, holding=None, config=EVENTS)
-    result = rollout_event(e0_seed5["snapshot"], action_for(scene, key), event, seed=0)
+    result = rollout_event(snapshot, action_for(scene, key), event, seed=0)
     assert result["outcome"] == "success", result
     evidence = result["evidence"]
     assert evidence["event_id"] == "push-segment-v0"

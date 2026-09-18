@@ -98,6 +98,9 @@ candidates:
   place_clearance_mm: 10     # 놓기점: 든 물체의 바닥이 작업면 위 이만큼 오는 높이
   push_contact_mm: 30        # 밀기 접촉점의 물체 표면 밖 거리
   push_segment_mm: 80        # 밀기 한 구간의 길이 (완료 판정에도 쓴다)
+  # 밀기 높이 = max(물체 중간 높이, 작업면 + 이 값). 닫힌 손가락 끝은 그립 사이트 아래 4mm이고 하강 끝의 추종
+  # 오차가 10mm쯤이라 그보다 낮으면 손가락이 작업면을 친다(3c-2 실측: 32mm 상자의 중간 높이에서 230N).
+  push_height_min_mm: 25
 
 # 후보 설명 문구. 언어는 `language`가 고른다 (docs/08 §4 "후보에 `action_ref`·설명").
 descriptions:
@@ -176,6 +179,9 @@ phases:
   height_tolerance_mm: 15    # 이동 높이에 이만큼 들어오면 lift → transport (추종 오차 흡수)
   place_tolerance_mm: 60     # 목적지 중심에 이만큼 들어오면 transport → place
   push_contact_mm: 40        # 접촉점에 이만큼 들어오면 approach → push
+  # …단, 말단이 이 속도 아래로 잦아든 뒤에. 하강 속도를 안은 채 임피던스가 밀기(부드러움)로 바뀌면 z가 15mm
+  # 처져 손가락이 작업면을 친다(3c-2 실측 113~144N). 파지 진입(60)보다 느슨한 것은 밀기 horizon(3초) 때문이다.
+  push_entry_speed_mm_s: 120
 
 # 명령 생성 (docs/08 §6).
 command:

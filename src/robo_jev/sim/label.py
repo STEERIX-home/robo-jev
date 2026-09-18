@@ -243,6 +243,11 @@ def rollout_event(
         "first_success_tick": None,
         "trajectory": [],
         "max_contact_n": 0.0,
+        "start_pose_mm": None,
+        "end_pose_mm": None,
+        "holding_at_end": None,
+        "displacement_along_mm": None,
+        "lift_mm": None,
         "restore_s": None,
         "wall_s": None,
     }
