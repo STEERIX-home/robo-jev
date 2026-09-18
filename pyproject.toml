@@ -4,7 +4,9 @@ version = "0.0.1"
 description = "robojev: 로봇용 typed judgment 모델 — 입력·라벨 계약과 fixture"
 readme = "docs/README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "pyyaml>=6.0.3",
+]
 
 [dependency-groups]
 dev = ["pytest>=8.3"]

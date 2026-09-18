@@ -1,0 +1,51 @@
+# 비로봇 단일 요청 생성 설정 (docs/04 §2·§5의 시작값).
+#
+#   python -m robo_jev.data.generate --config configs/data/pilot.yaml \
+#       --count 2000 --seed 17 --output artifacts/datasets/d1/single
+#
+# 여기 값은 `robo_jev.data.generate.DEFAULT_CONFIG`와 같아야 한다 (tests/test_data.py가 본다).
+# 비중은 상대값이므로 합이 100이 아니어도 된다.
+version: pilot-v0
+
+# 분야 비중. docs/04 §2는 브라우저·도구 15 / 업무 흐름 15 / 일반 규칙 10을 두고 나머지를
+# 색·위치·영역 문제가 채우게 했다. pilot에서는 넷을 고르게 두고 필요할 때 여기서 기울인다.
+domains:
+  spatial: 25
+  dom: 25
+  workflow: 25
+  rules: 25
+
+# 질문 타입 비중 (docs/04 §2 시작값).
+question_types:
+  choice: 60
+  boolean: 25
+  ordinal: 15
+
+# 상태당 질문 수 분포 (docs/04 §2: 1/4/8/16을 10/20/50/20%로 → 평균 약 8개).
+questions_per_state:
+  1: 10
+  4: 20
+  8: 50
+  16: 20
+
+# 지시문 언어. 번역본은 원본과 같은 split에 둔다.
+languages:
+  ko: 70
+  en: 30
+
+# 파생본 비율(%). 부모의 origin group을 쓰므로 split을 그대로 승계한다.
+derivations:
+  paraphrase: 20 # 같은 사실을 다른 언어·문장으로 다시 그린다 (라벨 재계산)
+  reorder: 10 # 문장은 그대로, 후보 순서·id만 바꾼다
+
+split:
+  # 해시 분할 비중 (docs/04 §5). ood는 여기 넣지 않는다 — holdout 목록으로만 만든다.
+  weights:
+    train: 70
+    dev: 10
+    calibration: 10
+    test: 10
+  # 의미 계열·분야 holdout. 해시 분할보다 **먼저** 제외되어 ood로 간다.
+  holdout_groups: []
+  holdout_prefixes: []
+  holdout_domains: []

@@ -1,0 +1,697 @@
+"""생성기·그룹 분할·QA 검사 (docs/04 §2·§3·§5·§6).
+
+`tests/test_contracts.py`가 계약 자체를 본다면, 여기서는 **생성된 데이터**가 그 계약과
+생성 계획을 지키는지 본다. 거절·불변 검사를 먼저 쓰고(RED) 구현을 붙인다(GREEN).
+
+핵심 불변:
+
+* 같은 seed는 같은 레코드 목록을 낸다 (바이트 단위 재현).
+* 라벨은 (사실, 질문 명세)의 순수 함수다 — 표현만 바꾸면 그대로, 사실을 바꾸면 따라 바뀐다.
+* origin group 하나는 split 하나에만 들어간다. 파생본은 부모의 group·split을 승계한다.
+* 정답 위치에 편향이 없다.
+"""
+
+import copy
+import json
+import random
+import subprocess
+import sys
+from collections import Counter, defaultdict
+
+import pytest
+from helpers import D0, D0_STREAMS, read_jsonl
+
+from robo_jev.contracts import model_input, validate_record
+from robo_jev.data import domains
+from robo_jev.data.generate import (
+    DEFAULT_CONFIG,
+    PILOT_CONFIG,
+    generate_records,
+    load_config,
+)
+from robo_jev.data.generate import main as generate_main
+from robo_jev.data.split import DEFAULT_WEIGHTS, SplitPolicy, assign_split
+from robo_jev.data.validate import POSITION_BIAS_MIN_SAMPLES, validate_dataset
+from robo_jev.data.validate import main as validate_main
+
+BATCH_COUNT = 500
+BATCH_SEED = 17
+
+
+@pytest.fixture(scope="module")
+def batch() -> list[dict]:
+    """검사 대부분이 함께 보는 비로봇 500상태 (docs/04 §6 smoke)."""
+    return generate_records(count=BATCH_COUNT, seed=BATCH_SEED)
+
+
+@pytest.fixture(scope="module")
+def report(batch) -> dict:
+    return validate_dataset(batch)
+
+
+# --------------------------------------------------------------------------
+# 계획서가 요구한 재현·계보 검사 (task-2-brief.md)
+# --------------------------------------------------------------------------
+
+
+def test_generation_is_reproducible_and_groups_do_not_leak():
+    rows = generate_records(count=500, seed=17)
+    assert rows == generate_records(count=500, seed=17)
+    groups = defaultdict(set)
+    for row in rows:
+        groups[row["origin_group"]].add(row["split"])
+    assert all(len(parts) == 1 for parts in groups.values())
+    report = validate_dataset(rows)
+    assert report["invalid_records"] == 0
+    assert report["states"] == 500
+
+
+def test_a_different_seed_gives_different_states():
+    other = generate_records(count=20, seed=18)
+    assert other != generate_records(count=20, seed=17)
+    assert len(other) == 20
+
+
+def test_count_is_exact_for_odd_sizes():
+    for count in (1, 3, 7, 33):
+        assert len(generate_records(count=count, seed=3)) == count
+
+
+# --------------------------------------------------------------------------
+# 생성된 레코드가 계약을 지킨다
+# --------------------------------------------------------------------------
+
+
+def test_every_generated_record_is_valid(batch):
+    for index, record in enumerate(batch):
+        try:
+            validate_record(record)
+        except ValueError as error:  # pragma: no cover - 실패할 때만 본다
+            pytest.fail(f"{index}번 레코드가 계약을 어긴다: {error}")
+
+
+def test_generated_records_are_json_serialisable(batch):
+    for record in batch:
+        json.dumps(record, ensure_ascii=False)
+
+
+def test_records_carry_group_split_provenance_and_evidence(batch):
+    for record in batch:
+        assert record["schema_version"] == "judgment-v0"
+        assert record["origin_group"].count("/") == 2, record["origin_group"]
+        assert record["split"] == assign_split(record["origin_group"])
+        provenance = record["provenance"]
+        for field in ("generator", "domain", "template", "seed", "origin_group", "variants"):
+            assert field in provenance, field
+        assert record["evidence"]["rule_trace"], record["request"]["request_id"]
+
+
+def test_request_ids_are_unique(batch):
+    ids = [record["request"]["request_id"] for record in batch]
+    assert len(set(ids)) == len(ids)
+
+
+def test_geometry_records_never_use_physical_event_labels(batch):
+    """기하·규칙 문제를 실제 물리 성공 라벨로 표시하지 않는다 (task-2-brief)."""
+    kinds = {label["kind"] for record in batch for label in record["labels"]}
+    assert kinds <= {"valid_set", "single"}, kinds
+
+
+def test_every_label_names_its_rule(batch):
+    for record in batch:
+        for label in record["labels"]:
+            assert label.get("source") or label.get("rule"), record["request"]["request_id"]
+
+
+def test_masked_questions_have_no_label_but_keep_a_reason(batch):
+    masked = 0
+    for record in batch:
+        labelled = {label["question_id"] for label in record["labels"]}
+        for question in record["request"]["questions"]:
+            if question["id"] in labelled:
+                continue
+            masked += 1
+            assert question["id"] in record["evidence"]["masked"], question["id"]
+    assert masked > 0, "근거가 없어 마스킹한 질문이 하나도 없다"
+
+
+# --------------------------------------------------------------------------
+# 분야·타입·난이도 구성 (docs/04 §2·§3)
+# --------------------------------------------------------------------------
+
+
+def test_all_four_non_robot_domains_are_generated(batch):
+    counts = Counter(record["provenance"]["domain"] for record in batch)
+    assert set(counts) == {"spatial", "dom", "workflow", "rules"}
+    for domain, weight in DEFAULT_CONFIG["domains"].items():
+        share = counts[domain] / len(batch)
+        assert abs(share - weight / 100) <= 0.08, (domain, share)
+
+
+def test_question_type_mix_follows_the_config(batch):
+    counts = Counter(
+        question["type"] for record in batch for question in record["request"]["questions"]
+    )
+    total = sum(counts.values())
+    for question_type, weight in DEFAULT_CONFIG["question_types"].items():
+        share = counts[question_type] / total
+        assert abs(share - weight / 100) <= 0.06, (question_type, share)
+
+
+def test_questions_per_state_uses_the_configured_sizes(batch):
+    sizes = Counter(len(record["request"]["questions"]) for record in batch)
+    assert set(sizes) == set(DEFAULT_CONFIG["questions_per_state"])
+    for size, weight in DEFAULT_CONFIG["questions_per_state"].items():
+        share = sizes[size] / len(batch)
+        assert abs(share - weight / 100) <= 0.08, (size, share)
+
+
+def test_both_languages_appear(batch):
+    languages = Counter(record["provenance"]["language"] for record in batch)
+    assert set(languages) == {"ko", "en"}
+    assert min(languages.values()) / len(batch) > 0.1
+
+
+def test_every_difficulty_variant_is_exercised(batch):
+    """docs/04 §3의 변형이 500상태 안에 모두 들어 있다."""
+    seen = Counter(tag for record in batch for tag in record["provenance"]["variants"])
+    missing = sorted(set(domains.VARIANT_TAGS) - set(seen))
+    assert not missing, missing
+
+
+def test_candidate_counts_and_multiple_answers_vary(batch):
+    sizes = set()
+    multiple = 0
+    for record in batch:
+        by_id = {question["id"]: question for question in record["request"]["questions"]}
+        for question in record["request"]["questions"]:
+            if question["type"] == "choice":
+                sizes.add(len(question["criteria"]))
+        for label in record["labels"]:
+            if (
+                label["kind"] == "valid_set"
+                and len(label["candidate_ids"]) > 1
+                and by_id[label["question_id"]]["type"] == "choice"
+            ):
+                multiple += 1
+    assert len(sizes) >= 4, sizes
+    assert multiple > 0
+
+
+def test_answer_position_has_no_bias(batch):
+    """정답이 유일한 choice 질문에서 후보 위치가 한쪽으로 쏠리지 않는다."""
+    positions: dict[int, Counter] = defaultdict(Counter)
+    for record in batch:
+        labels = {label["question_id"]: label for label in record["labels"]}
+        for question in record["request"]["questions"]:
+            label = labels.get(question["id"])
+            if question["type"] != "choice" or label is None:
+                continue
+            answers = label.get("candidate_ids") or [label.get("answer")]
+            if len(answers) != 1:
+                continue
+            candidates = [criterion["id"] for criterion in question["criteria"]]
+            if len(candidates) < 3:
+                continue
+            positions[len(candidates)][candidates.index(answers[0])] += 1
+
+    assert positions, "위치 편향을 볼 choice 질문이 없다"
+    checked = 0
+    for size, counter in sorted(positions.items()):
+        total = sum(counter.values())
+        if total < POSITION_BIAS_MIN_SAMPLES:
+            continue  # 표본이 적으면 균등해도 한 자리가 우연히 튄다
+        checked += 1
+        assert max(counter.values()) / total <= 1 / size + 0.15, (size, total, counter)
+    assert checked >= 2, positions  # 표본이 충분한 층이 최소 둘은 있어야 검사가 의미 있다
+
+
+# --------------------------------------------------------------------------
+# 라벨은 사실의 함수다 (docs/04 §3: "표현 변형으로 사실이 바뀌면 정답도 다시 계산한다")
+# --------------------------------------------------------------------------
+
+
+def _semantic(question: dict) -> dict[str, str]:
+    """후보 id → 표현·재배열과 무관한 의미 키.
+
+    choice 후보의 id는 레코드마다 다시 붙으므로 상태 요소를 가리키는 `ref`로 본다.
+    `ref`가 없는 choice 후보는 "해당 없음·정보 부족" 하나뿐이다. ordinal 수준의 id는
+    수준 자체라서 그대로 쓴다.
+    """
+    if question["type"] == "choice":
+        return {
+            criterion["id"]: criterion.get("ref", "<none>") for criterion in question["criteria"]
+        }
+    return {criterion["id"]: criterion["id"] for criterion in question["criteria"]}
+
+
+def _answer_key(rendered) -> object:
+    """표현과 무관하게 비교할 수 있는 정답 값."""
+    if rendered.label is None:
+        return "masked"
+    if rendered.question["type"] == "boolean":
+        return rendered.label["answer"]
+    keys = _semantic(rendered.question)
+    chosen = rendered.label.get("candidate_ids") or [rendered.label["answer"]]
+    return tuple(sorted(keys[candidate] for candidate in chosen))
+
+
+def _render_all(domain, scene, specs, *, language: str, seed: int) -> list:
+    rng = random.Random(seed)
+    return [domain.render(scene, spec, rng, language) for spec in specs]
+
+
+def _answers(rendered_list) -> dict:
+    return {item.question["id"]: _answer_key(item) for item in rendered_list}
+
+
+def _wording(rendered_list) -> list[str]:
+    return [item.question["instructions"] for item in rendered_list]
+
+
+#: 분야마다 "정답을 실제로 바꾸는" 사실 변경 (표현 변경과 구분한다).
+FACT_CHANGES = {
+    "spatial": lambda scene: scene["objects"][0].update(
+        {"x": -scene["objects"][0]["x"], "color": "magenta"}
+    ),
+    "dom": lambda scene: [
+        element.update({"visible": False, "enabled": False}) for element in scene["elements"]
+    ],
+    "workflow": lambda scene: [step.update({"done": not step["done"]}) for step in scene["steps"]],
+    "rules": lambda scene: scene["situation"].update(
+        {key: f"{value}-바뀜" for key, value in scene["situation"].items()}
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(domains.DOMAINS))
+def test_paraphrase_keeps_the_label_but_a_fact_change_moves_it(name):
+    domain = domains.DOMAINS[name]
+    scene = domain.make_scene(random.Random(f"fact:{name}"), domain.templates[0])
+    specs = domain.pool(scene)
+    assert len(specs) >= 16, (name, len(specs))
+
+    korean = _render_all(domain, scene, specs, language="ko", seed=1)
+    english = _render_all(domain, scene, specs, language="en", seed=2)
+    assert _answers(korean) == _answers(english), name
+    assert _wording(korean) != _wording(english), name
+
+    changed = copy.deepcopy(scene)
+    FACT_CHANGES[name](changed)
+    moved = _render_all(domain, changed, specs, language="ko", seed=1)
+    assert _answers(moved) != _answers(korean), name
+
+
+@pytest.mark.parametrize("name", sorted(domains.DOMAINS))
+def test_every_template_of_every_domain_builds_valid_questions(name):
+    domain = domains.DOMAINS[name]
+    for template in domain.templates:
+        scene = domain.make_scene(random.Random(f"tpl:{name}:{template}"), template)
+        rng = random.Random(7)
+        for spec in domain.pool(scene):
+            rendered = domain.render(scene, spec, rng, "ko")
+            assert rendered.question["id"] == spec.id
+            assert rendered.question["type"] == spec.type
+            assert rendered.trace, spec.id
+
+
+# --------------------------------------------------------------------------
+# 분할 (docs/04 §5)
+# --------------------------------------------------------------------------
+
+#: stable hash를 얼려 둔다. 값이 바뀌면 이미 배포한 데이터의 split이 뒤집힌다.
+FROZEN_SPLITS = {
+    "spatial/zone-color/0000": "train",
+    "spatial/zone-color/0001": "calibration",
+    "spatial/zone-color/0011": "dev",
+    "spatial/zone-color/0016": "test",
+    "dom/checkout-form/0001": "test",
+    "workflow/release-train/0002": "train",
+    "rules/access-policy/0003": "train",
+    "scene-family-018": "test",
+}
+
+
+def test_known_groups_keep_their_frozen_split():
+    for group, split in FROZEN_SPLITS.items():
+        assert assign_split(group) == split, group
+
+
+def test_assign_split_does_not_depend_on_the_process_hash_seed():
+    """`hash()`가 아니라 sha256을 써야 프로세스마다 같은 split이 나온다."""
+    code = (
+        "from robo_jev.data.split import assign_split;"
+        "print(','.join(assign_split(f'g/{i}') for i in range(24)))"
+    )
+    runs = []
+    for hash_seed in ("0", "1", "random"):
+        result = subprocess.run(
+            [sys.executable, "-c", code],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={"PATH": "/usr/bin:/bin", "PYTHONHASHSEED": hash_seed},
+        )
+        runs.append(result.stdout.strip())
+    assert len(set(runs)) == 1, runs
+
+
+def test_split_proportions_follow_the_weights():
+    groups = [f"synthetic-family-{index:05d}" for index in range(10_000)]
+    counts = Counter(assign_split(group) for group in groups)
+    for split, weight in DEFAULT_WEIGHTS:
+        assert abs(counts[split] / len(groups) - weight / 100) <= 0.03, (split, counts[split])
+
+
+def test_holdouts_are_excluded_before_the_hashed_split():
+    policy = SplitPolicy.from_config(
+        {
+            "holdout_groups": ["rules/access-policy/0003"],
+            "holdout_prefixes": ["rules/energy-device/"],
+            "holdout_domains": ["dom"],
+        }
+    )
+    assert policy.assign("rules/access-policy/0003") == "ood"
+    assert policy.assign("rules/energy-device/0007") == "ood"
+    assert policy.assign("dom/checkout-form/0001") == "ood"
+    # holdout이 아닌 group은 해시 분할을 그대로 따른다.
+    assert policy.assign("spatial/zone-color/0000") == assign_split("spatial/zone-color/0000")
+
+
+def test_split_weights_must_be_positive_integers():
+    with pytest.raises(ValueError, match="weights"):
+        SplitPolicy.from_config({"weights": {"train": 0, "dev": 0}})
+    with pytest.raises(ValueError, match="ood"):
+        SplitPolicy.from_config({"weights": {"train": 70, "ood": 30}})
+
+
+def test_derived_records_inherit_the_parent_group_and_split(batch):
+    by_id = {record["request"]["request_id"]: record for record in batch}
+    derived = [record for record in batch if record["provenance"].get("derived_from")]
+    assert derived, "파생본이 하나도 없다"
+    for record in derived:
+        parent = by_id[record["provenance"]["derived_from"]]
+        assert record["origin_group"] == parent["origin_group"]
+        assert record["split"] == parent["split"]
+        assert record["provenance"]["derivation"] in ("paraphrase", "reorder")
+
+
+def test_paraphrases_keep_the_answer_and_change_the_wording(batch):
+    by_id = {record["request"]["request_id"]: record for record in batch}
+    paraphrases = [
+        record
+        for record in batch
+        if record["provenance"].get("derivation") == "paraphrase"
+    ]
+    assert paraphrases, "표현 변형본이 하나도 없다"
+    for record in paraphrases:
+        parent = by_id[record["provenance"]["derived_from"]]
+        assert _record_answers(record) == _record_answers(parent)
+        assert _record_wording(record) != _record_wording(parent)
+
+
+def _record_answers(record: dict) -> dict:
+    questions = {question["id"]: question for question in record["request"]["questions"]}
+    labels = {label["question_id"]: label for label in record["labels"]}
+    answers = {}
+    for question_id, question in questions.items():
+        label = labels.get(question_id)
+        if label is None:
+            answers[question_id] = "masked"
+        elif question["type"] == "boolean":
+            answers[question_id] = label["answer"]
+        else:
+            keys = _semantic(question)
+            chosen = label.get("candidate_ids") or [label["answer"]]
+            answers[question_id] = tuple(sorted(keys[candidate] for candidate in chosen))
+    return answers
+
+
+def _record_wording(record: dict) -> list[str]:
+    return [question["instructions"] for question in record["request"]["questions"]]
+
+
+# --------------------------------------------------------------------------
+# QA (docs/04 §6)
+# --------------------------------------------------------------------------
+
+
+def test_report_counts_states_questions_and_groups(batch, report):
+    assert report["version"]
+    assert report["invalid_records"] == 0
+    assert report["errors"] == []
+    assert report["states"] == len(batch)
+    assert report["episodes"] == 0
+    assert report["ticks"] == 0
+    assert report["questions"] == sum(
+        len(record["request"]["questions"]) for record in batch
+    )
+    assert sum(report["domains"].values()) == len(batch)
+    assert sum(report["question_types"].values()) == report["questions"]
+    assert sum(report["label_kinds"].values()) == report["labels"]
+    groups = {record["origin_group"] for record in batch}
+    assert sum(report["split_groups"].values()) == len(groups)
+    assert sum(report["split_records"].values()) == len(batch)
+
+
+def test_report_counts_episodes_and_ticks_for_streams():
+    """D0 fixture로 스트림 집계 경로를 함께 본다."""
+    records = read_jsonl(D0) + read_jsonl(D0_STREAMS)
+    report = validate_dataset(records)
+    assert report["invalid_records"] == 0
+    assert report["states"] == 64
+    assert report["episodes"] == 4
+    assert report["ticks"] == sum(len(record["ticks"]) for record in read_jsonl(D0_STREAMS))
+    assert report["errors"] == []
+
+
+def test_report_flags_a_split_conflict_in_one_group(batch):
+    poisoned = copy.deepcopy(batch[:8])
+    conflict = copy.deepcopy(poisoned[0])
+    conflict["split"] = "dev" if conflict["split"] != "dev" else "test"
+    conflict["request"]["request_id"] += "-conflict"
+    poisoned.append(conflict)
+    report = validate_dataset(poisoned)
+    assert report["invalid_records"] == 0
+    paths = [error["path"] for error in report["errors"]]
+    assert "split" in paths, report["errors"]
+
+
+def test_report_flags_duplicated_facts_across_groups(batch):
+    poisoned = copy.deepcopy(batch[:8])
+    leaked = copy.deepcopy(poisoned[0])
+    leaked["origin_group"] = "spatial/leaked-family/9999"
+    leaked["split"] = assign_split(leaked["origin_group"])
+    leaked["request"]["request_id"] += "-leak"
+    poisoned.append(leaked)
+    report = validate_dataset(poisoned)
+    messages = [error["message"] for error in report["errors"]]
+    assert any("group" in message and "사실" in message for message in messages), report["errors"]
+    assert report["duplicate_content"]["cross_group"] == 1
+
+
+def test_report_flags_a_paraphrase_parent_in_another_group(batch):
+    poisoned = copy.deepcopy(batch[:8])
+    poisoned[1]["provenance"]["derived_from"] = poisoned[0]["request"]["request_id"]
+    poisoned[1]["provenance"]["derivation"] = "paraphrase"
+    poisoned[1]["origin_group"] = "spatial/other-family/4242"
+    poisoned[1]["split"] = assign_split(poisoned[1]["origin_group"])
+    report = validate_dataset(poisoned)
+    paths = [error["path"] for error in report["errors"]]
+    assert "provenance.derived_from" in paths, report["errors"]
+
+
+def test_report_flags_a_paraphrase_whose_facts_moved(batch):
+    """표현만 바꿨다면서 사실이 다르면 계보가 거짓이다."""
+    poisoned = copy.deepcopy(
+        [record for record in batch if record["provenance"].get("derivation") == "paraphrase"][:1]
+    )
+    parent_id = poisoned[0]["provenance"]["derived_from"]
+    poisoned.insert(0, copy.deepcopy(_find(batch, parent_id)))
+    assert validate_dataset(poisoned)["errors"] == []
+
+    poisoned[1]["request"]["state"]["observed_at_ms"] += 50
+    report = validate_dataset(poisoned)
+    messages = [error["message"] for error in report["errors"]]
+    assert any("표현 변형본" in message for message in messages), report["errors"]
+
+
+def _find(records: list[dict], request_id: str) -> dict:
+    return next(
+        record for record in records if record["request"]["request_id"] == request_id
+    )
+
+
+def test_report_flags_a_dangling_candidate_reference(batch):
+    poisoned = copy.deepcopy(batch[:8])
+    for record in poisoned:
+        for question in record["request"]["questions"]:
+            for criterion in question["criteria"]:
+                if "ref" in criterion:
+                    criterion["ref"] = "does-not-exist"
+                    report = validate_dataset(poisoned)
+                    assert any(
+                        error["path"].endswith(".ref") for error in report["errors"]
+                    ), report["errors"]
+                    return
+    pytest.fail("ref를 가진 후보가 없다")
+
+
+def test_report_flags_a_missing_label_source(batch):
+    poisoned = copy.deepcopy(batch[:8])
+    poisoned[0]["labels"][0].pop("source", None)
+    poisoned[0]["labels"][0].pop("rule", None)
+    report = validate_dataset(poisoned)
+    paths = [error["path"] for error in report["errors"]]
+    assert "labels[0].source" in paths, report["errors"]
+
+
+def test_report_flags_an_information_boundary_leak(batch):
+    poisoned = copy.deepcopy(batch[:4])
+    poisoned[0]["request"]["state"]["evidence"] = {"rule_trace": "정답이 새어 나간다"}
+    report = validate_dataset(poisoned)
+    assert report["invalid_records"] == 1
+    paths = [error["path"] for error in report["errors"]]
+    assert any(path.startswith("model_input") for path in paths), report["errors"]
+
+
+def test_report_collects_every_invalid_record_instead_of_stopping(batch):
+    poisoned = copy.deepcopy(batch[:6])
+    for record in poisoned[:3]:
+        record["labels"].append({"question_id": "q_missing", "kind": "single", "answer": True})
+    report = validate_dataset(poisoned)
+    assert report["invalid_records"] == 3
+    assert len({error["index"] for error in report["errors"]}) == 3
+
+
+def test_report_summarises_answer_positions(batch, report):
+    summary = report["answer_position"]
+    assert summary["questions"] > 0
+    for size, entry in summary["by_candidate_count"].items():
+        assert abs(sum(entry["shares"]) - 1.0) < 1e-6, size
+
+
+def test_model_input_of_every_generated_record_hides_the_labels(batch):
+    for record in batch:
+        served = model_input(record)
+        text = json.dumps(served, ensure_ascii=False)
+        assert "rule_trace" not in text
+        assert served["request"]["request_id"] == record["request"]["request_id"]
+
+
+# --------------------------------------------------------------------------
+# 설정과 CLI
+# --------------------------------------------------------------------------
+
+
+def test_pilot_config_file_matches_the_embedded_default():
+    assert load_config(PILOT_CONFIG) == DEFAULT_CONFIG
+
+
+def test_config_changes_the_domain_mix():
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    config["domains"] = {"rules": 100}
+    records = generate_records(count=40, seed=4, config=config)
+    assert {record["provenance"]["domain"] for record in records} == {"rules"}
+
+
+def test_config_holdouts_move_a_domain_to_ood():
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    config["split"]["holdout_domains"] = ["spatial"]
+    records = generate_records(count=60, seed=4, config=config)
+    splits = {
+        record["split"] for record in records if record["provenance"]["domain"] == "spatial"
+    }
+    assert splits == {"ood"}
+
+
+def test_cli_generate_and_validate_round_trip(tmp_path):
+    dataset = tmp_path / "d1"
+    assert (
+        generate_main(
+            [
+                "--config",
+                str(PILOT_CONFIG),
+                "--count",
+                "40",
+                "--seed",
+                "11",
+                "--output",
+                str(dataset / "single"),
+            ]
+        )
+        == 0
+    )
+    records = read_jsonl(dataset / "single" / "records.jsonl")
+    manifest = json.loads((dataset / "single" / "manifest.json").read_text(encoding="utf-8"))
+    assert len(records) == 40
+    assert manifest["seed"] == 11
+    assert manifest["counts"]["states"] == 40
+    assert manifest["files"]["records.jsonl"]["records"] == 40
+    assert manifest["generator"]
+    assert manifest["config_sha256"]
+
+    import hashlib
+
+    digest = hashlib.sha256((dataset / "single" / "records.jsonl").read_bytes()).hexdigest()
+    assert manifest["files"]["records.jsonl"]["sha256"] == digest
+
+    report_path = tmp_path / "reports" / "d1-qa.json"
+    assert validate_main(["--dataset", str(dataset), "--report", str(report_path)]) == 0
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["invalid_records"] == 0
+    assert report["states"] == 40
+    assert report["errors"] == []
+
+
+def test_cli_generate_is_byte_reproducible(tmp_path):
+    outputs = []
+    for run in ("a", "b"):
+        target = tmp_path / run
+        assert (
+            generate_main(
+                ["--count", "24", "--seed", "9", "--output", str(target)]
+            )
+            == 0
+        )
+        outputs.append(
+            (
+                (target / "records.jsonl").read_bytes(),
+                (target / "manifest.json").read_bytes(),
+            )
+        )
+    assert outputs[0] == outputs[1]
+
+
+def test_cli_validate_reports_failure_with_a_non_zero_exit(tmp_path):
+    dataset = tmp_path / "broken"
+    dataset.mkdir()
+    broken = {"schema_version": "judgment-v0", "request": {}}
+    (dataset / "records.jsonl").write_text(
+        json.dumps(broken, ensure_ascii=False) + "\n", encoding="utf-8"
+    )
+    report_path = tmp_path / "qa.json"
+    assert validate_main(["--dataset", str(dataset), "--report", str(report_path)]) == 1
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report["invalid_records"] == 1
+
+
+def test_generate_module_runs_as_a_script(tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "robo_jev.data.generate",
+            "--count",
+            "4",
+            "--seed",
+            "2",
+            "--output",
+            str(tmp_path / "tiny"),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "tiny" / "records.jsonl").exists()
