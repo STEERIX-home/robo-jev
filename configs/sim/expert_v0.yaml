@@ -28,10 +28,11 @@ goal:
   # 파지가 막혔고 경유점도 없을 때(하강 구간의 평범한 이웃) 그 이웃을 대상에서 멀리 미는가.
   push_blockers: true
   push_min_gain_mm: 20
-  # v0 실행기는 밀 때 그리퍼가 열려 있고(닫기 readiness는 대상 중심 15mm 안에서만) 손가락이 로봇 기준
-  # y축으로 벌어진다. ±y 접근은 접촉점(표면 밖 30mm)에서 손가락이 물체 안에 들어가 친다(측정: 접촉력
-  # 45~78N). ±x는 손가락이 물체를 양옆으로 지나가 충돌은 없다. 하네스의 `faces: [top]`과 같은 성격의
-  # 실행기 역량 제한이며 실행기가 밀기 자세를 얻으면 방향을 되돌린다.
+  # 실행기 역량 제한(하네스의 `faces: [top]`과 같은 성격). 3c-2에서 밀기는 닫힌 손가락·물체 중간 높이로
+  # 바뀌었고 단일 물체 장면 8 seed 실측(4초, 40틱)은 다음과 같다: ±x는 상자·원통 모두 민다(+x 66~98mm,
+  # 접촉력 5~30N; −x 34~67mm, 5~22N — 시점 쪽에서 돌아 들어가 시작이 늦다). ±y는 상자는 밀지만(33~110mm)
+  # 원통에서는 손가락 옆면이 곡면을 비껴 타 접촉력 45~90N의 반사 정지가 8건 중 6건이다. 그래서 ±y는
+  # 아직 열지 않는다 — 옆면 접촉 자세(손목 요)를 얻으면 되돌린다. 의미 적합성에는 영향이 없다(선택만 거른다).
   push_directions: ["+x", "-x"]
 
 thresholds:
@@ -57,6 +58,10 @@ profiles:
   speed_by_phase: {approach: 2, grasp: 1, lift: 1, transport: 2, place: 1, push: 1, none: 0}
   force_by_phase: {approach: 0, grasp: 1, lift: 0, transport: 0, place: 1, push: 2, none: 0}
   gripper_by_phase: {approach: open, grasp: closed, lift: closed, transport: closed, place: open, push: open, none: current}
+  # 밀기 후보는 접근·밀기 국면 모두 이 상태다(주먹으로 민다). 열린 손가락은 y축으로 벌어져 ±y 접근에서
+  # 물체를 치고(3c-1 측정 45~78N) ±x에서는 물체가 손가락 사이로 빠진다(≤5mm). 하네스는 밀기 명령에
+  # `gripper_ref`를 두지 않으므로 실행기의 close readiness(대상 거리)가 걸리지 않는다.
+  gripper_for_push: closed
   fragile_speed_cap: 1
 
 # 라벨 (docs/08 §7).

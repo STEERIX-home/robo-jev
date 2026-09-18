@@ -314,9 +314,9 @@ def test_a_protected_blocker_is_never_pushed(attributes):
     assert out["expert_meta"]["main"]["reason"] == "keep_commitment"
 
 
-def test_push_directions_are_restricted_by_config_to_what_the_open_gripper_can_do():
-    """v0 실행기는 밀 때 그리퍼가 열려 있고 손가락이 y축으로 벌어진다 — ±y 접근은 손가락이 물체를
-    친다(측정: 접촉력 45~78N). 설정의 방향만 고른다."""
+def test_push_directions_are_restricted_by_config_to_what_the_executor_can_push():
+    """밀기는 닫힌 손가락으로 하지만 ±y는 원통에서 손가락 옆면이 곡면을 비껴 타 반사 정지가 난다(3c-2 실측
+    45~90N, 8건 중 6건). 설정의 방향만 고른다 — 실행기 역량이지 의미 적합성이 아니다."""
     assert set(CONFIG["goal"]["push_directions"]) == {"+x", "-x"}
     obs = two_object_scene((100, 120, -80))  # +y가 영역 쪽이지만 허용된 방향이 아니다
     request = without_goal_grasp(request_for(obs))
@@ -460,6 +460,27 @@ def test_observation_follows_geometry_age_except_when_the_arm_hides_the_target()
     request, commitment = committed_request(GRASP, obs=descending, hrn=hrn)
     assert request["request"]["commitment"]["phase"] == "grasp"
     assert expert().act(request, commitment, descending)["q_observe"] == CONFIDENCE["low"]
+
+
+def test_observation_waits_while_another_object_is_held():
+    """지시가 바뀌어 새 대상이 안 보이는데 손에 옛 대상이 있으면 관측은 지금 할 수 있는 일이 아니다 — 운반 중의
+    관측은 제자리 hold이고 가리는 것은 팔 자신이라 영영 풀리지 않는다(E1 seed 2, 244틱). 먼저 놓는다."""
+    obs = scene(instruction={"version": 2, "t_ms": 500, "text": "red 상자 대신 blue 상자를 왼쪽 정리 영역으로 먼저 옮겨라"})
+    obs["goal"].update(target_ref="o1", target_desc="blue 상자", version=2)
+    obs["objects"][1].update(visible=False, visible_ratio=0.0)
+    obs["robot"].update(ee_pos_mm=[300, 0, 150], holding="o0")
+    request = request_for(obs)
+    out = expert().act(request, None, obs)
+    assert out["q_observe"] == CONFIDENCE["low"]
+    assert out["expert_meta"]["gates"]["q_observe"]["reason"] == "holding_other_first"
+    assert key_of(request, top(out["q_main"])).startswith("place:o0:release:zoneL:")
+    assert out["expert_meta"]["main"]["reason"] == "release_held_object"
+
+    # 손이 비면 다시 관측을 요구한다.
+    obs["robot"].update(holding=None)
+    request = request_for(obs)
+    out = expert().act(request, None, obs)
+    assert out["q_observe"] == CONFIDENCE["high"]
 
 
 def test_retry_is_bounded_by_the_configured_same_way_failure_count():
@@ -674,6 +695,29 @@ def test_force_is_push_only_for_push_candidates():
     assert top(expert().act(request, commitment, pushing)["q_force"]) == "2"
 
 
+def test_push_candidates_close_the_fingers_before_contact():
+    """밀기는 닫힌 손가락(주먹)으로 한다: 접촉점으로 가는 접근 국면부터 `closed`다. 열린 손가락은 y축으로
+    벌어져 ±y 접근에서 물체를 치고(3c-1 측정 45~78N), ±x에서는 물체가 손가락 사이로 빠진다."""
+    approaching = scene()
+    approaching["robot"]["ee_pos_mm"] = [100, 0, 100]
+    request, commitment = committed_request("push:o0:+x:none:slow", obs=approaching)
+    assert request["request"]["commitment"]["phase"] == "approach"
+    out = expert().act(request, commitment, approaching)
+    assert top(out["q_gripper"]) == "closed"
+    assert out["expert_meta"]["aux"]["gripper"]["reason"] == "push_with_closed_fingers"
+
+    pushing = scene()
+    pushing["robot"]["ee_pos_mm"] = [240, 0, -80]
+    request, commitment = committed_request("push:o0:+x:none:slow", obs=pushing)
+    assert request["request"]["commitment"]["phase"] == "push"
+    assert top(expert().act(request, commitment, pushing)["q_gripper"]) == "closed"
+
+    # 파지 후보의 접근 국면은 여전히 열려 있다.
+    request, commitment = committed_request(GRASP, obs=approaching)
+    assert request["request"]["commitment"]["phase"] == "approach"
+    assert top(expert().act(request, commitment, approaching)["q_gripper"]) == "open"
+
+
 # --------------------------------------------------------------------------
 # 라벨 — 전문가 답이 라벨이 된다 (docs/08 §7)
 # --------------------------------------------------------------------------
@@ -728,6 +772,65 @@ def assert_completed(outcome: dict) -> None:
 @pytest.mark.parametrize("seed", [17, 29, 43])
 def test_the_expert_completes_an_e0_episode(seed):
     assert_completed(run_episode("E0", seed))
+
+
+class ForcedMain:
+    """전문가의 답 위에 주 결정만 한 후보로 못박고 게이팅을 끈 정책 — 밀기 실측용."""
+
+    version = "forced-main"
+
+    def __init__(self, expert: Expert, key: str) -> None:
+        self.expert, self.key = expert, key
+
+    def act(self, request, commitment, observation=None):
+        out = self.expert.act(request, commitment, observation)
+        ids = [entry["id"] for entry in request["request"]["candidates"]["q_main"]]
+        if candidate_id(self.key) in ids:
+            out["q_main"] = self.expert._spread(candidate_id(self.key), ids)
+        out.update(q_done=CONFIDENCE["low"], q_instr=CONFIDENCE["high"], q_observe=CONFIDENCE["low"], q_retry=CONFIDENCE["high"])
+        return out
+
+
+def test_a_push_moves_the_object_with_closed_fingers_at_mid_height():
+    """3c-1 측정에서 열린 손가락의 ±x 밀기는 120틱에 ≤5mm였다(물체가 손가락 사이로 빠진다). 주먹으로 물체
+    중간 높이를 밀면 E0 seed 5의 상자(34×32×32)가 4초 안에 한 구간(80mm)의 절반 이상 움직이고 접촉력은
+    반사 한계 아래다."""
+    from robo_jev.harness.robot import RobotHarness, load_harness_config
+    from robo_jev.sim.environment import Environment
+
+    policy_expert = Expert()
+    env = Environment(config_path=str(SIM_CONFIG), profile="E0")
+    try:
+        scene = env.reset(seed=5)
+        target = next(entry for entry in scene["objects"] if entry["id"] == "o0")
+        assert target["shape"] == "box"
+        start = list(target["pos_mm"])
+        hrn = RobotHarness(load_harness_config())
+        policy = ForcedMain(policy_expert, "push:o0:+x:none:slow")
+        commitment = history = None
+        max_force, closed_ticks = 0.0, 0
+        for _ in range(40):
+            request = hrn.build_request(scene, history, commitment)
+            answers = policy.act(request, commitment, scene)
+            out = hrn.compose(request, {q: answers[q] for q in QUESTION_SET_V0}, commitment, int(scene["sim_time_ms"]))
+            ack = None
+            for step in range(5):
+                scene = env.step(out["command"] if step == 0 else None)
+                ack = scene["ack"] or ack
+                max_force = max(max_force, scene["robot"]["contact_force_n"])
+            committed = request["request"]["commitment"]
+            if committed and committed["phase"] == "push":  # 부가 답은 틱 시작 시 commitment 기준이다
+                assert out["command"]["force_level"] == "push" and out["command"]["gripper"] == "closed"
+                assert abs(out["command"]["path"]["target_mm"][2] - start[2]) <= 2  # 중간 높이
+                closed_ticks += int(scene["robot"]["gripper_mm"] < 20)
+            commitment, history = out["commitment"], {"adopted": out["adopted"], "ack": ack, "gate": out["gate"]}
+        end = next(entry for entry in scene["objects"] if entry["id"] == "o0")["pos_mm"]
+    finally:
+        env.close()
+    assert end[0] - start[0] >= HARNESS["candidates"]["push_segment_mm"] * 0.5, (start, end)
+    assert abs(end[1] - start[1]) < 40
+    assert max_force < CONTROLLER["reflex"]["force_limit_n"], max_force
+    assert closed_ticks >= 10
 
 
 CAP_BLOCKED = (

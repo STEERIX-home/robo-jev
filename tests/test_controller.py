@@ -149,9 +149,10 @@ def test_geometry_age_is_measured_at_apply_time():
     assert older.apply(move(seq=1, geometry_age_ms=limit + 1, target_moving=True), now_ms=0)["reason"] == "geometry_age"
 
 
-@pytest.mark.parametrize("phase", ["grasp", "place"])
+@pytest.mark.parametrize("phase", ["grasp", "place", "push"])
 def test_contact_phases_are_exempt_from_the_geometry_age_gate(phase):
-    """파지·놓기 국면에서는 readiness가 시점을 정한다 — 기하 나이로 거절하지 않는다 (docs/08 §5.0)."""
+    """파지·놓기·밀기 국면에서는 readiness·접촉이 시점을 정한다 — 기하 나이로 거절하지 않는다 (docs/08 §5.0).
+    밀리는 물체는 실행기가 밀어서 움직이므로 이동 대상의 나이 문턱(200ms)이 밀기 자체를 끊으면 안 된다."""
     ctrl = controller(target_distance_mm=10.0)
     command = move(seq=1, now_ms=0, geometry_age_ms=LIFETIME["geometry_age_static_ms"] + 1, phase=phase)
     command["geometry_observed_at"] = -(LIFETIME["geometry_age_static_ms"] + 1)

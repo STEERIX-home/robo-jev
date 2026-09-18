@@ -1076,6 +1076,23 @@ def test_the_desired_gripper_state_goes_into_the_command_and_readiness_is_the_co
     assert "gripper_change" in count_records(out["records"])
 
 
+def test_a_push_command_refers_to_no_object_with_the_gripper():
+    """밀기는 주먹으로 한다: 그리퍼가 작용하는 물체(`gripper_ref`, docs/08 §6)가 없다. 그래서 실행기의 close
+    readiness(대상까지의 거리)가 걸리지 않고 접촉 전에 손가락이 닫힌다. 파지는 그대로 대상을 가리킨다."""
+    hrn = harness()
+    push = "push:o0:+x:none:slow"
+    commitment = committed(hrn, push)
+    _, out = step(hrn, observation(), answers(probabilities(**{push.replace(":", "__"): 1.0}), q_gripper={"closed": 1.0}), commitment)
+    assert out["command"]["phase"] == "approach"
+    assert out["command"]["gripper"] == "closed"
+    assert out["command"]["gripper_ref"] is None
+    assert out["command"]["path"]["target_ref"] == "o0"  # 밀 물체 자체는 경로가 가리킨다
+    # 파지 명령은 그리퍼가 대상에 작용한다.
+    commitment = committed(hrn, GRASP)
+    _, out = step(hrn, observation(), answers(probabilities(**{GRASP.replace(":", "__"): 1.0}), q_gripper={"closed": 1.0}), commitment)
+    assert out["command"]["gripper_ref"] == "o0"
+
+
 def test_a_pending_gripper_wait_is_recorded():
     hrn = harness()
     scene = observation()
@@ -1199,6 +1216,30 @@ def test_the_grasp_phase_is_exempt_from_the_geometry_age_gate():
     ctrl.observe({"holding": None, "target_distance_mm": 10.0})
     ack = ctrl.apply(out["command"], now_ms=scene["sim_time_ms"] + 100)
     assert ack["applied"] is True and ack["request_observation"] is False
+
+
+def test_the_push_phase_is_exempt_from_the_geometry_age_gate():
+    """밀기 국면도 접촉 국면이다: 밀리는 물체는 **실행기가 밀어서** 움직이므로(이동 대상 200ms) 기하 나이로
+    관측 분기에 보내면 밀기가 두 틱 만에 끊긴다(측정: -x 밀기가 21mm에서 `geometry_age`로 해제). 파지·놓기와
+    같이 실행기의 접촉이 시점을 정한다."""
+    hrn = harness()
+    push = "push:o0:-x:none:slow"
+    scene, commitment = moved_target_scene(hrn, key=push)
+    scene["robot"]["ee_pos_mm"] = [390, 0, -80]  # 접촉점(340+30+30) 안 → push 국면
+    request = hrn.build_request(scene, None, commitment)
+    geometry = request["harness"]["candidates"][candidate_id(push)]
+    assert geometry["phase"] == "push" and geometry["moving"] is True and geometry["geometry_age_ms"] == 190
+
+    out = hrn.compose(request, answers(probabilities(**{push.replace(":", "__"): 1.0})), commitment, scene["sim_time_ms"] + 100)
+    assert out["gate"] is None
+    assert "geometry_age" not in count_records(out["records"])
+    assert out["command"]["phase"] == "push"
+
+    ctrl = Controller.from_config_path(CONTROLLER_CONFIG)
+    ctrl.reset(ee_pos_mm=[390, 0, -80], ee_quat=[0.0, 0.0, 0.0, 1.0], gripper_mm=0, now_ms=0)
+    ctrl.observe({"holding": None, "target_distance_mm": None})
+    ack = ctrl.apply(out["command"], now_ms=scene["sim_time_ms"] + 100)
+    assert ack["applied"] is True and ack["request_observation"] is False and ack["executor"] == "PUSH_SEGMENT"
 
 
 def test_a_redirect_to_observe_leaves_no_phantom_switch_records():

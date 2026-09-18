@@ -574,7 +574,14 @@ class Expert:
 
     def _needs_observation(self, state: dict[str, Any], goal: Goal, phase: str) -> tuple[bool, str]:
         """대상이 아직 추적되지 않았거나 대상 기하가 문턱보다 오래됐다. 팔이 대상을 가리는 파지·놓기
-        국면과 파지 중에는 하네스의 실행 가능성 문턱이 기준이다 — 규칙 기준군과 같은 규칙."""
+        국면과 파지 중에는 하네스의 실행 가능성 문턱이 기준이다 — 규칙 기준군과 같은 규칙.
+
+        손에 **다른** 물체가 있으면 관측은 지금 할 수 있는 일이 아니다: 운반 중의 관측은 제자리 hold이고
+        (docs/08 §5.2) 가리는 것이 팔 자신이면 영영 풀리지 않는다. 먼저 놓는 것이 답이다(`_main`).
+        """
+        holding = state["robot"].get("holding")
+        if holding is not None and goal.target_ref != holding and (goal.target_ref is not None or goal.target_desc):
+            return False, "holding_other_first"
         target = self._target(state, goal)
         if target is None:
             return True, "target_untracked"
@@ -646,6 +653,10 @@ class Expert:
         holding = state["robot"].get("holding")
         desired = str(self.profiles["gripper_by_phase"][phase])
         reason = f"phase:{phase}"
+        if value and value.get("function") == "push" and phase in ("approach", "push") and not holding:
+            # 밀기는 주먹으로: 접촉점으로 가는 접근부터 닫는다 (설정 `gripper_for_push`).
+            desired = str(self.profiles.get("gripper_for_push", desired))
+            reason = "push_with_closed_fingers" if desired == "closed" else f"push:{desired}"
         if desired == "current":
             desired = "closed" if holding else "open"
             reason = "holding" if holding else "idle"

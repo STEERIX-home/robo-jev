@@ -701,7 +701,15 @@ class RobotHarness:
         executing = state.get("exec") or {}
 
         if function == "push":
-            if math.dist(ee, approach_mm) <= float(spec["push_contact_mm"]):
+            # 밀기 구간은 접촉점에서 시작해 정해진 길이만큼 간다. 이미 이 후보의 밀기 국면을 실행 중이면
+            # 구간을 이어 간다 — 손이 물체를 가리면(시점 쪽에서 미는 −x 방향) 상태의 자세가 마지막 관측에
+            # 머물러 손이 "접촉점을 떠난" 것처럼 보이고, 그러면 후보가 늙은 기하로 빠져 밀기가 끊긴다.
+            already = (
+                action_ref is not None
+                and executing.get("phase") == "push"
+                and executing.get("action_ref") == action_ref
+            )
+            if already or math.dist(ee, approach_mm) <= float(spec["push_contact_mm"]):
                 return "push", list(action_mm)
             return "approach", list(approach_mm)
         if function == "place" or holding == object_id:
@@ -1180,7 +1188,9 @@ class RobotHarness:
         """
         if not info or info.get("function") is None:
             return None
-        if info.get("phase") in ("grasp", "place") or state["robot"].get("holding") == info.get("target_ref"):
+        # 접촉 국면(파지·놓기·밀기)과 파지 중에는 실행기의 접촉이 시점을 정한다. 밀리는 물체는 실행기가
+        # 밀어서 움직이므로 이동 대상의 짧은 문턱으로 밀기 자체를 끊으면 안 된다.
+        if info.get("phase") in CONTACT_PHASES or state["robot"].get("holding") == info.get("target_ref"):
             return None
         tolerance = (
             self.geometry_age_moving_ms if info.get("moving") else self.geometry_age_static_ms
@@ -1724,7 +1734,9 @@ class RobotHarness:
             "force_level": self.force_level_names[int(force_level)],
             "gripper": gripper,
             "stop": bool(stop),
-            "gripper_ref": target_ref,
+            # 그리퍼가 작용하는 물체 (docs/08 §6). 밀기는 주먹으로 하므로 없다 — 실행기의 close readiness
+            # (대상까지의 거리)가 걸리지 않아 접촉 전에 손가락이 닫힌다. 밀 물체는 `path.target_ref`가 가리킨다.
+            "gripper_ref": None if (info or {}).get("function") == "push" else target_ref,
             "frame": str(self.command_config["frame"]),
             "constraints": {
                 "forbidden_objects": list(state["goal"].get("forbidden_contact") or ()),

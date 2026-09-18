@@ -471,6 +471,32 @@ def test_gripper_readiness_uses_the_real_distance_to_the_target(env):
     assert [event["kind"] for event in waiting["events"]].count("gripper_wait") == 1
 
 
+def test_a_command_whose_gripper_acts_on_no_object_closes_at_once(env):
+    """docs/08 §6의 `gripper_ref`는 그리퍼가 작용하는 물체다. 밀기 명령은 경로가 밀 물체를 가리키되
+    `gripper_ref`가 없으므로(주먹으로 민다) close에 거리 조건이 없다 — 멀리서도 그 자리에서 닫힌다."""
+    observation = env.reset(seed=5)
+    far = max(
+        observation["objects"],
+        key=lambda obj: math.dist(obj["pos_mm"], observation["robot"]["ee_pos_mm"]),
+    )
+    now = observation["sim_time_ms"]
+    push_approach = {
+        "seq": 1, "request_id": "r0", "observed_at": now, "issued_at": now, "lease_until": now + 300,
+        "goal_version": 1, "candidate_set_version": "cs-x", "action_ref": "c1", "phase": "approach",
+        "path": {"kind": "direct", "target_ref": far["id"], "target_mm": list(observation["robot"]["ee_pos_mm"])},
+        "speed_level": 1, "force_level": "avoid", "gripper": "closed", "stop": False,
+        "gripper_ref": None, "frame": "robot_base",
+        "constraints": {"forbidden_objects": [], "speed_limit_mm_s": 100, "forbidden_segment": False},
+        "geometry_age_ms": 0, "geometry_observed_at": now, "target_moving": False,
+    }
+    closing = env.step(push_approach)
+    assert closing["ack"]["applied"] is True
+    assert closing["ack"]["gripper_event"] is not None and closing["ack"]["gripper_wait"] is None
+    for _ in range(25):
+        closing = env.step(None)
+    assert closing["robot"]["gripper_mm"] < 20, closing["robot"]
+
+
 # --------------------------------------------------------------------------
 # snapshot / restore
 # --------------------------------------------------------------------------

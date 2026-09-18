@@ -88,11 +88,18 @@ def _maybe_decode(text: str | None, shape: tuple[int, ...] | None = None) -> np.
 
 
 def _target_ref(command: dict[str, Any] | None) -> str | None:
-    """명령이 가리키는 물체 id. 두 명령 형식 모두에서 같은 자리를 본다."""
+    """그리퍼의 close readiness가 거리를 잴 물체 id.
+
+    docs/08 §6 형식에서는 `gripper_ref`(그리퍼가 작용하는 물체)다 — 키가 있고 `None`이면 "작용하는
+    물체가 없다"는 뜻이라 거리 조건이 없다(밀기는 주먹으로 하므로 접촉 전에 닫힌다). 원시 형식
+    (`{"kind": …}`)은 `target_ref`를 본다.
+    """
     if command is None:
         return None
+    if "gripper_ref" in command:
+        return command["gripper_ref"]
     path = command.get("path") or {}
-    return command.get("target_ref") or path.get("target_ref") or command.get("gripper_ref")
+    return command.get("target_ref") or path.get("target_ref")
 
 
 def _top_face_samples(plan_object, inflate_m: float, samples: int) -> list[np.ndarray]:

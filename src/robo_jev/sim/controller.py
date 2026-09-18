@@ -49,8 +49,9 @@ _PATH_KINDS = ("direct", "via", "retreat", "hold")
 
 _GRIPPER_STATES = ("open", "closed")
 
-#: 기하 나이 대신 실행기의 readiness가 시점을 정하는 국면 (docs/08 §5.0).
-_READINESS_PHASES = ("grasp", "place")
+#: 기하 나이 대신 실행기의 readiness·접촉이 시점을 정하는 국면 (docs/08 §5.0). 밀기도 접촉 국면이다 —
+#: 밀리는 물체는 실행기가 밀어서 움직이므로 이동 대상의 짧은 나이 문턱으로 밀기를 끊지 않는다.
+_READINESS_PHASES = ("grasp", "place", "push")
 
 #: 이 모듈이 쓰는 quaternion 순서. 설정의 `frame.quaternion_order`와 대조한다.
 _QUATERNION_ORDER = "xyzw"
