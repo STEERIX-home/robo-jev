@@ -200,6 +200,68 @@ def one_sided_manifest(tmp_path, name: str) -> str:
     return str(path)
 
 
+def robot_batch(tmp_path, *, max_ticks: int) -> str:
+    """전문가로 만든 로봇 에피소드 2편(E0 seed 17·E1 seed 29, 앞 `max_ticks`틱)의 manifest 경로. split은 전부 train."""
+    from robo_jev.data.robot_episodes import build_manifest, generate_episode, load_generator_config, write_episode
+    from robo_jev.sim.expert import Expert
+
+    config = {**load_generator_config(), "split": {"weights": {"train": 1}, "holdout_prefixes": []}}
+    expert = Expert()
+    out = tmp_path / "d1-robot"
+    for profile, seed in (("E0", 17), ("E1", 29)):
+        write_episode(generate_episode(profile, seed, policy=expert, expert=expert, config=config, max_ticks=max_ticks), out)
+    manifest = build_manifest(out, config, batch_wall_s=1.0)
+    assert manifest["episodes"] == 2 and manifest["splits"] == {"train": 2} and isinstance(manifest["files"], dict)
+    return str(out / "manifest.json")
+
+
+def test_a_generated_robot_batch_and_the_d0_singles_train_together_from_two_manifests(tmp_path):
+    """`dataset_manifests: [로봇 batch manifest, D0 단일 요청 manifest]` — 생성기가 쓴 manifest(files dict)를 적재기가
+    그대로 읽고, manifest마다 분야를 달 수 있으며, step마다 로봇 에피소드와 비로봇 묶음이 든다."""
+    robot = robot_batch(tmp_path, max_ticks=6)
+    singles = one_sided_manifest(tmp_path, "d0.jsonl")
+    config = tiny_config(
+        tmp_path, max_steps=2, stream_max_ticks=4, stream_chunk_seconds=0.2, run_id="two-manifests",
+        dataset_manifests=[robot, {"path": singles, "domain": "non_robot"}],
+    )
+    del config["dataset_manifest"]
+    resolved = resolve_config(config)
+    assert resolved["dataset_manifest"] is None
+    assert resolved["dataset_manifests"] == [
+        {"path": robot, "domain": None, "material": None}, {"path": singles, "domain": "non_robot", "material": None},
+    ]
+    # `dataset_manifest: x`는 `dataset_manifests: [x]`와 같은 run이다 (재개의 정체 비교).
+    assert resolve_config(tiny_config(tmp_path, dataset_manifest=singles))["dataset_manifests"] == resolve_config(
+        {**tiny_config(tmp_path, dataset_manifests=[singles]), "dataset_manifest": None}
+    )["dataset_manifests"]
+    with pytest.raises(ValueError, match="dataset_manifests"):
+        resolve_config({**config, "dataset_manifests": [{"path": robot, "domain": "space"}]})
+    with pytest.raises(ValueError, match="dataset_manifests"):
+        resolve_config({**config, "dataset_manifests": []})
+
+    with Trainer(config) as trainer:
+        robot_items = [item for item in trainer.items if item.kind == "stream"]
+        single_items = [item for item in trainer.items if item.kind == "single"]
+        assert [item.record_id for item in robot_items] == ["ep-E0-000017", "ep-E1-000029"]
+        assert all(item.domain == "robot" and item.manifest == robot for item in robot_items)
+        assert len(single_items) == 32 and all(item.domain == "non_robot" and item.manifest == singles for item in single_items)
+        assert [item.index for item in trainer.items] == list(range(len(trainer.items)))
+        assert all(len(item.record["ticks"]) == 4 for item in robot_items)
+        result = trainer.run()
+    assert result["status"] == "completed" and result["step"] == 2
+    for metrics in result["metrics"]["steps"]:
+        assert [u["kind"] for u in metrics["units"]] == ["stream", "single"]
+        assert metrics["units"][0]["records"][0].startswith("ep-E") and metrics["chunks"] == 3
+        assert abs(metrics["loss_share"]["domain"]["robot"] - 0.6) < 1e-6 and math.isfinite(metrics["loss"])
+    manifest = trainer.manifest
+    assert [entry["path"] for entry in manifest["dataset_manifests"]] == [robot, singles]
+    assert manifest["dataset_manifests"][0]["records"] == {"single": 0, "stream": 2}
+    assert manifest["dataset_manifests"][1]["records"] == {"single": 32, "stream": 0}
+    assert manifest["dataset_manifests"][1]["domain"] == "non_robot"
+    assert all(len(entry["sha256"]) == 64 and entry["files"] for entry in manifest["dataset_manifests"])
+    assert (tmp_path / "runs" / "two-manifests" / "checkpoint.pt").is_file()
+
+
 def test_one_sided_data_gives_the_present_kind_the_whole_share(tmp_path):
     singles_only = tiny_config(tmp_path, dataset_manifest=one_sided_manifest(tmp_path, "d0.jsonl"), gradient_accumulation=1, max_steps=1)
     with Trainer(singles_only) as trainer:
@@ -436,7 +498,8 @@ def test_cli_runs_the_shipped_config_for_three_steps_and_writes_checkpoint_and_m
     assert [u["kind"] for u in metrics["steps"][0]["units"]] == ["stream", "single"] and metrics["steps"][0]["chunks"] == 3
     assert all(abs(m["loss_share"]["domain"]["robot"] - 0.6) < 1e-6 for m in metrics["steps"])
     assert metrics["manifest"]["serializer_version"] == "ts0.3" and metrics["manifest"]["question_set"]["id"] == "qs-v0"
-    assert metrics["manifest"]["dataset_manifest"]["sha256"] and metrics["manifest"]["git"]["sha"]
+    assert len(metrics["manifest"]["dataset_manifests"]) == 1 and metrics["manifest"]["dataset_manifests"][0]["sha256"]
+    assert metrics["manifest"]["git"]["sha"]
     assert metrics["config"]["max_steps"] == 3 and metrics["config"]["checkpoint_every"] == 3
     assert (run_dir / "config.yaml").is_file()
 

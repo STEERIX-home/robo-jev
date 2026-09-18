@@ -84,7 +84,7 @@ from robo_jev.sampler import (
     Item,
     MixedSampler,
     Unit,
-    load_items,
+    load_manifests,
     manifest_files,
     sha256_of,
     tick_class,
@@ -142,7 +142,8 @@ DEFAULTS: dict[str, Any] = {
     "model_vocab_size": None,
     "model_seed": None,
     "model_revision_manifest": None,
-    "dataset_manifest": None,
+    "dataset_manifest": None,  # manifest 하나 (= dataset_manifests: [그것]). 정규화 뒤에는 null이다
+    "dataset_manifests": None,  # 여러 manifest: 경로 또는 {path, domain, material} — 로봇 batch + 비로봇 데이터를 한 run에
     "splits": ["train"],
     "tokenizer": "whitespace",
     "dtype": "float32",
@@ -185,6 +186,34 @@ def _need(condition: bool, message: str) -> None:
         raise ValueError(message)
 
 
+def _dataset_manifests(single: Any, many: Any) -> list[dict[str, Any]]:
+    """`dataset_manifest`(경로 하나)와 `dataset_manifests`(경로 또는 `{path, domain, material}` 목록)를 하나의 정규화된
+    목록으로. 둘 다 주면 이어 붙인다(단일 것이 먼저). 비어 있으면 오류."""
+    entries: list[Any] = []
+    if single is not None:
+        _need(isinstance(single, str) and bool(single), f"dataset_manifest: 데이터 manifest 경로(문자열)여야 한다 (받은 값: {single!r})")
+        entries.append(single)
+    if many is not None:
+        _need(isinstance(many, list), f"dataset_manifests: 목록이어야 한다 (받은 값: {many!r})")
+        entries.extend(many)
+    _need(bool(entries), "dataset_manifests: 데이터 manifest 경로가 하나 이상 필요하다 (dataset_manifest 또는 dataset_manifests)")
+    out: list[dict[str, Any]] = []
+    for position, entry in enumerate(entries):
+        if isinstance(entry, str):
+            entry = {"path": entry}
+        _need(isinstance(entry, dict), f"dataset_manifests[{position}]: 경로 또는 {{path, domain, material}}여야 한다 (받은 값: {entry!r})")
+        unknown = [key for key in entry if key not in ("path", "domain", "material")]
+        _need(not unknown, f"dataset_manifests[{position}]: 알 수 없는 키 {unknown} (허용: ['path', 'domain', 'material'])")
+        path = entry.get("path")
+        _need(isinstance(path, str) and bool(path), f"dataset_manifests[{position}].path: manifest 경로(문자열)가 필요하다")
+        domain = entry.get("domain")
+        _need(domain is None or domain in DOMAINS, f"dataset_manifests[{position}].domain: {list(DOMAINS)} 중 하나이거나 null이어야 한다 (받은 값: {domain!r})")
+        material = entry.get("material")
+        _need(material is None or material in MATERIALS, f"dataset_manifests[{position}].material: {list(MATERIALS)} 중 하나이거나 null이어야 한다 (받은 값: {material!r})")
+        out.append({"path": path, "domain": domain, "material": material})
+    return out
+
+
 def _is_int(value: Any) -> bool:
     return isinstance(value, int) and not isinstance(value, bool)
 
@@ -207,7 +236,8 @@ def resolve_config(config: dict) -> dict:
     _need(not unknown, f"sampler: 알 수 없는 키 {unknown} (허용: {list(DEFAULT_SAMPLER)})")
     out["sampler"] = sampler
 
-    _need(isinstance(out["dataset_manifest"], str) and out["dataset_manifest"], "dataset_manifest: 데이터 manifest 경로가 필요하다")
+    out["dataset_manifests"] = _dataset_manifests(out.pop("dataset_manifest"), out["dataset_manifests"])
+    out["dataset_manifest"] = None  # 정규화한 목록이 run의 정체다 — `dataset_manifest: x`와 `dataset_manifests: [x]`는 같은 run
     _need(_is_int(out["max_steps"]) and out["max_steps"] >= 1, f"max_steps: 1 이상의 정수여야 한다 (받은 값: {out['max_steps']!r})")
     _need(out["execution_backend"] in EXECUTION_BACKENDS, f"execution_backend: {list(EXECUTION_BACKENDS)}만 구현했다 — shared_hybrid(P1)는 state_first에 아직 없다 (받은 값: {out['execution_backend']!r})")
     _need(out["readout"] in READOUTS, f"readout: {list(READOUTS)} 중 하나여야 한다 (받은 값: {out['readout']!r})")
@@ -561,18 +591,27 @@ def git_revision() -> dict[str, Any] | None:
 
 
 def build_manifest(config: dict, items: list[Item], model: Judge) -> dict[str, Any]:
-    """checkpoint에 함께 적는 것: 데이터 manifest 참조, 토큰 직렬화·질문 세트 버전, git SHA, 모델 fixture."""
-    manifest_path = Path(config["dataset_manifest"])
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    """checkpoint에 함께 적는 것: 데이터 manifest 참조(manifest마다 경로·sha256·파일 해시·분야 태그·레코드 수), 토큰
+    직렬화·질문 세트 버전, git SHA, 모델 fixture."""
+    datasets = []
+    for entry in config["dataset_manifests"]:
+        manifest_path = Path(entry["path"])
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        own = [item for item in items if item.manifest == str(manifest_path)]
+        datasets.append(
+            {
+                "path": str(manifest_path),
+                "sha256": sha256_of(manifest_path),
+                "builder_version": manifest.get("builder_version") or manifest.get("generator"),
+                "files": {name: (item or {}).get("sha256") for name, item in manifest_files(manifest, manifest_path).items()},
+                "domain": entry.get("domain"),
+                "material": entry.get("material"),
+                "records": {"single": sum(i.kind == "single" for i in own), "stream": sum(i.kind == "stream" for i in own)},
+            }
+        )
     return {
-        "dataset_manifest": {
-            "path": str(manifest_path),
-            "sha256": sha256_of(manifest_path),
-            "builder_version": manifest.get("builder_version"),
-            "files": {name: (entry or {}).get("sha256") for name, entry in manifest_files(manifest, manifest_path).items()},
-            "splits": list(config["splits"]),
-            "records": {"single": sum(i.kind == "single" for i in items), "stream": sum(i.kind == "stream" for i in items)},
-        },
+        "dataset_manifests": datasets,
+        "splits": list(config["splits"]),
         "serializer_version": TOKEN_SERIALIZER_VERSION,  # 토큰 직렬화의 버전 (레코드의 versions.serializer와 다른 것)
         "question_set": {"id": "qs-v0", "markers": {qid: spec["marker"] for qid, spec in QUESTION_SET_V0.items()}},
         "layouts": dict(config["layout"]),
@@ -646,15 +685,15 @@ class Trainer:
 
         sampler_config = self.config["sampler"]
         self.tokenizer = build_tokenizer(self.config["tokenizer"])
-        self.items = load_items(
-            self.config["dataset_manifest"], tokenizer=self.tokenizer, splits=tuple(self.config["splits"]),
+        self.items = load_manifests(
+            self.config["dataset_manifests"], tokenizer=self.tokenizer, splits=tuple(self.config["splits"]),
             layouts=self.config["layout"], window_ticks=self.config["stream_window_ticks"],
             max_state_tokens=self.config["max_state_tokens"], max_total_tokens=self.config["max_total_tokens"],
             stream_max_ticks=self.config["stream_max_ticks"], domain_tag=sampler_config["domain_tag"],
             material_tag=sampler_config["material_tag"],
         )  # fmt: skip
         if not self.items:
-            raise ValueError(f"dataset_manifest: split {self.config['splits']}에 레코드가 없다")
+            raise ValueError(f"dataset_manifests: split {self.config['splits']}에 레코드가 없다")
         self.model = build_model(self.config)
         vocab = self.model.backbone.config.vocab_size
         largest = max(max(item.layout["tokens"]) for item in self.items)

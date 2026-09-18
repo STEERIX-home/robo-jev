@@ -13,7 +13,8 @@ model_vocab_size: 4096                     # 공백 tokenizer의 id < 4096. 설�
                                            # (4b 검사). 실제 tokenizer(어휘 248,077)로 학습하면 null(설정값)이어야 한다.
 model_seed: null                           # null = fixture 설정의 seed(고정 가중치)
 model_revision_manifest: null              # 계획서 키. fixture에는 revision manifest가 없다
-dataset_manifest: tests/fixtures/d0_manifest.json
+dataset_manifests:                         # 데이터 manifest 목록 (경로 또는 {path, domain, material}); `dataset_manifest: 경로` 하나도 된다
+  - tests/fixtures/d0_manifest.json        # D0 fixture. 로봇 batch를 더하려면 예: {path: artifacts/datasets/d1-robot/batch-0/manifest.json, domain: robot}
 splits: [train]                            # D0 train split: 단일 요청 32 + 스트림 2 (dev/test는 학습에 쓰지 않는다)
 tokenizer: whitespace                      # 구조 검사용 공백 tokenizer. 실제 tokenizer는 Hub id (예: Qwen/Qwen3.8-27B)
 dtype: float32                             # CPU 검증은 FP32. bfloat16 허용 오차는 클라우드 단계

@@ -1,8 +1,9 @@
 """학습 데이터의 읽기 전용 적재와 혼합 sampler (docs/04 §2·§7, docs/08 §8, docs/06 Task 5).
 
-**적재.** :func:`load_items` 는 데이터 manifest(`files: {이름: {sha256, …}}`)가 가리키는 JSONL 파일을
+**적재.** :func:`load_items` 는 데이터 manifest(`files: {경로: {sha256, …}}`)가 가리키는 JSONL 파일을
 manifest 순서·줄 순서로 읽고(sha256 대조), `split`으로 거른 뒤 레코드를 그 종류의 배치로 직렬화한다
-(`judgment-v0` → ``state_first``, `stream-v0` → ``stream_l1a``). 직렬화를 **적재 시점에 고정된 순서로**
+(`judgment-v0` → ``state_first``, `stream-v0` → ``stream_l1a``). :func:`load_manifests` 는 여러 manifest
+(로봇 batch + 비로봇 데이터)를 manifest 순서로 이어 붙이고 manifest마다 분야·자료 태그의 기본값을 달 수 있다. 직렬화를 **적재 시점에 고정된 순서로**
 하는 이유는 공백 tokenizer가 id를 처음 본 순서로 주기 때문이다 — 재개한 프로세스도 같은 순서로
 읽어 같은 토큰 id를 얻는다(실제 tokenizer는 순서와 무관하다). 레코드는 라벨·틱 종류 계산에 쓰려고
 그대로 들고 있되, 모델에는 직렬화된 layout만 간다.
@@ -59,6 +60,7 @@ __all__ = [
     "MixedSampler",
     "Unit",
     "load_items",
+    "load_manifests",
     "manifest_files",
     "sha256_of",
     "tick_class",
@@ -100,6 +102,7 @@ class Item:
     tokens: int = 0
     question_types: dict[str, str] = field(default_factory=dict, repr=False)
     source: str = ""
+    manifest: str = ""  # 이 레코드를 가리킨 manifest 경로 (여러 manifest를 합쳐 학습할 때의 출처)
 
 
 def _tag(record: dict, path: str) -> Any:
@@ -148,10 +151,17 @@ def load_items(
     stream_max_ticks: int | None = None,
     domain_tag: str = "provenance.domain",
     material_tag: str = "provenance.material",
+    domain: str | None = None,
+    material: str | None = None,
+    index_offset: int = 0,
 ) -> list[Item]:
     """manifest의 파일들을 읽어 직렬화된 :class:`Item` 목록으로 (모듈 설명 참조).
 
     ``stream_max_ticks``는 CPU 검사용이다 — 에피소드를 앞 N틱으로 자른다(실제 학습에서는 `None`).
+    ``domain``·``material``은 **이 manifest의** 기본 태그다(학습 설정 `dataset_manifests[].domain`): 레코드에
+    태그(`domain_tag`·`material_tag`)가 없을 때 종류별 기본값(스트림 = robot, 단일 = non_robot; existing) 대신
+    쓴다 — 레코드 자체의 태그가 있으면 그것이 이긴다. ``index_offset``은 여러 manifest를 이어 붙일 때의 첫
+    `Item.index`다(:func:`load_manifests`).
 
     **레코드는 여기서 계약 검증을 지난다.** :func:`~robo_jev.model.serialize.serialize_request` 가 먼저
     :func:`robo_jev.contracts.validate_record` 를 부르므로(입력 영역의 비입력 키·라벨 구조·후보 참조를
@@ -170,6 +180,10 @@ def load_items(
             raise ValueError(f"splits: {list(SPLITS)} 중에서 골라야 한다 (받은 값: {split!r})")
     if stream_max_ticks is not None and int(stream_max_ticks) < 1:
         raise ValueError(f"stream_max_ticks: 1 이상이거나 None이어야 한다 (받은 값: {stream_max_ticks})")
+    if domain is not None and domain not in DOMAINS:
+        raise ValueError(f"{manifest_file}: domain은 {list(DOMAINS)} 중 하나여야 한다 (받은 값: {domain!r})")
+    if material is not None and material not in MATERIALS:
+        raise ValueError(f"{manifest_file}: material은 {list(MATERIALS)} 중 하나여야 한다 (받은 값: {material!r})")
     layouts = {**DEFAULT_LAYOUTS, **(layouts or {})}
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
     files = manifest_files(manifest, manifest_file)
@@ -198,16 +212,16 @@ def load_items(
                 raise ValueError(f"{where}: split이 없거나 알 수 없다: {split!r}")
             if split not in splits:
                 continue
-            domain = _tag(record, domain_tag)
-            if domain is None:
-                domain = _DEFAULT_DOMAIN[kind]
-            elif domain not in DOMAINS:
-                raise ValueError(f"{where}: {domain_tag}는 {list(DOMAINS)} 중 하나여야 한다 (받은 값: {domain!r})")
-            material = _tag(record, material_tag)
-            if material is None:
-                material = MATERIALS[0]
-            elif material not in MATERIALS:
-                raise ValueError(f"{where}: {material_tag}는 {list(MATERIALS)} 중 하나여야 한다 (받은 값: {material!r})")
+            record_domain = _tag(record, domain_tag)
+            if record_domain is None:
+                record_domain = domain if domain is not None else _DEFAULT_DOMAIN[kind]
+            elif record_domain not in DOMAINS:
+                raise ValueError(f"{where}: {domain_tag}는 {list(DOMAINS)} 중 하나여야 한다 (받은 값: {record_domain!r})")
+            record_material = _tag(record, material_tag)
+            if record_material is None:
+                record_material = material if material is not None else MATERIALS[0]
+            elif record_material not in MATERIALS:
+                raise ValueError(f"{where}: {material_tag}는 {list(MATERIALS)} 중 하나여야 한다 (받은 값: {record_material!r})")
             if kind == "single":
                 layout = serialize_request(
                     record, tokenizer, layout=layouts["single"],
@@ -223,11 +237,27 @@ def load_items(
                 question_types = {qid: spec["type"] for qid, spec in QUESTION_SET_V0.items()}
             items.append(
                 Item(
-                    index=len(items), kind=kind, record_id=record_id, split=split, domain=domain,
-                    material=material, record=record, layout=layout, tokens=len(layout["tokens"]),
-                    question_types=question_types, source=where,
+                    index=int(index_offset) + len(items), kind=kind, record_id=record_id, split=split,
+                    domain=record_domain, material=record_material, record=record, layout=layout,
+                    tokens=len(layout["tokens"]), question_types=question_types, source=where,
+                    manifest=str(manifest_path),
                 )  # fmt: skip
             )
+    return items
+
+
+def load_manifests(manifests: list[dict[str, Any]], **kwargs: Any) -> list[Item]:
+    """여러 manifest(`[{"path", "domain", "material"}, …]`, 학습 설정 `dataset_manifests`)의 레코드를 manifest 순서로
+    이어 붙인 :class:`Item` 목록. `Item.index`는 전체에서 이어지고(sampler의 열쇠), 출처는 `Item.manifest`다.
+    `kwargs`는 :func:`load_items` 의 공통 인자(tokenizer·splits·layouts·…)다."""
+    items: list[Item] = []
+    for entry in manifests:
+        items.extend(
+            load_items(
+                entry["path"], domain=entry.get("domain"), material=entry.get("material"), index_offset=len(items),
+                **kwargs,
+            )
+        )
     return items
 
 
