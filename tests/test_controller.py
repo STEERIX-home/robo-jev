@@ -127,6 +127,48 @@ def test_geometry_age_over_tolerance_requests_observation():
     assert ok["applied"] is True, "같은 나이도 정지 대상에서는 허용치 안이다"
 
 
+def test_geometry_age_is_measured_at_apply_time():
+    """docs/08 §6 "수명": 기하 나이는 `geometry_observed_at`으로부터 **적용 시각에** 계산한다.
+
+    요청 시 190ms였던 이동 대상의 기하는 100ms 뒤에 적용하면 290ms다 (docs/10 I6).
+    """
+    limit = LIFETIME["geometry_age_moving_ms"]
+    ctrl = controller()
+    command = move(seq=1, now_ms=390, observed_at=390, geometry_age_ms=190, target_moving=True)
+    command["geometry_observed_at"] = 200
+    late = ctrl.apply(command, now_ms=390 + 100)
+    assert late["applied"] is False
+    assert late["reason"] == "geometry_age" and late["request_observation"] is True
+    assert late["geometry_age_ms"] == 290 > limit
+
+    fresh = controller()
+    assert fresh.apply(dict(command), now_ms=390)["applied"] is True
+
+    # `geometry_observed_at`이 없으면 요청 시점의 나이로 되돌아간다 (다른 버전의 하네스).
+    older = controller()
+    assert older.apply(move(seq=1, geometry_age_ms=limit + 1, target_moving=True), now_ms=0)["reason"] == "geometry_age"
+
+
+@pytest.mark.parametrize("phase", ["grasp", "place"])
+def test_contact_phases_are_exempt_from_the_geometry_age_gate(phase):
+    """파지·놓기 국면에서는 readiness가 시점을 정한다 — 기하 나이로 거절하지 않는다 (docs/08 §5.0)."""
+    ctrl = controller(target_distance_mm=10.0)
+    command = move(seq=1, now_ms=0, geometry_age_ms=LIFETIME["geometry_age_static_ms"] + 1, phase=phase)
+    command["geometry_observed_at"] = -(LIFETIME["geometry_age_static_ms"] + 1)
+    ack = ctrl.apply(command, now_ms=0)
+    assert ack["applied"] is True and ack["request_observation"] is False
+
+
+def test_a_held_target_is_exempt_from_the_geometry_age_gate():
+    ctrl = controller(holding="o1", gripper_mm=GRIPPER["closed_mm"])
+    command = move(seq=1, now_ms=0, geometry_age_ms=LIFETIME["geometry_age_static_ms"] + 1, phase="transport", gripper="closed")
+    command["geometry_observed_at"] = -(LIFETIME["geometry_age_static_ms"] + 1)
+    assert ctrl.apply(command, now_ms=0)["applied"] is True
+
+    other = controller(holding="o9", gripper_mm=GRIPPER["closed_mm"])
+    assert other.apply(dict(command), now_ms=0)["reason"] == "geometry_age"
+
+
 def test_lease_expiry_decelerates_then_holds_after_one_second():
     """감속 구간과 HOLD 절차는 다른 상태다 — 실행 기록에서 구분돼야 한다 (docs/08 §6 "stale")."""
     lease_ms = LIFETIME["lease_ms"]
@@ -528,6 +570,91 @@ def test_open_waits_while_the_gripper_is_loaded():
     ack = ctrl.apply(move(seq=2, gripper="open"), now_ms=PERIOD_MS)
     assert ack["gripper_event"] is None
     assert ack["gripper_wait"] == "readiness"
+
+
+def test_open_in_the_place_phase_waits_until_the_end_effector_is_at_the_place_point():
+    """놓기 국면의 release readiness: 말단이 놓기점 안에 와야 연다 (docs/08 §4, docs/10 I2)."""
+    tolerance = GRIPPER["open_readiness_distance_mm"]
+    ctrl = controller(gripper_mm=GRIPPER["closed_mm"], holding="o3")
+    ctrl.apply(move(seq=1, gripper="closed", target_distance_mm=0.0), now_ms=0)
+    place_point = (START_MM[0], START_MM[1], START_MM[2] - 100)
+
+    far = ctrl.apply(move(seq=2, now_ms=PERIOD_MS, phase="place", gripper="open", target_mm=place_point), now_ms=PERIOD_MS)
+    assert far["applied"] is True and far["gripper_event"] is None
+    assert far["gripper_wait"] == "readiness"
+    assert ctrl.advance(PERIOD_MS)["gripper"] == "closed"
+
+    ctrl.observe(sensors(ee_pos_mm=[place_point[0], place_point[1], place_point[2] + tolerance - 1], holding="o3"))
+    near = ctrl.apply(move(seq=3, now_ms=2 * PERIOD_MS, phase="place", gripper="open", target_mm=place_point), now_ms=2 * PERIOD_MS)
+    assert near["gripper_event"] is not None
+
+    # 다른 국면의 open은 거리 조건이 없다 (하중 조건만).
+    other = controller(gripper_mm=GRIPPER["closed_mm"], holding="o3")
+    other.apply(move(seq=1, gripper="closed", target_distance_mm=0.0), now_ms=0)
+    assert other.apply(move(seq=2, now_ms=PERIOD_MS, phase="approach", gripper="open"), now_ms=PERIOD_MS)["gripper_event"] is not None
+
+
+# --------------------------------------------------------------------------
+# 관측 — 설정된 관측 자세로 이동한 뒤 정지 (docs/08 §6 "관측", docs/02 §4 `OBSERVE`)
+# --------------------------------------------------------------------------
+
+
+OBSERVE = CONFIG["observe"]
+
+
+def observe_command(seq: int = 1, now_ms: int = 0, **over) -> dict:
+    command = move(seq=seq, now_ms=now_ms, speed_level=0)
+    command["path"] = {"kind": "hold"}
+    command["observe"] = True
+    command.update(over)
+    return command
+
+
+def test_observe_moves_to_the_configured_pose_then_holds():
+    ctrl = controller()
+    ack = ctrl.apply(observe_command(), now_ms=0)
+    assert ack["applied"] is True
+    assert ack["executor"] == "OBSERVE" and ack["path"] == "observe"
+
+    setpoint = None
+    for now in range(PERIOD_MS, 3000, PERIOD_MS):
+        if now % 100 == 0:  # 하네스가 10Hz로 다시 발행한다
+            ctrl.apply(observe_command(seq=now // 100 + 1, now_ms=now), now_ms=now)
+        setpoint = ctrl.advance(now)
+    assert setpoint["executor"] == "OBSERVE"
+    assert setpoint["ee_pos_mm"] == pytest.approx(OBSERVE["pose_mm"], abs=1.0)
+    assert ctrl.state_dict()["path_kind"] == "observe"
+    # 닿은 뒤에는 그 자리에 머문다 (다시 발행해도 움직이지 않는다).
+    ctrl.apply(observe_command(seq=99, now_ms=3000), now_ms=3000)
+    for now in range(3000, 3500, PERIOD_MS):
+        setpoint = ctrl.advance(now)
+    assert setpoint["ee_pos_mm"] == pytest.approx(OBSERVE["pose_mm"], abs=1.0)
+
+
+def test_observe_moves_at_the_configured_speed_not_the_gate_profile():
+    """게이팅 틱의 속도 답은 0이지만 관측 이동은 설정의 속도로 간다 (제자리 정지가 아니다)."""
+    ctrl = controller()
+    ctrl.apply(observe_command(), now_ms=0)
+    for i in range(BLEND_MS // PERIOD_MS + 1):
+        ctrl.advance(i * PERIOD_MS)
+    expected = SPEEDS[OBSERVE["speed_level"]] * 1000.0
+    assert ctrl.advance(BLEND_MS)["speed_cap_mm_s"] == pytest.approx(expected)
+
+
+def test_observe_while_holding_stays_in_place():
+    """운반 중의 관측은 hold다 (docs/08 §5.2) — 물체를 든 채 관측 자세로 가지 않는다."""
+    ctrl = controller(holding="o3", gripper_mm=GRIPPER["closed_mm"])
+    ack = ctrl.apply(observe_command(gripper="closed"), now_ms=0)
+    assert ack["applied"] is True and ack["executor"] == "OBSERVE"
+    assert ack["path"] == "hold"
+    for i in range(1, 30):
+        setpoint = ctrl.advance(i * PERIOD_MS)
+    assert setpoint["ee_pos_mm"] == pytest.approx(START_MM)
+
+
+def test_the_observe_pose_passes_the_reach_check():
+    ctrl = controller()
+    assert ctrl._check_reach({"pos_mm": list(OBSERVE["pose_mm"]), "quat": START_QUAT}) is None
 
 
 # --------------------------------------------------------------------------

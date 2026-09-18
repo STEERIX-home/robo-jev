@@ -49,6 +49,9 @@ _PATH_KINDS = ("direct", "via", "retreat", "hold")
 
 _GRIPPER_STATES = ("open", "closed")
 
+#: 기하 나이 대신 실행기의 readiness가 시점을 정하는 국면 (docs/08 §5.0).
+_READINESS_PHASES = ("grasp", "place")
+
 #: 이 모듈이 쓰는 quaternion 순서. 설정의 `frame.quaternion_order`와 대조한다.
 _QUATERNION_ORDER = "xyzw"
 
@@ -168,12 +171,22 @@ class Controller:
         self.gripper_closed_mm = float(gripper["closed_mm"])
         self.close_readiness_distance_mm = float(gripper["close_readiness_distance_mm"])
         self.open_readiness_force_n = float(gripper["open_readiness_force_n"])
+        self.open_readiness_distance_mm = float(gripper["open_readiness_distance_mm"])
         self.gripper_event_prefix = str(gripper["event_id_prefix"])
 
         reach = config["reach"]
         self.workspace_radius_mm = float(reach["workspace_radius_mm"])
         self.min_height_mm = float(reach["min_height_mm"])
         self.clearance_mm = float(reach["clearance_mm"])
+
+        observe = config["observe"]
+        self.observe_pose_mm = [float(value) for value in observe["pose_mm"]]
+        self.observe_speed_level = int(observe["speed_level"])
+        if not 0 <= self.observe_speed_level < len(self.speed_levels_mm_s):
+            raise ValueError(f"observe.speed_level이 속도 수준 밖이다: {self.observe_speed_level}")
+        rejection = self._check_reach({"pos_mm": self.observe_pose_mm})
+        if rejection is not None:
+            raise ValueError(f"observe.pose_mm이 도달 검사를 지나지 못한다 ({rejection}): {self.observe_pose_mm}")
 
         declared = list(config["executors"])
         if declared != list(EXECUTORS):
@@ -283,6 +296,7 @@ class Controller:
         실행기·경로·목표를 어디서 읽느냐뿐이므로 그 셋만 갈라 읽고 나머지는 한 군데서 만든다.
         """
         kind = command.get("kind")
+        target_ref = command.get("target_ref") or command.get("gripper_ref")
         if kind is not None:
             if kind not in EXECUTORS:
                 return None, "unknown_executor"
@@ -311,6 +325,7 @@ class Controller:
                 # 경유점 없는 via를 직선으로 바꾸지 않는다. 하네스가 그 직선을 피하려고
                 # 경유점을 고른 것이므로, 대신 직진하면 계약을 어기는 쪽이 더 위험하다.
                 return None, "waypoint_missing"
+            target_ref = path.get("target_ref") or target_ref
             shape = {
                 "executor": self._executor_for(command, path_kind),
                 "path_kind": path_kind,
@@ -323,6 +338,21 @@ class Controller:
                 ),
             }
 
+        if shape["executor"] == "OBSERVE":
+            # 관측은 설정된 관측 자세로 **이동한 뒤** 정지다 (docs/08 §6 "관측"). 운반 중이면
+            # 제자리 hold다(docs/08 §5.2). 게이팅 틱의 속도 답(0)이 아니라 설정의 속도로 간다.
+            if self.sensors.get("holding") is not None:
+                shape.update({"path_kind": "hold", "target_mm": None})
+            else:
+                shape.update(
+                    {
+                        "path_kind": "observe",
+                        "target_mm": list(self.observe_pose_mm),
+                        "target_quat": None,
+                        "speed_level": self.observe_speed_level,
+                    }
+                )
+
         normalised = {
             **shape,
             "seq": command.get("seq", self.last_seq + 1),
@@ -332,7 +362,9 @@ class Controller:
             "gripper": command.get("gripper"),
             "stop": bool(command.get("stop", False)),
             "geometry_age_ms": command.get("geometry_age_ms"),
+            "geometry_observed_at": command.get("geometry_observed_at"),
             "target_moving": bool(command.get("target_moving", False)),
+            "target_ref": target_ref,
             "action_ref": command.get("action_ref"),
             "phase": command.get("phase"),
         }
@@ -395,7 +427,7 @@ class Controller:
         """
         if self.now_ms - int(normalised["observed_at"]) > self.observation_deadline_ms:
             return "observation_late"
-        age = normalised["geometry_age_ms"]
+        age = self._geometry_age_ms(normalised)
         if age is not None and normalised["target_mm"] is not None:
             tolerance = (
                 self.geometry_age_moving_ms
@@ -405,6 +437,24 @@ class Controller:
             if float(age) > tolerance:
                 return "geometry_age"
         return None
+
+    def _geometry_age_ms(self, normalised: dict[str, Any]) -> float | None:
+        """명령이 참조하는 대상 기하의 나이를 **적용 시각에** 계산한다 (docs/08 §6 "수명").
+
+        `geometry_observed_at`(관측 시각)이 있으면 지금과의 차이고, 없으면(다른 버전의 하네스)
+        요청 시점의 `geometry_age_ms`로 되돌아간다. 말단이 대상의 행동점에 들어온 파지·놓기
+        국면과 대상을 들고 있는 동안에는 readiness가 시점을 정하므로 검사하지 않는다(docs/08 §5.0).
+        """
+        if normalised["phase"] in _READINESS_PHASES:
+            return None
+        holding = self.sensors.get("holding")
+        if holding is not None and normalised["target_ref"] is not None and holding == normalised["target_ref"]:
+            return None
+        observed_at = normalised["geometry_observed_at"]
+        if observed_at is not None:
+            return float(self.now_ms - int(observed_at))
+        age = normalised["geometry_age_ms"]
+        return None if age is None else float(age)
 
     def apply(self, command: dict[str, Any], now_ms: int) -> dict[str, Any]:
         """명령 하나를 계약대로 검사하고 ACK를 돌려준다 (docs/08 §6)."""
@@ -457,10 +507,11 @@ class Controller:
             self._record("discarded", seq=seq, reason=lifetime_fault)
             return self._ack(seq, executor, stale=True, reason=lifetime_fault)
         if lifetime_fault == "geometry_age":
-            self._record(
-                "discarded", seq=seq, reason=lifetime_fault, age_ms=normalised["geometry_age_ms"]
+            age_ms = int(self._geometry_age_ms(normalised) or 0)
+            self._record("discarded", seq=seq, reason=lifetime_fault, age_ms=age_ms)
+            return self._ack(
+                seq, executor, reason=lifetime_fault, request_observation=True, geometry_age_ms=age_ms
             )
-            return self._ack(seq, executor, reason=lifetime_fault, request_observation=True)
 
         # 4. 국소 도달·충돌 검사.
         target = self._resolve_target(normalised)
@@ -486,7 +537,7 @@ class Controller:
         self._refresh_lease(normalised)
 
         # 7. 그리퍼. 상태가 바뀔 때만 readiness를 보고 이벤트를 한 번 낸다.
-        event_id, wait = self._set_gripper(normalised["gripper"])
+        event_id, wait = self._set_gripper(normalised["gripper"], normalised["phase"], target)
         return self._ack(
             seq,
             executor,
@@ -572,12 +623,14 @@ class Controller:
         self._record("gripper_wait", desired=desired, reason=reason)
         return reason
 
-    def _set_gripper(self, desired: str | None) -> tuple[str | None, str | None]:
+    def _set_gripper(
+        self, desired: str | None, phase: str | None = None, target: dict[str, Any] | None = None
+    ) -> tuple[str | None, str | None]:
         """원하는 상태가 바뀔 때만 이벤트 하나. 같은 상태가 반복돼도 다시 나지 않는다."""
         if desired is None or desired == self.gripper_desired:
             return None, None
 
-        reason = self._gripper_readiness(desired)
+        reason = self._gripper_readiness(desired, phase, target)
         if reason is not None:
             self._record("gripper_wait", desired=desired, reason=reason)
             return None, reason
@@ -589,8 +642,14 @@ class Controller:
         self._record("gripper", id=event_id, desired=desired)
         return event_id, None
 
-    def _gripper_readiness(self, desired: str) -> str | None:
-        """close는 대상 접촉·도달, open은 해제 readiness를 본다 (docs/08 §4)."""
+    def _gripper_readiness(
+        self, desired: str, phase: str | None = None, target: dict[str, Any] | None = None
+    ) -> str | None:
+        """close는 대상 접촉·도달, open은 해제 readiness를 본다 (docs/08 §4).
+
+        놓기 국면의 open은 말단이 명령의 놓기점에 `open_readiness_distance_mm` 안으로 와야 한다 —
+        운반 높이에서 놓으면 떨어뜨리는 일이다(docs/10 I2).
+        """
         if desired == "closed":
             distance = self.sensors.get("target_distance_mm")
             # 대상을 참조하지 않는 close에는 거리 조건이 없다.
@@ -600,6 +659,10 @@ class Controller:
         load = float(self.sensors.get("gripper_load_n") or 0.0)
         if load > self.open_readiness_force_n:
             return "readiness"
+        if phase == "place" and target is not None:
+            here = [float(value) for value in self.sensors["ee_pos_mm"]]
+            if math.dist(here, [float(value) for value in target["pos_mm"]]) > self.open_readiness_distance_mm:
+                return "readiness"
         return None
 
     # ------------------------------------------------------------------

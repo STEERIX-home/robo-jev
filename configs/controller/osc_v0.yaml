@@ -2,7 +2,7 @@
 #
 # 계약의 수치는 전부 여기에만 둔다. `sim/controller.py`에는 상수를 쓰지 않는다.
 # 값은 실험 시작값이며 버전(`version`)과 함께 레코드에 기록한다(docs/08 §8 `versions.controller`).
-version: c0.3
+version: c0.4
 
 # 하네스↔실행기 계약의 표현 규약 (docs/02 §4, docs/05 §2 "좌표계·회전 표현·delta/absolute 설정을 기록").
 frame:
@@ -41,9 +41,19 @@ timing:
 lifetime:                    # docs/08 §6 "수명"
   observation_deadline_ms: 200
   lease_ms: 300              # lease_until 기본값 = issued_at + 300ms
+  # 기하 나이 허용치. 명령의 `geometry_observed_at`(대상 기하의 관측 시각)으로부터 **적용 시각에**
+  # 계산한다 — 요청 시점의 나이에 모델·전송 경과 시간이 더해진다. 파지·놓기 국면과 파지 중에는
+  # readiness가 시점을 정하므로 이 검사를 하지 않는다 (docs/08 §5.0).
   geometry_age_static_ms: 500
   geometry_age_moving_ms: 200
   hold_after_stale_ms: 1000  # lease 만료가 1초 이어지면 HOLD 절차
+
+observe:                     # docs/08 §6 "관측", docs/02 §4 `OBSERVE`
+  # 관측 명령은 제자리 정지가 아니라 이 자세로 이동한 뒤 정지해 새 관측을 기다린다 — 팔 자신이
+  # 가림의 원인이면 제자리에서는 풀리지 않는다. 시작값은 reset 말단 자세([457, 0, 99])를 100mm 올린
+  # 것이며 `reach` 검사를 지나야 한다(생성 시 확인). 로봇 기준 좌표계.
+  pose_mm: [457.0, 0.0, 199.0]
+  speed_level: 2             # 게이팅 틱의 속도 답(0)이 아니라 이 속도로 이동한다
 
 blend:                       # docs/08 §6 "혼합"
   blend_ms: 100
@@ -84,6 +94,7 @@ gripper:                     # docs/08 §6 "그리퍼" — readiness·ID·ACK·�
   closed_mm: 0
   close_readiness_distance_mm: 60   # 대상까지 이 안이어야 close를 실행한다
   open_readiness_force_n: 25.0      # 이보다 큰 하중에서는 open을 보류한다
+  open_readiness_distance_mm: 20    # 놓기 국면의 open은 말단이 놓기점에 이 안으로 와야 실행한다
   event_id_prefix: ge
 
 retreat:                     # docs/08 §6 `path: retreat`
