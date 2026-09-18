@@ -73,6 +73,27 @@ def test_split_is_assigned_from_the_family_before_generation_and_the_holdout_is_
     assert "ood" in splits and "train" in splits
 
 
+def test_the_generator_config_names_every_config_it_digests_and_the_generator_requires_them():
+    """생성 설정은 지문에 드는 설정 파일(장면·하네스·전문가·사건)의 경로를 전부 이름으로 적는다 — 키가 빠지면
+    기본 경로로 조용히 대신하지 않고 생성기가 거절한다."""
+    from robo_jev.data.robot_episodes import config_paths
+
+    assert CONFIG["events_config"] == "configs/sim/events.yaml"
+    paths = config_paths(CONFIG)
+    assert paths == {
+        "sim_config": CONFIG["sim_config"], "harness_config": CONFIG["harness_config"],
+        "expert_config": CONFIG["expert_config"], "events_config": CONFIG["events_config"],
+    }
+    for key in ("sim_config", "harness_config", "expert_config", "events_config"):
+        missing = {k: v for k, v in CONFIG.items() if k != key}
+        with pytest.raises(ValueError, match=key):
+            config_paths(missing)
+        with pytest.raises(ValueError, match=key):
+            generate_episode("E0", 17, policy=None, expert=None, config=missing, max_ticks=1)
+        with pytest.raises(ValueError, match=key):
+            run(missing, 1, None)
+
+
 def test_the_seed_schedule_is_deterministic_and_a_prefix_of_a_longer_one():
     short = seed_schedule(CONFIG, 6)
     assert short == [("E0", 100), ("E1", 100), ("E0", 101), ("E1", 101), ("E0", 102), ("E1", 102)]

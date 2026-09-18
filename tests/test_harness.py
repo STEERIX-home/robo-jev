@@ -1911,10 +1911,13 @@ def test_default_versions_follow_the_config_on_disk(monkeypatch):
 
 
 def test_versions_carry_a_digest_of_every_config_that_shapes_the_record(tmp_path):
-    """`versions.config_digest`는 하네스·컨트롤러·전문가·장면·사건 설정의 canonical JSON sha256이다 — 버전
-    문자열을 올리지 않은 수치 변경도 레코드를 표시한다. 다섯 설정 중 어느 하나가 바뀌면 digest가 바뀐다."""
+    """`versions.config_digest`는 하네스·컨트롤러·규칙 기준군·전문가·장면·사건 설정과 생성기의 `episode.*` 손잡이의
+    canonical JSON sha256이다 — 버전 문자열을 올리지 않은 수치 변경도 레코드를 표시한다. 어느 하나가 바뀌면 digest가
+    바뀐다. 규칙 기준군 설정은 DAgger 레코드의 `model_output`을 만들고, 생성기의 `episode.*`는 틱의 제어 주기·꼬리를
+    정한다."""
     from robo_jev.data import episode as episode_module
 
+    assert episode_module.CONFIG_DIGEST_PARTS == ("harness", "controller", "rule_judge", "expert", "sim", "events", "generator")
     versions = episode_module.default_versions()
     assert len(versions["config_digest"]) == 64
     assert versions["config_digest"] == episode_module.running_config_digest()
@@ -1928,9 +1931,10 @@ def test_versions_carry_a_digest_of_every_config_that_shapes_the_record(tmp_path
 
     # 어느 설정이든 한 값이 바뀌면 다른 digest다 (다른 설정은 그대로).
     changed: set[str] = set()
-    for name in ("harness", "expert", "sim", "events"):
+    for name in ("harness", "rule_judge", "expert", "sim", "events"):
         source = {
-            "harness": HARNESS_CONFIG, "expert": REPO_CONFIGS / "sim" / "expert_v0.yaml",
+            "harness": HARNESS_CONFIG, "rule_judge": REPO_CONFIGS / "harness" / "rule_judge_v0.yaml",
+            "expert": REPO_CONFIGS / "sim" / "expert_v0.yaml",
             "sim": SIM_CONFIG, "events": REPO_CONFIGS / "sim" / "events.yaml",
         }[name]
         text = source.read_text(encoding="utf-8")
@@ -1939,7 +1943,16 @@ def test_versions_carry_a_digest_of_every_config_that_shapes_the_record(tmp_path
         digest = episode_module.running_config_digest(**{f"{name}_config": str(copy_path)})
         assert digest != versions["config_digest"]
         changed.add(digest)
-    assert len(changed) == 4
+    assert len(changed) == 5
+    # 생성기 설정은 `episode.*` 손잡이만 지문에 든다 — 편수 목표·seed 일정은 레코드의 틱을 만들지 않는다.
+    generator = yaml.safe_load((REPO_CONFIGS / "data" / "d1_robot.yaml").read_text(encoding="utf-8"))
+    same = {**generator, "target_episodes": generator["target_episodes"] + 1}
+    assert episode_module.running_config_digest(generator_config=same) == versions["config_digest"]
+    knobs = {**generator, "episode": {**generator["episode"], "tail_ticks_after_done": 3}}
+    knob_path = tmp_path / "generator.yaml"
+    knob_path.write_text(yaml.safe_dump(knobs), encoding="utf-8")
+    assert episode_module.running_config_digest(generator_config=str(knob_path)) not in changed | {versions["config_digest"]}
+    assert episode_module.running_config_digest(generator_config=knobs) == episode_module.running_config_digest(generator_config=str(knob_path))
     # 컨트롤러 설정은 하네스 설정이 가리킨다 — 그 사본을 가리키는 하네스 사본으로 본다.
     controller_copy = tmp_path / "osc.yaml"
     controller_copy.write_text(CONTROLLER_CONFIG.read_text(encoding="utf-8") + "\nreview_marker: 1\n", encoding="utf-8")

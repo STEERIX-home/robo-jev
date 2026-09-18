@@ -28,6 +28,7 @@ from robo_jev.data.split import SplitPolicy, assign_split
 __all__ = [
     "CONFIG_DIGEST_PARTS",
     "DEFAULT_CONFIG_PATHS",
+    "GENERATOR_DIGEST_KEYS",
     "REQUIRED_VERSIONS",
     "aggregate",
     "append_tick",
@@ -49,14 +50,22 @@ __all__ = [
 #: 별개이며 학습 manifest에 적힌다. 둘은 따로 올라간다.
 REQUIRED_VERSIONS = ("harness", "controller", "rules", "serializer", "extractor", "config_digest")
 
-#: `config_digest`에 들어가는 설정과 그 순서. 컨트롤러 설정은 하네스 설정이 가리키는 파일이다.
-CONFIG_DIGEST_PARTS = ("harness", "controller", "expert", "sim", "events")
+#: `config_digest`에 들어가는 설정과 그 순서. 컨트롤러 설정은 하네스 설정이 가리키는 파일이다. 규칙 기준군 설정은
+#: 규칙 기준군이 정책 대역인 DAgger 레코드의 `model_output`을 만들고, `generator`는 생성 설정의 `episode.*`
+#: 손잡이(틱당 제어 주기·done 뒤 꼬리)다 — 둘 다 레코드의 틱을 만든다. 생성 설정의 나머지(편수 목표·seed 일정·
+#: split 정책)는 어느 에피소드를 만드는지를 정할 뿐 틱의 내용을 만들지 않으므로 지문에 넣지 않는다.
+CONFIG_DIGEST_PARTS = ("harness", "controller", "rule_judge", "expert", "sim", "events", "generator")
+
+#: 생성 설정 가운데 지문에 드는 부분.
+GENERATOR_DIGEST_KEYS = ("episode",)
 
 DEFAULT_CONFIG_PATHS = {
     "harness_config": "configs/harness/robot.yaml",
+    "rule_judge_config": "configs/harness/rule_judge_v0.yaml",
     "expert_config": "configs/sim/expert_v0.yaml",
     "sim_config": "configs/sim/tidy_clutter.yaml",
     "events_config": "configs/sim/events.yaml",
+    "generator_config": "configs/data/d1_robot.yaml",
 }
 
 #: 요청 안에만 사는 하네스 장부. 레코드에는 넣지 않는다.
@@ -69,16 +78,25 @@ def config_digest(configs: dict[str, Any]) -> str:
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _generator_digest_part(config: dict[str, Any]) -> dict[str, Any]:
+    """생성 설정에서 지문에 드는 부분(`GENERATOR_DIGEST_KEYS`)만."""
+    return {key: config.get(key) for key in GENERATOR_DIGEST_KEYS}
+
+
 def running_config_digest(
     *,
     harness_config: str | Path | None = None,
+    rule_judge_config: str | Path | None = None,
     expert_config: str | Path | None = None,
     sim_config: str | Path | None = None,
     events_config: str | Path | None = None,
+    generator_config: str | Path | dict[str, Any] | None = None,
 ) -> str:
-    """지금 디스크의 하네스·컨트롤러(하네스 설정이 가리키는 파일)·전문가·장면·사건 설정의 :func:`config_digest`.
+    """지금 디스크의 하네스·컨트롤러(하네스 설정이 가리키는 파일)·규칙 기준군·전문가·장면·사건 설정과 생성 설정의
+    `episode.*` 손잡이의 :func:`config_digest`.
 
-    경로를 주지 않으면 기본 설정(`DEFAULT_CONFIG_PATHS`)이다. 생성기는 자기가 실제로 쓴 경로를 준다.
+    경로를 주지 않으면 기본 설정(`DEFAULT_CONFIG_PATHS`)이다. 생성기는 자기가 실제로 쓴 경로(생성 설정은 이미
+    읽은 dict여도 된다)를 준다.
     """
     import yaml
 
@@ -89,12 +107,19 @@ def running_config_digest(
         return yaml.safe_load(resolve_config_path(path).read_text(encoding="utf-8"))
 
     harness = load_harness_config(harness_config or DEFAULT_CONFIG_PATHS["harness_config"])
+    generator = (
+        generator_config
+        if isinstance(generator_config, dict)
+        else read(generator_config or DEFAULT_CONFIG_PATHS["generator_config"])
+    )
     parts = {
         "harness": harness,
         "controller": load_controller_config(harness["controller_config"]),
+        "rule_judge": read(rule_judge_config or DEFAULT_CONFIG_PATHS["rule_judge_config"]),
         "expert": read(expert_config or DEFAULT_CONFIG_PATHS["expert_config"]),
         "sim": read(sim_config or DEFAULT_CONFIG_PATHS["sim_config"]),
         "events": read(events_config or DEFAULT_CONFIG_PATHS["events_config"]),
+        "generator": _generator_digest_part(generator),
     }
     return config_digest({name: parts[name] for name in CONFIG_DIGEST_PARTS})
 
@@ -102,15 +127,17 @@ def running_config_digest(
 def default_versions(
     *,
     harness_config: str | Path | None = None,
+    rule_judge_config: str | Path | None = None,
     expert_config: str | Path | None = None,
     sim_config: str | Path | None = None,
     events_config: str | Path | None = None,
+    generator_config: str | Path | dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """설정과 모듈 상수에서 읽은 기본 버전 + 설정 묶음의 지문. 부를 때마다 설정을 다시 읽는다.
 
-    하네스·규칙·추출기는 코드가, 컨트롤러·serializer는 설정이 단일 출처다. 한 군데서
-    모아야 레코드의 `versions`가 실제로 돌아간 것을 가리킨다. 캐시하지 않는다 — 한 과정
-    안에서 설정을 바꾸면 그 뒤의 레코드는 바뀐 버전을 적어야 한다. 경로를 주면 그 설정으로
+    하네스·규칙·추출기는 코드가, 컨트롤러·serializer(레코드 직렬화 = 장면 설정의 `version`, `sim`도 같은
+    값)는 설정이 단일 출처다. 한 군데서 모아야 레코드의 `versions`가 실제로 돌아간 것을 가리킨다. 캐시하지
+    않는다 — 한 과정 안에서 설정을 바꾸면 그 뒤의 레코드는 바뀐 버전을 적어야 한다. 경로를 주면 그 설정으로
     (생성기가 실제로 쓴 것), 아니면 기본 설정으로 digest를 만든다.
     """
     import yaml
@@ -130,9 +157,11 @@ def default_versions(
         "controller": str(controller.get("version", "c0")),
         "rules": RULE_JUDGE_VERSION,
         "serializer": str(serializer.get("version", "s0")),
+        "sim": str(serializer.get("version", "s0")),
         "extractor": EXTRACTOR_VERSION,
         "config_digest": running_config_digest(
-            harness_config=harness_config, expert_config=expert_config, sim_config=sim_config, events_config=events_config
+            harness_config=harness_config, rule_judge_config=rule_judge_config, expert_config=expert_config,
+            sim_config=sim_config, events_config=events_config, generator_config=generator_config,
         ),
     }
 

@@ -50,6 +50,7 @@ __all__ = [
     "GENERATOR_VERSION",
     "MANIFEST_VERSION",
     "build_manifest",
+    "config_paths",
     "episode_id",
     "family_id",
     "family_signature",
@@ -81,6 +82,19 @@ def config_digest(config: dict[str, Any]) -> str:
     return hashlib.sha256(
         json.dumps(config, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+#: 생성 설정이 이름으로 적어야 하는 설정 파일. 전부 레코드의 `versions.config_digest`에 든다.
+CONFIG_PATH_KEYS = ("sim_config", "harness_config", "expert_config", "events_config")
+
+
+def config_paths(config: dict[str, Any]) -> dict[str, str]:
+    """생성 설정이 가리키는 장면·하네스·전문가·사건 설정의 경로. 빠진 키는 기본 경로로 대신하지 않고 거절한다 —
+    레코드의 지문(`config_digest`)에 드는 파일은 설정이 이름으로 적은 것이어야 한다."""
+    missing = [key for key in CONFIG_PATH_KEYS if not config.get(key)]
+    if missing:
+        raise ValueError(f"생성 설정에 설정 파일 경로가 없다: {missing} (configs/data/d1_robot.yaml처럼 {list(CONFIG_PATH_KEYS)} 전부를 적는다)")
+    return {key: str(config[key]) for key in CONFIG_PATH_KEYS}
 
 
 # --------------------------------------------------------------------------
@@ -162,11 +176,12 @@ def generate_episode(
     """
     from robo_jev.sim.environment import Environment
 
-    sim_config = str(config["sim_config"])
+    paths = config_paths(config)
+    sim_config = paths["sim_config"]
     episode_config = config.get("episode") or {}
     control_steps = int(episode_config.get("control_steps_per_tick", 5))
     tail_ticks = int(episode_config.get("tail_ticks_after_done", 10))
-    harness_config = load_harness_config(str(config.get("harness_config") or "configs/harness/robot.yaml"))
+    harness_config = load_harness_config(paths["harness_config"])
 
     own_env = env is None
     if own_env:
@@ -271,12 +286,9 @@ def generate_episode(
             versions=versions,
             provenance=provenance,
             evidence=evidence,
-            config_paths={
-                "harness_config": str(config.get("harness_config") or "configs/harness/robot.yaml"),
-                "expert_config": str(config.get("expert_config") or "configs/sim/expert_v0.yaml"),
-                "sim_config": sim_config,
-                "events_config": str(config.get("events_config") or "configs/sim/events.yaml"),
-            },
+            # 지문에 드는 설정: 설정이 이름으로 적은 네 파일(+ 하네스가 가리키는 컨트롤러, 기본 경로의 규칙 기준군)과
+            # 이 생성 설정의 `episode.*` 손잡이.
+            config_paths={**paths, "generator_config": config},
         )
     finally:
         if own_env:
@@ -495,7 +507,8 @@ def run(
     from robo_jev.sim.environment import Environment
 
     started = time.perf_counter()
-    expert = Expert(load_expert_config(str(config.get("expert_config") or "configs/sim/expert_v0.yaml")))
+    paths = config_paths(config)
+    expert = Expert(load_expert_config(paths["expert_config"]))
     schedule = seed_schedule(config, count)
     envs: dict[str, Any] = {}
     produced = skipped = 0
@@ -507,7 +520,7 @@ def run(
                 continue
             env = envs.get(profile)
             if env is None:
-                env = envs[profile] = Environment(config_path=str(config["sim_config"]), profile=profile)
+                env = envs[profile] = Environment(config_path=paths["sim_config"], profile=profile)
             record = generate_episode(profile, seed, policy=expert, expert=expert, config=config, env=env)
             validate_record(record)
             write_episode(record, out)

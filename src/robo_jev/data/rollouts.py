@@ -59,16 +59,22 @@ __all__ = [
 ROLLOUTS_VERSION = "rollouts-v0.1"
 _QUESTIONS = tuple(QUESTION_SET_V0)
 
-#: 레코드와 지금 돌아가는 것이 같아야 하는 `versions` 키. 앞의 셋은 코드 버전, 마지막은 설정 묶음의 지문이다.
-VERSION_KEYS = ("harness", "controller", "expert", "config_digest")
+#: 레코드와 지금 돌아가는 것이 같아야 하는 `versions` 키. 코드 버전(하네스·전문가·규칙 기준군·추출기), 설정의 버전
+#: 문자열(컨트롤러·레코드 직렬화·장면), 그리고 설정 묶음의 지문이다. 재생은 관측 → 상태(추출기·레코드 직렬화) →
+#: 요청 → 조합(하네스·규칙) → 실행(컨트롤러·장면)을 되풀이하므로 어느 하나가 올라가도 조용한 fidelity skip이 아니라
+#: 거절이어야 한다.
+VERSION_KEYS = ("harness", "controller", "expert", "rules", "serializer", "extractor", "sim", "config_digest")
 
 
 class ConfigMismatch(ValueError):
     """레코드를 만든 코드·설정이 지금 것과 다르다 — 재생은 그 레코드를 거절한다."""
 
 
-def running_versions_for(*, sim_config: str, events: dict[str, Any]) -> dict[str, str]:
-    """지금 돌아가는 하네스·컨트롤러·전문가 버전과 설정 묶음의 지문 (사건 설정이 가리키는 하네스·전문가 설정으로)."""
+def running_versions_for(
+    *, sim_config: str, events: dict[str, Any], generator_config: str | Path | dict[str, Any] | None = None
+) -> dict[str, str]:
+    """지금 돌아가는 코드·설정의 버전과 설정 묶음의 지문 (사건 설정이 가리키는 하네스·전문가 설정, 생성 설정의
+    `episode.*` 손잡이 — 없으면 기본 생성 설정)."""
     from robo_jev.sim.expert import Expert, load_expert_config
 
     followup = events["followup"]
@@ -77,6 +83,7 @@ def running_versions_for(*, sim_config: str, events: dict[str, Any]) -> dict[str
         expert_config=followup["expert_config"],
         sim_config=sim_config,
         events_config=events.get("_path"),
+        generator_config=generator_config,
     )
     versions["expert"] = Expert(load_expert_config(followup["expert_config"])).version
     return {key: str(versions[key]) for key in VERSION_KEYS}
@@ -192,6 +199,7 @@ def build_jobs(
     control_steps: int,
     log: Any = None,
     running: dict[str, str] | None = None,
+    generator_config: str | Path | dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """키프레임을 고르고 재생해 rollout 작업 `(keyframe, candidate, seed)` 목록을 만든다.
 
@@ -203,7 +211,7 @@ def build_jobs(
     from robo_jev.sim.environment import Environment
 
     if running is None:
-        running = running_versions_for(sim_config=sim_config, events=events)
+        running = running_versions_for(sim_config=sim_config, events=events, generator_config=generator_config)
     for record in records:
         check_record_versions(record, running)
     seeds = int(events.get("seeds", 8))
@@ -519,6 +527,7 @@ def run(
     out: Path | None = None,
     per_episode: int | None = None,
     log: Any = None,
+    generator_config: str | Path = "configs/data/d1_robot.yaml",
 ) -> dict[str, Any]:
     started = time.perf_counter()
     events = {**load_events_config(events_path), "_path": str(events_path)}
@@ -529,7 +538,7 @@ def run(
         raise FileNotFoundError(f"에피소드가 없다: {dataset}")
     jobs, keyframes, summary = build_jobs(
         records, events, limit=limit, per_episode=per_episode, sim_config=sim_config, harness_config=harness_config,
-        control_steps=control_steps, log=log,
+        control_steps=control_steps, log=log, generator_config=generator_config,
     )
     results = run_jobs(jobs, sim_config=sim_config, expert_config=events["followup"]["expert_config"], workers=workers, log=log)
     labels = label_keyframes(records, keyframes, results, events)
@@ -547,8 +556,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--events", default="configs/sim/events.yaml")
     parser.add_argument("--out", type=Path, default=None, help="기본 <dataset>/rollouts")
+    parser.add_argument("--generator-config", default="configs/data/d1_robot.yaml", help="레코드를 만든 생성 설정 (episode.* 손잡이가 지문에 든다)")
     args = parser.parse_args(argv)
-    outcome = run(args.dataset, limit=args.limit, workers=args.workers, events_path=args.events, out=args.out, log=sys.stdout)
+    outcome = run(
+        args.dataset, limit=args.limit, workers=args.workers, events_path=args.events, out=args.out, log=sys.stdout,
+        generator_config=args.generator_config,
+    )
     cost = outcome["costing"]
     print(json.dumps({key: cost[key] for key in ("rollouts", "outcomes", "wall_s_per_rollout", "restore_s_per_rollout", "env_rebuild_s", "bytes_per_rollout", "throughput", "projections", "keyframes")}, ensure_ascii=False, indent=2))
     print(f"→ {outcome['paths']['costing'].parent}")

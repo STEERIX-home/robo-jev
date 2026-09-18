@@ -71,6 +71,17 @@ def test_replay_refuses_a_record_made_by_other_configs_with_an_explicit_reason(s
     with pytest.raises(ConfigMismatch, match="config_digest"):
         replay_to_keyframes(undated, [0], **kwargs)
 
+    # 추출기·규칙 기준군·레코드 직렬화·장면 버전도 재생의 전제다 — 올라간 것이 조용한 fidelity skip이 되지 않는다.
+    from robo_jev.data.rollouts import VERSION_KEYS
+
+    assert set(VERSION_KEYS) == {"harness", "controller", "expert", "rules", "serializer", "extractor", "sim", "config_digest"}
+    for key in ("extractor", "rules", "serializer", "sim"):
+        assert record["versions"][key] == running[key]
+        bumped = copy.deepcopy(record)
+        bumped["versions"][key] = f"{record['versions'][key]}-next"
+        with pytest.raises(ConfigMismatch, match=key):
+            replay_to_keyframes(bumped, [0], **kwargs)
+
     out = short_episode["out"]
     (out / "episodes" / stale["episode_id"] / "streams.jsonl").write_text(json.dumps(stale, ensure_ascii=False) + "\n", encoding="utf-8")
     try:

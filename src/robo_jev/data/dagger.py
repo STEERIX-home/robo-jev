@@ -24,6 +24,7 @@ from robo_jev.contracts import validate_record
 from robo_jev.data.episode import aggregate
 from robo_jev.data.robot_episodes import (
     build_manifest,
+    config_paths,
     generate_episode,
     load_generator_config,
     seed_schedule,
@@ -141,7 +142,8 @@ def run_cycle(
 
     started = time.perf_counter()
     config = config or load_generator_config()
-    expert = expert or Expert(load_expert_config(str(config.get("expert_config") or "configs/sim/expert_v0.yaml")))
+    paths = config_paths(config)
+    expert = expert or Expert(load_expert_config(paths["expert_config"]))
     schedule = seed_schedule(config, episodes)
     envs: dict[str, Any] = {}
     per_episode: list[dict[str, Any]] = []
@@ -149,7 +151,7 @@ def run_cycle(
         for profile, seed in schedule:
             env = envs.get(profile)
             if env is None:
-                env = envs[profile] = Environment(config_path=str(config["sim_config"]), profile=profile)
+                env = envs[profile] = Environment(config_path=paths["sim_config"], profile=profile)
             record = generate_episode(profile, seed, policy=policy, expert=expert, config=config, env=env, max_ticks=max_ticks)
             relabel(record, cycle=cycle, policy=policy)
             validate_record(record)
