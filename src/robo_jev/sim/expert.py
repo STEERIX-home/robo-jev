@@ -786,31 +786,41 @@ class Expert:
     # -- 라벨 (docs/08 §7) ----------------------------------------------------------
 
     def labels(self, answers: dict[str, Any], request: dict[str, Any]) -> list[dict[str, Any]]:
-        """전문가 답 → 그 틱의 라벨. 부가 질문은 요청의 commitment에 조건화되고, 없으면 마스킹한다."""
+        """전문가 답 → 그 틱의 라벨. 부가 질문은 요청의 commitment에 조건화되고, 없으면 마스킹한다.
+
+        두 가지 완화 규칙을 :meth:`_finish_label` 이 건다. **낮은 신뢰도**(`label_confidence: low` — 목표를
+        실현할 후보가 목록에 없거나 재시도가 막혔거나 실행기 사정으로 `hold`로 물러난 퇴화 틱)의 라벨은
+        설정 `labels.low_confidence_weight`(시작값 0.25)를 `weight`로 달아 손실(docs/03 §4, `loss.py`)이
+        덜 끌리게 한다. **허용 집합이 빈** `valid_set` 라벨은 근거가 없는 질문이라 마스크인데, 계약이 빈
+        `candidate_ids`를 거절하므로 마스크 = 라벨을 적지 않는 것이다(경로 후보가 없는 틱의 `q_path`).
+        """
         model = request.get("request", request)
         meta = answers["expert_meta"]
         main = meta["main"]
         source = self.label_source
-        labels: list[dict[str, Any]] = [
+        labels: list[dict[str, Any]] = []
+        self._finish_label(
+            labels,
             {
                 "question_id": "q_main",
                 "kind": "valid_set",
-                "candidate_ids": [main["choice"]],
+                "candidate_ids": [main["choice"]] if main["choice"] is not None else [],
                 "semantic_admissible": list(main["admissible"]),
                 "source": source,
                 "rule": f"expert-{self.version}/{main['reason']}",
                 "label_confidence": main["confidence"],
-            }
-        ]
+            },
+        )
         for question_id, gate in meta["gates"].items():
-            labels.append(
+            self._finish_label(
+                labels,
                 {
                     "question_id": question_id,
                     "kind": "single",
                     "answer": bool(gate["value"]),
                     "source": source,
                     "rule": gate["rule"],
-                }
+                },
             )
         commitment = model.get("commitment")
         aux = meta.get("aux")
@@ -826,10 +836,24 @@ class Expert:
         }
         for question_id in AUX_QUESTIONS:
             entry = entries[question_id]
-            if entry["kind"] == "valid_set" and not entry["candidate_ids"]:
-                continue  # 경로 후보가 없는 틱은 마스킹
-            labels.append({"question_id": question_id, **entry, "source": source, "conditioned_on": conditioned})
+            self._finish_label(labels, {"question_id": question_id, **entry, "source": source, "conditioned_on": conditioned})
         return labels
+
+    def _finish_label(self, labels: list[dict[str, Any]], label: dict[str, Any]) -> None:
+        """라벨 하나를 목록에 넣기 전에 완화 규칙을 건다 (:meth:`labels` 참조).
+
+        허용 집합이 빈 `valid_set`은 넣지 않고(마스크), 낮은 신뢰도에는 설정의 weight를 단다. weight는
+        1이면 적지 않는다 — 기본값과 같은 값을 레코드마다 되풀이할 이유가 없다.
+        """
+        if label["kind"] == "valid_set" and not label["candidate_ids"]:
+            return
+        if label.get("label_confidence") == "low":
+            weight = float(self.label_config.get("low_confidence_weight", 0.25))
+            if weight < 0:
+                raise ValueError(f"labels.low_confidence_weight: 0 이상이어야 한다 (받은 값: {weight})")
+            if weight != 1.0:
+                label["weight"] = weight
+        labels.append(label)
 
 
 # --------------------------------------------------------------------------

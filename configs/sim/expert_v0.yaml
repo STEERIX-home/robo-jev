@@ -71,3 +71,8 @@ labels:
   gripper_transition_tolerance_ticks: 1
   # 막힌 경로의 대안 경유점 가운데 최선보다 이만큼 안에 드는 것은 허용 집합에 넣는다.
   path_alternative_extra_mm: 60
+  # 낮은 신뢰도 라벨(`label_confidence: low` — 목표를 실현할 후보가 목록에 없거나(상한·실행 불가), 재시도가
+  # 막혔거나, 실행기 사정으로 고를 수 없어 `hold`로 물러난 퇴화 틱)의 손실 가중치 `weight`. 손실은 라벨의
+  # weight를 그대로 쓴다(docs/03 §4). 후보 공간 자체의 결정(E1 퇴화 틱 44%)이 나올 때까지의 완화이며 1이면
+  # 다른 라벨과 같다. 허용 집합이 빈 라벨은 weight가 아니라 마스크다(적지 않는다).
+  low_confidence_weight: 0.25

@@ -158,6 +158,38 @@ def test_packed_nonrobot_unit_loss_equals_the_mean_of_singles_run_one_by_one(tmp
             assert entry["loss"] == pytest.approx(value, rel=1e-5, abs=1e-6)
 
 
+def test_low_confidence_labels_are_counted_separately_per_step(tmp_path):
+    """퇴화 틱의 낮은 신뢰도 라벨(`label_confidence: low`, `weight` 0.25 — I4 완화)은 step 지표에 따로 센다:
+    `labels_low_confidence` = 그 step의 상태(틱·단일 요청)에 실린 낮은 신뢰도 라벨 수."""
+    with Trainer(tiny_config(tmp_path, max_steps=2)) as trainer:
+        metrics = trainer.run_step()
+        assert metrics["labels_low_confidence"] == 0  # D0에는 낮은 신뢰도 라벨이 없다
+        assert metrics["labels_total"] > 0
+
+        marked = 0
+        for item in trainer.items:
+            states = item.record["ticks"] if item.kind == "stream" else [item.record]
+            for state in states:
+                for label in state.get("labels", []):
+                    if label["question_id"] in ("q_main", "q_target") and marked % 2 == 0:
+                        label["label_confidence"] = "low"
+                        label["weight"] = 0.25
+                    marked += 1
+        assert trainer.accumulate()
+        expected = 0
+        for unit in trainer.progress["units"]:
+            for index in unit.items:
+                item = trainer.items[index]
+                states = item.record["ticks"] if item.kind == "stream" else [item.record]
+                expected += sum(
+                    1 for state in states for label in state.get("labels", []) if label.get("label_confidence") == "low"
+                )
+        assert expected > 0
+        metrics = trainer.apply()
+        assert metrics["labels_low_confidence"] == expected
+        assert metrics["labels_total"] >= expected
+
+
 def one_sided_manifest(tmp_path, name: str) -> str:
     """D0 manifest에서 파일 하나만 남긴 manifest (같은 sha256)."""
     manifest = json.loads(D0_MANIFEST.read_text(encoding="utf-8"))

@@ -267,10 +267,13 @@ def tick_weights(record: dict, *, weights: dict[str, float], steady_min_held_tic
 
 
 def _label_contributes(label: dict) -> bool:
-    """:func:`robo_jev.loss.label_loss`가 `None`을 내는 조건의 거울 (mask=false, 근거 없는 사건)."""
+    """:func:`robo_jev.loss.label_loss`가 `None`을 내는 조건(mask=false, 근거 없는 사건)과 :func:`robo_jev.loss.judgment_loss`
+    가 상태를 세지 않는 조건(weight 0)의 거울."""
     if label.get("mask", True) is False:
         return False
     if label.get("kind") == "event" and int(label.get("successes", 0)) + int(label.get("failures", 0)) == 0:
+        return False
+    if float(label.get("weight", 1.0)) <= 0:
         return False
     return True
 

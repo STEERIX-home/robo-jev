@@ -139,6 +139,11 @@ def test_valid_single_mirrors_the_same_rules(singles):
     assert not valid_single(record)
     record["labels"] = []
     assert not valid_single(record)
+    # weight 0 라벨만 있는 상태는 손실이 세지 않는다 (judgment_loss의 total_weight <= 0) — 같은 규칙.
+    record["labels"] = [dict(l, weight=0.0) for l in singles[0]["labels"]]
+    assert not valid_single(record)
+    record["labels"] = [dict(l, weight=0.25) for l in singles[0]["labels"]]  # 낮은 신뢰도의 내린 weight는 기여한다
+    assert valid_single(record)
 
 
 # --------------------------------------------------------------------------

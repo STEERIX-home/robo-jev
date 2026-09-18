@@ -434,6 +434,21 @@ def _add_type_losses(by_type: dict[str, list[float]], entries: dict, question_ty
         slot[1] += 1
 
 
+def _count_labels(states: list[dict]) -> tuple[int, int]:
+    """상태(틱·단일 요청) 목록의 라벨 수와 그 가운데 낮은 신뢰도(`label_confidence: low`) 라벨 수.
+
+    낮은 신뢰도 라벨은 퇴화 틱(목표 후보 없음·재시도 차단·실행기 사정)의 표지이며 생성기가 `weight`로
+    내려 준다(I4 완화) — 손실이 그 weight를 쓰므로 step 지표에 따로 세어 그 비중을 읽을 수 있게 한다.
+    """
+    total = low = 0
+    for state in states:
+        for label in state.get("labels", []):
+            total += 1
+            if label.get("label_confidence") == "low":
+                low += 1
+    return total, low
+
+
 def run_stream_chunk(
     judge: Judge,
     item: Item,
@@ -480,6 +495,7 @@ def run_stream_chunk(
     tokens = (int(layout["prefix_end"]) if start == 0 else 0) + sum(
         int(t["end"]) - int(t["start"]) for t in layout["ticks"][start:end]
     )
+    labels_total, labels_low = _count_labels(record["ticks"][start:end])
     return ChunkResult(
         loss=total,
         value=0.0 if total is None else float(total.detach()),
@@ -488,7 +504,7 @@ def run_stream_chunk(
         stats={
             "tokens": tokens, "ticks": end - start, "valid_ticks": valid_ticks, "loss_sum": loss_sum,
             "weight_sum": weight_sum, "loss_by_class": value_by_class, "weight_by_class": weight_by_class,
-            "loss_by_type": by_type,
+            "loss_by_type": by_type, "labels_total": labels_total, "labels_low_confidence": labels_low,
         },  # fmt: skip
     )
 
@@ -514,6 +530,7 @@ def run_single_unit(judge: Judge, items: list[Item], *, scale: float = 1.0) -> C
             {"index": item.index, "valid": True, "loss": float(state_loss.detach()), "contribution": float(term.detach())}
         )
         _add_type_losses(by_type, question_losses(one, labels)[0], item.question_types)
+    labels_total, labels_low = _count_labels([item.record for item in items])
     return ChunkResult(
         loss=total,
         value=0.0 if total is None else float(total.detach()),
@@ -521,7 +538,8 @@ def run_single_unit(judge: Judge, items: list[Item], *, scale: float = 1.0) -> C
         outputs=outputs,
         stats={
             "tokens": sum(item.tokens for item in items), "states": len(items), "valid_states": valid_states,
-            "per_item": per_item, "loss_by_type": by_type,
+            "per_item": per_item, "loss_by_type": by_type, "labels_total": labels_total,
+            "labels_low_confidence": labels_low,
         },  # fmt: skip
     )
 
@@ -592,6 +610,8 @@ def _new_accumulators() -> dict[str, Any]:
         "tokens": {domain: 0 for domain in DOMAINS},
         "items": {"single": 0, "stream": 0},
         "valid_states": {"single": 0, "stream": 0},  # 유효 라벨이 있는 단일 요청 상태 / 틱
+        "labels_total": 0,  # step의 상태들에 실린 라벨 수
+        "labels_low_confidence": 0,  # 그 가운데 낮은 신뢰도(퇴화 틱, weight로 내린) 라벨 수
         "chunks": 0,
         "seconds": 0.0,
     }
@@ -735,6 +755,8 @@ class Trainer:
         acc["value_by_domain"][domain] += result.value
         acc["tokens"][domain] += int(stats["tokens"])
         acc["chunks"] += 1
+        acc["labels_total"] = acc.get("labels_total", 0) + int(stats["labels_total"])
+        acc["labels_low_confidence"] = acc.get("labels_low_confidence", 0) + int(stats["labels_low_confidence"])
         for kind, (total, count) in stats["loss_by_type"].items():
             slot = acc["loss_by_type"].setdefault(kind, [0.0, 0])
             slot[0] += total
@@ -850,6 +872,8 @@ class Trainer:
             },
             "items": dict(acc["items"]),
             "valid_states": dict(acc["valid_states"]),
+            "labels_total": int(acc.get("labels_total", 0)),
+            "labels_low_confidence": int(acc.get("labels_low_confidence", 0)),  # 퇴화 틱의 라벨 (I4 완화, weight로 내림)
             "chunks": acc["chunks"],
             "units": [
                 {

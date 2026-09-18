@@ -256,6 +256,48 @@ def test_hold_when_no_candidate_can_realise_the_goal():
     assert labels["q_main"]["label_confidence"] == "low"
 
 
+def test_low_confidence_labels_are_down_weighted_from_the_config():
+    """퇴화 틱(목표 후보 없음·재시도 차단·실행기 사정)의 낮은 신뢰도 라벨은 설정의 `labels.low_confidence_weight`
+    (시작값 0.25)를 `weight`로 달고 나간다 — 손실(`loss.py`)이 weight를 그대로 쓰므로 그 틱이 학습을 덜 끈다.
+    후보 공간 자체의 결정(I4)은 사람의 몫이고 이것은 그때까지의 완화다."""
+    import torch
+
+    from robo_jev.loss import question_losses
+
+    weight = CONFIG["labels"]["low_confidence_weight"]
+    assert weight == 0.25
+    obs = two_object_scene((300, -100, -80))
+    request = without_goal_grasp(request_for(obs))
+    request["request"]["candidates"]["q_main"] = [
+        entry for entry in request["request"]["candidates"]["q_main"] if not entry["key"].startswith("push:o0:")
+    ]
+    out = expert().act(request, None, obs)
+    labels = {label["question_id"]: label for label in expert().labels(out, request)}
+    main = labels["q_main"]
+    assert main["label_confidence"] == "low" and main["weight"] == weight
+    assert all("weight" not in labels[question_id] for question_id in BOOLEANS)  # 신뢰도 표지가 없는 라벨은 그대로
+
+    # 손실이 그 weight를 쓴다.
+    ids = [entry["id"] for entry in request["request"]["candidates"]["q_main"]]
+    outputs = {"logits": [{"q_main": torch.zeros(len(ids))}], "candidates": [{"q_main": ids}]}
+    entries = question_losses(outputs, {"labels": [[main]]})[0]
+    assert entries["q_main"]["weight"] == weight
+
+    # 설정값을 바꾸면 그 값이다. 정상 틱(높은 신뢰도)에는 weight가 없다.
+    heavier = Expert({**CONFIG, "labels": {**CONFIG["labels"], "low_confidence_weight": 0.5}})
+    assert {l["question_id"]: l for l in heavier.labels(out, request)}["q_main"]["weight"] == 0.5
+    normal = request_for()
+    normal_labels = {l["question_id"]: l for l in expert().labels(expert().act(normal, None, scene()), normal)}
+    assert normal_labels["q_main"]["label_confidence"] == "high" and "weight" not in normal_labels["q_main"]
+
+    # 실행기 사정(`not_executable`)의 낮은 신뢰도도 같은 weight다.
+    blocked = two_object_scene((100, 120, -80))
+    request = without_goal_grasp(request_for(blocked))
+    out = expert().act(request, None, blocked)
+    assert out["expert_meta"]["main"]["reason"] == "not_executable"
+    assert {l["question_id"]: l for l in expert().labels(out, request)}["q_main"]["weight"] == weight
+
+
 def test_push_is_not_chosen_when_it_would_not_bring_the_target_closer():
     obs = two_object_scene((100, 0, -80))  # +y만이 영역에 가까워지는 방향이다
     request = without_goal_grasp(request_for(obs))
@@ -779,6 +821,27 @@ def test_aux_labels_are_masked_without_a_commitment():
     out = expert().act(request, None, scene())
     labels = {label["question_id"] for label in expert().labels(out, request)}
     assert labels == set(BOOLEANS) | {"q_main"}
+
+
+def test_a_label_whose_answer_set_is_empty_is_masked_by_omission():
+    """허용 집합이 빈 라벨은 근거가 없는 질문이다 (docs/08 §7 "근거가 없는 질문은 loss mask"). 계약은 `valid_set`의
+    `candidate_ids`가 비는 것을 거절하므로 mask는 라벨을 아예 적지 않는 것이다 — 경로 후보가 없는 틱의 `q_path`."""
+    from robo_jev.contracts import validate_record
+
+    request, commitment = committed_request()
+    request["request"]["candidates"].pop("q_path")
+    out = expert().act(request, commitment, scene())
+    assert out["q_path"] == {}
+    labels = expert().labels(out, request)
+    ids = {label["question_id"] for label in labels}
+    assert "q_path" not in ids and {"q_gripper", "q_speed", "q_force"} <= ids
+    assert all(label["candidate_ids"] for label in labels if label["kind"] == "valid_set")
+    tick = {key: value for key, value in request.items() if key != "harness"}
+    validate_record({
+        "schema_version": "stream-v0", "episode_id": "ep-x",
+        "prefix": {"instructions": [{"version": 1, "t_ms": 0, "text": "x"}], "question_set": "qs-v0"},
+        "ticks": [{**tick, "labels": labels}],
+    })
 
 
 # --------------------------------------------------------------------------
