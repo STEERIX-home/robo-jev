@@ -13,6 +13,7 @@
 
 import copy
 import json
+import os
 import random
 import subprocess
 import sys
@@ -177,6 +178,148 @@ def test_every_difficulty_variant_is_exercised(batch):
     seen = Counter(tag for record in batch for tag in record["provenance"]["variants"])
     missing = sorted(set(domains.VARIANT_TAGS) - set(seen))
     assert not missing, missing
+
+
+# --------------------------------------------------------------------------
+# 수준 경계: 상태에서 답이 나와야 한다 (검토 1차 Important 1, Minor 5)
+# --------------------------------------------------------------------------
+
+#: 상태에 허용 오차를 적어 둔 규칙만 인접 수준을 함께 허용할 수 있다.
+TOLERANCE_RULES = {
+    "spatial/distance-level-v0",
+    "workflow/urgency-level-v0",
+    "workflow/resource-load-v0",
+}
+
+#: 정수·정확한 값을 세는 규칙. 경계에 정확히 걸려도 수준은 하나여야 한다.
+EXACT_LEVEL_RULES = {"spatial/crowding-level-v0", "dom/progress-level-v0"}
+
+#: 분야마다 상태에 있어야 하는 수준 경계 (생성기 상수가 아니라 상태에서 읽혀야 한다).
+REQUIRED_THRESHOLDS = {
+    "spatial": (
+        "distance_edges_mm",
+        "distance_tolerance_mm",
+        "crowding_edges",
+        "crowd_radius_mm",
+    ),
+    "dom": ("progress_edges", "progress_scale"),
+    "workflow": ("urgency_edges_h", "schedule_tolerance_h", "load_edges", "load_tolerance"),
+    "rules": (),  # 심각도는 지배 규칙의 `severity` 그 자체다
+}
+
+
+def test_bucket_keeps_exact_values_in_one_level():
+    """허용 오차가 0이면 경계값은 위쪽 한 수준에만 속한다 (반열린 구간)."""
+    edges = (1.0, 2.0, 3.0)
+    assert domains._bucket(0.0, edges, margin=0.0) == ["0"]
+    assert domains._bucket(1.0, edges, margin=0.0) == ["1"]
+    assert domains._bucket(2.0, edges, margin=0.0) == ["2"]
+    assert domains._bucket(3.0, edges, margin=0.0) == ["3"]
+    # 실제 허용 오차가 있을 때만 인접 수준을 함께 허용한다.
+    assert domains._bucket(1.0, edges, margin=0.2) == ["0", "1"]
+    assert domains._bucket(1.5, edges, margin=0.2) == ["1"]
+
+
+def test_exact_count_levels_never_straddle_two_levels(batch):
+    for record in batch:
+        for trace in record["evidence"]["rule_trace"]:
+            if trace["rule"] in EXACT_LEVEL_RULES and isinstance(trace["answer"], list):
+                assert len(trace["answer"]) == 1, (record["request"]["request_id"], trace)
+
+
+def test_only_rules_with_a_stated_tolerance_give_two_level_answers(batch):
+    two_level: Counter = Counter()
+    for record in batch:
+        by_id = {question["id"]: question for question in record["request"]["questions"]}
+        for label in record["labels"]:
+            if by_id[label["question_id"]]["type"] != "ordinal":
+                continue
+            if len(label.get("candidate_ids") or [label["answer"]]) > 1:
+                two_level[label["source"]] += 1
+    # 심각도만 예외다 — 지배 규칙이 여럿이라 수준이 여럿이지 경계 때문이 아니다.
+    assert set(two_level) <= TOLERANCE_RULES | {"rules/severity-level-v0"}, two_level
+    assert set(two_level) & TOLERANCE_RULES, two_level
+
+
+def test_ordinal_cut_points_are_written_in_the_state(batch):
+    for record in batch:
+        thresholds = record["request"]["state"].get("thresholds", {})
+        for key in REQUIRED_THRESHOLDS[record["provenance"]["domain"]]:
+            assert key in thresholds, (record["request"]["request_id"], key)
+
+
+# --------------------------------------------------------------------------
+# 관측 한계: 관측으로 못 정하는 답을 정답이라 하지 않는다 (검토 1차 Important 2·3)
+# --------------------------------------------------------------------------
+
+#: 관측된 것만 두고 묻는 질문. 모든 표현에 "관측"이 들어가야 답이 상태에서 나온다.
+OBSERVED_SCOPED = ("q_goal_met", "q_distance", "q_crowding")
+
+
+def _spatial_pair(*, hidden: bool):
+    """같은 색 물체 둘 — 하나는 가려 두거나(hidden) 둘 다 관측된 장면."""
+    domain = domains.DOMAINS["spatial"]
+    scene = domain.make_scene(random.Random("observability"), "zone-color")
+    for obj in scene["objects"]:
+        obj.update({"color": "blue", "visible": True, "age_ms": 40})
+    scene["objects"][0].update({"color": "red", "x": 100, "y": 0})
+    scene["objects"][1].update({"color": "red", "x": 300, "y": 0})
+    if hidden:
+        scene["objects"][1].update({"visible": False, "x": None, "y": None})
+    return domain, scene
+
+
+def _nearest_red(domain, scene):
+    """`nearest` 규칙만 떼어 본다 (후보는 pool과 같게 전부 + "해당 없음")."""
+    spec = domains.QuestionSpec(
+        "q_nearest_0",
+        "choice",
+        "nearest",
+        {
+            "color": "red",
+            "candidates": [obj["id"] for obj in scene["objects"]],
+            "none": True,
+        },
+    )
+    return domain.render(scene, spec, random.Random(3), "ko")
+
+
+def _goal_met_red(domain, scene, zone: str):
+    spec = domains.QuestionSpec("q_goal_met_0", "boolean", "goal_met", {"color": "red", "zone": zone})
+    return domain.render(scene, spec, random.Random(3), "ko")
+
+
+def test_nearest_is_undecidable_when_a_same_colour_object_is_unobserved():
+    """가려진 같은 색 물체가 더 가까울 수 있으므로 '가장 가까운'은 정해지지 않는다."""
+    domain, scene = _spatial_pair(hidden=True)
+    rendered = _nearest_red(domain, scene)
+    assert _answer_key(rendered) in (("<none>",), "masked"), rendered.label
+    assert "missing_info" in rendered.variants
+
+
+def test_nearest_names_the_object_when_every_same_colour_object_is_observed():
+    domain, scene = _spatial_pair(hidden=False)
+    assert _answer_key(_nearest_red(domain, scene)) == ("o1",)
+
+
+def test_goal_satisfied_is_about_the_observation_only():
+    """가려진 같은 색 물체가 있어도 '관측으로 확인되는가'는 답할 수 있다."""
+    domain, scene = _spatial_pair(hidden=True)
+    zone = domains._zone_of_x(scene["objects"][0]["x"])
+    assert _answer_key(_goal_met_red(domain, scene, zone)) is True
+    other = next(zone_id for zone_id, _, _ in domains._ZONES if zone_id != zone)
+    assert _answer_key(_goal_met_red(domain, scene, other)) is False
+
+
+def test_observation_scoped_questions_say_so_in_both_languages(batch):
+    seen: Counter = Counter()
+    for record in batch:
+        marker = "관측" if record["provenance"]["language"] == "ko" else "observ"
+        for question in record["request"]["questions"]:
+            if question["id"].rsplit("_", 1)[0] in OBSERVED_SCOPED:
+                seen[question["id"].rsplit("_", 1)[0]] += 1
+                assert marker in question["instructions"], question["instructions"]
+    assert set(seen) == set(OBSERVED_SCOPED), seen
 
 
 def test_candidate_counts_and_multiple_answers_vary(batch):
@@ -350,7 +493,7 @@ def test_assign_split_does_not_depend_on_the_process_hash_seed():
             capture_output=True,
             text=True,
             check=True,
-            env={"PATH": "/usr/bin:/bin", "PYTHONHASHSEED": hash_seed},
+            env={**os.environ, "PYTHONHASHSEED": hash_seed},
         )
         runs.append(result.stdout.strip())
     assert len(set(runs)) == 1, runs
@@ -465,6 +608,23 @@ def test_report_counts_episodes_and_ticks_for_streams():
     assert report["errors"] == []
 
 
+def test_stream_questions_count_only_what_a_tick_actually_poses():
+    """틱이 던지지 않은 동적 질문(후보 없음)은 질문 수에 넣지 않는다."""
+    streams = read_jsonl(D0_STREAMS)[:1]
+    full = validate_dataset(copy.deepcopy(streams))["questions"]
+
+    trimmed = copy.deepcopy(streams)
+    tick = next(
+        tick for tick in trimmed[0]["ticks"] if "q_path" in tick["request"]["candidates"]
+    )
+    tick["request"]["candidates"].pop("q_path")
+    tick["labels"] = [label for label in tick["labels"] if label["question_id"] != "q_path"]
+
+    report = validate_dataset(trimmed)
+    assert report["invalid_records"] == 0, report["errors"]
+    assert report["questions"] == full - 1
+
+
 def test_report_flags_a_split_conflict_in_one_group(batch):
     poisoned = copy.deepcopy(batch[:8])
     conflict = copy.deepcopy(poisoned[0])
@@ -501,11 +661,13 @@ def test_report_flags_a_paraphrase_parent_in_another_group(batch):
     assert "provenance.derived_from" in paths, report["errors"]
 
 
-def test_report_flags_a_paraphrase_whose_facts_moved(batch):
-    """표현만 바꿨다면서 사실이 다르면 계보가 거짓이다."""
+@pytest.mark.parametrize("derivation", ["paraphrase", "reorder"])
+def test_report_flags_a_derivation_whose_facts_moved(batch, derivation):
+    """표현·순서만 바꿨다면서 사실이 다르면 계보가 거짓이다."""
     poisoned = copy.deepcopy(
-        [record for record in batch if record["provenance"].get("derivation") == "paraphrase"][:1]
+        [record for record in batch if record["provenance"].get("derivation") == derivation][:1]
     )
+    assert poisoned, derivation
     parent_id = poisoned[0]["provenance"]["derived_from"]
     poisoned.insert(0, copy.deepcopy(_find(batch, parent_id)))
     assert validate_dataset(poisoned)["errors"] == []
@@ -513,7 +675,7 @@ def test_report_flags_a_paraphrase_whose_facts_moved(batch):
     poisoned[1]["request"]["state"]["observed_at_ms"] += 50
     report = validate_dataset(poisoned)
     messages = [error["message"] for error in report["errors"]]
-    assert any("표현 변형본" in message for message in messages), report["errors"]
+    assert any("파생본" in message and "사실" in message for message in messages), report["errors"]
 
 
 def _find(records: list[dict], request_id: str) -> dict:
@@ -586,6 +748,20 @@ def test_model_input_of_every_generated_record_hides_the_labels(batch):
 
 def test_pilot_config_file_matches_the_embedded_default():
     assert load_config(PILOT_CONFIG) == DEFAULT_CONFIG
+
+
+def test_loading_a_partial_config_never_touches_the_embedded_default(tmp_path):
+    """빠진 절은 기본값에서 오는데, 그 값을 고쳐도 모듈 전역이 따라 바뀌면 안 된다."""
+    partial = tmp_path / "partial.yaml"
+    partial.write_text("version: partial\n", encoding="utf-8")
+
+    before = copy.deepcopy(DEFAULT_CONFIG)
+    loaded = load_config(partial)
+    assert loaded["version"] == "partial"
+    loaded["split"]["holdout_domains"].append("spatial")
+    loaded["domains"]["spatial"] = 1
+    loaded["questions_per_state"].clear()
+    assert DEFAULT_CONFIG == before
 
 
 def test_config_changes_the_domain_mix():

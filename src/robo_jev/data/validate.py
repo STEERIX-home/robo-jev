@@ -12,7 +12,8 @@
 * 정보 경계 — :func:`robo_jev.contracts.model_input`이 낸 입력에 비입력 필드 이름이 없는가.
 * 후보 참조 — 후보의 `ref`가 상태에 실제로 있는 요소를 가리키는가.
 * 라벨 출처 — 규칙·전문가 이름이 붙어 있는가.
-* 계보 충돌 — 한 origin group이 두 split에 걸쳐 있는가, 파생본의 부모가 다른 group인가.
+* 계보 충돌 — 한 origin group이 두 split에 걸쳐 있는가, 파생본의 부모가 다른 group인가,
+  표현·순서만 바꿨다는 파생본의 사실이 부모와 다른가.
 * 중복 계보 — 표현을 걷어낸 **정규화된 사실**이 다른 group과 같은가.
 * 정답 위치 편향, 분포 라벨의 합.
 
@@ -63,6 +64,9 @@ WORDING_KEYS = (
     "note",
     "title",
 )
+
+#: 표현·순서만 바꾼 파생본. 부모와 **정규화된 사실**이 같아야 한다.
+FACT_PRESERVING_DERIVATIONS = ("paraphrase", "reorder")
 
 #: 정답 위치 편향의 허용 초과분과 최소 표본 수.
 #:
@@ -129,6 +133,24 @@ def _scan_keys(node: Any, path: str, forbidden: Iterable[str], found: list[tuple
             _scan_keys(value, f"{path}[{index}]", forbidden, found)
 
 
+def _posed_questions(tick: Any) -> int:
+    """그 틱이 실제로 던진 질문 수.
+
+    정적 후보를 가진 질문은 언제나 던지고, 후보가 틱마다 바뀌는 질문(`q_main`·`q_path`)은
+    그 틱의 후보 목록에 있을 때만 던진다 — 계약의 후보 해석과 같은 규칙이다. 틱 수 × 10으로
+    세면 후보가 없어 던지지 않은 질문까지 세게 된다.
+    """
+    request = tick.get("request") if isinstance(tick, dict) else None
+    candidates = request.get("candidates") if isinstance(request, dict) else None
+    if not isinstance(candidates, dict):
+        return 0
+    return sum(
+        1
+        for question_id, spec in QUESTION_SET_V0.items()
+        if spec["criteria"] or question_id in candidates
+    )
+
+
 def validate_dataset(records: Sequence[dict]) -> dict:
     """데이터셋 QA 보고서. 위반은 모두 모으고 집계를 함께 낸다."""
     errors: list[dict] = []
@@ -191,11 +213,10 @@ def validate_dataset(records: Sequence[dict]) -> dict:
             tick_list = record.get("ticks")
             if isinstance(tick_list, list):
                 ticks += len(tick_list)
-                # 스트림은 틱마다 질문 세트 v0 전체를 던진다 (docs/08 §4).
-                questions += len(tick_list) * len(QUESTION_SET_V0)
                 for tick in tick_list:
                     if not isinstance(tick, dict):
                         continue
+                    questions += _posed_questions(tick)
                     for label in tick.get("labels") or ():
                         if not isinstance(label, dict):
                             continue
@@ -340,14 +361,15 @@ def validate_dataset(records: Sequence[dict]) -> dict:
                     f"파생본의 부모가 다른 origin group에 있다: {parent_group!r} != {group!r}",
                 )
             )
-        if entry["derivation"] == "paraphrase" and entry["facts"] != facts_of_request.get(parent):
-            # 표현만 바꾼 파생본은 사실이 같아야 한다. 다르면 정답도 달라야 하므로
-            # 표현 변형본으로 부를 수 없다 (docs/04 §3).
+        preserves_facts = entry["derivation"] in FACT_PRESERVING_DERIVATIONS
+        if preserves_facts and entry["facts"] != facts_of_request.get(parent):
+            # 표현·순서만 바꾼 파생본은 사실이 같아야 한다. 사실이 다르면 정답도 달라야
+            # 하므로 그 이름으로 부를 수 없다 (docs/04 §3).
             errors.append(
                 _error(
                     index,
                     "request.state",
-                    f"표현 변형본인데 부모({parent!r})와 정규화된 사실이 다르다",
+                    f"{entry['derivation']} 파생본인데 부모({parent!r})와 정규화된 사실이 다르다",
                 )
             )
 

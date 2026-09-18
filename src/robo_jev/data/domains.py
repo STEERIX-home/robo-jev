@@ -267,15 +267,22 @@ def _ordinal_rendered(
 
 
 def _bucket(value: float, edges: tuple[float, ...], margin: float) -> list[str]:
-    """값을 수준으로 나눈다. 경계에서 `margin` 안이면 인접 수준도 함께 허용한다."""
+    """값을 수준으로 나눈다. 구간은 반열린 `[edge_i, edge_{i+1})`이다.
+
+    `margin`은 **상태에 적어 둔 허용 오차**일 때만 쓴다. 그때는 경계에서 오차 안에 든 값이
+    두 수준 중 어느 쪽인지 상태로 가릴 수 없으므로 인접 수준을 함께 허용한다. 오차가 0이면
+    (물체 개수처럼 정확히 세는 값) 경계에 정확히 걸린 값도 **위쪽 한 수준**에만 속한다 —
+    `<=`로 비교하면 `1 == 1`인 개수가 "주변이 비어 있음"까지 정답이 되어 버린다.
+    """
     level = 0
     for edge in edges:
         if value >= edge:
             level += 1
     levels = {level}
-    for index, edge in enumerate(edges):
-        if abs(value - edge) <= margin:
-            levels |= {index, index + 1}
+    if margin > 0:
+        for index, edge in enumerate(edges):
+            if abs(value - edge) <= margin:
+                levels |= {index, index + 1}
     return [str(item) for item in sorted(levels)]
 
 
@@ -306,6 +313,8 @@ _CROWDING_LEVELS = {
     "ko": ["주변이 비어 있음", "여유 있음", "붐빔", "매우 붐빔"],
     "en": ["clear around it", "some room", "crowded", "very crowded"],
 }
+#: 혼잡 수준의 경계 (관측된 이웃 수). 정확히 세는 값이라 허용 오차가 없다.
+_CROWDING_EDGES = (1.0, 2.0, 3.0)
 
 _SPATIAL_TEXT = {
     "target": {
@@ -337,31 +346,38 @@ _SPATIAL_TEXT = {
             "Does the position of {entity} fall in the {zone}?",
         ),
     },
+    # 아래 셋은 **관측된 것만** 두고 묻는다. 가려지거나 오래된 물체가 있어도 답이 상태에서
+    # 나오려면 질문이 그 범위를 말해야 한다 — 모든 표현에 "관측"/"observed"가 들어간다.
     "goal_met": {
         "ko": (
-            "{zone} 안에 {color} 물체가 이미 하나라도 있는가.",
-            "지금 관측만으로 {zone}의 {color} 물체 조건이 충족되었는가.",
+            "지금 관측으로 {zone} 안의 {color} 물체를 확인할 수 있는가.",
+            "현재 관측만으로 {zone}의 {color} 물체 조건이 충족됐다고 말할 수 있는가.",
+            "관측된 물체만 보면 {zone} 안에 {color} 물체가 있는가.",
         ),
         "en": (
-            "Is there already at least one {color} object in the {zone}?",
-            "Does the current observation satisfy the {color}-object condition in the {zone}?",
+            "Does the current observation show a {color} object inside the {zone}?",
+            "Can the {color}-object condition in the {zone} be called satisfied from the observation alone?",
+            "Among the observed objects, is there a {color} object in the {zone}?",
         ),
     },
     "distance": {
         "ko": (
-            "가장 가까운 {color} 물체까지의 거리 수준을 고르라. 근접역은 상태의 용어 정의를 따른다.",
-            "{color} 물체 중 가장 가까운 것의 거리 수준을 고르라 (근접역 정의는 상태에 있다).",
+            "관측된 {color} 물체 중 가장 가까운 것까지의 거리 수준을 고르라. 경계와 허용 오차는 상태의 thresholds에 있다.",
+            "지금 관측된 {color} 물체 가운데 원점에 가장 가까운 것의 거리 수준을 고르라 (근접역 정의는 상태에 있다).",
         ),
         "en": (
-            "Choose the distance level to the nearest {color} object; the near band is defined in the state.",
-            "Pick the distance level of the closest {color} object (see the near band definition in the state).",
+            "Choose the distance level to the nearest observed {color} object; the cut points and tolerance are in the state thresholds.",
+            "Pick the distance level of the closest observed {color} object (see the near band definition in the state).",
         ),
     },
     "crowding": {
-        "ko": ("{entity} 주변의 혼잡 수준을 고르라.", "{entity} 둘레가 얼마나 붐비는지 수준을 고르라."),
+        "ko": (
+            "관측된 물체만 세어 {entity} 주변의 혼잡 수준을 고르라.",
+            "{entity} 둘레에 관측된 물체가 몇이나 되는지로 혼잡 수준을 고르라.",
+        ),
         "en": (
-            "Choose how crowded the area around {entity} is.",
-            "Pick the congestion level around {entity}.",
+            "Counting only the observed objects, choose how crowded the area around {entity} is.",
+            "Pick the congestion level around {entity} from the observed objects alone.",
         ),
     },
 }
@@ -378,10 +394,6 @@ def _zone_of_x(x: int | None) -> str | None:
 
 def _spatial_observable(scene: dict, obj: dict) -> bool:
     return bool(obj["visible"]) and obj["age_ms"] <= scene["stale_after_ms"]
-
-
-def _spatial_zone(scene: dict, obj: dict) -> str | None:
-    return _zone_of_x(obj["x"])
 
 
 def _spatial_distance(obj: dict) -> float | None:
@@ -449,6 +461,8 @@ class SpatialDomain:
             "stale_after_ms": 300,
             "near_zone_mm": rng.choice((200, 250, 300)),
             "crowd_radius_mm": rng.choice((180, 220, 260)),
+            # 관측 자세의 오차. 거리 수준의 경계에서 이 안에 들면 인접 수준도 허용한다.
+            "distance_tolerance_mm": rng.choice((15, 20, 25)),
             "objects": objects,
             "zones": [
                 {"id": zone_id, "x_min": x_min, "x_max": x_max}
@@ -481,10 +495,14 @@ class SpatialDomain:
                 "color": scene["goal"]["color"],
                 "zone": scene["goal"]["zone"],
             },
+            # 수준의 경계와 허용 오차는 상태에 적는다. 생성기 상수를 몰라도 답이 나와야 한다.
             "thresholds": {
                 "stale_after_ms": scene["stale_after_ms"],
                 "near_zone_mm": near,
+                "distance_edges_mm": [near, near * 2, near * 3],
+                "distance_tolerance_mm": scene["distance_tolerance_mm"],
                 "crowd_radius_mm": scene["crowd_radius_mm"],
+                "crowding_edges": list(_CROWDING_EDGES),
             },
             "glossary": {
                 "근접역" if language == "ko" else "near band": term,
@@ -494,6 +512,28 @@ class SpatialDomain:
                     f"age_ms가 {scene['stale_after_ms']}보다 큰 관측"
                     if language == "ko"
                     else f"an observation whose age_ms exceeds {scene['stale_after_ms']}"
+                ),
+                "거리 수준"
+                if language == "ko"
+                else "distance level": (
+                    f"thresholds.distance_edges_mm를 경계로 0~3. 경계에서 "
+                    f"{scene['distance_tolerance_mm']}mm 안이면 두 수준을 모두 허용한다."
+                    if language == "ko"
+                    else (
+                        "0-3 split at thresholds.distance_edges_mm; within "
+                        f"{scene['distance_tolerance_mm']}mm of a cut point both levels are accepted."
+                    )
+                ),
+                "혼잡 수준"
+                if language == "ko"
+                else "congestion level": (
+                    f"crowd_radius_mm 안의 관측된 다른 물체 수를 "
+                    f"{list(_CROWDING_EDGES)} 경계로 나눈 0~3 (정확히 세므로 오차 없음)"
+                    if language == "ko"
+                    else (
+                        "the number of other observed objects within crowd_radius_mm, cut at "
+                        f"{list(_CROWDING_EDGES)} into 0-3 (an exact count, so no tolerance)"
+                    )
                 ),
             },
             "objects": [
@@ -527,9 +567,9 @@ class SpatialDomain:
         # 그래야 "해당 없음"만 정답인 문제로 쏠리지 않는다.
         pairs = [(goal["color"], goal["zone"])]
         pairs += [
-            (obj["color"], _spatial_zone(scene, obj))
+            (obj["color"], _zone_of_x(obj["x"]))
             for obj in scene["objects"]
-            if _spatial_observable(scene, obj) and _spatial_zone(scene, obj) is not None
+            if _spatial_observable(scene, obj) and _zone_of_x(obj["x"]) is not None
         ]
         pairs = list(dict.fromkeys(pairs))
         # 아무 물체도 만족하지 않는 조합은 몇 개만 섞는다. 전부 넣으면 "해당 없음"만
@@ -645,12 +685,18 @@ class SpatialDomain:
                     color=color_text[spec.params["color"]],
                 )
                 rule = "spatial/nearest-observed-v0"
+                if unknown:
+                    # "가장 가까운"은 모든 같은 색 물체를 견줘야 정해진다. 하나라도 관측되지
+                    # 않으면 그것이 더 가까울 수 있으므로 관측된 물체를 정답이라 할 수 없다
+                    # — "해당 없음·정보 부족"이 유일하게 도출되는 답이다 (docs/04 §3).
+                    answer = []
                 trace = {
                     "question_id": spec.id,
                     "rule": rule,
                     "color": spec.params["color"],
                     "near_miss": near_miss,
                     "unobservable": unknown,
+                    "undecidable": bool(unknown),
                 }
             if near_miss:
                 tags += ("near_miss",)
@@ -664,7 +710,8 @@ class SpatialDomain:
                 none_text=none_text,
                 rule=rule,
                 trace=trace,
-                confidence="medium" if unknown else "high",
+                # nearest는 정보가 모자라면 그 사실 자체가 정답이라 근거가 약하지 않다.
+                confidence="high" if spec.kind == "nearest" or not unknown else "medium",
                 variants=tags,
             )
 
@@ -672,7 +719,7 @@ class SpatialDomain:
             obj = _spatial_object(scene, spec.params["object"])
             zone = spec.params["zone"]
             observable = _spatial_observable(scene, obj)
-            answer = (_spatial_zone(scene, obj) == zone) if observable else None
+            answer = (_zone_of_x(obj["x"]) == zone) if observable else None
             instructions = _say(
                 rng,
                 _SPATIAL_TEXT["in_zone"],
@@ -710,6 +757,9 @@ class SpatialDomain:
                 zone=zone_text[spec.params["zone"]],
             )
             rule = "spatial/goal-satisfied-v0"
+            # 질문이 "지금 관측으로 확인되는가"를 묻는다. 가려진 물체가 있어도 답은
+            # 관측된 물체만으로 정해지므로 근거가 약해지지 않는다 (in_zone처럼 특정 물체의
+            # 자세를 묻는 질문만 관측이 없을 때 마스킹한다).
             return _boolean_rendered(
                 spec,
                 instructions,
@@ -719,10 +769,10 @@ class SpatialDomain:
                 trace={
                     "question_id": spec.id,
                     "rule": rule,
+                    "scope": "observed",
                     "matched": answer,
                     "unobservable": unknown,
                 },
-                confidence="medium" if unknown and not answer else "high",
                 variants=tags + (("missing_info",) if unknown else ()),
             )
 
@@ -735,7 +785,8 @@ class SpatialDomain:
             nearest = min((value for value in distances if value is not None), default=None)
             near = scene["near_zone_mm"]
             edges = (float(near), float(near) * 2, float(near) * 3)
-            levels = None if nearest is None else _bucket(nearest, edges, margin=20.0)
+            tolerance = float(scene["distance_tolerance_mm"])
+            levels = None if nearest is None else _bucket(nearest, edges, margin=tolerance)
             instructions = _say(
                 rng, _SPATIAL_TEXT["distance"], language, color=color_text[spec.params["color"]]
             )
@@ -751,6 +802,7 @@ class SpatialDomain:
                     "rule": rule,
                     "nearest_mm": None if nearest is None else round(nearest, 1),
                     "edges_mm": list(edges),
+                    "tolerance_mm": tolerance,
                 },
                 variants=tags + ("unfamiliar_term",),
                 mask_reason="그 색의 관측된 물체가 없다",
@@ -769,7 +821,10 @@ class SpatialDomain:
                 and abs(other["x"] - obj["x"]) <= radius
                 and abs(other["y"] - obj["y"]) <= radius
             )
-        levels = None if neighbours is None else _bucket(float(neighbours), (1.0, 2.0, 3.0), margin=0.0)
+        # 이웃 수는 정확히 세는 값이다 — 경계에 딱 걸려도 수준은 하나다.
+        levels = (
+            None if neighbours is None else _bucket(float(neighbours), _CROWDING_EDGES, margin=0.0)
+        )
         instructions = _say(
             rng,
             _SPATIAL_TEXT["crowding"],
@@ -805,7 +860,7 @@ class SpatialDomain:
                 if color_ok:
                     unknown.append(obj["id"])
                 continue
-            zone_ok = _spatial_zone(scene, obj) == zone
+            zone_ok = _zone_of_x(obj["x"]) == zone
             if color_ok and zone_ok:
                 answer.append(obj["id"])
             elif color_ok or zone_ok:
@@ -875,6 +930,9 @@ _DOM_PROGRESS = {
     "ko": ["시작 전", "입력 중", "거의 다 됨", "제출 가능"],
     "en": ["not started", "filling in", "almost ready", "ready to submit"],
 }
+#: 진행 수준 = (만족한 조건 수 ÷ 전체 조건 수) × scale을 내림한 값. 정확히 세므로 오차 없음.
+_DOM_PROGRESS_SCALE = 3
+_DOM_PROGRESS_EDGES = (1.0, 2.0, 3.0)
 _DOM_TEXT = {
     "action": {
         "ko": (
@@ -1116,6 +1174,10 @@ class DomDomain:
                 "kind": scene["goal"]["kind"],
                 "element": scene["goal"]["element"],
             },
+            "thresholds": {
+                "progress_scale": _DOM_PROGRESS_SCALE,
+                "progress_edges": list(_DOM_PROGRESS_EDGES),
+            },
             "glossary": {
                 "활성 요소"
                 if language == "ko"
@@ -1123,6 +1185,18 @@ class DomDomain:
                     "자신과 모든 상위 요소가 visible이고 enabled가 참인 요소"
                     if language == "ko"
                     else "an element that is enabled and visible together with all of its ancestors"
+                ),
+                "진행 수준"
+                if language == "ko"
+                else "progress level": (
+                    "(만족한 조건 수 ÷ 전체 조건 수) × progress_scale을 내림한 0~3. 조건은 필수 "
+                    "입력란 각각과 '목표 요소가 활성인가'다 (정확히 세므로 오차 없음)."
+                    if language == "ko"
+                    else (
+                        "floor of (satisfied conditions / all conditions) x progress_scale, 0-3. The "
+                        "conditions are each required field plus 'is the goal element active' "
+                        "(an exact count, so no tolerance)."
+                    )
                 ),
                 **{token: text[language] for token, text in _DOM_REASONS.items()},
             },
@@ -1335,11 +1409,13 @@ class DomDomain:
         ]
         if goal_actionable is None or pending_unknown:
             levels = None
+            done = total = None
         else:
             filled = sum(1 for element in required if element.get("value"))
             total = len(required) + 1
             done = filled + (1 if goal_actionable else 0)
-            levels = _bucket(done / total * 3, (0.9, 1.9, 2.9), margin=0.0)
+            # 만족한 조건 수 ÷ 전체 조건 수 × 3을 내림한 값. 정확히 세는 값이라 오차가 없다.
+            levels = _bucket(done / total * _DOM_PROGRESS_SCALE, _DOM_PROGRESS_EDGES, margin=0.0)
         rule = "dom/progress-level-v0"
         return _ordinal_rendered(
             spec,
@@ -1352,6 +1428,8 @@ class DomDomain:
                 "rule": rule,
                 "required": [element["id"] for element in required],
                 "goal_actionable": goal_actionable,
+                "satisfied": done,
+                "total": total,
             },
             variants=tags,
             mask_reason="진행 수준을 셀 요소의 상태를 읽지 못했다",
@@ -1429,6 +1507,10 @@ _LOAD_LEVELS = {
     "ko": ["한가함", "보통", "빠듯함", "초과"],
     "en": ["idle", "normal", "tight", "over capacity"],
 }
+#: 시급도의 경계 (마감까지 남은 여유 시간). 여유가 24시간 이하면 1, 8시간 이하면 2, 0 이하면 3.
+_URGENCY_EDGES_H = (24, 8, 0)
+#: 부하의 경계 (남은 시간 ÷ 남은 용량).
+_LOAD_EDGES = (0.5, 1.0, 1.5)
 _WORKFLOW_TEXT = {
     "next": {
         "ko": ("지금 착수할 수 있는 단계를 고르라.", "선행 조건과 자원을 모두 만족하는 단계를 고르라."),
@@ -1574,6 +1656,9 @@ class WorkflowDomain:
             "template": template,
             "observed_at_ms": rng.randrange(600, 9950, 50),
             "deadline_h": rng.choice((12, 20, 28, 40)),
+            # 소요 시간은 추정치다. 경계에서 이 안에 들면 인접 수준도 허용한다.
+            "schedule_tolerance_h": rng.choice((1, 2)),
+            "load_tolerance": 0.05,
             "steps": steps,
             "resources": resources,
             "drop_answer_at": rng.randrange(0, 6),
@@ -1589,6 +1674,12 @@ class WorkflowDomain:
         return {
             "observed_at_ms": scene["observed_at_ms"],
             "goal": {"text": goal_text, "deadline_h": scene["deadline_h"]},
+            "thresholds": {
+                "urgency_edges_h": list(_URGENCY_EDGES_H),
+                "schedule_tolerance_h": scene["schedule_tolerance_h"],
+                "load_edges": list(_LOAD_EDGES),
+                "load_tolerance": scene["load_tolerance"],
+            },
             "glossary": {
                 "착수 가능"
                 if language == "ko"
@@ -1596,7 +1687,31 @@ class WorkflowDomain:
                     "선행 단계가 모두 끝났고 담당 자원이 가용하며 남은 용량이 소요 시간 이상인 단계"
                     if language == "ko"
                     else "a step whose prerequisites are done and whose resource is available with enough capacity"
-                )
+                ),
+                "시급도"
+                if language == "ko"
+                else "urgency level": (
+                    "여유 = 마감 − 그 단계부터 끝까지의 최장 경로 시간. urgency_edges_h를 경계로 "
+                    f"0~3이고, 소요 시간이 ±{scene['schedule_tolerance_h']}시간의 추정치라 경계에서 "
+                    "그 안에 들면 두 수준을 모두 허용한다."
+                    if language == "ko"
+                    else (
+                        "slack = deadline - the longest remaining path from that step; cut at "
+                        f"urgency_edges_h into 0-3. Hours are estimates within "
+                        f"+/-{scene['schedule_tolerance_h']}h, so near a cut point both levels are accepted."
+                    )
+                ),
+                "부하 수준"
+                if language == "ko"
+                else "load level": (
+                    "남은 단계의 소요 시간 합 ÷ 남은 용량을 load_edges로 나눈 0~3. 경계에서 "
+                    f"{scene['load_tolerance']} 안이면 두 수준을 모두 허용한다."
+                    if language == "ko"
+                    else (
+                        "the remaining hours on the resource divided by its capacity, cut at load_edges "
+                        f"into 0-3; within {scene['load_tolerance']} of a cut point both levels are accepted."
+                    )
+                ),
             },
             "steps": [
                 {
@@ -1797,7 +1912,11 @@ class WorkflowDomain:
             else:
                 slack = scene["deadline_h"] - _workflow_critical_path(scene, step["id"])
                 # 여유가 적을수록 높은 수준이므로 부호를 뒤집어 구간을 나눈다.
-                levels = _bucket(float(-slack), (-24.0, -8.0, 0.0), margin=1.0)
+                levels = _bucket(
+                    float(-slack),
+                    tuple(float(-edge) for edge in _URGENCY_EDGES_H),
+                    margin=float(scene["schedule_tolerance_h"]),
+                )
             rule = "workflow/urgency-level-v0"
             return _ordinal_rendered(
                 spec,
@@ -1833,7 +1952,7 @@ class WorkflowDomain:
             load = None
         else:
             load = sum(step["hours"] for step in remaining) / max(resource["available_h"], 1)
-            levels = _bucket(load, (0.5, 1.0, 1.5), margin=0.05)
+            levels = _bucket(load, _LOAD_EDGES, margin=float(scene["load_tolerance"]))
         rule = "workflow/resource-load-v0"
         return _ordinal_rendered(
             spec,
@@ -2097,6 +2216,16 @@ class RulesDomain:
                     "상황에 걸리는 규칙 중 우선순위 숫자가 가장 작은 규칙. 예외(unless)에 걸리면 빠진다."
                     if language == "ko"
                     else "the matching rule with the smallest priority number; an `unless` clause removes it"
+                ),
+                "심각도 수준"
+                if language == "ko"
+                else "severity level": (
+                    "지배 규칙의 `severity` 값 그대로다. 지배 규칙이 여럿이면 각자의 값을 모두 허용한다."
+                    if language == "ko"
+                    else (
+                        "the `severity` field of the governing rule itself; when several rules govern, "
+                        "each of their values is accepted"
+                    )
                 ),
                 **{key: text[language] for key, text in _RULE_ATTRS.items()},
                 **{value: text[language] for value, text in _RULE_VALUES.items()},

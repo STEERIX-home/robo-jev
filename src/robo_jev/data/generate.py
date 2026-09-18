@@ -91,7 +91,9 @@ _SECTION_KEYS = ("split",)
 
 
 def _merge(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
-    merged = dict(base)
+    # 기본값을 깊은 복사한다. 얕게 복사하면 돌려준 설정의 안쪽 dict·list가 모듈 전역
+    # `DEFAULT_CONFIG`와 같은 객체라, 부르는 쪽이 고치면 전역이 따라 바뀐다.
+    merged = copy.deepcopy(dict(base))
     for key, value in override.items():
         section = key in _SECTION_KEYS and isinstance(value, Mapping)
         if section and isinstance(merged.get(key), Mapping):
