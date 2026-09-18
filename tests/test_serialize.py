@@ -386,16 +386,24 @@ def test_an_instruction_change_is_appended_before_the_tick_that_first_carries_it
     record["ticks"] = record["ticks"][: first_tick + 2]
     out = serialize_request(record, tokenizer, layout="stream_l1a")
 
-    change = [s for s in out["segments"] if s["kind"] == "prefix" and s["start"] >= out["prefix_end"]]
+    # 도중 지시는 그 틱의 **첫 토큰들**이다 — prefix가 아니라 틱 토큰이라 윈도우 밖으로 나간다 (docs/08 §3.1).
+    change = [s for s in out["segments"] if s["name"] == f"instruction:{second['version']}"]
     assert len(change) == 1
-    assert change[0]["tick"] == first_tick
-    assert out["ticks"][first_tick - 1]["end"] <= change[0]["start"]
-    assert change[0]["end"] == out["ticks"][first_tick]["start"]
+    assert change[0]["kind"] == "state" and change[0]["tick"] == first_tick
+    assert change[0]["start"] == out["ticks"][first_tick]["start"] == out["ticks"][first_tick - 1]["end"]
+    assert all(kind != "prefix" for kind in out["kind"][out["prefix_end"] :])
+    assert all(value == first_tick for value in out["tick"][change[0]["start"] : change[0]["end"]])
     assert second["text"] in tokenizer.decode(out["tokens"][change[0]["start"] : change[0]["end"]])
     assert out["instruction_positions"] == [0, change[0]["start"]]
     assert out["unplaced_instructions"] == []
-    # 첫 지시는 처음 prefix 안에 있다.
+    # 처음 prefix는 에피소드 시작 시의 것으로 고정이다: 지시 변경이 있어도 같은 길이·내용이다.
     assert second["text"] not in tokenizer.decode(out["tokens"][: out["prefix_end"]])
+    unchanged = copy.deepcopy(record)
+    unchanged["prefix"]["instructions"] = unchanged["prefix"]["instructions"][:1]
+    unchanged["ticks"] = unchanged["ticks"][:first_tick]
+    same_prefix = serialize_request(unchanged, tokenizer, layout="stream_l1a")
+    assert same_prefix["prefix_end"] == out["prefix_end"]
+    assert same_prefix["tokens"][: out["prefix_end"]] == out["tokens"][: out["prefix_end"]]
 
     # 그 틱 앞에서 잘린 레코드에는 지시 v2를 실을 틱이 없다 — 넣지 않고 버전만 알린다.
     record["ticks"] = record["ticks"][:first_tick]
@@ -403,6 +411,28 @@ def test_an_instruction_change_is_appended_before_the_tick_that_first_carries_it
     assert truncated["unplaced_instructions"] == [second["version"]]
     assert truncated["instruction_positions"] == [0]
     assert truncated["ticks"][-1]["end"] == len(truncated["tokens"])
+
+
+def test_tick_header_does_not_repeat_the_states_own_t_line(stream, tokenizer):
+    """틱 머리는 `[tick t]`뿐이다. 상태에 `t` 구간이 없는 레코드(D0 fixture)에서만 틱 겉봉투의
+    시각 값을 머리에 실어 정보를 잃지 않는다."""
+    out = serialize_request(stream, tokenizer, layout="stream_l1a")
+    lines = out["text"].splitlines()
+    assert "[tick 0] sim_ms=0 observed_at_ms=0 obs_age_ms=geom:100,proprio:20" in lines
+
+    harness_like = copy.deepcopy(stream)
+    for tick in harness_like["ticks"]:
+        tick["request"]["state"] = {
+            "t": {"tick": tick["t"], "sim_ms": tick["sim_ms"], "observed_at_ms": tick["observed_at_ms"],
+                  "age_ms": tick["obs_age_ms"], "seq": tick["t"] + 1},
+            **tick["request"]["state"],
+        }
+    out = serialize_request(harness_like, tokenizer, layout="stream_l1a")
+    lines = out["text"].splitlines()
+    assert "[tick 0]" in lines
+    assert "t tick=0 sim_ms=0 observed_at_ms=0 age_ms=geom:100,proprio:20 seq=1" in lines
+    assert not any(line.startswith("[tick ") and "sim_ms" in line for line in lines)
+    assert sum(line.startswith("[tick 0]") for line in lines) == 1
 
 
 def test_unknown_question_set_is_an_error(stream, tokenizer):

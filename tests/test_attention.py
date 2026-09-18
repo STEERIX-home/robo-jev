@@ -95,9 +95,9 @@ def random_stream(rng: random.Random, *, ticks: int | None = None, questions: in
             layout["static_candidates"].append(len(layout["kind"]) - 1)
         position += 1
     for tick in range(ticks if ticks is not None else rng.randint(1, 40)):
-        if tick and rng.random() < 0.15:  # 지시 변경: 틱 앞의 prefix 구간
+        if tick and rng.random() < 0.15:  # 지시 변경: 그 틱의 첫 토큰들 (prefix가 아니다, docs/08 §3.1)
             for _ in range(rng.randint(1, 2)):
-                push(-1, -1, "prefix", tick, position)
+                push(-1, -1, "state", tick, position)
                 position += 1
         for _ in range(rng.randint(2, 6)):
             kind = rng.choice(["state", "exec", "candidate"])
@@ -300,3 +300,49 @@ def test_serialized_stream_feeds_the_mask(streams):
     first, second = out["ticks"][0], out["ticks"][1]
     assert not any(bool(mask[second["start"], index]) for index in first["decision_positions"].values())
     assert all(bool(mask[second["start"], index]) for index in range(first["start"], first["body_end"]))
+
+
+def test_a_mid_stream_instruction_change_leaves_the_window_like_any_tick_token(streams):
+    """docs/08 §3.1: 도중 추가되는 `[지시·제약 v2]`는 그 틱의 토큰이라 윈도우 밖으로 나간다.
+
+    현재 지시는 매 틱 `goal` 필드가 다시 실으므로 잊히지 않는다. 처음 prefix는 고정 크기다.
+    """
+    record = copy.deepcopy(streams[0])
+    second = record["prefix"]["instructions"][1]
+    change = next(
+        index
+        for index, tick in enumerate(record["ticks"])
+        if int(tick["request"]["state"]["goal"]["version"]) >= second["version"]
+    )
+    # 변경 한 틱 전부터 31틱 뒤까지, 상태는 goal만 남겨 mask를 작게 한다.
+    record["ticks"] = record["ticks"][change - 1 : change + 32]
+    for tick in record["ticks"]:
+        tick["request"]["state"] = {"goal": tick["request"]["state"]["goal"]}
+        for field in ("labels", "model_output", "adopted", "ack"):
+            tick.pop(field, None)
+    tokenizer = WhitespaceTokenizer()
+    out = serialize_request(record, tokenizer, layout="stream_l1a")
+    mask = build_reference_mask(out)
+
+    piece = next(s for s in out["segments"] if s["name"] == f"instruction:{second['version']}")
+    assert piece["kind"] != "prefix" and piece["tick"] == 1
+    assert out["ticks"][1]["start"] == piece["start"]
+    v2 = range(piece["start"], piece["end"])
+
+    def decision_of(tick_index: int) -> int:
+        return out["ticks"][tick_index]["decision_positions"]["q_main"]
+
+    def state_text_of(tick_index: int) -> str:
+        state = next(s for s in out["segments"] if s["tick"] == tick_index and s["name"] == "state")
+        return tokenizer.decode(out["tokens"][state["start"] : state["end"]])
+
+    inside = decision_of(1 + WINDOW_TICKS - 1)  # 29틱 뒤: 아직 윈도우 안
+    outside = decision_of(1 + WINDOW_TICKS + 1)  # 31틱 뒤: 윈도우 밖
+    assert all(bool(mask[inside, index]) for index in v2)
+    assert not any(bool(mask[outside, index]) for index in v2)
+    assert all(bool(mask[outside, index]) for index in range(out["prefix_end"]))  # 정적 prefix는 남는다
+    # 그 틱의 goal 줄은 여전히 version=2를 싣는다.
+    assert any(
+        line.startswith("goal ") and "version=2" in line
+        for line in state_text_of(1 + WINDOW_TICKS + 1).splitlines()
+    )

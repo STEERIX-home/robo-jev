@@ -9,11 +9,14 @@
 * ``state_first`` (L0, 단일 요청) — 공통 상태 S 뒤에 질문 T_i가 병렬 분기로 놓인다.
   ``T_i = [질문 머리][후보 1 … c_i1][후보 2 … c_i2] … [결정 위치 d_i]``. 각 질문의 position은
   ``len(S)``에서 다시 센다 (docs/03 §3 "분기별 정보 접근과 위치 규칙").
-* ``stream_l1a`` (L1-a, 에피소드 스트림) — 정적 prefix(지시, 질문 세트 v0 텍스트와 정적 후보) 뒤에
-  틱이 이어진다. 틱 = ``[틱 머리·상태][commitment][실행 이력][동적 후보]`` 뒤 결정 위치들. 결정
-  위치는 틱 끝 공통 상태에서 갈라지는 **1토큰 분기**라 모두 같은 position을 갖고, 다음 틱은 분기
-  이전 position에서 이어진다 (docs/08 §3.1). 지시가 바뀌면 그 버전을 처음 실은 틱 앞에 prefix
-  종류의 구간으로 덧붙인다(리셋 없음).
+* ``stream_l1a`` (L1-a, 에피소드 스트림) — 정적 prefix(시작 지시, 질문 세트 v0 텍스트와 정적
+  후보) 뒤에 틱이 이어진다. 틱 = ``[틱 머리·상태][commitment][실행 이력][동적 후보]`` 뒤 결정
+  위치들. 결정 위치는 틱 끝 공통 상태에서 갈라지는 **1토큰 분기**라 모두 같은 position을 갖고,
+  다음 틱은 분기 이전 position에서 이어진다 (docs/08 §3.1). prefix는 에피소드 시작 시의 것으로
+  고정이며, 지시가 바뀌면 그 버전을 처음 실은 틱의 **첫 토큰들**로 덧붙인다(리셋 없음) — 그
+  틱의 토큰이라 다른 틱 토큰과 같이 윈도우 밖으로 나가고, 현재 지시는 매 틱 `goal`이 다시
+  싣는다. 틱 머리는 ``[tick t]``뿐이며, 상태에 `t` 구간이 없는 레코드에서만 틱 겉봉투의 시각
+  값을 머리에 싣는다(하네스 상태는 `t`에 같은 값을 이미 실으므로 중복을 만들지 않는다).
 
 서식 규칙 (docs/08 §3.2): 한 줄에 한 항목, 고정 필드 순서, 위치는 mm 정수, 자세는 quaternion
 소수 2자리, 시간은 ms 정수. 스칼라 묶음(`t`·`goal`·`scene`·`robot`·`exec`)은 ``이름 k=v k=v`` 한
@@ -33,7 +36,8 @@ tokenizer로 확인한다. 질문 머리에도 같은 글자가 붙어(``A q_mai
 
 * ``kind`` — ``state``·``question``·``candidate``·``decision``, 스트림은 ``prefix``·``exec``가 더 있다.
   스트림의 처음 prefix는 정적 후보 줄까지 전부 ``prefix``다(mask에서 윈도우 밖으로 나가지 않는
-  구간). 그 후보의 경계는 ``static_candidate_boundaries``와 토큰별 ``candidate``가 가리킨다.
+  유일한 구간). 그 후보의 경계는 ``static_candidate_boundaries``와 토큰별 ``candidate``가
+  가리킨다. 도중 지시 조각은 ``state``다.
 * ``question`` — 논리적 분기 id(0부터, ``question_ids``의 색인). 공유 토큰은 -1. ``state_first``는
   T_i 전체가, ``stream_l1a``는 결정 토큰만 분기다.
 * ``candidate`` — 그 질문의 후보 목록(``candidate_mapping``) 안 색인(0부터). 후보 줄 밖은 -1.
@@ -407,6 +411,24 @@ def _instruction_line(instruction: dict) -> str:
     return f"instruction {_pairs(instruction)}\n"
 
 
+_ENVELOPE_FIELDS = ("sim_ms", "observed_at_ms", "obs_age_ms")
+
+
+def _tick_header(tick: dict) -> str:
+    """틱 머리 ``[tick t]``.
+
+    하네스가 만든 상태는 같은 시각 값을 `t` 구간에 싣는다 — 머리에 또 적으면 직렬화가 스스로
+    중복을 만드는 것이다. `t` 구간이 없는 레코드(D0 fixture처럼 손으로 만든 것)에서만 틱
+    겉봉투의 값을 머리에 실어 정보를 잃지 않는다.
+    """
+    header = f"[tick {_scalar('t', tick['t'])}]"
+    if not isinstance(tick["request"].get("state", {}).get("t"), dict):
+        envelope = {key: tick[key] for key in _ENVELOPE_FIELDS if key in tick}
+        if envelope:
+            header += " " + _pairs(envelope)
+    return header + "\n"
+
+
 def _instruction_slots(
     instructions: list[dict], ticks: list[dict]
 ) -> tuple[dict[int, list[dict]], list[int]]:
@@ -481,20 +503,21 @@ def _serialize_stream(projected: dict, tokenizer: Any, *, window_ticks: int) -> 
 
     slots, unplaced = _instruction_slots(instructions, ticks)
     for index, tick in enumerate(ticks):
+        # 도중 추가되는 지시는 **그 틱의 토큰**이다 — prefix가 아니라 다른 틱 토큰과 같이 윈도우
+        # 밖으로 나간다. 현재 지시는 매 틱 `goal`이 다시 실으므로 잊히지 않는다 (docs/08 §3.1).
         for instruction in slots.get(index, ()):
             chunks.append(
                 _Chunk(
                     _instruction_line(instruction),
-                    "prefix",
+                    "state",
                     f"instruction:{instruction['version']}",
                     tick=index,
                 )
             )
         request = tick["request"]
-        header = {key: tick[key] for key in ("sim_ms", "observed_at_ms", "obs_age_ms") if key in tick}
         chunks.append(
             _Chunk(
-                f"[tick {_scalar('t', tick['t'])}] {_pairs(header)}\n"
+                _tick_header(tick)
                 + "\n".join(state_lines(request["state"]))
                 + "\n",
                 "state",
@@ -577,7 +600,7 @@ def _serialize_stream(projected: dict, tokenizer: Any, *, window_ticks: int) -> 
         segment["start"] for segment in segments if segment["name"].startswith("instruction:")
     ]
     for index, tick in enumerate(ticks):
-        own = [segment for segment in segments if segment["tick"] == index and segment["kind"] != "prefix"]
+        own = [segment for segment in segments if segment["tick"] == index]
         body = [segment for segment in own if segment["kind"] != "decision"]
         decisions = [segment for segment in own if segment["kind"] == "decision"]
         candidates = tick["request"]["candidates"]
