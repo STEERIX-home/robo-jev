@@ -41,6 +41,7 @@ __all__ = [
     "RuleJudge",
     "candidate_values",
     "load_rule_judge_config",
+    "normalise_distribution",
     "read_goal",
     "rule_judge",
 ]
@@ -580,6 +581,9 @@ def _normalise(distribution: dict[str, float]) -> dict[str, float]:
     rounded[top] = round(rounded[top] + (1.0 - sum(rounded.values())), 6)
     return rounded
 
+
+#: 공개 이름. 전문가도 같은 반올림 규칙으로 분포를 낸다.
+normalise_distribution = _normalise
 
 _DEFAULT: RuleJudge | None = None
 
