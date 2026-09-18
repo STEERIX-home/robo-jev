@@ -60,6 +60,7 @@ from typing import Any
 
 from robo_jev.contracts import (
     QUESTION_SET_V0,
+    QUESTION_SET_V0_EN,
     SCHEMA_SINGLE_REQUEST,
     SCHEMA_STREAM,
     model_input,
@@ -100,8 +101,9 @@ DECISION_MARKERS = tuple(string.ascii_uppercase)
 #: 상태 선행(L0)의 고정 표지 — 모든 질문이 같은 토큰을 쓴다 (docs/03 §3).
 STATE_FIRST_MARKER = "A"
 
-#: 스트림 prefix에 펼치는 질문 세트. id → 질문 정의 (docs/08 §4).
-QUESTION_SETS: dict[str, dict[str, dict[str, Any]]] = {"qs-v0": QUESTION_SET_V0}
+#: 스트림 prefix에 펼치는 질문 세트. id → 질문 정의 (docs/08 §4). 하네스 설정 `question_set_id`가 언어마다 내는 id가
+#: 전부 여기 있어야 한다(검사가 대조한다). 영어판은 문구만 다르고 id·타입·후보·표지는 같다.
+QUESTION_SETS: dict[str, dict[str, dict[str, Any]]] = {"qs-v0": QUESTION_SET_V0, "qs-v0-en": QUESTION_SET_V0_EN}
 
 #: 상태 스키마 v0의 구간 순서 (docs/08 §3.2 표). 없는 키는 뒤에 이름순.
 SECTION_ORDER = (

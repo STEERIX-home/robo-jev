@@ -149,6 +149,21 @@ def test_english_variant_is_selectable_by_config():
     assert "Grasp" in candidate_for(request, keys_of(request)[0])["desc"]
 
 
+def test_every_language_the_harness_offers_has_a_question_set_in_the_contract():
+    """언어마다 낼 수 있는 질문 세트 id는 계약(`QUESTION_SETS`)에 있고 그 문구가 설정과 같다 — 영어도 한국어처럼."""
+    from robo_jev.model.serialize import QUESTION_SETS
+
+    for language in CONFIG["question_set_id"]:
+        variant = copy.deepcopy(CONFIG)
+        variant["language"] = language
+        hrn = RobotHarness(variant)
+        question_set = QUESTION_SETS[hrn.question_set_id()]
+        texts = hrn.question_texts()
+        assert set(texts) == set(question_set)
+        for question_id, spec in question_set.items():
+            assert texts[question_id] == spec["instructions"], (language, question_id)
+
+
 def test_candidates_combine_function_target_approach_destination_profile():
     request = harness().build_request(observation(), None, None)
     keys = keys_of(request)

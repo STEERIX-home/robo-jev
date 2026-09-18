@@ -31,6 +31,7 @@ __all__ = [
     "PHASES",
     "PROB_SUM_TOL",
     "QUESTION_SET_V0",
+    "QUESTION_SET_V0_EN",
     "QUESTION_TYPES",
     "SCHEMA_SINGLE_REQUEST",
     "SCHEMA_STREAM",
@@ -137,6 +138,51 @@ QUESTION_SET_V0: dict[str, dict[str, Any]] = {
         "J",
     ),
 }
+
+#: 질문 세트 v0의 영어판 (`qs-v0-en`) — 하네스 설정 `language: en`이 내는 세트. id·타입·후보 id·수치·표지는
+#: 한국어 세트와 같고 **문구만** 다르다(하네스 설정 `questions.*.en`과 같아야 한다; 검사가 대조한다). 그래서
+#: 언어를 바꿔도 결정 토큰·layout 구조·라벨 참조가 같다.
+_EN_INSTRUCTIONS = {
+    "q_main": "Choose the action to execute now.",
+    "q_done": "Is the current goal already satisfied?",
+    "q_instr": "Is the instruction sufficient to execute?",
+    "q_observe": "Should more observation be gathered?",
+    "q_retry": "Is retrying the same way as the last failure appropriate?",
+    "q_stop": "Must the robot stop right now?",
+    "q_gripper": "Choose the desired gripper state for the committed action and phase.",
+    "q_path": "Choose the path for the committed action and phase.",
+    "q_speed": "Choose the speed level for the committed action and phase.",
+    "q_force": "Choose the contact/force level for the committed action and phase.",
+}
+_EN_DESCRIPTIONS = {
+    "true": "yes",
+    "false": "no",
+    "open": "open",
+    "closed": "closed",
+    "q_speed:0": "stop (0 m/s)",
+    "q_speed:1": "slow (0.1 m/s)",
+    "q_speed:2": "medium (0.25 m/s)",
+    "q_speed:3": "fast (0.5 m/s)",
+    "q_force:0": "avoid contact",
+    "q_force:1": "light contact",
+    "q_force:2": "push",
+}
+
+
+def _translated_question_set(instructions: dict[str, str], descriptions: dict[str, str]) -> dict[str, dict[str, Any]]:
+    """`QUESTION_SET_V0`의 구조 그대로에 문구만 바꾼 세트. 후보 설명은 `id` 또는 `질문:id`로 찾는다."""
+    translated: dict[str, dict[str, Any]] = {}
+    for question_id, spec in QUESTION_SET_V0.items():
+        criteria = []
+        for criterion in spec["criteria"]:
+            key = f"{question_id}:{criterion['id']}"
+            description = descriptions.get(key, descriptions.get(criterion["id"], criterion["description"]))
+            criteria.append({**criterion, "description": description})
+        translated[question_id] = _question(spec["type"], instructions[question_id], criteria, spec["marker"])
+    return translated
+
+
+QUESTION_SET_V0_EN: dict[str, dict[str, Any]] = _translated_question_set(_EN_INSTRUCTIONS, _EN_DESCRIPTIONS)
 
 #: 후보가 틱마다 바뀌는 질문.
 _DYNAMIC_QUESTIONS = tuple(qid for qid, spec in QUESTION_SET_V0.items() if not spec["criteria"])

@@ -472,6 +472,40 @@ def test_unknown_question_set_is_an_error(stream, tokenizer):
         serialize_request(stream, tokenizer, layout="stream_l1a")
 
 
+def test_every_question_set_id_the_harness_can_emit_is_serializable(stream, tokenizer):
+    """하네스 설정의 `question_set_id`(언어별)는 전부 `QUESTION_SETS`에 있어야 한다 — 영어 세트는 한국어 세트와 같은
+    id·타입·후보 id·표지에 설정의 `questions.*.en` 문구다. 그래서 언어를 바꿔도 결정 토큰과 layout 구조가 같다."""
+    from helpers import HARNESS_CONFIG
+
+    from robo_jev.model.serialize import QUESTION_SETS
+
+    config = yaml.safe_load(HARNESS_CONFIG.read_text(encoding="utf-8"))
+    ids = config["question_set_id"]
+    assert set(ids.values()) <= set(QUESTION_SETS)
+    assert ids["ko"] == "qs-v0" and QUESTION_SETS["qs-v0"] is QUESTION_SET_V0
+    outputs = {}
+    for language, question_set_id in ids.items():
+        question_set = QUESTION_SETS[question_set_id]
+        assert list(question_set) == list(QUESTION_SET_V0)
+        for question_id, spec in question_set.items():
+            reference = QUESTION_SET_V0[question_id]
+            assert spec["instructions"] == config["questions"][question_id][language]
+            assert spec["type"] == reference["type"] and spec["marker"] == reference["marker"]
+            assert [c["id"] for c in spec["criteria"]] == [c["id"] for c in reference["criteria"]]
+            assert [c.get("value") for c in spec["criteria"]] == [c.get("value") for c in reference["criteria"]]
+        record = copy.deepcopy(stream)
+        record["prefix"]["question_set"] = question_set_id
+        outputs[language] = serialize_request(record, tokenizer, layout="stream_l1a")
+        assert outputs[language]["question_set"] == question_set_id
+        assert f"[questions {question_set_id}]" in outputs[language]["text"]
+    ko, en = outputs["ko"], outputs["en"]
+    assert en["decision_markers"] == ko["decision_markers"] and en["question_ids"] == ko["question_ids"]
+    assert en["static_candidate_mapping"] == ko["static_candidate_mapping"]
+    assert [t["posed"] for t in en["ticks"]] == [t["posed"] for t in ko["ticks"]]
+    assert "Choose the action to execute now." in en["text"] and "지금 실행할 행동을 고르라." not in en["text"]
+    assert en["text"] != ko["text"]
+
+
 def test_stream_markers_are_declared_by_the_question_set_and_written_in_the_prefix(stream, tokenizer):
     """docs/08 §3.1(0d89e27): 표지는 질문 세트 버전이 id마다 고정해 정적 prefix에 선언한다."""
     out = serialize_request(stream, tokenizer, layout="stream_l1a")
