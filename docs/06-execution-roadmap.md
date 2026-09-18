@@ -292,7 +292,7 @@ def test_decision_branches_do_not_leak_into_next_tick():
 
 ### Task 5: 실제 학습·저장·중단 후 재개
 
-**Files:** `train.py`, `checkpoint.py`, `configs/train/qwen38-27b-pilot.yaml`, `infra/train.Dockerfile`, `tests/test_resume.py`.
+**Files:** `train.py`, `checkpoint.py`, `sampler.py`, `configs/train/tiny_cpu.yaml`(CPU fixture), `configs/train/qwen38-27b-pilot.yaml`, `infra/train.Dockerfile`, `tests/test_checkpoint.py`, `tests/test_sampler.py`, `tests/test_train.py`, `tests/test_resume.py`.
 
 **Interfaces:** `train(config: dict) -> dict`는 run ID·checkpoint 경로·마지막 step·지표를 반환한다. `save_checkpoint(path: str, state: dict) -> None`, `load_checkpoint(path: str) -> dict`는 model/optimizer/scheduler/RNG/sampler/config/manifest를 다룬다.
 
