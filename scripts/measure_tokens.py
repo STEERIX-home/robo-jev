@@ -6,8 +6,14 @@
     p50/p95/max, 그 틱의 K에서의 후보 블록, 결정 위치 부담.
 (b) D0 단일 요청 64건(`tests/fixtures/d0.jsonl`): 전체 토큰 p50/p95/max, 질문별 T_i 크기.
 (c) 합성 스트림 요청: `RobotHarness.build_request`로 물체 6·10개 × K=12·32 × 지시 변경
-    유무의 장면을 만들어 prefix·틱·후보 블록·결정 위치를 잰다. 장면은
-    `tests/test_harness.py`의 `obj`/`observation`과 같은 최소 관측이다.
+    유무의 장면을 만들어 prefix·틱·후보 블록·결정 위치를 잰다.
+
+**장면 빌더의 결합 규칙.** 아래 `obj`/`observation`은 `tests/test_harness.py`의 같은 이름
+빌더를 **복제**한 것이다(`tests/`는 패키지가 아니고, 그 파일은 다른 브랜치에서 고쳐지고 있어
+import로 묶지 않는다). 두 곳이 어긋나면 이 스크립트의 장면이 하네스 검사가 쓰는 관측과 달라져
+측정이 다른 것을 재게 되므로, `tests/test_measure_tokens.py`가 두 빌더의 출력이 같은지(영역
+목록만 이 스크립트의 `ZONES`로 다름) 검사로 대조한다. `tests/test_harness.py`의 빌더를 바꾸면
+여기도 같이 바꾼다.
 
 결과는 `artifacts/reports/tokens-b2.json`(git 제외)에 쓰고 표로 찍는다. 이 스크립트는
 하네스를 import한다 — 모델 코드는 하지 않는다 (docs/06 §1).
@@ -117,12 +123,12 @@ def tick_breakdown(out: dict, tick: dict) -> dict[str, Any]:
             by_name["instruction_change"] = by_name.get("instruction_change", 0) + tokens
         else:
             by_name[name] = by_name.get(name, 0) + tokens
-    new_tokens = tick["end"] - tick["start"]
+    new_tokens = tick["end"] - tick["start"]  # 도중 지시 조각은 그 틱의 토큰이라 이미 들어 있다
     change = by_name.get("instruction_change", 0)
     return {
         "t": tick["t"],
         "new_tokens": new_tokens,
-        "new_tokens_with_instruction_change": new_tokens + change,
+        "new_tokens_without_instruction_change": new_tokens - change,
         "state": by_name.get("state", 0),
         "commitment": by_name.get("commitment", 0),
         "exec_history": by_name.get("exec_history", 0),
@@ -242,10 +248,16 @@ def measure_singles(tokenizer: Any, records: list[dict]) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
-# (c) 합성 스트림 요청 (tests/test_harness.py의 obj/observation과 같은 최소 관측)
+# (c) 합성 스트림 요청 — 장면 빌더는 tests/test_harness.py의 obj/observation 복제 (모듈 설명의 결합 규칙)
 # --------------------------------------------------------------------------
 
 COLOURS = ("red", "blue", "green", "yellow", "purple", "orange", "cyan", "pink", "brown", "grey")
+
+#: 이 스크립트만의 차이: 영역 둘 (sim 설정 `zones.count_min: 2`). 나머지는 test_harness와 같다.
+ZONES = [
+    {"id": "zoneL", "desc": "왼쪽 정리 영역", "bounds_mm": [-120, 150, 180, 330]},
+    {"id": "zoneR", "desc": "오른쪽 정리 영역", "bounds_mm": [-120, -330, 180, -150]},
+]
 
 
 def obj(object_id: str, pos_mm, **over) -> dict:
@@ -273,10 +285,7 @@ def observation(objects: list[dict], **over) -> dict:
         "sim_time_ms": 0,
         "instruction": {"version": 1, "t_ms": 0, "text": "red 상자를 왼쪽 정리 영역으로 옮겨라"},
         "objects": objects,
-        "zones": [
-            {"id": "zoneL", "desc": "왼쪽 정리 영역", "bounds_mm": [-120, 150, 180, 330]},
-            {"id": "zoneR", "desc": "오른쪽 정리 영역", "bounds_mm": [-120, -330, 180, -150]},
-        ],
+        "zones": copy.deepcopy(ZONES),
         "robot": {
             "ee_pos_mm": [0, 0, 200],
             "ee_quat": [0.0, 0.0, 0.0, 1.0],
@@ -378,8 +387,16 @@ def measure_synthetic(tokenizer: Any) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
+#: 점 추정치와의 대조 허용 폭 (양쪽 ±15%).
+TOLERANCE = 0.15
+
+
 def within(value: float, bounds: tuple[float, float]) -> bool:
     return bounds[0] <= value <= bounds[1]
+
+
+def near(value: float, estimate: float) -> bool:
+    return abs(value - estimate) <= TOLERANCE * estimate
 
 
 def verdicts(report: dict[str, Any]) -> dict[str, Any]:
@@ -413,12 +430,12 @@ def verdicts(report: dict[str, Any]) -> dict[str, Any]:
         "candidate_block_k32": {
             "estimate": ESTIMATES["candidate_block_k32"],
             "measured": {"min": min(k32) if k32 else None, "max": max(k32) if k32 else None},
-            "holds": bool(k32) and all(abs(v - ESTIMATES["candidate_block_k32"]) <= 0.15 * ESTIMATES["candidate_block_k32"] for v in k32),
+            "holds": bool(k32) and all(near(v, ESTIMATES["candidate_block_k32"]) for v in k32),
         },
         "tokens_per_object": {
             "estimate": ESTIMATES["tokens_per_object"],
             "measured": {"min": min(per_object), "max": max(per_object)},
-            "holds": all(v <= ESTIMATES["tokens_per_object"] for v in per_object),
+            "holds": all(near(v, ESTIMATES["tokens_per_object"]) for v in per_object),
         },
         "decision_positions": {
             "estimate": ESTIMATES["decision_positions"],
@@ -461,13 +478,13 @@ def print_table(report: dict[str, Any]) -> None:
     print(f"  T_i p50={fmt(b['question_tokens']['p50'])} p95={fmt(b['question_tokens']['p95'])} max={fmt(b['question_tokens']['max'])}; "
           + "; ".join(f"{kind} p50={fmt(v['p50'])} max={fmt(v['max'])}" for kind, v in b["question_tokens_by_type"].items()))
 
-    print("\n(c) 합성 스트림 요청 (하네스 build_request)")
-    print(f"{'objs':>5}{'Kcap':>6}{'K':>4}{'instr':>7}{'prefix':>8}{'tick0':>7}{'tick1':>7}{'+instr':>8}{'state':>7}{'q_main':>8}{'q_path':>8}{'dec':>5}{'tok/obj':>9}{'tok/cand':>10}")
+    print("\n(c) 합성 스트림 요청 (하네스 build_request; tick1은 지시 변경 조각을 포함한 새 토큰, 'of which instr'는 그 조각)")
+    print(f"{'objs':>5}{'Kcap':>6}{'K':>4}{'instr':>7}{'prefix':>8}{'tick0':>7}{'tick1':>7}{'of which':>10}{'state':>7}{'q_main':>8}{'q_path':>8}{'dec':>5}{'tok/obj':>9}{'tok/cand':>10}")
     for c in report["synthetic"]:
         t0, t1 = c["tick0"], c["tick1"]
         print(
             f"{c['objects']:>5}{c['k_cap']:>6}{c['k_actual']:>4}{'yes' if c['instruction_change'] else 'no':>7}{c['prefix_tokens']:>8}"
-            f"{t0['new_tokens']:>7}{t1['new_tokens']:>7}{t1['instruction_change']:>8}{t0['state']:>7}"
+            f"{t0['new_tokens']:>7}{t1['new_tokens']:>7}{t1['instruction_change']:>10}{t0['state']:>7}"
             f"{t0['candidate_block'].get('q_main', 0):>8}{t0['candidate_block'].get('q_path', 0):>8}{t0['decisions']:>5}"
             f"{fmt(c['state_lines_tick0'].get('object', {}).get('per_line', 0)):>9}{fmt(t0['tokens_per_candidate'].get('q_main', 0)):>10}"
         )
