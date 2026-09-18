@@ -9,8 +9,11 @@
 :func:`label_main_decision`. 결과는 `<dataset>/rollouts/`에 `keyframes.json`·`rollouts.jsonl`·`labels.jsonl`·
 `costing.json`으로 쓴다. 레코드 자체는 바꾸지 않는다(라벨은 계보를 유지한 후속 버전에 붙는다, docs/04 §6).
 
-재생의 전제는 레코드를 만든 코드와 지금 코드가 같은 조합 규칙·실행기라는 것이다. 키프레임 틱에서 다시 만든
-요청의 후보 집합 버전·commitment가 레코드와 다르면 `fidelity`에 적고 그 키프레임은 건넌다.
+재생의 전제는 레코드를 만든 코드·설정과 지금 것이 같다는 것이다. 그래서 먼저 레코드의 `versions`(하네스·
+컨트롤러·전문가 버전과 설정 묶음의 `config_digest`)를 지금 돌아가는 것과 맞대 보고, 다르면 무엇이 다른지 말하는
+:class:`ConfigMismatch`로 그 레코드를 **거절**한다(조용히 건너뛰지 않는다). 그 다음 키프레임 틱에서 다시 만든
+요청의 후보 집합 버전·commitment·실행 이력·물체가 레코드와 같은지(`fidelity`)를 보고, 다르면 그 키프레임은
+건너뛰되 `skipped_fidelity`로 센다.
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from robo_jev.contracts import QUESTION_SET_V0
+from robo_jev.data.episode import default_versions
 from robo_jev.data.robot_episodes import read_episodes
 from robo_jev.harness.robot import FIXED_KEYS, RobotHarness, load_harness_config
 from robo_jev.sim.expert import Expert, load_expert_config
@@ -41,16 +45,57 @@ from robo_jev.sim.label import (
 )
 
 __all__ = [
+    "ConfigMismatch",
+    "VERSION_KEYS",
     "build_jobs",
     "costing",
     "main",
     "replay_to_keyframes",
     "run",
+    "running_versions_for",
     "write_outputs",
 ]
 
 ROLLOUTS_VERSION = "rollouts-v0.1"
 _QUESTIONS = tuple(QUESTION_SET_V0)
+
+#: 레코드와 지금 돌아가는 것이 같아야 하는 `versions` 키. 앞의 셋은 코드 버전, 마지막은 설정 묶음의 지문이다.
+VERSION_KEYS = ("harness", "controller", "expert", "config_digest")
+
+
+class ConfigMismatch(ValueError):
+    """레코드를 만든 코드·설정이 지금 것과 다르다 — 재생은 그 레코드를 거절한다."""
+
+
+def running_versions_for(*, sim_config: str, events: dict[str, Any]) -> dict[str, str]:
+    """지금 돌아가는 하네스·컨트롤러·전문가 버전과 설정 묶음의 지문 (사건 설정이 가리키는 하네스·전문가 설정으로)."""
+    from robo_jev.sim.expert import Expert, load_expert_config
+
+    followup = events["followup"]
+    versions = default_versions(
+        harness_config=followup["harness_config"],
+        expert_config=followup["expert_config"],
+        sim_config=sim_config,
+        events_config=events.get("_path"),
+    )
+    versions["expert"] = Expert(load_expert_config(followup["expert_config"])).version
+    return {key: str(versions[key]) for key in VERSION_KEYS}
+
+
+def check_record_versions(record: dict[str, Any], running: dict[str, str]) -> None:
+    """레코드의 `versions`가 지금 것과 다르면 :class:`ConfigMismatch` — 무엇이 어떻게 다른지 적는다."""
+    recorded = record.get("versions") or {}
+    differences = []
+    for key in VERSION_KEYS:
+        if key not in recorded:
+            differences.append(f"{key}: 레코드에 없음 (지금 {running[key]})")
+        elif str(recorded[key]) != running[key]:
+            differences.append(f"{key}: 레코드 {recorded[key]} ≠ 지금 {running[key]}")
+    if differences:
+        raise ConfigMismatch(
+            f"{record.get('episode_id')}: 레코드를 만든 코드·설정이 지금과 다르다 — " + "; ".join(differences)
+            + ". 배치를 지금 설정으로 다시 만들거나 그 설정으로 돌린다."
+        )
 
 
 # --------------------------------------------------------------------------
@@ -66,15 +111,19 @@ def replay_to_keyframes(
     harness_config: dict[str, Any],
     control_steps: int,
     env: Any | None = None,
+    running: dict[str, str] | None = None,
 ) -> dict[int, dict[str, Any]]:
     """레코드를 키프레임 틱까지 재생해 `{index: {"snapshot", "commitment", "fidelity", "replay_s"}}`를 만든다.
 
-    snapshot은 그 틱의 요청을 만든 관측의 상태다(명령을 적용하기 **전**). `commitment`는 하네스 장부까지 든
-    그 틱 시작의 commitment이고, `fidelity`는 다시 만든 요청이 레코드와 같은지(후보 집합 버전·commitment·
-    실행 이력)를 말한다.
+    `running`(:func:`running_versions_for`)을 주면 먼저 레코드의 `versions`와 맞대 보고 다르면
+    :class:`ConfigMismatch`로 거절한다. snapshot은 그 틱의 요청을 만든 관측의 상태다(명령을 적용하기 **전**).
+    `commitment`는 하네스 장부까지 든 그 틱 시작의 commitment이고, `fidelity`는 다시 만든 요청이 레코드와
+    같은지(후보 집합 버전·commitment·실행 이력·물체)를 말한다.
     """
     from robo_jev.sim.environment import Environment
 
+    if running is not None:
+        check_record_versions(record, running)
     wanted = sorted(set(int(index) for index in indices))
     if not wanted:
         return {}
@@ -142,14 +191,21 @@ def build_jobs(
     harness_config: dict[str, Any],
     control_steps: int,
     log: Any = None,
+    running: dict[str, str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """키프레임을 고르고 재생해 rollout 작업 `(keyframe, candidate, seed)` 목록을 만든다.
 
-    작업 순서는 (에피소드를 돌아가며 키프레임) → seed → 후보다. 그래서 `limit`가 작아도 첫 키프레임은 모든
-    후보의 paired seed를 갖고, 기능(파지·놓기·밀기)이 섞인다. 재생이 레코드와 어긋난 키프레임은 건넌다.
+    먼저 모든 레코드의 `versions`를 지금 것(`running`, 없으면 여기서 계산)과 맞대 보고 하나라도 다르면
+    :class:`ConfigMismatch`로 멈춘다. 작업 순서는 (에피소드를 돌아가며 키프레임) → seed → 후보다. 그래서
+    `limit`가 작아도 첫 키프레임은 모든 후보의 paired seed를 갖고, 기능(파지·놓기·밀기)이 섞인다. 재생이
+    레코드와 어긋난 키프레임은 건넌다(`skipped_fidelity`).
     """
     from robo_jev.sim.environment import Environment
 
+    if running is None:
+        running = running_versions_for(sim_config=sim_config, events=events)
+    for record in records:
+        check_record_versions(record, running)
     seeds = int(events.get("seeds", 8))
     config = {"keyframes": {"per_episode": per_episode or int((events.get("keyframes") or {}).get("per_episode", 5))}}
     selected: list[dict[str, Any]] = []
@@ -181,7 +237,8 @@ def build_jobs(
             if env is None:
                 env = envs[profile] = Environment(config_path=sim_config, profile=profile)
             replayed = replay_to_keyframes(
-                record, [frame["index"]], sim_config=sim_config, harness_config=harness_config, control_steps=control_steps, env=env
+                record, [frame["index"]], sim_config=sim_config, harness_config=harness_config, control_steps=control_steps,
+                env=env, running=running,
             )[frame["index"]]
             replay_total += replayed["replay_s"]
             tick = record["ticks"][frame["index"]]
@@ -244,7 +301,12 @@ def build_jobs(
     finally:
         for env in envs.values():
             env.close()
-    summary = {"keyframes": len(keyframes_out), "skipped_fidelity": skipped_fidelity, "replay_s_total": round(replay_total, 3)}
+    summary = {
+        "keyframes": len(keyframes_out),
+        "skipped_fidelity": skipped_fidelity,
+        "replay_s_total": round(replay_total, 3),
+        "running_versions": dict(running),
+    }
     return jobs, keyframes_out, summary
 
 
@@ -459,7 +521,7 @@ def run(
     log: Any = None,
 ) -> dict[str, Any]:
     started = time.perf_counter()
-    events = load_events_config(events_path)
+    events = {**load_events_config(events_path), "_path": str(events_path)}
     harness_config = load_harness_config(events["followup"]["harness_config"])
     control_steps = int(events["followup"]["control_steps_per_tick"])
     records = [record for _, record in read_episodes(dataset)]
@@ -473,6 +535,7 @@ def run(
     labels = label_keyframes(records, keyframes, results, events)
     cost = costing(results, batch_wall_s=time.perf_counter() - started, replay_s_total=summary["replay_s_total"], workers=workers)
     cost["keyframes"] = {**summary, "labelled": len(labels), "events_version": events["version"]}
+    cost["versions"] = summary["running_versions"]
     paths = write_outputs(out or (dataset / "rollouts"), keyframes=keyframes, results=results, labels=labels, cost=cost)
     return {"jobs": len(jobs), "results": results, "labels": labels, "costing": cost, "paths": paths, "keyframes": keyframes}
 

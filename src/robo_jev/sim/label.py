@@ -76,6 +76,18 @@ _GATE_REASONS = ("goal_done", "instruction_incomplete", "observe_target")
 _QUESTIONS = tuple(QUESTION_SET_V0)
 
 
+class _SimulatorError(Exception):
+    """simulator 경계(환경 생성·복원·관측·자세 이동·step) 안에서 난 예외. 원인은 `__cause__`."""
+
+
+def _simulator(call, *args, **kwargs):
+    """simulator 호출을 감싼다: 안에서 난 예외는 `_SimulatorError`로 표시해 밖의 코드 결함과 가른다."""
+    try:
+        return call(*args, **kwargs)
+    except Exception as error:
+        raise _SimulatorError(f"{type(error).__name__}: {error}") from error
+
+
 def load_events_config(path: str | Path = DEFAULT_EVENTS_PATH) -> dict[str, Any]:
     return yaml.safe_load(resolve_config_path(path).read_text(encoding="utf-8"))
 
@@ -241,6 +253,12 @@ def rollout_event(
         "rollout_seed": int(seed),
         "ticks": 0,
         "first_success_tick": None,
+        # 접근 시간을 구간 성과와 가르는 값 (리뷰 라운드 1): 채택 국면이 approach를 벗어난 첫 틱, 대상과의 접촉이
+        # 처음 시작된 틱, 그리고 그 시각(초).
+        "first_action_tick": None,
+        "first_contact_tick": None,
+        "approach_s": None,
+        "contact_s": None,
         "trajectory": [],
         "max_contact_n": 0.0,
         "start_pose_mm": None,
@@ -260,19 +278,19 @@ def rollout_event(
     try:
         try:
             if own_env:
-                header = Environment.describe_snapshot(snapshot)
-                env = Environment(config_path=str(event.get("sim_config") or DEFAULT_SIM_CONFIG), profile=str(header["profile"]))
+                header = _simulator(Environment.describe_snapshot, snapshot)
+                env = _simulator(Environment, config_path=str(event.get("sim_config") or DEFAULT_SIM_CONFIG), profile=str(header["profile"]))
             restore_started = time.perf_counter()
-            env.restore(snapshot)
+            _simulator(env.restore, snapshot)
             evidence["restore_s"] = round(time.perf_counter() - restore_started, 4)
 
             rng = np.random.default_rng([int(seed), 0x5EED])
             env.rng = rng
-            scene = env.observe()
+            scene = _simulator(env.observe)
             evidence["observation"] = {"sim_ms": int(scene["sim_time_ms"]), "tick": int(scene["tick"])}
-            evidence["randomization_distribution"]["applied"] = _apply_jitter(env, scene, action, event["randomization"], rng)
+            evidence["randomization_distribution"]["applied"] = _simulator(_apply_jitter, env, scene, action, event["randomization"], rng)
             env.setpoint_noise_mm = float(event["randomization"]["controller_noise"]["setpoint_sigma_mm"])
-            scene = env.observe()
+            scene = _simulator(env.observe)
 
             expert = expert or Expert(load_expert_config(event.get("expert_config") or "configs/sim/expert_v0.yaml"))
             harness = RobotHarness(load_harness_config(event.get("harness_config") or "configs/harness/robot.yaml"))
@@ -293,12 +311,21 @@ def rollout_event(
                 out = harness.compose(request, results, commitment, int(scene["sim_time_ms"]))
                 ack = None
                 for step in range(control_steps):
-                    scene = env.step(out["command"] if step == 0 else None)
+                    scene = _simulator(env.step, out["command"] if step == 0 else None)
                     ack = scene["ack"] or ack
                     rule.observe_step(scene)
+                    if evidence["first_contact_tick"] is None and any(
+                        str(item.get("kind")) == "contact_onset" and str(item.get("object")) == rule.target
+                        for item in scene.get("events") or ()
+                    ):
+                        evidence["first_contact_tick"] = tick + 1
+                        evidence["contact_s"] = round((tick + 1) * tick_ms / 1000.0, 2)
                 commitment = out["commitment"]
                 history = {"adopted": out["adopted"], "ack": ack, "gate": out["gate"]}
                 evidence["ticks"] = tick + 1
+                if evidence["first_action_tick"] is None and str(out["adopted"].get("phase")) not in ("approach", "none"):
+                    evidence["first_action_tick"] = tick + 1
+                    evidence["approach_s"] = round(tick * tick_ms / 1000.0, 2)
                 evidence["trajectory"].append(_trajectory_row(scene, rule.target, out["adopted"]))
                 verdict = rule.check(scene)
                 if verdict == "success":
@@ -314,9 +341,13 @@ def rollout_event(
             if evidence["first_success_tick"] is not None:
                 return finish("success", None)
             return finish("failure", "horizon")
-        except Exception as error:  # simulator 오류 → censoring, 사유 보존 (docs/04 §4)
+        except _SimulatorError as error:  # simulator 오류 → censoring, 사유 보존 (docs/04 §4)
+            cause = error.__cause__
+            evidence["error"] = str(error)
+            return finish("censored", f"simulator_error:{type(cause).__name__}")
+        except Exception as error:  # 그 밖의 예외는 코드 결함 — 제 이름으로 센다
             evidence["error"] = f"{type(error).__name__}: {error}"
-            return finish("censored", f"simulator_error:{type(error).__name__}")
+            return finish("censored", f"pipeline_error:{type(error).__name__}")
     finally:
         if own_env and env is not None:
             env.close()

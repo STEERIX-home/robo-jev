@@ -266,7 +266,18 @@ def generate_episode(
             "disturbance_log": [dict(entry) for entry in scene.get("disturbance_log") or ()],
             "adapter": harness.adapter.evidence(),
         }
-        return finalize(record, versions=versions, provenance=provenance, evidence=evidence)
+        return finalize(
+            record,
+            versions=versions,
+            provenance=provenance,
+            evidence=evidence,
+            config_paths={
+                "harness_config": str(config.get("harness_config") or "configs/harness/robot.yaml"),
+                "expert_config": str(config.get("expert_config") or "configs/sim/expert_v0.yaml"),
+                "sim_config": sim_config,
+                "events_config": str(config.get("events_config") or "configs/sim/events.yaml"),
+            },
+        )
     finally:
         if own_env:
             env.close()

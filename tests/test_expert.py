@@ -771,8 +771,9 @@ def assert_completed(outcome: dict) -> None:
     assert outcome["gripper_mm"] > (gripper["open_mm"] + gripper["closed_mm"]) / 2, outcome
 
 
-@pytest.mark.parametrize("seed", [17, 29, 43])
+@pytest.mark.parametrize("seed", [17, 29, 43, 101])
 def test_the_expert_completes_an_e0_episode(seed):
+    """101은 3c-1의 파지 결함(키 큰 원통, 대각선 하강 → 정지 76틱) seed — 파지 진입 조건(xy 정렬·잦아들기)이 고쳤다."""
     assert_completed(run_episode("E0", seed))
 
 

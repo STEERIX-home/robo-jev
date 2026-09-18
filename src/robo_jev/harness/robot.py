@@ -59,7 +59,7 @@ __all__ = [
 ]
 
 #: 하네스 버전. 질문 세트·후보 형식·조합 규칙의 묶음을 가리킨다 (docs/08 §3.1).
-HARNESS_VERSION = "h0.2"
+HARNESS_VERSION = "h0.3"
 
 DEFAULT_CONFIG_PATH = "configs/harness/robot.yaml"
 

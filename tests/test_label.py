@@ -49,6 +49,9 @@ def test_every_joint_function_has_a_versioned_event_with_the_documented_fields()
     assert event_for("push:o0:+x:none:slow", holding=None, config=EVENTS)["event_id"] == "push-segment-v0"
     with pytest.raises(ValueError):
         event_for("hold", holding=None, config=EVENTS)
+    # 후보는 같은 horizon 아래 비교한다 (docs/08 §7).
+    horizons = {name: spec["horizon_seconds"] for name, spec in EVENTS["events"].items()}
+    assert horizons["push"] == horizons["grasp"] == horizons["place"] == 5.0
 
 
 # --------------------------------------------------------------------------
@@ -93,6 +96,10 @@ def test_a_grasp_rollout_succeeds_and_records_the_event_fields(e0_seed5):
     assert 0 < evidence["first_success_tick"] <= evidence["ticks"] <= event["horizon_seconds"] * 10
     assert evidence["wall_s"] > 0 and evidence["restore_s"] > 0
     assert len(evidence["trajectory"]) == evidence["ticks"]
+    # 접근 시간은 구간 성과와 따로 읽힌다: 접근을 벗어난 틱, 대상과의 첫 접촉 틱.
+    assert 0 < evidence["first_action_tick"] <= evidence["first_contact_tick"] <= evidence["first_success_tick"]
+    assert evidence["approach_s"] == pytest.approx((evidence["first_action_tick"] - 1) * 0.1)
+    assert evidence["contact_s"] == pytest.approx(evidence["first_contact_tick"] * 0.1)
     json.dumps(result)  # 저장 가능
 
 
@@ -173,6 +180,38 @@ def test_simulator_errors_and_wall_time_overruns_are_censored_with_the_reason(e0
     assert result["evidence"]["ticks"] >= 1
 
 
+def test_a_bug_outside_the_simulator_is_censored_as_a_pipeline_error(e0_seed5, monkeypatch):
+    """simulator(환경·MuJoCo) 밖의 예외 — 하네스·전문가·후속 정책·성공 기준의 결함 — 는 `pipeline_error:<Type>`이다.
+    코드 버그가 simulator 오류 통계에 섞이지 않고 제 이름으로 센다."""
+    from robo_jev.harness.robot import RobotHarness
+
+    scene = e0_seed5["scene"]
+    key = goal_grasp_key(scene)
+    event = {**event_for(key, holding=None, config=EVENTS), "horizon_seconds": 1.0}
+    action = action_for(scene, key)
+    original = RobotHarness.compose
+
+    def broken(self, request, results, commitment, now_ms):
+        if int(request["t"]) >= 3:
+            raise KeyError("q_missing")
+        return original(self, request, results, commitment, now_ms)
+
+    monkeypatch.setattr(RobotHarness, "compose", broken)
+    result = rollout_event(e0_seed5["snapshot"], action, event, seed=0)
+    assert result["outcome"] == "censored" and result["reason"] == "pipeline_error:KeyError"
+    assert "q_missing" in result["evidence"]["error"] and result["evidence"]["ticks"] >= 1
+
+    # MuJoCo 자체의 오류도 simulator 오류다.
+    import mujoco
+
+    def fatal(self, command=None):
+        raise mujoco.FatalError("mj_step: unstable simulation")
+
+    monkeypatch.setattr(Environment, "step", fatal)
+    result = rollout_event(e0_seed5["snapshot"], action, event, seed=0)
+    assert result["outcome"] == "censored" and result["reason"] == "simulator_error:FatalError"
+
+
 def test_a_candidate_the_followup_cannot_see_is_censored(e0_seed5):
     scene = e0_seed5["scene"]
     key = "grasp:o99:top:zoneL:slow"
@@ -197,6 +236,7 @@ def test_a_push_rollout_measures_displacement_along_the_direction():
     assert evidence["event_id"] == "push-segment-v0"
     assert evidence["displacement_along_mm"] >= event["success_rule"]["segment_fraction"] * 80
     assert evidence["max_contact_n"] <= event["success_rule"]["max_contact_force_n"]
+    assert evidence["first_contact_tick"] is not None and evidence["first_action_tick"] <= evidence["first_success_tick"]
 
 
 def test_the_followup_policy_forces_the_main_decision_and_disables_the_gates(e0_seed5):
@@ -327,7 +367,7 @@ def test_rollout_candidates_include_the_commitment_and_the_expert_choice_and_spr
 # --------------------------------------------------------------------------
 
 
-def labelled_tick(*, commitment=None, admissible=("c1", "c2", "c3"), choice="c1", rule="expert-e0.1/goal_grasp") -> dict:
+def labelled_tick(*, commitment=None, admissible=("c1", "c2", "c3"), choice="c1", rule="expert-e0.2/goal_grasp") -> dict:
     ids = [f"c{index}" for index in range(1, 10)] + ["ch", "co", "cr"]
     keys = {f"c{index}": f"grasp:o{index}:top:zoneL:slow" for index in range(1, 10)}
     keys.update(ch="hold", co="observe", cr="replan")
@@ -421,7 +461,7 @@ def test_weak_evidence_keeps_a_plural_set_with_low_confidence():
 def test_a_gate_tick_keeps_its_rule_label_but_carries_the_event_results():
     from robo_jev.sim.label import label_main_decision
 
-    tick = labelled_tick(commitment=None, admissible=("ch",), choice="ch", rule="expert-e0.1/goal_done")
+    tick = labelled_tick(commitment=None, admissible=("ch",), choice="ch", rule="expert-e0.2/goal_done")
     label = label_main_decision(tick, table(c1=(8, 0, 0)), EVENTS)
     assert label["candidate_ids"] == ["ch"] and label["rollout_reason"] == "gate:goal_done"
     assert label["event_results"]["c1"]["s"] == 8 and "c1" not in label["unknown"]

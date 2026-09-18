@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import json
 from pathlib import Path
 from typing import Any
 
@@ -24,29 +26,87 @@ from robo_jev.contracts import QUESTION_SET_V0, SCHEMA_STREAM, validate_record
 from robo_jev.data.split import SplitPolicy, assign_split
 
 __all__ = [
+    "CONFIG_DIGEST_PARTS",
+    "DEFAULT_CONFIG_PATHS",
     "REQUIRED_VERSIONS",
     "aggregate",
     "append_tick",
+    "config_digest",
     "default_question_set",
     "default_versions",
     "finalize",
     "new_episode",
     "posed_questions",
+    "running_config_digest",
 ]
 
-#: 레코드가 반드시 적어야 하는 버전 (docs/08 §8). `expert`는 전문가 에피소드에만 붙는다.
-REQUIRED_VERSIONS = ("harness", "controller", "rules", "serializer", "extractor")
+#: 레코드가 반드시 적어야 하는 버전 (docs/08 §8). `expert`는 전문가 에피소드에만 붙는다. `config_digest`는
+#: 레코드를 만든 설정 묶음의 지문이다 — 버전 문자열을 올리지 않은 수치 변경도 레코드에 남긴다.
+REQUIRED_VERSIONS = ("harness", "controller", "rules", "serializer", "extractor", "config_digest")
+
+#: `config_digest`에 들어가는 설정과 그 순서. 컨트롤러 설정은 하네스 설정이 가리키는 파일이다.
+CONFIG_DIGEST_PARTS = ("harness", "controller", "expert", "sim", "events")
+
+DEFAULT_CONFIG_PATHS = {
+    "harness_config": "configs/harness/robot.yaml",
+    "expert_config": "configs/sim/expert_v0.yaml",
+    "sim_config": "configs/sim/tidy_clutter.yaml",
+    "events_config": "configs/sim/events.yaml",
+}
 
 #: 요청 안에만 사는 하네스 장부. 레코드에는 넣지 않는다.
 _HARNESS_BLOCK = "harness"
 
 
-def default_versions() -> dict[str, str]:
-    """설정과 모듈 상수에서 읽은 기본 버전. 부를 때마다 설정을 다시 읽는다.
+def config_digest(configs: dict[str, Any]) -> str:
+    """설정 묶음(`{이름: 설정 dict}`)의 지문 — 키를 정렬한 canonical JSON의 sha256."""
+    payload = json.dumps(configs, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def running_config_digest(
+    *,
+    harness_config: str | Path | None = None,
+    expert_config: str | Path | None = None,
+    sim_config: str | Path | None = None,
+    events_config: str | Path | None = None,
+) -> str:
+    """지금 디스크의 하네스·컨트롤러(하네스 설정이 가리키는 파일)·전문가·장면·사건 설정의 :func:`config_digest`.
+
+    경로를 주지 않으면 기본 설정(`DEFAULT_CONFIG_PATHS`)이다. 생성기는 자기가 실제로 쓴 경로를 준다.
+    """
+    import yaml
+
+    from robo_jev.harness.robot import load_harness_config
+    from robo_jev.sim.controller import load_controller_config, resolve_config_path
+
+    def read(path: str | Path) -> Any:
+        return yaml.safe_load(resolve_config_path(path).read_text(encoding="utf-8"))
+
+    harness = load_harness_config(harness_config or DEFAULT_CONFIG_PATHS["harness_config"])
+    parts = {
+        "harness": harness,
+        "controller": load_controller_config(harness["controller_config"]),
+        "expert": read(expert_config or DEFAULT_CONFIG_PATHS["expert_config"]),
+        "sim": read(sim_config or DEFAULT_CONFIG_PATHS["sim_config"]),
+        "events": read(events_config or DEFAULT_CONFIG_PATHS["events_config"]),
+    }
+    return config_digest({name: parts[name] for name in CONFIG_DIGEST_PARTS})
+
+
+def default_versions(
+    *,
+    harness_config: str | Path | None = None,
+    expert_config: str | Path | None = None,
+    sim_config: str | Path | None = None,
+    events_config: str | Path | None = None,
+) -> dict[str, str]:
+    """설정과 모듈 상수에서 읽은 기본 버전 + 설정 묶음의 지문. 부를 때마다 설정을 다시 읽는다.
 
     하네스·규칙·추출기는 코드가, 컨트롤러·serializer는 설정이 단일 출처다. 한 군데서
     모아야 레코드의 `versions`가 실제로 돌아간 것을 가리킨다. 캐시하지 않는다 — 한 과정
-    안에서 설정을 바꾸면 그 뒤의 레코드는 바뀐 버전을 적어야 한다.
+    안에서 설정을 바꾸면 그 뒤의 레코드는 바뀐 버전을 적어야 한다. 경로를 주면 그 설정으로
+    (생성기가 실제로 쓴 것), 아니면 기본 설정으로 digest를 만든다.
     """
     import yaml
 
@@ -55,10 +115,10 @@ def default_versions() -> dict[str, str]:
     from robo_jev.perception.pointworld import EXTRACTOR_VERSION
     from robo_jev.sim.controller import load_controller_config, resolve_config_path
 
-    harness_config = load_harness_config()
-    controller = load_controller_config(harness_config["controller_config"])
+    harness = load_harness_config(harness_config or DEFAULT_CONFIG_PATHS["harness_config"])
+    controller = load_controller_config(harness["controller_config"])
     serializer = yaml.safe_load(
-        resolve_config_path(Path("configs/sim/tidy_clutter.yaml")).read_text(encoding="utf-8")
+        resolve_config_path(sim_config or DEFAULT_CONFIG_PATHS["sim_config"]).read_text(encoding="utf-8")
     )
     return {
         "harness": HARNESS_VERSION,
@@ -66,6 +126,9 @@ def default_versions() -> dict[str, str]:
         "rules": RULE_JUDGE_VERSION,
         "serializer": str(serializer.get("version", "s0")),
         "extractor": EXTRACTOR_VERSION,
+        "config_digest": running_config_digest(
+            harness_config=harness_config, expert_config=expert_config, sim_config=sim_config, events_config=events_config
+        ),
     }
 
 
@@ -145,11 +208,12 @@ def finalize(
     provenance: dict[str, Any] | None = None,
     evidence: dict[str, Any] | None = None,
     validate: bool = True,
+    config_paths: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """버전·provenance·evidence를 붙이고 계약을 확인한다."""
+    """버전·provenance·evidence를 붙이고 계약을 확인한다. `config_paths`는 :func:`default_versions`의 경로 인자다."""
     if not record.get("ticks"):
         raise ValueError("틱이 하나도 없는 에피소드는 레코드가 아니다")
-    record["versions"] = {**default_versions(), **(versions or {})}
+    record["versions"] = {**default_versions(**(config_paths or {})), **(versions or {})}
     missing = [name for name in REQUIRED_VERSIONS if not record["versions"].get(name)]
     if missing:
         raise ValueError(f"레코드에 필요한 버전이 없다: {missing}")

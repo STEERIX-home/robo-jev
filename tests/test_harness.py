@@ -10,7 +10,7 @@ import math
 
 import pytest
 import yaml
-from helpers import CONTROLLER_CONFIG, D0_STREAMS, HARNESS_CONFIG, SIM_CONFIG, read_jsonl
+from helpers import CONTROLLER_CONFIG, D0_STREAMS, HARNESS_CONFIG, REPO_CONFIGS, SIM_CONFIG, read_jsonl
 
 from robo_jev.contracts import AUX_QUESTIONS, QUESTION_SET_V0, model_input, validate_record
 from robo_jev.data.episode import aggregate, append_tick, finalize, new_episode
@@ -1893,6 +1893,44 @@ def test_default_versions_follow_the_config_on_disk(monkeypatch):
     after = episode_module.default_versions()
     assert before["controller"] != "c-test"
     assert after["controller"] == "c-test"
+
+
+def test_versions_carry_a_digest_of_every_config_that_shapes_the_record(tmp_path):
+    """`versions.config_digest`는 하네스·컨트롤러·전문가·장면·사건 설정의 canonical JSON sha256이다 — 버전
+    문자열을 올리지 않은 수치 변경도 레코드를 표시한다. 다섯 설정 중 어느 하나가 바뀌면 digest가 바뀐다."""
+    from robo_jev.data import episode as episode_module
+
+    versions = episode_module.default_versions()
+    assert len(versions["config_digest"]) == 64
+    assert versions["config_digest"] == episode_module.running_config_digest()
+    assert versions["harness"] == HARNESS_VERSION == "h0.3" and versions["controller"] == "c0.5"
+
+    hrn = harness()
+    record = new_episode("ep-0005", "scene-family-031", instructions=[INSTRUCTION])
+    append_tick(record, hrn.build_request(observation(), None, None))
+    finalize(record, provenance={"generator": "test", "seed": 1})
+    assert record["versions"]["config_digest"] == versions["config_digest"]
+
+    # 어느 설정이든 한 값이 바뀌면 다른 digest다 (다른 설정은 그대로).
+    changed: set[str] = set()
+    for name in ("harness", "expert", "sim", "events"):
+        source = {
+            "harness": HARNESS_CONFIG, "expert": REPO_CONFIGS / "sim" / "expert_v0.yaml",
+            "sim": SIM_CONFIG, "events": REPO_CONFIGS / "sim" / "events.yaml",
+        }[name]
+        text = source.read_text(encoding="utf-8")
+        copy_path = tmp_path / f"{name}.yaml"
+        copy_path.write_text(text + "\nreview_marker: 1\n", encoding="utf-8")
+        digest = episode_module.running_config_digest(**{f"{name}_config": str(copy_path)})
+        assert digest != versions["config_digest"]
+        changed.add(digest)
+    assert len(changed) == 4
+    # 컨트롤러 설정은 하네스 설정이 가리킨다 — 그 사본을 가리키는 하네스 사본으로 본다.
+    controller_copy = tmp_path / "osc.yaml"
+    controller_copy.write_text(CONTROLLER_CONFIG.read_text(encoding="utf-8") + "\nreview_marker: 1\n", encoding="utf-8")
+    harness_copy = tmp_path / "harness.yaml"
+    harness_copy.write_text(HARNESS_CONFIG.read_text(encoding="utf-8").replace("configs/controller/osc_v0.yaml", str(controller_copy)), encoding="utf-8")
+    assert episode_module.running_config_digest(harness_config=str(harness_copy)) not in changed | {versions["config_digest"]}
 
 
 def test_append_tick_keeps_the_four_outputs_separate_and_drops_the_harness_block():

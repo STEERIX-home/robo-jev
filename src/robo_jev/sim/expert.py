@@ -35,7 +35,7 @@ from robo_jev.sim.controller import load_controller_config, resolve_config_path
 __all__ = ["DEFAULT_CONFIG_PATH", "EXPERT_VERSION", "Expert", "load_expert_config"]
 
 #: 전문가 버전. 레코드의 `versions.expert`에 들어간다.
-EXPERT_VERSION = "e0.1"
+EXPERT_VERSION = "e0.2"
 
 DEFAULT_CONFIG_PATH = "configs/sim/expert_v0.yaml"
 

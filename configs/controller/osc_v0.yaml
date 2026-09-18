@@ -2,7 +2,7 @@
 #
 # 계약의 수치는 전부 여기에만 둔다. `sim/controller.py`에는 상수를 쓰지 않는다.
 # 값은 실험 시작값이며 버전(`version`)과 함께 레코드에 기록한다(docs/08 §8 `versions.controller`).
-version: c0.4
+version: c0.5
 
 # 하네스↔실행기 계약의 표현 규약 (docs/02 §4, docs/05 §2 "좌표계·회전 표현·delta/absolute 설정을 기록").
 frame:

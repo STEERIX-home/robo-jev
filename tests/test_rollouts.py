@@ -42,6 +42,44 @@ def test_replay_reaches_the_keyframe_with_the_recorded_request(short_episode):
     assert all(found[index]["commitment"]["action_ref"] == record["ticks"][index]["request"]["commitment"]["action_ref"] for index in committed)
 
 
+def test_replay_refuses_a_record_made_by_other_configs_with_an_explicit_reason(short_episode):
+    """레코드의 `versions`(config_digest와 하네스·컨트롤러·전문가 버전)가 지금 돌아가는 것과 다르면 재생은 그 레코드를
+    거절한다 — 조용한 `skipped_fidelity`가 아니라 무엇이 다른지 말하는 예외다."""
+    import copy
+
+    from robo_jev.data.rollouts import ConfigMismatch, running_versions_for
+
+    record = short_episode["record"]
+    running = running_versions_for(sim_config=CONFIG["sim_config"], events=EVENTS)
+    assert record["versions"]["config_digest"] == running["config_digest"]
+    kwargs = dict(sim_config=CONFIG["sim_config"], harness_config=load_harness_config(), control_steps=CONFIG["episode"]["control_steps_per_tick"], running=running)
+
+    stale = copy.deepcopy(record)
+    stale["versions"]["config_digest"] = "0" * 64
+    with pytest.raises(ConfigMismatch) as excinfo:
+        replay_to_keyframes(stale, [0], **kwargs)
+    message = str(excinfo.value)
+    assert stale["episode_id"] in message and "config_digest" in message and "0" * 64 in message and running["config_digest"] in message
+
+    older = copy.deepcopy(record)
+    older["versions"]["harness"] = "h0.2"
+    with pytest.raises(ConfigMismatch, match="harness"):
+        replay_to_keyframes(older, [0], **kwargs)
+
+    undated = copy.deepcopy(record)
+    del undated["versions"]["config_digest"]
+    with pytest.raises(ConfigMismatch, match="config_digest"):
+        replay_to_keyframes(undated, [0], **kwargs)
+
+    out = short_episode["out"]
+    (out / "episodes" / stale["episode_id"] / "streams.jsonl").write_text(json.dumps(stale, ensure_ascii=False) + "\n", encoding="utf-8")
+    try:
+        with pytest.raises(ConfigMismatch):
+            run(out, limit=1, workers=1, per_episode=1, out=out / "refused")
+    finally:
+        (out / "episodes" / record["episode_id"] / "streams.jsonl").write_text(json.dumps(record, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
 def test_jobs_cover_every_candidate_with_paired_seeds_before_the_next_keyframe(short_episode):
     record = short_episode["record"]
     jobs, keyframes, summary = build_jobs(
@@ -85,6 +123,29 @@ def test_the_pipeline_writes_rollouts_labels_and_a_costing_that_extrapolates(sho
         projection = cost["projections"][name]
         assert projection["cpu_hours"] > 0 and projection["wall_hours_with_all_cores"] <= projection["cpu_hours"]
     assert cost["machine"]["cpu_count"] >= 1 and cost["keyframes"]["labelled"] == 1
+
+
+def test_a_worker_pool_produces_the_same_evidence_as_the_serial_run(short_episode):
+    """비용 산정이 기대는 성질: worker 풀(spawn, worker마다 환경 하나)의 결과가 직렬과 같다 — 시간·pid만 다르다."""
+    from robo_jev.data.rollouts import run_jobs
+
+    record = short_episode["record"]
+    jobs, _, _ = build_jobs(
+        [record], EVENTS, limit=2, sim_config=CONFIG["sim_config"], harness_config=load_harness_config(),
+        control_steps=CONFIG["episode"]["control_steps_per_tick"],
+    )
+    assert len(jobs) == 2
+    serial = run_jobs(jobs, sim_config=CONFIG["sim_config"], expert_config=EVENTS["followup"]["expert_config"], workers=1)
+    pooled = run_jobs(jobs, sim_config=CONFIG["sim_config"], expert_config=EVENTS["followup"]["expert_config"], workers=2)
+    pids = {result["job"]["worker_pid"] for result in pooled}
+    assert 1 <= len(pids) <= 2 and all(pid != serial[0]["job"]["worker_pid"] for pid in pids)  # 다른 프로세스가 돌렸다
+    timing = {"wall_s", "restore_s"}
+    for left, right in zip(serial, pooled):
+        assert (left["outcome"], left["reason"]) == (right["outcome"], right["reason"])
+        assert {k: v for k, v in left["evidence"].items() if k not in timing} == {k: v for k, v in right["evidence"].items() if k not in timing}
+        assert {k: v for k, v in left["job"].items() if k not in ("worker_pid", "env_rebuild_s")} == {
+            k: v for k, v in right["job"].items() if k not in ("worker_pid", "env_rebuild_s")
+        }
 
 
 def test_costing_counts_outcomes_by_function():
