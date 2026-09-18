@@ -765,6 +765,13 @@ GRASP_CLEARANCE_MM = 30
 #: 물체를 들고 있을 수 있는 국면.
 CARRY_PHASES = ("grasp", "lift", "transport", "place")
 
+#: marks를 읽는 사람에게 명령/관측 구분을 알려 주는 메모.
+GRIPPER_MARK_NOTE = (
+    "그리퍼: commanded_gripper_transition_ticks는 각본이 명령한 전환(q_gripper 라벨 기준), "
+    "observed_gripper_close_ticks는 state.robot.gripper_mm이 닫힌 틱이다 "
+    "— 말단이 물체에 닿아야 닫히므로 둘은 몇 틱 어긋난다"
+)
+
 
 class CandidateIds:
     """의미 키 → 후보 id. 에피소드 안에서 같은 키는 항상 같은 id를 받는다."""
@@ -1193,10 +1200,14 @@ def _build_episode(script: EpisodeScript) -> dict:
     ticks: list[dict] = []
     carried_ticks = 0
     previous_tick_ee = list(ee)
+    previous_gripper_mm: int | None = None
+    observed_close_ticks: list[int] = []
 
     for t in range(script.n_ticks):
         segment = _segment_at(script, t)
         phase = segment.phase
+        # 정지가 참인 틱에는 어떤 답도 적용하지 않는다 (docs/08 §5.1).
+        stop = t in script.stop_ticks
         contrast_second = script.contrast_at is not None and t == script.contrast_at + 1
 
         # 기하 관측은 한 틱 뒤처져 들어오고, 정체 틱에는 아예 갱신되지 않는다.
@@ -1238,7 +1249,7 @@ def _build_episode(script: EpisodeScript) -> dict:
             )
 
             previous_ee = list(ee)
-            if phase != "none" and t not in script.stop_ticks:
+            if phase != "none" and not stop:
                 if phase == "push" and not at_contact:
                     goal = contact_point
                 else:
@@ -1247,7 +1258,11 @@ def _build_episode(script: EpisodeScript) -> dict:
 
             # 파지·해제는 이 틱의 상태를 만들기 전에 판정한다. 그래야 상태가 스스로
             # 모순되지 않는다(열린 그리퍼로 물체를 들고 있을 수 없다).
-            if holding is None:
+            if stop:
+                # 정지 틱에는 파지·해제도 판정하지 않는다. 말단이 움직이지 않으므로
+                # 물체를 새로 물 수도 없고, 파지 중이면 그대로 유지한다 (docs/08 §6).
+                pass
+            elif holding is None:
                 # 파지 판정은 **이동 전** 자세로 한다. 그러면 이 틱의 총 이동이
                 # (한 걸음 안인) 파지 자세까지로 끝나 축마다 STEP_MM을 넘지 않는다.
                 if (
@@ -1292,10 +1307,12 @@ def _build_episode(script: EpisodeScript) -> dict:
                 }
             state = None  # 아래에서 만든다
 
-        gripper_holds = holding is not None or (
-            segment.gripper == "closed" and can_grasp(ee, poses[script.target])
-        )
         if state is None:
+            # 관측값이다: 명령이 아니라 실제로 물체를 물었는지, 말단이 이 틱에 움직였는지.
+            gripper_holds = holding is not None or (
+                segment.gripper == "closed" and can_grasp(ee, poses[script.target])
+            )
+            ee_moved = list(ee) != previous_tick_ee
             instruction = _instruction_at(script, t)
             state = {
                 "goal": {
@@ -1336,7 +1353,8 @@ def _build_episode(script: EpisodeScript) -> dict:
                     "gripper_mm": GRIPPER_CLOSED_MM if gripper_holds else GRIPPER_OPEN_MM,
                     "holding": holding,
                     "contact_n": 1.5 if phase in ("grasp", "place", "push") else 0.0,
-                    "speed_mm_s": 0 if phase == "none" else 120,
+                    # 말단이 실제로 움직인 틱만 속도가 있다 (정지 틱·목표점 도달 후는 0).
+                    "speed_mm_s": 120 if ee_moved else 0,
                 },
                 "events": (
                     [{"kind": "slip", "object": script.target, "t_ms": t * 100}] if t in script.failure_ticks else []
@@ -1362,6 +1380,20 @@ def _build_episode(script: EpisodeScript) -> dict:
             emitted_ee,
         )
         previous_tick_ee = list(emitted_ee)
+        if robot_state["gripper_mm"] == GRIPPER_CLOSED_MM and previous_gripper_mm != GRIPPER_CLOSED_MM:
+            observed_close_ticks.append(t)
+        previous_gripper_mm = robot_state["gripper_mm"]
+        if stop and ticks:
+            # 정지 틱은 로봇 상태를 얼린다 (docs/08 §5.1·§6).
+            was = ticks[-1]["request"]["state"]["robot"]
+            for field in ("ee_pose_mm", "holding", "gripper_mm"):
+                assert robot_state[field] == was[field], (
+                    script.episode_id,
+                    t,
+                    f"정지 틱인데 {field}가 바뀌었다",
+                    was[field],
+                    robot_state[field],
+                )
         assert robot_state["holding"] is None or robot_state["gripper_mm"] == GRIPPER_CLOSED_MM, (
             script.episode_id,
             t,
@@ -1384,7 +1416,6 @@ def _build_episode(script: EpisodeScript) -> dict:
         near_fragile = any(
             obj.fragile and _distance_mm(ee, poses[obj.id]) < 260 for obj in script.objects
         )
-        stop = t in script.stop_ticks
         # 마지막 구간에 들어오면 목표를 달성한 것이다 (그 전 무-commitment 구간은 에피소드 시작).
         done = t >= script.segments[-1].start
         observe = geom_age_ms >= STALE_OBSERVE_MS or t in script.observe_adopt_ticks
@@ -1498,13 +1529,14 @@ def _build_episode(script: EpisodeScript) -> dict:
                 "zone": script.zone,
                 "keyframes": list(script.keyframes),
                 "switch_ticks": switch_ticks,
-                "gripper_transition_ticks": sorted(gripper_switch_ticks),
+                "commanded_gripper_transition_ticks": sorted(gripper_switch_ticks),
+                "observed_gripper_close_ticks": observed_close_ticks,
                 "stop_ticks": list(script.stop_ticks),
                 "contrast_pair": (
                     [script.contrast_at, script.contrast_at + 1] if script.contrast_at is not None else []
                 ),
                 "instruction_versions": [instruction["version"] for instruction in script.instructions],
-                "notes": script.notes,
+                "notes": [*script.notes, GRIPPER_MARK_NOTE],
             },
         },
         "evidence": evidence,
@@ -1772,7 +1804,9 @@ def build_all(out_dir: Path) -> dict:
         },
         "review_note": (
             "사람 검수 전이다. 검수자는 두 파일을 읽고 이름·날짜를 reviewed_by에 추가한다. "
-            "각 에피소드의 provenance.marks에 키프레임·전환·정지·대조 쌍 틱이 적혀 있다."
+            "각 에피소드의 provenance.marks에 키프레임·전환·정지·대조 쌍 틱이 적혀 있다. "
+            "marks의 commanded_gripper_transition_ticks는 명령이고 "
+            "observed_gripper_close_ticks는 관측(state.robot.gripper_mm)이라 서로 어긋난다."
         ),
         "reviewed_by": [],
     }

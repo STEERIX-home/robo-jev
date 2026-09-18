@@ -27,8 +27,8 @@
       "labels_answering_not_applicable": 2
     },
     "d0_streams.jsonl": {
-      "sha256": "b8d6b32ecf0621a980acca15f4f101f7666d1e2e85acace2963ed2538459f52f",
-      "bytes": 1508651,
+      "sha256": "e44db9f9eb7c4dc17f5db5931a6a81d941a4824935716191f5a8ee6ecdcb0595",
+      "bytes": 1510434,
       "records": 4,
       "ticks": 400,
       "questions": 4000,
@@ -42,6 +42,6 @@
       "ticks_with_adopted_switch": 11
     }
   },
-  "review_note": "사람 검수 전이다. 검수자는 두 파일을 읽고 이름·날짜를 reviewed_by에 추가한다. 각 에피소드의 provenance.marks에 키프레임·전환·정지·대조 쌍 틱이 적혀 있다.",
+  "review_note": "사람 검수 전이다. 검수자는 두 파일을 읽고 이름·날짜를 reviewed_by에 추가한다. 각 에피소드의 provenance.marks에 키프레임·전환·정지·대조 쌍 틱이 적혀 있다. marks의 commanded_gripper_transition_ticks는 명령이고 observed_gripper_close_ticks는 관측(state.robot.gripper_mm)이라 서로 어긋난다.",
   "reviewed_by": []
 }

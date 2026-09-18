@@ -198,7 +198,7 @@ def test_stream_gripper_transitions_allow_two_states(streams):
     two_state = 0
     single_answer = 0
     for record in streams:
-        transitions = record["provenance"]["marks"]["gripper_transition_ticks"]
+        transitions = record["provenance"]["marks"]["commanded_gripper_transition_ticks"]
         window = {t for switch in transitions for t in (switch - 1, switch, switch + 1)}
         for tick in record["ticks"]:
             for label in tick["labels"]:
@@ -280,6 +280,53 @@ def test_stream_holding_implies_a_closed_gripper(streams):
                 tick["t"],
                 robot,
             )
+
+
+def test_stream_stop_ticks_freeze_the_robot(streams):
+    """정지가 참인 틱에는 말단·파지·그리퍼가 직전 틱과 같다 (docs/08 §5.1·§6)."""
+    stopped = 0
+    for record in streams:
+        for previous, tick in zip(record["ticks"], record["ticks"][1:]):
+            if not tick["adopted"].get("stop"):
+                continue
+            stopped += 1
+            before = previous["request"]["state"]["robot"]
+            now = tick["request"]["state"]["robot"]
+            for field in ("ee_pose_mm", "holding", "gripper_mm"):
+                assert now[field] == before[field], (
+                    record["episode_id"],
+                    tick["t"],
+                    field,
+                    before[field],
+                    now[field],
+                )
+            assert now["speed_mm_s"] == 0, (record["episode_id"], tick["t"], now)
+    assert stopped >= 3
+
+
+def test_stream_marks_separate_commanded_and_observed_gripper(streams):
+    """marks는 명령 전환과 관측 닫힘을 따로 적는다 (사람 검수가 marks만 읽는다)."""
+    builder = load_builder()
+    for record in streams:
+        marks = record["provenance"]["marks"]
+        assert "gripper_transition_ticks" not in marks, record["episode_id"]
+        ticks = record["ticks"]
+        closed = [
+            tick["t"]
+            for previous, tick in zip([None, *ticks], ticks)
+            if tick["request"]["state"]["robot"]["gripper_mm"] == builder.GRIPPER_CLOSED_MM
+            and (
+                previous is None
+                or previous["request"]["state"]["robot"]["gripper_mm"] != builder.GRIPPER_CLOSED_MM
+            )
+        ]
+        assert marks["observed_gripper_close_ticks"] == closed, record["episode_id"]
+        commanded = marks["commanded_gripper_transition_ticks"]
+        assert all(isinstance(t, int) for t in commanded), record["episode_id"]
+        # 명령과 관측은 어긋난다: 말단이 물체에 닿아야 관측 그리퍼가 닫힌다.
+        if closed:
+            assert closed != commanded, record["episode_id"]
+            assert min(closed) > min(commanded), record["episode_id"]
 
 
 def test_stream_closed_gripper_implies_it_can_hold(streams):

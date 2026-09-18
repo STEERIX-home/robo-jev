@@ -522,10 +522,11 @@ def _validate_single_request(record: dict) -> None:
 def _validate_prefix(prefix: Any) -> None:
     """`prefix`도 모델 입력이므로 `request`와 똑같이 재귀 검사 + 허용 목록을 쓴다."""
     _need_dict(prefix, "prefix")
-    _scan_input_area(prefix, "prefix", forbidden_keys=FORBIDDEN_REQUEST_KEYS)
+    # 순서는 `_check_request_fields`와 같다: 허용 목록 먼저, 그다음 재귀 검사.
     for key in prefix:
         if key not in _PREFIX_FIELDS:
             _fail(f"prefix.{key}", f"prefix의 허용 필드가 아니다 (허용: {list(_PREFIX_FIELDS)})")
+    _scan_input_area(prefix, "prefix", forbidden_keys=FORBIDDEN_REQUEST_KEYS)
     _need_str(prefix.get("question_set"), "prefix.question_set")
     instructions = _need_list(prefix.get("instructions"), "prefix.instructions", allow_empty=False)
     previous_version = None

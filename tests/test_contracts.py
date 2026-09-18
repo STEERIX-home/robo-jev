@@ -641,7 +641,10 @@ def test_unknown_prefix_field_is_rejected():
         validate_record(record)
 
 
-@pytest.mark.parametrize("field", FORBIDDEN_REQUEST_KEYS)
+@pytest.mark.parametrize(
+    "field",
+    ["labels", "provenance", "evidence", "split", "usage", "model_output", "adopted", "ack", "origin_group", "versions", "true_state", "occluded_true_poses"],
+)
 def test_non_input_field_inside_prefix_instructions_is_rejected(field):
     """prefix도 모델 입력이다: 지시 안에 비입력 필드를 숨길 수 없다."""
     record = stream_record()
@@ -650,7 +653,10 @@ def test_non_input_field_inside_prefix_instructions_is_rejected(field):
         validate_record(record)
 
 
-@pytest.mark.parametrize("field", FORBIDDEN_REQUEST_KEYS)
+@pytest.mark.parametrize(
+    "field",
+    ["labels", "provenance", "evidence", "split", "usage", "model_output", "adopted", "ack", "origin_group", "versions", "true_state", "occluded_true_poses"],
+)
 def test_non_input_field_inside_prefix_is_rejected(field):
     record = stream_record()
     record["prefix"][field] = {"future_success": True}
