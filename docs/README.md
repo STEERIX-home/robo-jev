@@ -33,7 +33,7 @@
 
 ## 구현 상태 (2026-09-19)
 
-브랜치 `task-1-contracts`(모델 CPU 경로 merge 완료). 전체 검사 868 passed + 1 strict xfail(E1 seed 29 — 후보 상한이 지시된 대상×영역 파지를 떨어뜨림, 아래 결정 대기). 아래는 "검증된 것"만 적는다.
+브랜치 `task-1-contracts`(모델 CPU 경로 merge 완료). 전체 검사 885 passed + 1 strict xfail(E1 seed 29 — 후보 상한이 지시된 대상×영역 파지를 떨어뜨림, 아래 결정 대기). 아래는 "검증된 것"만 적는다.
 
 | Task | 구현 | 단위 검증 | 폐루프 인수 | 학습 실측 |
 | --- | --- | --- | --- | --- |
@@ -41,12 +41,12 @@
 | 2 비로봇 생성기·split·QA | 완료 | 완료(2,000건 재생성 QA 오류 0; 사람 검수 미완; holdout 목록 비어 있음) | — | — |
 | 3a 시뮬레이터·컨트롤러(E0/E1) | 완료 | 완료 | E0 통과(시점 `[600,0,700]`, 영역 좌표계·조기 파지·밀기 접촉 자세 수정) · E1은 전문가 폐루프로 3 seed 통과 | — |
 | 3b 로봇 스트림 하네스·규칙 판단기 | 완료 | 완료(리뷰 10 I1~I6 회귀 검사 포함) | E0 통과(규칙 판단기만으로 seed 17/29/43/5/7/11/101 완료) | — |
-| 3c 스크립트 전문가·에피소드·rollout·DAgger | 완료 | 완료 | E0 4 seed + E1 3 seed 완료(E1 seed 29 xfail). 첫 40 에피소드: E0 19/20·E1 16/20 완료, 2,585 ep/h, 1.33 MB/ep. 첫 100 rollout: 0.345 s/rollout → D1 128k ≈ 12.3 CPU-h(8 worker ≈ 2.9 h). **128k rollout은 후보 공간 결정 전까지 보류** | — |
+| 3c 스크립트 전문가·에피소드·rollout·DAgger | 완료 | 완료 | E0 4 seed + E1 3 seed 완료(E1 seed 29 xfail). 첫 40 에피소드(마지막 재생성, h0.3): E0 20/20·E1 17/20 완료, 2,708 ep/h, 1.28 MB/ep. 첫 100 rollout: 0.345 s/rollout → D1 128k ≈ 12.3 CPU-h(8 worker ≈ 2.9 h). **128k rollout은 후보 공간 결정 전까지 보류** | — |
 | 4 모델(CPU 부분: 직렬화·mask·손실·소형 hybrid·StreamState·pointer Judge) | 완료 | 완료(실제 tokenizer; 증분=처음부터 계산 FP32/float64 일치; 분기 격리 비트 동일; 세 계획 검사 원문 통과) | — | B2 토큰 실측(h0.3): prefix 382~385, 틱당 1,764~3,469(물체 6·K12 → 10·K32) — **08 §3.4 추정 450~700 불성립**, 서식 축약+변화분 틱이 전제 |
-| 5 학습(CPU 부분: step·TBPTT·혼합 sampler·atomic checkpoint·재개) | 완료 | 완료(20 step 연속 vs 10+프로세스 재시작+10 비트 동일; step마다 로봇·비로봇 둘 다, 손실 0.6/0.4 고정) | — | **D0 fixture로만 검증**. GPU/FSDP/BF16 미착수 |
+| 5 학습(CPU 부분: step·TBPTT·혼합 sampler·atomic checkpoint·재개) | 완료 | 완료(20 step 연속 vs 10+프로세스 재시작+10 비트 동일; step마다 로봇·비로봇 둘 다, 손실 0.6/0.4 고정) | — | **D0 fixture + 생성한 2 에피소드 로봇 batch(`dataset_manifests`)로만 검증**. GPU/FSDP/BF16 미착수 |
 | 2b backbone 게이트 · 6 평가 | 미착수(GPU 필요; 지연 게이트는 배포급 장비(DGX Spark/Jetson)에서 잰다) | | | |
 
-**데이터 품질에서 알려진 것(결정 대기).** 첫 40 에피소드 배치에서 E1 틱의 44%(전체의 28%)가 후보 상한 때문에 `hold`를 낮은 신뢰도로 라벨한 퇴화 틱이다(690 `not_executable`, 435 `goal_candidate_missing`): `profile` 2개 × push 4방향으로 거의 모든 장면이 K=32 상한에 걸린다. 비키프레임 `q_main` 라벨은 현재 전부 단일 답(허용 집합 없음)이라 같은 대상·영역의 profile 변형이 열등으로 학습된다. 두 항목의 처리(결합 키에서 profile 제거·push 방향 축소·목표 관련성 선필터; 비키프레임 허용 집합 또는 08 §7 문구 수정)는 D1 생성 전에 정한다.
+**데이터 품질에서 알려진 것(결정 대기).** 첫 40 에피소드 배치에서 E1 틱의 44%(전체의 28%)가 후보 상한 때문에 `hold`를 낮은 신뢰도로 라벨한 퇴화 틱이다(690 `not_executable`, 435 `goal_candidate_missing`): `profile` 2개 × push 4방향으로 거의 모든 장면이 K=32 상한에 걸린다. 비키프레임 `q_main` 라벨은 현재 전부 단일 답(허용 집합 없음)이라 같은 대상·영역의 profile 변형이 열등으로 학습된다. 임시 완화로 낮은 신뢰도 라벨은 `labels.low_confidence_weight: 0.25`로 학습 가중치를 내리고, 규칙 라벨 틱은 rollout이 뒤집지 않는다. 두 항목의 처리(결합 키에서 profile 제거·push 방향 축소·목표 관련성 선필터; 비키프레임 허용 집합 또는 08 §7 문구 수정)는 D1 생성 전에 정한다.
 
 모델 선정은 2026-09-18 공식 최신 계열 확인 후 수정했다. 기존 Qwen3-14B→32B 기본안은 사용하지 않는다. Qwen3.8-27B는 첫 후보이자 품질 기준으로 유지하되, 본 실험 backbone은 지연 예산의 실측 뒤 확정한다. 선정 절차, 후보, hybrid 구조의 구현 조건은 [모델 설계](03-model-and-training-design.md)에 기록한다.
 
