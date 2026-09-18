@@ -206,7 +206,7 @@ def test_snapshot_restores_controller_and_rng():
 
 ### Task 4: Hybrid 상태 분기·스트림 상태·readout과 학습 loss
 
-**Files:** `model/serialize.py`, `model/attention.py`, `model/hybrid.py`, `model/stream.py`, `model/judge.py`, `loss.py`, `tests/test_attention.py`, `tests/test_hybrid.py`, `tests/test_stream.py`, `tests/test_loss.py`.
+**Files:** `model/serialize.py`, `model/tokenizer.py`, `model/attention.py`, `model/hybrid.py`, `model/stream.py`, `model/judge.py`, `loss.py`, `configs/model/tiny_hybrid.yaml`, `scripts/fetch_tokenizer.py`, `scripts/measure_tokens.py`, `tests/test_serialize.py`, `tests/test_attention.py`, `tests/test_hybrid.py`, `tests/test_stream.py`, `tests/test_judge.py`, `tests/test_loss.py`, `tests/test_measure_tokens.py`.
 
 **Interfaces:** `serialize_request(request: dict, tokenizer, layout: str = "state_first") -> dict`는 알려진 토큰·구간 ID·논리적 분기·local position·후보 경계 index·결정 위치 index·candidate mapping을 반환한다. `layout`은 상태 선행 `state_first`(L0)와 스트림 `stream_l1a`를 지원하며 스트림에서는 prefix 경계와 틱 경계도 반환한다. `StreamState.fork(n: int) -> list[StreamState]`는 결정 분기용 일시 상태를 만들고, `StreamState.advance(tokens) -> StreamState`는 분기 이전 공통 상태에 다음 틱 토큰을 이어 붙이며, 윈도우(정적 prefix + 30틱) 밖의 KV를 내보낸다. `build_reference_mask(layout: dict) -> Tensor`는 full-attention 층의 query×key 허용 행렬이다. `fork_delta_state(state: dict, branches: int) -> list[dict]`는 한 층의 `recurrent`·`conv` tensor를 분기하되 gradient 연결을 유지한다. `Judge.forward(batch: dict) -> dict`는 질문별 logits를 반환하며, `judgment_loss(outputs: dict, labels: dict) -> Tensor`는 상태 평균 loss를 반환한다.
 
