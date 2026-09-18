@@ -11,6 +11,13 @@ dependencies = [
     "mujoco>=3.3,<3.10",
     "pyyaml>=6.0.3",
     "robosuite>=1.5.2,<1.6",
+    # 모델 계약의 CPU 검증(Task 4a): 기준 mask·손실은 torch, 토큰 실측은 backbone의
+    # 실제 tokenizer(`tokenizers` + `huggingface_hub`로 `tokenizer.json`만 받는다,
+    # `transformers`는 넣지 않는다). torch는 lock이 고른 CPU wheel의 정확한 버전으로
+    # 고정한다 — 수치 검사의 기준이 되는 버전을 조용히 바꾸지 않기 위해서다.
+    "torch==2.14.0",
+    "tokenizers>=0.23.2",
+    "huggingface-hub>=1.32.0",
 ]
 
 [dependency-groups]
