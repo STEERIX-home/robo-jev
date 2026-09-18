@@ -27,3 +27,4 @@ attention:           # full attention 1층, 명시적 mask(build_reference_mask)
 
 readout:
   rank: 16           # pointer readout z = (U h_d)ᵀ(V h_c)/√r + b 의 r (docs/03 §3)
+  mode: pointer      # 주 경로. `candidate_branch` = 참고군 R(후보별 분기 + scalar readout, docs/03 §3)

@@ -304,11 +304,16 @@ def _resolve_window(layout: dict, backbone: TinyHybrid, window_ticks: Any) -> in
 
 
 def forward_layout(
-    layout: dict, *, backbone: TinyHybrid | None = None, window_ticks: Any = LAYOUT_WINDOW
-) -> Tensor:
+    layout: dict,
+    *,
+    backbone: TinyHybrid | None = None,
+    window_ticks: Any = LAYOUT_WINDOW,
+    return_layers: bool = False,
+) -> Any:
     """처음부터 한 번의 forward: 기준 mask + 결정 토큰 transient. ``[n, d]`` hidden state.
 
-    ``window_ticks=None``은 절단 없음(윈도우 절단 차이를 재는 기준)이다.
+    ``window_ticks=None``은 절단 없음(윈도우 절단 차이를 재는 기준)이다. ``return_layers``면
+    ``(hidden, [층별 출력 [n, d] …])``를 돌려준다(어느 층에서 차이가 나는지 볼 때).
     """
     backbone = default_backbone() if backbone is None else backbone
     window = _resolve_window(layout, backbone, window_ticks)
@@ -320,6 +325,8 @@ def forward_layout(
     positions = torch.tensor([layout["position"]], dtype=torch.long)
     transient = torch.tensor([kind == "decision" for kind in layout["kind"]], dtype=torch.bool)
     out = backbone(tokens, positions, mask=mask, transient=transient)
+    if return_layers:
+        return out["hidden"][0], [layer[0] for layer in out["layer_hidden"]]
     return out["hidden"][0]
 
 
@@ -339,13 +346,16 @@ def replay_layout(
     window_ticks: Any = LAYOUT_WINDOW,
     initial: list[dict[str, Tensor]] | None = None,
     state: StreamState | None = None,
+    start_tick: int = 0,
 ) -> dict[str, Any]:
     """직렬화된 스트림 layout을 증분으로 재생한다.
 
     prefix(``tokens[:prefix_end]``)를 읽고 틱마다 몸통을 ``advance``한 뒤 결정 토큰마다 ``fork``/``step``
     한다. 돌려주는 것: ``hidden [n, d]``(모든 토큰; 결정 토큰은 분기의 값), ``final``(마지막 틱의
-    분기 이전 공통 상태), ``tick_states``(틱마다 그 공통 상태), ``branch_hidden``(틱마다 결정 index →
-    hidden). ``state``를 주면 prefix를 다시 읽지 않고 거기서 이어간다(구간 이어 붙이기).
+    분기 이전 공통 상태), ``tick_states``(재생한 틱마다 그 공통 상태), ``branch_hidden``(틱마다 결정
+    index → hidden), ``start_tick``. ``state``를 주면 prefix를 다시 읽지 않고 거기서 이어가며,
+    ``start_tick``부터 재생한다(앞 틱은 그 상태가 이미 읽은 것으로 보고 hidden 행은 0이다) — 구간을
+    이어 붙이는 학습(truncated BPTT)의 근거다.
     """
     backbone = default_backbone() if backbone is None else backbone
     window = _resolve_window(layout, backbone, window_ticks)
@@ -355,12 +365,16 @@ def replay_layout(
     prefix_end = int(layout["prefix_end"])
     pieces: list[Tensor] = []
     if state is None:
+        if start_tick:
+            raise ValueError("start_tick: 앞 틱을 이미 읽은 state와 함께만 쓸 수 있다")
         state = StreamState.initial(backbone, window_ticks=window, initial=initial)
         if prefix_end:
             _check_position(layout, 0, state.position)
             state = state.extend_prefix(tokens[:prefix_end])
     elif state.is_branch:
         raise ValueError("state: 분기 상태에서는 재생을 이어갈 수 없다")
+    elif state.tick != start_tick - 1:
+        raise ValueError(f"start_tick: state는 틱 {state.tick}까지 읽었으니 {state.tick + 1}부터 이어가야 한다 (받은 값: {start_tick})")
     if prefix_end:
         if state.prefix_hidden is None or state.prefix_hidden.shape[0] < prefix_end:
             raise ValueError("state: 이 layout의 prefix를 이미 읽은 상태여야 한다")
@@ -372,6 +386,10 @@ def replay_layout(
         start, body_end, end = int(tick["start"]), int(tick["body_end"]), int(tick["end"])
         if start != cursor:
             raise ValueError(f"ticks[{tick.get('index')}].start: {start} — 토큰 {cursor}부터 이어져야 한다")
+        if int(tick["index"]) < start_tick:
+            pieces.append(torch.zeros(end - start, backbone.config.d_model, dtype=state.prefix_hidden.dtype if state.prefix_hidden is not None else torch.float32))
+            cursor = end
+            continue
         _check_position(layout, start, state.position)
         state = state.advance(tokens[start:body_end])
         tick_states.append(state)
@@ -388,4 +406,10 @@ def replay_layout(
     if cursor != len(tokens):
         raise ValueError(f"ticks: 토큰 {cursor}까지만 틱에 속한다 (전체 {len(tokens)})")
     hidden = torch.cat(pieces) if pieces else torch.zeros(0, backbone.config.d_model)
-    return {"hidden": hidden, "final": state, "tick_states": tick_states, "branch_hidden": branch_hidden}
+    return {
+        "hidden": hidden,
+        "final": state,
+        "tick_states": tick_states,
+        "branch_hidden": branch_hidden,
+        "start_tick": int(start_tick),
+    }

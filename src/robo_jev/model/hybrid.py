@@ -102,8 +102,10 @@ class RMSNorm(nn.Module):
         self.weight = nn.Parameter(torch.ones(dim))
 
     def forward(self, x: Tensor) -> Tensor:
-        variance = x.float().pow(2).mean(dim=-1, keepdim=True)
-        return (x * torch.rsqrt(variance + self.eps)) * self.weight
+        # 반정밀도는 float32로 올려 계산하고 float64는 그대로 둔다 (float64 정확성 검사의 근거).
+        wide = x.to(torch.promote_types(x.dtype, torch.float32))
+        variance = wide.pow(2).mean(dim=-1, keepdim=True)
+        return (wide * torch.rsqrt(variance + self.eps)).to(x.dtype) * self.weight
 
 
 def causal_mask(length: int, cache: int = 0) -> Tensor:
@@ -280,12 +282,13 @@ class GatedDeltaNetLayer(nn.Module):
 # --------------------------------------------------------------------------
 
 
-def _rope(positions: Tensor, head_dim: int, theta: float) -> tuple[Tensor, Tensor]:
+def _rope(positions: Tensor, head_dim: int, theta: float, dtype: torch.dtype) -> tuple[Tensor, Tensor]:
     half = head_dim // 2
-    inv_freq = theta ** (-torch.arange(0, half, dtype=torch.float32) / half)
-    angles = positions.to(torch.float32)[..., None] * inv_freq  # [B, T, half]
+    wide = torch.promote_types(dtype, torch.float32)
+    inv_freq = theta ** (-torch.arange(0, half, dtype=wide) / half)
+    angles = positions.to(wide)[..., None] * inv_freq  # [B, T, half]
     emb = torch.cat([angles, angles], dim=-1)
-    return emb.cos()[:, :, None, :], emb.sin()[:, :, None, :]  # [B, T, 1, hd]
+    return emb.cos().to(dtype)[:, :, None, :], emb.sin().to(dtype)[:, :, None, :]  # [B, T, 1, hd]
 
 
 def _rotate_half(x: Tensor) -> Tensor:
@@ -320,7 +323,7 @@ class WindowedAttentionLayer(nn.Module):
         q = self.q_proj(x).reshape(B, T, H, hd)
         k = self.k_proj(x).reshape(B, T, H, hd)
         v = self.v_proj(x).reshape(B, T, H, hd)
-        cos, sin = _rope(positions.reshape(B, T), hd, self.theta)
+        cos, sin = _rope(positions.reshape(B, T), hd, self.theta, q.dtype)
         q = q * cos + _rotate_half(q) * sin
         k = k * cos + _rotate_half(k) * sin
 
@@ -378,6 +381,7 @@ class HybridConfig:
     deltanet: DeltaNetConfig = DeltaNetConfig()
     attention: AttentionConfig = AttentionConfig()
     readout_rank: int = 16
+    readout_mode: str = "pointer"
 
     @classmethod
     def from_dict(cls, raw: dict) -> HybridConfig:
@@ -401,6 +405,7 @@ class HybridConfig:
                 }
             ),
             readout_rank=int((raw.get("readout") or {}).get("rank", cls.readout_rank)),
+            readout_mode=str((raw.get("readout") or {}).get("mode", cls.readout_mode)),
         )
 
     @classmethod

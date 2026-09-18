@@ -78,7 +78,8 @@ def label_loss(
         raise ValueError(
             f"{path}: logits 길이 {tuple(logits.shape)}와 candidates 길이 {len(candidates)}가 다르다"
         )
-    z = logits.float()
+    # FP32 loss (docs/03 §5): 반정밀도 logits는 float32로 올리고, float64는 그대로 둔다(정확성 검사용).
+    z = logits.to(torch.promote_types(logits.dtype, torch.float32))
     everything = list(range(len(candidates)))
 
     if kind == "valid_set":

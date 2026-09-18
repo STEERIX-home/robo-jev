@@ -324,8 +324,32 @@ def _last_index(segment: dict[str, Any]) -> int:
 # --------------------------------------------------------------------------
 
 
+def _markers_for(question_ids: list[str], override: dict[str, str] | None) -> list[str]:
+    """질문 i의 결정 표지: 기본은 순서대로 ``DECISION_MARKERS[i]``, ``override``가 그 질문을 말하면 그것.
+
+    override는 요청의 일부(질문 하나)를 다시 직렬화할 때 표지를 전체 요청의 것으로 고정하는 데 쓴다
+    (P0의 질문별 microbatch, docs/03 §5) — 표지는 예약 토큰 집합 안이어야 한다.
+    """
+    markers: list[str] = []
+    for branch, question_id in enumerate(question_ids):
+        marker = DECISION_MARKERS[branch]
+        if override and question_id in override:
+            marker = override[question_id]
+            if marker not in DECISION_MARKERS:
+                raise ValueError(
+                    f"decision_markers.{question_id}: 예약 토큰 {DECISION_MARKERS[0]}~{DECISION_MARKERS[-1]} 중 하나여야 한다 (받은 값: {marker!r})"
+                )
+        markers.append(marker)
+    return markers
+
+
 def _serialize_state_first(
-    projected: dict, tokenizer: Any, *, max_state_tokens: int | None, max_total_tokens: int | None
+    projected: dict,
+    tokenizer: Any,
+    *,
+    max_state_tokens: int | None,
+    max_total_tokens: int | None,
+    decision_markers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     request = projected["request"]
     questions = request["questions"]
@@ -334,10 +358,11 @@ def _serialize_state_first(
             f"request.questions: 결정 위치 예약 토큰은 {len(DECISION_MARKERS)}개다 "
             f"(질문 {len(questions)}개)"
         )
+    markers = _markers_for([spec["id"] for spec in questions], decision_markers)
 
     chunks = [_Chunk("[state]\n" + "\n".join(state_lines(request["state"])) + "\n", "state", "state")]
     for branch, spec in enumerate(questions):
-        marker = DECISION_MARKERS[branch]
+        marker = markers[branch]
         question_id = spec["id"]
         chunks.append(
             _Chunk(
@@ -394,9 +419,7 @@ def _serialize_state_first(
             },
             "candidate_boundaries": boundaries,
             "decision_positions": decisions,
-            "decision_markers": {
-                spec["id"]: DECISION_MARKERS[branch] for branch, spec in enumerate(questions)
-            },
+            "decision_markers": {spec["id"]: markers[branch] for branch, spec in enumerate(questions)},
         }
     )
     return out
@@ -669,13 +692,16 @@ def serialize_request(
     max_state_tokens: int | None = 2048,
     max_total_tokens: int | None = 8192,
     window_ticks: int = WINDOW_TICKS,
+    decision_markers: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """레코드 → 토큰·구간·분기·position (모듈 설명 참조).
 
     `request`는 `judgment-v0`(``state_first``) 또는 `stream-v0`(``stream_l1a``) 레코드다. 계약
     검사를 먼저 돌리므로 입력 영역의 비입력 키·라벨 구조는 경로가 붙은 `ValueError`로 거절되고,
     입력 영역 밖의 라벨·근거는 투영에서 빠져 결과에 영향을 주지 않는다. `max_*`는 L0 프로파일의
-    상한(docs/06 Global Constraints)이며 넘으면 자르지 않고 오류다.
+    상한(docs/06 Global Constraints)이며 넘으면 자르지 않고 오류다. `decision_markers`(``state_first``)
+    는 질문 id → 결정 표지의 고정값이다: 요청의 일부를 다시 직렬화할 때(P0의 질문별 microbatch)
+    표지가 요청 순서에 따라 바뀌지 않게 전체 요청의 표지를 넘긴다. 기본은 순서대로 ``A, B, C …``다.
     """
     if layout not in LAYOUTS:
         raise ValueError(f"layout: {list(LAYOUTS)} 중 하나여야 한다 (받은 값: {layout!r})")
@@ -689,8 +715,14 @@ def serialize_request(
         )
     if layout == "state_first":
         return _serialize_state_first(
-            projected, tokenizer, max_state_tokens=max_state_tokens, max_total_tokens=max_total_tokens
+            projected,
+            tokenizer,
+            max_state_tokens=max_state_tokens,
+            max_total_tokens=max_total_tokens,
+            decision_markers=decision_markers,
         )
+    if decision_markers:
+        raise ValueError("decision_markers: 스트림의 표지는 질문 세트 순서로 고정이라 덮어쓸 수 없다")
     if window_ticks < 1:
         raise ValueError(f"window_ticks: 1 이상이어야 한다 (받은 값: {window_ticks})")
     return _serialize_stream(projected, tokenizer, window_ticks=window_ticks)

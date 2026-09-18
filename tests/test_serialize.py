@@ -251,6 +251,31 @@ def test_state_first_rejects_oversized_requests(single, tokenizer):
     serialize_request(single, tokenizer, max_state_tokens=None, max_total_tokens=None)
 
 
+def test_decision_markers_can_be_pinned_when_reserializing_part_of_a_request(three_questions, tokenizer):
+    """요청의 일부(질문 하나)를 다시 직렬화해도 표지는 전체 요청의 것으로 고정할 수 있다 (P0 microbatch)."""
+    whole = serialize_request(three_questions, tokenizer)
+    second = copy.deepcopy(three_questions)
+    second["request"]["questions"] = [second["request"]["questions"][1]]
+    second["labels"] = [l for l in second["labels"] if l["question_id"] == second["request"]["questions"][0]["id"]]
+    second["usage"]["questions_used"] = [second["request"]["questions"][0]["id"]]
+    question_id = second["request"]["questions"][0]["id"]
+    default = serialize_request(second, tokenizer)
+    assert default["decision_markers"][question_id] == DECISION_MARKERS[0]  # 기본은 요청 순서
+    pinned = serialize_request(second, tokenizer, decision_markers=whole["decision_markers"])
+    assert pinned["decision_markers"][question_id] == whole["decision_markers"][question_id] == DECISION_MARKERS[1]
+    # T_i의 토큰이 전체 요청 안의 것과 정확히 같다
+    header = next(s for s in whole["segments"] if s["name"] == f"question:{question_id}")
+    t_i = whole["tokens"][header["start"] : whole["decision_positions"][question_id] + 1]
+    assert pinned["tokens"][pinned["state_end"] :] == t_i
+    with pytest.raises(ValueError, match="decision_markers"):
+        serialize_request(second, tokenizer, decision_markers={question_id: "a"})
+
+
+def test_decision_markers_cannot_override_the_streams_fixed_order(stream, tokenizer):
+    with pytest.raises(ValueError, match="decision_markers"):
+        serialize_request(stream, tokenizer, layout="stream_l1a", decision_markers={"q_main": "B"})
+
+
 def test_too_many_questions_for_the_reserved_markers_is_an_error(single, tokenizer):
     question = single["request"]["questions"][0]
     single["request"]["questions"] = [
