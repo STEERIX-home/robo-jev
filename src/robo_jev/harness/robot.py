@@ -500,7 +500,10 @@ class RobotHarness:
         if not (self._reachable(approach_mm) and self._reachable(action_mm)):
             return None
 
-        phase, target_mm = self._phase_target(function, object_id, entry, approach_mm, action_mm, state)
+        key = f"{function}:{object_id}:{approach}:{destination}:{profile}"
+        phase, target_mm = self._phase_target(
+            function, object_id, entry, approach_mm, action_mm, state, action_ref=candidate_id(key)
+        )
         if not self._reachable(target_mm):
             return None
 
@@ -520,7 +523,7 @@ class RobotHarness:
             default=float(state["scene"].get("clearance_mm", 0.0)),
         )
         return _Candidate(
-            key=f"{function}:{object_id}:{approach}:{destination}:{profile}",
+            key=key,
             function=function,
             target_ref=object_id,
             approach=approach,
@@ -683,16 +686,19 @@ class RobotHarness:
         approach_mm: list[float],
         action_mm: list[float],
         state: dict[str, Any],
+        action_ref: str | None = None,
     ) -> tuple[str, list[float]]:
         """이 후보를 지금 실행하면 어느 국면이고 어디로 가는가 (docs/08 §3.2 `commitment`, §5.6).
 
-        관측으로만 정한다: 무엇을 들고 있는가, 말단이 어디인가. 국면별 목표점은
-        approach → 접근점, grasp → 파지점, lift → 현재 XY에서 이동 높이, transport → 목적지
-        위 접근점(이동 높이), place → 놓기점, push → 접촉점 뒤 밀기 구간이다.
+        관측으로만 정한다: 무엇을 들고 있는가, 말단이 어디인가, 실행기가 지금 무엇을 어느 국면으로
+        실행 중인가(상태의 `exec`). 국면별 목표점은 approach → 접근점, grasp → 파지점, lift → 현재
+        XY에서 이동 높이, transport → 목적지 위 접근점(이동 높이), place → 놓기점, push → 접촉점 뒤
+        밀기 구간이다.
         """
         spec = self.phases_config
         ee = [float(value) for value in state["robot"]["ee_pose_mm"]]
         holding = state["robot"].get("holding")
+        executing = state.get("exec") or {}
 
         if function == "push":
             if math.dist(ee, approach_mm) <= float(spec["push_contact_mm"]):
@@ -705,8 +711,22 @@ class RobotHarness:
             if ee[2] < transport_z - float(spec["height_tolerance_mm"]):
                 return "lift", [ee[0], ee[1], max(ee[2], transport_z)]
             return "transport", [approach_mm[0], approach_mm[1], max(ee[2], transport_z)]
+        # 파지 국면에 **들어가는** 조건은 파지점에 가깝고 xy가 정렬된 것이다. 접근점과 파지점은 언제나
+        # 70mm(접근 여유 + 파지 깊이) 떨어져 있어 거리 조건만으로는 xy가 벗어난 채 대각선으로 내려온다
+        # (키 큰 원통에서 패드가 윗면 모서리를 누른다 — 3c-1 E0 seed 101). 이미 이 후보의 파지 국면을
+        # 실행 중이면 거리 조건만 본다 — 하강 초기의 가로 흔들림(임피던스 전환·관성)이 xy 허용 오차를
+        # 잠깐 넘겨도 접근점으로 되돌아가지 않는다(파지점의 xy가 대상이므로 하강하며 바로잡힌다).
         if math.dist(ee, action_mm) <= float(spec["grasp_distance_mm"]):
-            return "grasp", list(action_mm)
+            already = (
+                action_ref is not None
+                and executing.get("phase") == "grasp"
+                and executing.get("action_ref") == action_ref
+            )
+            aligned = math.dist(ee[:2], action_mm[:2]) <= float(spec["grasp_xy_tolerance_mm"])
+            # 접근의 관성을 안고 내려가지 않는다: 말단이 접근점에서 멈춘 뒤에 하강한다.
+            settled = float(state["robot"].get("speed_mm_s") or 0.0) <= float(spec["grasp_entry_speed_mm_s"])
+            if already or (aligned and settled):
+                return "grasp", list(action_mm)
         return "approach", list(approach_mm)
 
     def _transport_height(

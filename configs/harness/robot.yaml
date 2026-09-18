@@ -165,6 +165,13 @@ compose:
 # `lift_height_mm`만큼 든 높이). 들고 있는 물체의 바닥이 작업면 위 물체(≤80mm)를 넘는다.
 phases:
   grasp_distance_mm: 80      # 파지점에 이만큼 들어오면 approach → grasp
+  # …단, xy도 파지점에 이만큼 정렬돼 있어야 한다. 접근점(윗면+60)과 파지점(윗면−10)은 어떤 물체든 70mm
+  # 떨어져 있어 거리 조건만으로는 xy가 최대 38mm 벗어난 채 파지 국면에 들어가고, 키 큰 원통에서는 그
+  # 대각선 하강이 손가락 패드로 윗면 모서리를 누른다(3c-1 E0 seed 101, 접촉력 58~67N).
+  grasp_xy_tolerance_mm: 10
+  # …그리고 말단이 접근점에서 멈춰야 한다. 80mm 경계는 접근점보다 10mm 위라 접근 속도(2단계)를 안은 채
+  # 넘어오며, 그 가로 관성이 하강 첫 200ms에 20~30mm를 흘려 좁은 원통의 테두리를 짚는다.
+  grasp_entry_speed_mm_s: 60
   lift_height_mm: 120        # 파지점에서 이만큼 올린 높이가 이동 높이
   height_tolerance_mm: 15    # 이동 높이에 이만큼 들어오면 lift → transport (추종 오차 흡수)
   place_tolerance_mm: 60     # 목적지 중심에 이만큼 들어오면 transport → place

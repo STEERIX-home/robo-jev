@@ -1690,6 +1690,45 @@ def test_lift_rises_vertically_then_transport_keeps_the_height_then_place_descen
     assert controller_at(above, closed=True).apply(out["command"], 3 * PERIOD_MS)["applied"] is True
 
 
+def test_the_grasp_phase_also_needs_xy_alignment_on_a_tall_cylinder():
+    """3c-1의 E0 seed 101: 접근점(윗면+60)과 파지점(윗면−10)은 어떤 물체든 70mm 떨어져 있어
+    `grasp_distance_mm`(80)만으로는 xy가 23mm 벗어난 채 파지 국면에 들어가 대각선으로 내려온다. 국면 전환은
+    xy 정렬(`phases.grasp_xy_tolerance_mm`)도 요구한다."""
+    tolerance = CONFIG["phases"]["grasp_xy_tolerance_mm"]
+    assert 0 < tolerance < CONFIG["phases"]["grasp_distance_mm"]
+    tall = obj("o0", (300, 0, -74), obb_mm=[48, 48, 76], **{"class": "cylinder"}, shape="cylinder")
+    approach_z = -74 + 38 + CANDIDATES["approach_clearance_mm"]
+    grasp_point = [300, 0, -74 + 38 - CANDIDATES["grasp_depth_mm"]]
+
+    def phase_at(ee, executing=None, speed=0):
+        scene = observation(objects=[tall], robot={**observation()["robot"], "ee_pos_mm": list(ee), "speed_mm_s": speed})
+        if executing is not None:
+            scene["exec"] = {**scene["exec"], **executing}
+        request = harness().build_request(scene, None, None)
+        geometry = request["harness"]["candidates"][candidate_id(GRASP)]
+        assert math.dist(ee, grasp_point) <= CONFIG["phases"]["grasp_distance_mm"]
+        return geometry["phase"], geometry["target_mm"]
+
+    drifted = (300 + tolerance + 13, 0, approach_z)
+    phase, target = phase_at(drifted)
+    assert phase == "approach" and target[:2] == [300, 0], "xy가 벗어나 있으면 접근점으로 먼저 간다"
+    aligned = (300 + tolerance - 5, 0, approach_z)
+    phase, target = phase_at(aligned)
+    assert phase == "grasp" and target == grasp_point
+    # 정렬됐어도 접근 속도를 안고 있으면 아직이다 — 관성이 하강 초기에 가로로 흘러 테두리를 짚는다.
+    phase, _ = phase_at(aligned, speed=CONFIG["phases"]["grasp_entry_speed_mm_s"] + 40)
+    assert phase == "approach"
+
+    # 들어간 뒤의 가로 흔들림은 되돌리지 않는다: 실행기가 이미 이 후보의 파지 국면이면 거리 조건만 본다.
+    # 다른 후보(빠른 프로파일)의 파지 국면이었다면 이 후보에는 해당하지 않는다.
+    phase, target = phase_at(drifted, {"phase": "grasp", "action_ref": candidate_id(GRASP), "executor": "MOVE_EE"})
+    assert phase == "grasp" and target == grasp_point
+    phase, _ = phase_at(drifted, {"phase": "grasp", "action_ref": candidate_id("grasp:o0:top:zoneL:fast"), "executor": "MOVE_EE"})
+    assert phase == "approach"
+    phase, _ = phase_at(drifted, {"phase": "approach", "action_ref": candidate_id(GRASP), "executor": "MOVE_EE"})
+    assert phase == "approach"
+
+
 def test_the_controller_opens_only_at_the_place_point():
     """놓기 국면의 open readiness는 말단이 놓기점에 와야 한다 (docs/08 §4 "release readiness")."""
     ctrl = Controller.from_config_path(CONTROLLER_CONFIG)
