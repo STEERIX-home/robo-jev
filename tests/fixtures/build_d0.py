@@ -12,7 +12,14 @@
 D0는 계약 검사를 위한 **손으로 읽을 수 있는** 작은 표본이다. 물리 시뮬레이터는 쓰지
 않는다. 스트림은 아래의 결정적인 장난감 시나리오(직선 보간으로 움직이는 말단, mm
 정수 자세, 각본대로 답하는 "전문가")로 만든다. 표준 라이브러리만 쓰고, 같은 씨앗에서
-언제나 같은 바이트를 낸다.
+언제나 같은 바이트를 낸다. 말단은 한 틱에 축마다 ``STEP_MM``을 넘게 움직이지 않는다
+(파지 안착까지 포함해서).
+
+**명령과 관측을 가른다.** 각본의 ``Segment.gripper``는 *명령*이고 ``exec_history``와
+``q_gripper`` 라벨·``provenance.marks.gripper_transition_ticks``가 그것을 쓴다.
+``state.robot.gripper_mm``은 *관측*이라 :func:`can_grasp`로 판정한 실제 파지 여부에서
+나온다 (docs/08 §3.2 "실제 관측 또는 선언한 추정치만"). 그래서 파지 명령 틱과 관측
+그리퍼가 닫히는 틱은 몇 틱 어긋난다 — 말단이 물체에 닿아야 닫힌다.
 
 사람 검수는 아직 끝나지 않았다. manifest의 ``reviewed_by``가 비어 있으면 검수 전이다.
 """
@@ -833,19 +840,19 @@ def _distance_mm(a: list[int] | tuple[int, ...], b: list[int] | tuple[int, ...])
     return int(round(sum((int(p) - int(q)) ** 2 for p, q in zip(a, b)) ** 0.5))
 
 
-def _grasp_pose(pose: list[int]) -> tuple[int, int, int]:
+def grasp_pose(pose: list[int]) -> tuple[int, int, int]:
     """물체를 잡은 순간의 말단 자세. 물체는 여기서 `CARRY_OFFSET_MM`만큼 아래에 있다."""
     return (pose[0], pose[1], pose[2] + CARRY_OFFSET_MM)
 
 
-def _can_grasp(ee: list[int], pose: list[int]) -> bool:
+def can_grasp(ee: list[int], pose: list[int]) -> bool:
     """말단이 물체에 닿았는가 — 해제 쪽 검사와 대칭인 파지 쪽 검사.
 
     말단이 파지 자세에서 한 걸음 안에 들어왔고(세 축 모두) 물체 윗면 가까이 내려왔을
     때만 파지가 성립한다. 이 검사가 없으면 그리퍼가 닫히는 순간 멀리 있는 물체가
-    말단으로 순간이동한다.
+    말단으로 순간이동한다. 관측 그리퍼 열림(`gripper_mm`)도 이 판정에서 나온다.
     """
-    within_one_step = all(abs(a - b) <= STEP_MM for a, b in zip(ee, _grasp_pose(pose)))
+    within_one_step = all(abs(a - b) <= STEP_MM for a, b in zip(ee, grasp_pose(pose)))
     below_object_top = ee[2] <= pose[2] + OBJECT_HEIGHT_MM + GRASP_CLEARANCE_MM
     return within_one_step and below_object_top
 
@@ -1185,6 +1192,7 @@ def _build_episode(script: EpisodeScript) -> dict:
     switch_ticks: list[int] = []
     ticks: list[dict] = []
     carried_ticks = 0
+    previous_tick_ee = list(ee)
 
     for t in range(script.n_ticks):
         segment = _segment_at(script, t)
@@ -1240,14 +1248,16 @@ def _build_episode(script: EpisodeScript) -> dict:
             # 파지·해제는 이 틱의 상태를 만들기 전에 판정한다. 그래야 상태가 스스로
             # 모순되지 않는다(열린 그리퍼로 물체를 들고 있을 수 없다).
             if holding is None:
+                # 파지 판정은 **이동 전** 자세로 한다. 그러면 이 틱의 총 이동이
+                # (한 걸음 안인) 파지 자세까지로 끝나 축마다 STEP_MM을 넘지 않는다.
                 if (
                     segment.gripper == "closed"
                     and phase in CARRY_PHASES
-                    and _can_grasp(ee, poses[script.target])
+                    and can_grasp(previous_ee, poses[script.target])
                 ):
                     holding = script.target
-                    # 남은 한 걸음만큼 말단이 물체 위에 안착한다. 물체는 움직이지 않는다.
-                    ee = list(_grasp_pose(poses[holding]))
+                    # 말단이 파지 자세에 정확히 안착한다. 물체는 움직이지 않는다.
+                    ee = list(grasp_pose(poses[holding]))
             elif segment.gripper == "open":
                 if phase == "place":
                     # 각본이 어긋나면(놓기 높이·목표 영역에 도달하기 전에 열면) 여기서 멈춘다.
@@ -1282,6 +1292,9 @@ def _build_episode(script: EpisodeScript) -> dict:
                 }
             state = None  # 아래에서 만든다
 
+        gripper_holds = holding is not None or (
+            segment.gripper == "closed" and can_grasp(ee, poses[script.target])
+        )
         if state is None:
             instruction = _instruction_at(script, t)
             state = {
@@ -1317,7 +1330,10 @@ def _build_episode(script: EpisodeScript) -> dict:
                 ],
                 "robot": {
                     "ee_pose_mm": list(ee),
-                    "gripper_mm": GRIPPER_CLOSED_MM if segment.gripper == "closed" else GRIPPER_OPEN_MM,
+                    # 관측값이다: 명령이 아니라 실제로 물체를 물었을 때만 닫힌다
+                    # (docs/08 §3.2 "실제 관측 또는 선언한 추정치만").
+                    # 명령한 그리퍼 상태는 exec_history와 q_gripper 라벨에 있다.
+                    "gripper_mm": GRIPPER_CLOSED_MM if gripper_holds else GRIPPER_OPEN_MM,
                     "holding": holding,
                     "contact_n": 1.5 if phase in ("grasp", "place", "push") else 0.0,
                     "speed_mm_s": 0 if phase == "none" else 120,
@@ -1337,6 +1353,15 @@ def _build_episode(script: EpisodeScript) -> dict:
 
         # 상태가 스스로 모순되면 각본이 어긋난 것이다. 빌드를 여기서 멈춘다.
         robot_state = state["robot"]
+        emitted_ee = robot_state["ee_pose_mm"]
+        assert all(abs(now - was) <= STEP_MM for was, now in zip(previous_tick_ee, emitted_ee)), (
+            script.episode_id,
+            t,
+            "말단이 한 틱에 한 걸음보다 많이 움직였다",
+            previous_tick_ee,
+            emitted_ee,
+        )
+        previous_tick_ee = list(emitted_ee)
         assert robot_state["holding"] is None or robot_state["gripper_mm"] == GRIPPER_CLOSED_MM, (
             script.episode_id,
             t,

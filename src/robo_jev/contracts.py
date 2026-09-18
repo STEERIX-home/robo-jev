@@ -85,6 +85,7 @@ _QUESTION_FIELDS = ("id", "type", "instructions", "criteria")
 _CRITERION_FIELDS = ("id", "description", "ref", "value")
 _TICK_FIELDS = ("t", "sim_ms", "observed_at_ms", "obs_age_ms")
 _PREFIX_FIELDS = ("instructions", "question_set")
+_INSTRUCTION_FIELDS = ("version", "t_ms", "text")
 
 _BOOLEAN_CRITERIA = [{"id": "true", "description": "예"}, {"id": "false", "description": "아니오"}]
 
@@ -519,7 +520,12 @@ def _validate_single_request(record: dict) -> None:
 
 
 def _validate_prefix(prefix: Any) -> None:
+    """`prefix`도 모델 입력이므로 `request`와 똑같이 재귀 검사 + 허용 목록을 쓴다."""
     _need_dict(prefix, "prefix")
+    _scan_input_area(prefix, "prefix", forbidden_keys=FORBIDDEN_REQUEST_KEYS)
+    for key in prefix:
+        if key not in _PREFIX_FIELDS:
+            _fail(f"prefix.{key}", f"prefix의 허용 필드가 아니다 (허용: {list(_PREFIX_FIELDS)})")
     _need_str(prefix.get("question_set"), "prefix.question_set")
     instructions = _need_list(prefix.get("instructions"), "prefix.instructions", allow_empty=False)
     previous_version = None
@@ -527,6 +533,9 @@ def _validate_prefix(prefix: Any) -> None:
     for index, instruction in enumerate(instructions):
         path = f"prefix.instructions[{index}]"
         _need_dict(instruction, path)
+        for key in instruction:
+            if key not in _INSTRUCTION_FIELDS:
+                _fail(f"{path}.{key}", f"지시의 허용 필드가 아니다 (허용: {list(_INSTRUCTION_FIELDS)})")
         version = _need_int(instruction.get("version"), f"{path}.version", minimum=1)
         t_ms = _need_int(instruction.get("t_ms"), f"{path}.t_ms", minimum=0)
         _need_str(instruction.get("text"), f"{path}.text")
@@ -685,14 +694,14 @@ def _pick(node: dict, fields: tuple[str, ...]) -> dict:
 def _single_request_input(record: dict) -> dict:
     request = _need_dict(record.get("request"), "request")
     questions = []
-    for index, question in enumerate(_need_list(request.get("questions", []), "request.questions")):
+    for index, question in enumerate(_need_list(request.get("questions"), "request.questions")):
         question_path = f"request.questions[{index}]"
         _need_dict(question, question_path)
         allowed = _pick(question, _QUESTION_FIELDS)
         criteria_path = f"{question_path}.criteria"
         allowed["criteria"] = [
             _pick(_need_dict(criterion, f"{criteria_path}[{position}]"), _CRITERION_FIELDS)
-            for position, criterion in enumerate(_need_list(question.get("criteria", []), criteria_path))
+            for position, criterion in enumerate(_need_list(question.get("criteria"), criteria_path))
         ]
         questions.append(allowed)
     allowed_request = _pick(request, ("request_id", "state"))
@@ -710,11 +719,19 @@ def _stream_input(record: dict) -> dict:
             _need_dict(tick.get("request"), f"{tick_path}.request"), _STREAM_REQUEST_FIELDS
         )
         ticks.append(allowed_tick)
-    return {
-        "schema_version": record["schema_version"],
-        "prefix": _pick(_need_dict(record.get("prefix", {}), "prefix"), _PREFIX_FIELDS),
-        "ticks": ticks,
+
+    prefix = _need_dict(record.get("prefix"), "prefix")
+    # 지시도 필드 단위로 추린다. 질문·후보와 같은 투영이며, 통째로 깊은 복사하지 않는다.
+    allowed_prefix: dict[str, Any] = {
+        "instructions": [
+            _pick(_need_dict(instruction, f"prefix.instructions[{index}]"), _INSTRUCTION_FIELDS)
+            for index, instruction in enumerate(
+                _need_list(prefix.get("instructions"), "prefix.instructions")
+            )
+        ]
     }
+    allowed_prefix.update(_pick(prefix, ("question_set",)))
+    return {"schema_version": record["schema_version"], "prefix": allowed_prefix, "ticks": ticks}
 
 
 def model_input(record: dict) -> dict:

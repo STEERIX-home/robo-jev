@@ -9,7 +9,7 @@ import hashlib
 import json
 
 import pytest
-from conftest import D0_MANIFEST, FIXTURES, all_keys, load_builder
+from helpers import D0_MANIFEST, FIXTURES, all_keys, load_builder
 
 from robo_jev.contracts import (
     FORBIDDEN_REQUEST_KEYS,
@@ -19,7 +19,7 @@ from robo_jev.contracts import (
     validate_record,
 )
 
-# `manifest`·`singles`·`streams` fixture와 경로·빌더 도우미는 tests/conftest.py에 있다.
+# `manifest`·`singles`·`streams` fixture는 tests/conftest.py, 도우미는 tests/helpers.py에 있다.
 
 
 # --------------------------------------------------------------------------
@@ -280,6 +280,46 @@ def test_stream_holding_implies_a_closed_gripper(streams):
                 tick["t"],
                 robot,
             )
+
+
+def test_stream_closed_gripper_implies_it_can_hold(streams):
+    """`gripper_mm`은 관측값이다: 닫혀 있다면 들고 있거나 지금 잡을 수 있는 자리여야 한다."""
+    builder = load_builder()
+    closed_ticks = 0
+    for record in streams:
+        target = record["provenance"]["marks"]["target"]
+        for tick in record["ticks"]:
+            robot = tick["request"]["state"]["robot"]
+            if robot["gripper_mm"] >= builder.GRIPPER_OPEN_MM:
+                continue
+            closed_ticks += 1
+            pose = next(
+                obj["pose_mm"] for obj in tick["request"]["state"]["objects"] if obj["id"] == target
+            )
+            assert robot["holding"] is not None or builder.can_grasp(robot["ee_pose_mm"], pose), (
+                record["episode_id"],
+                tick["t"],
+                robot,
+                pose,
+            )
+    assert closed_ticks >= 100
+
+
+def test_stream_end_effector_moves_at_most_one_step_per_tick(streams):
+    """말단은 한 틱에 축마다 한 걸음(STEP_MM)을 넘지 않는다 (파지 안착 포함)."""
+    builder = load_builder()
+    for record in streams:
+        for previous, tick in zip(record["ticks"], record["ticks"][1:]):
+            before = previous["request"]["state"]["robot"]["ee_pose_mm"]
+            after = tick["request"]["state"]["robot"]["ee_pose_mm"]
+            for axis, (was, now) in enumerate(zip(before, after)):
+                assert abs(now - was) <= builder.STEP_MM, (
+                    record["episode_id"],
+                    tick["t"],
+                    axis,
+                    before,
+                    after,
+                )
 
 
 def test_stream_non_carried_object_never_rises(streams):

@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import all_keys
+from helpers import all_keys
 
 from robo_jev.contracts import (
     FORBIDDEN_REQUEST_KEYS,
@@ -627,6 +627,51 @@ def test_instruction_versions_must_increase():
         validate_record(record)
 
 
+def test_unknown_instruction_field_is_rejected():
+    record = stream_record()
+    record["prefix"]["instructions"][0]["note"] = "검수자가 남긴 메모"
+    with pytest.raises(ValueError, match=r"prefix\.instructions\[0\]\.note"):
+        validate_record(record)
+
+
+def test_unknown_prefix_field_is_rejected():
+    record = stream_record()
+    record["prefix"]["question_bank"] = "qs-v9"
+    with pytest.raises(ValueError, match=r"prefix\.question_bank"):
+        validate_record(record)
+
+
+@pytest.mark.parametrize("field", FORBIDDEN_REQUEST_KEYS)
+def test_non_input_field_inside_prefix_instructions_is_rejected(field):
+    """prefix도 모델 입력이다: 지시 안에 비입력 필드를 숨길 수 없다."""
+    record = stream_record()
+    record["prefix"]["instructions"][0][field] = {"future_success": True}
+    with pytest.raises(ValueError, match=rf"prefix\.instructions\[0\]\.{field}"):
+        validate_record(record)
+
+
+@pytest.mark.parametrize("field", FORBIDDEN_REQUEST_KEYS)
+def test_non_input_field_inside_prefix_is_rejected(field):
+    record = stream_record()
+    record["prefix"][field] = {"future_success": True}
+    with pytest.raises(ValueError, match=rf"prefix\.{field}"):
+        validate_record(record)
+
+
+def test_label_structure_inside_prefix_is_rejected():
+    record = stream_record()
+    record["prefix"]["hint"] = {"question_id": "q_main", "candidate_ids": ["c3"]}
+    with pytest.raises(ValueError, match=r"prefix\.hint"):
+        validate_record(record)
+
+
+def test_label_structure_inside_an_instruction_is_rejected():
+    record = stream_record()
+    record["prefix"]["instructions"][0]["hint"] = {"question_id": "q_main", "answer": "c3"}
+    with pytest.raises(ValueError, match=r"prefix\.instructions\[0\]\.hint"):
+        validate_record(record)
+
+
 def test_unknown_key_inside_a_tick_request_is_rejected():
     record = stream_record()
     record["ticks"][0]["request"]["hint"] = {"best": "c3"}
@@ -682,13 +727,19 @@ def test_model_input_of_stream_is_allow_listed():
     got = model_input(record)
     assert set(got) == {"schema_version", "prefix", "ticks"}
     assert set(got["prefix"]) == {"instructions", "question_set"}
+    assert set(got["prefix"]["instructions"][0]) == {"version", "t_ms", "text"}
     assert set(got["ticks"][0]) == {"t", "sim_ms", "observed_at_ms", "obs_age_ms", "request"}
     assert set(got["ticks"][0]["request"]) == {"state", "exec_history", "commitment", "candidates"}
 
 
 @pytest.mark.parametrize("factory", [single_record, stream_record], ids=["single", "stream"])
 def test_model_input_excludes_non_input_fields(factory):
-    got = model_input(factory())
+    record = factory()
+    if "prefix" in record:
+        # prefix도 투영 대상이다: 지시에 비입력 필드를 섞어도 입력에 남지 않는다.
+        record["prefix"]["provenance"] = {"rules": "r0.4"}
+        record["prefix"]["instructions"][0]["evidence"] = {"future_success": True}
+    got = model_input(record)
     assert all_keys(got).isdisjoint(NON_INPUT_FIELDS)
     assert all_keys(got).isdisjoint(FORBIDDEN_REQUEST_KEYS)  # 가려진 참값 키까지
 
@@ -755,6 +806,20 @@ def test_model_input_rejects_a_record_without_a_usable_request(record):
 )
 def test_model_input_rejects_a_stream_without_usable_ticks(record):
     with pytest.raises(ValueError, match=r"^ticks: "):
+        model_input(record)
+
+
+def test_model_input_rejects_a_request_without_questions():
+    record = single_record()
+    del record["request"]["questions"]
+    with pytest.raises(ValueError, match=r"^request\.questions: "):
+        model_input(record)
+
+
+def test_model_input_rejects_a_question_without_criteria():
+    record = single_record()
+    del record["request"]["questions"][0]["criteria"]
+    with pytest.raises(ValueError, match=r"^request\.questions\[0\]\.criteria: "):
         model_input(record)
 
 
