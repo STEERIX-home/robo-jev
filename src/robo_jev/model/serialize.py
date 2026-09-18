@@ -42,7 +42,6 @@ tokenizer로 확인한다. 질문 머리에도 같은 글자가 붙어(``A q_mai
 
 from __future__ import annotations
 
-import copy
 import string
 from typing import Any
 
@@ -658,7 +657,7 @@ def serialize_request(
     if layout not in LAYOUTS:
         raise ValueError(f"layout: {list(LAYOUTS)} 중 하나여야 한다 (받은 값: {layout!r})")
     validate_record(request)
-    projected = model_input(copy.deepcopy(request))
+    projected = model_input(request)  # 허용 필드만 깊은 복사한 새 dict — 원본은 그대로다
     schema_version = projected["schema_version"]
     expected = SCHEMA_SINGLE_REQUEST if layout == "state_first" else SCHEMA_STREAM
     if schema_version != expected:
