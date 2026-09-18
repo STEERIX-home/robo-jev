@@ -92,7 +92,9 @@ reflex:                      # docs/08 §6 "반사" — 모델 응답을 기다�
 gripper:                     # docs/08 §6 "그리퍼" — readiness·ID·ACK·멱등
   open_mm: 80
   closed_mm: 0
-  close_readiness_distance_mm: 60   # 대상까지 이 안이어야 close를 실행한다
+  # close readiness. 파지 국면(`phase: grasp`)에서는 말단이 명령의 파지점에 이 안으로 와야 하고,
+  # 다른 명령에서는 관측된 대상(중심)까지의 거리가 이 안이어야 한다.
+  close_readiness_distance_mm: 15
   open_readiness_force_n: 25.0      # 이보다 큰 하중에서는 open을 보류한다
   open_readiness_distance_mm: 20    # 놓기 국면의 open은 말단이 놓기점에 이 안으로 와야 실행한다
   event_id_prefix: ge

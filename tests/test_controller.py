@@ -562,6 +562,23 @@ def test_gripper_readiness_failure_waits_without_an_event():
     assert ready["gripper_event"] is not None
 
 
+def test_close_in_the_grasp_phase_waits_until_the_end_effector_is_at_the_grasp_point():
+    """파지 국면의 close readiness는 말단이 명령의 파지점에 와야 한다 (docs/08 §4 "접촉·도달 readiness").
+
+    물체 중심까지의 거리만 보면 내려가는 도중에 닫혀 패드가 윗면을 잡는다.
+    """
+    tolerance = GRIPPER["close_readiness_distance_mm"]
+    grasp_point = (START_MM[0], START_MM[1], START_MM[2] - 100)
+    ctrl = controller(target_distance_mm=0.0)  # 중심까지는 이미 가깝다고 해도
+    far = ctrl.apply(move(seq=1, phase="grasp", gripper="closed", target_mm=grasp_point), now_ms=0)
+    assert far["applied"] is True and far["gripper_event"] is None
+    assert far["gripper_wait"] == "readiness"
+
+    ctrl.observe(sensors(ee_pos_mm=[grasp_point[0], grasp_point[1], grasp_point[2] + tolerance - 1], target_distance_mm=0.0))
+    near = ctrl.apply(move(seq=2, now_ms=PERIOD_MS, phase="grasp", gripper="closed", target_mm=grasp_point), now_ms=PERIOD_MS)
+    assert near["gripper_event"] is not None
+
+
 def test_open_waits_while_the_gripper_is_loaded():
     loaded = GRIPPER["open_readiness_force_n"] + 1.0
     ctrl = controller(gripper_mm=GRIPPER["closed_mm"], gripper_load_n=loaded, holding="o3")

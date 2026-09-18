@@ -1766,6 +1766,108 @@ def test_the_harness_drives_a_real_e0_episode_and_records_it():
         env.close()
 
 
+def run_e0_episode(seed: int, *, max_ticks: int = 300) -> dict:
+    """규칙 기준군 + 하네스 + 실제 실행기로 E0 에피소드 하나를 완료(done 게이트)까지 돈다.
+
+    판단 틱마다 50Hz 제어 5회를 진행한다 (docs/10 closed_loop_probe.py와 같은 구성).
+    """
+    from robo_jev.harness.rule_judge import RuleJudge
+    from robo_jev.sim.environment import Environment
+
+    env = Environment(config_path=str(SIM_CONFIG), profile="E0")
+    try:
+        scene = env.reset(seed=seed)
+        hrn = harness()
+        judge = RuleJudge()
+        text = scene["instruction"]["text"]
+        target = next(entry for entry in scene["objects"] if text.startswith(entry["desc"]))
+        zone = next(entry for entry in scene["zones"] if entry["desc"] in text)
+
+        commitment = None
+        history = None
+        summary = {
+            "seed": seed, "first_joint_tick": None, "holding_tick": None, "done_tick": None,
+            "gates": {}, "acks": {}, "ticks": 0, "final": None,
+        }
+        for tick in range(max_ticks):
+            request = hrn.build_request(scene, history, commitment)
+            results = judge(request)
+            out = hrn.compose(request, results, commitment, int(scene["sim_time_ms"]))
+            key = next(
+                (entry["key"] for entry in request["request"]["candidates"]["q_main"] if entry["id"] == out["adopted"]["main"]),
+                None,
+            )
+            if summary["first_joint_tick"] is None and key and ":" in key:
+                summary["first_joint_tick"] = tick
+            summary["gates"][str(out["gate"])] = summary["gates"].get(str(out["gate"]), 0) + 1
+
+            ack = None
+            for control_step in range(PERIOD_MS // (1000 // CONTROLLER["timing"]["control_hz"])):
+                scene = env.step(out["command"] if control_step == 0 else None)
+                ack = scene["ack"] or ack
+                if summary["holding_tick"] is None and scene["robot"]["holding"] is not None:
+                    summary["holding_tick"] = tick
+            result = "applied" if ack and ack["applied"] else str((ack or {}).get("reason"))
+            summary["acks"][result] = summary["acks"].get(result, 0) + 1
+            summary["ticks"] = tick + 1
+            commitment = out["commitment"]
+            history = {"adopted": out["adopted"], "ack": ack, "gate": out["gate"]}
+            if out["gate"] == "done":
+                summary["done_tick"] = tick
+                break
+
+        placed = next(entry for entry in scene["objects"] if entry["id"] == target["id"])
+        x0, y0, x1, y1 = zone["bounds_mm"]
+        summary["final"] = {
+            "target_pos_mm": placed["pos_mm"],
+            "inside_zone": x0 <= placed["pos_mm"][0] <= x1 and y0 <= placed["pos_mm"][1] <= y1,
+            "gripper_mm": scene["robot"]["gripper_mm"],
+            "holding": scene["robot"]["holding"],
+        }
+        return summary
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("seed", [17, 29, 43])
+def test_the_rule_baseline_completes_an_e0_episode(seed):
+    """E0 완료 검증 (docs/10 §3, Part D3): 20틱 안에 결합 행동을 채택하고, 잡고, 목표 영역에 놓고 연다."""
+    summary = run_e0_episode(seed)
+    assert summary["first_joint_tick"] is not None and summary["first_joint_tick"] < 20, summary
+    assert summary["holding_tick"] is not None, summary
+    assert summary["done_tick"] is not None, summary
+    assert summary["final"]["inside_zone"] is True, summary
+    assert summary["final"]["holding"] is None, summary
+    midpoint = (CONTROLLER["gripper"]["open_mm"] + CONTROLLER["gripper"]["closed_mm"]) / 2
+    assert summary["final"]["gripper_mm"] > midpoint, summary
+    assert set(summary["acks"]) == {"applied"}, summary
+
+
+def test_hidden_world_changes_do_not_change_the_request():
+    """docs/10 I5의 대조: 가려진 물체의 자세·사건·이동·파생 값이 요청 어디에도 새지 않는다."""
+    first, second = harness(), harness()
+    scene = observation(objects=[obj("o0", (300, 0, -80)), obj("o1", (200, 220, -80), colour="blue")])
+    first.build_request(scene, None, None)
+    second.build_request(scene, None, None)
+
+    quiet = observation(objects=[obj("o0", (300, 0, -80)), obj("o1", (200, 220, -80), colour="blue")],
+                        tick=1, sim_time_ms=100)
+    quiet["objects"][1].update(visible=False, visible_ratio=0.0)
+    moved = copy.deepcopy(quiet)
+    moved["objects"][1]["pos_mm"] = [650, 220, -80]
+    moved["events"] = [{"kind": "disturbance_applied", "object": "o1", "sim_ms": 100}]
+
+    expected = first.build_request(quiet, None, None)
+    actual = second.build_request(moved, None, None)
+    state = actual["request"]["state"]
+    assert next(entry for entry in state["objects"] if entry["id"] == "o1")["pose_mm"] == [200, 220, -80]
+    assert state["events"] == []
+    assert state["derived"] == expected["request"]["state"]["derived"]
+    assert not any(geometry["moving"] for geometry in actual["harness"]["candidates"].values())
+    assert actual == expected
+    assert second.adapter.evidence()["simulator_events"] == moved["events"]
+
+
 def test_compose_accepts_a_tick_built_by_another_tool():
     """다른 도구가 만든 틱(D0 fixture)에도 조합 규칙이 그대로 걸린다.
 

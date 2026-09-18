@@ -320,28 +320,85 @@ def test_observation_follows_the_state_schema(env):
     assert isinstance(robot["speed_mm_s"], int)
 
 
+def shadow(env, observation: dict, object_id: str, ee_z_mm: float = -20.0, hand_offset_mm: float = 97.0) -> dict:
+    """손을 시점→물체 광선 위에 세운다 — 물체가 손의 그늘에 든다.
+
+    시점은 설정(테이블 중심 기준)을 로봇 기준으로 옮긴 것이고, 손 몸통은 그립 사이트 위
+    약 `hand_offset_mm`에 있다. 손 중심이 광선을 지나는 말단 위치를 계산해 그리로 움직인다.
+    """
+    target = next(obj for obj in observation["objects"] if obj["id"] == object_id)
+    top = [target["pos_mm"][0], target["pos_mm"][1], target["pos_mm"][2] + target["obb_mm"][2] / 2.0]
+    offset = CONFIG["visibility"]["viewpoint_mm"]
+    viewpoint = [float(value) * 1000.0 for value in env._env.table_offset - env._base_pos]
+    viewpoint = [viewpoint[i] + offset[i] for i in range(3)]
+    hand_z = ee_z_mm + hand_offset_mm
+    t = (viewpoint[2] - hand_z) / (viewpoint[2] - top[2])
+    ee = [viewpoint[0] + (top[0] - viewpoint[0]) * t, viewpoint[1] + (top[1] - viewpoint[1]) * t, ee_z_mm]
+    command = {"kind": "MOVE_EE", "target_mm": [round(value) for value in ee], "speed_level": 3}
+    for tick in range(120):
+        observation = env.step(command if tick % 5 == 0 else None)
+    return observation
+
+
+def test_the_viewpoint_sees_the_whole_scene_at_reset(env):
+    """설정의 시점은 홈 자세의 팔에 가려지지 않는다 (docs/10 E0 폐루프 원인, Part C(a))."""
+    threshold = CONFIG["visibility"]["visible_ratio_threshold"]
+    visible = total = 0
+    for seed in range(1, 21):
+        objects = env.reset(seed=seed)["objects"]
+        visible += sum(obj["visible_ratio"] >= threshold for obj in objects)
+        total += len(objects)
+    assert visible / total >= 0.95
+
+
 def test_visibility_is_measured_not_assumed(env):
-    """가림은 참값이 아니라 시점에서 실제로 쏜 광선으로 정한다."""
-    ratios = [obj["visible_ratio"] for seed in range(6) for obj in env.reset(seed=seed)["objects"]]
-    assert {ratio == 1.0 for ratio in ratios} == {True, False}
-    partial = [ratio for ratio in ratios if 0.0 < ratio < 1.0]
-    assert partial, "부분 가림이 한 번도 없다 — 광선이 아니라 상수를 쓰고 있을 수 있다"
+    """가림은 참값이 아니라 시점에서 실제로 쏜 광선으로 정한다 — 손이 위에 오면 비율이 떨어진다."""
+    observation = env.reset(seed=5)
+    clear = {obj["id"]: obj["visible_ratio"] for obj in observation["objects"]}
+    assert all(ratio == 1.0 for ratio in clear.values())
+
+    covered = shadow(env, observation, "o1")
+    ratios = {obj["id"]: obj["visible_ratio"] for obj in covered["objects"]}
+    assert ratios["o1"] < 1.0, "손이 시점과 물체 사이에 있는데 가시 비율이 그대로다"
+    assert any(ratio == 1.0 for ratio in ratios.values())
 
 
 def test_moving_the_arm_away_uncovers_what_it_hid(env):
-    """가시성이 팔의 실제 자세에 달렸는지 본다 — 팔을 치우면 가렸던 물체가 보인다."""
+    """가시성이 팔의 실제 자세에 달렸는지 본다 — 팔을 치우면 가렸던 물체가 다시 보인다."""
     observation = env.reset(seed=0)
-    hidden = [obj["id"] for obj in observation["objects"] if obj["visible_ratio"] == 0.0]
-    assert hidden, "seed 0에서 팔에 가려진 물체가 없다"
+    covered = shadow(env, observation, "o1")
+    hidden_ratio = next(obj["visible_ratio"] for obj in covered["objects"] if obj["id"] == "o1")
+    assert hidden_ratio < CONFIG["visibility"]["visible_ratio_threshold"], "손 아래 물체가 가려지지 않았다"
 
     aside = {"kind": "MOVE_EE", "target_mm": [320, 340, 260], "speed_level": 3}
     for tick in range(80):
         observation = env.step(aside if tick % 5 == 0 else None)
 
-    uncovered = {obj["id"]: obj["visible_ratio"] for obj in observation["objects"]}
-    assert any(uncovered[object_id] > 0.0 for object_id in hidden), (
-        f"팔을 치웠는데 가렸던 물체가 그대로다: {[(i, uncovered[i]) for i in hidden]}"
-    )
+    uncovered = next(obj["visible_ratio"] for obj in observation["objects"] if obj["id"] == "o1")
+    assert uncovered > hidden_ratio, f"팔을 치웠는데 가렸던 물체가 그대로다: {hidden_ratio} → {uncovered}"
+
+
+def test_zone_bounds_share_the_robot_frame_with_objects(env):
+    """영역 경계는 물체·말단과 같은 로봇 기준 좌표계다 — 장면 설정의 테이블 중심 기준이 아니다."""
+    observation = env.reset(seed=5)
+    base_shift = [float(value) * 1000.0 for value in env._env.table_offset - env._base_pos]
+    for zone, planned in zip(observation["zones"], env.plan.zones):
+        x0, y0, x1, y1 = planned.bounds_mm
+        assert zone["bounds_mm"] == [
+            round(x0 + base_shift[0]), round(y0 + base_shift[1]),
+            round(x1 + base_shift[0]), round(y1 + base_shift[1]),
+        ]
+        assert all(isinstance(value, int) for value in zone["bounds_mm"])
+    # 장면 설정에서 영역 안에 놓인 물체는 관측에서도 그 영역 안이다.
+    for planned in env.plan.objects:
+        observed = next(obj for obj in observation["objects"] if obj["id"] == planned.id)
+        for zone, planned_zone in zip(observation["zones"], env.plan.zones):
+            x0, y0, x1, y1 = planned_zone.bounds_mm
+            inside_plan = x0 <= planned.pos_mm[0] <= x1 and y0 <= planned.pos_mm[1] <= y1
+            bx0, by0, bx1, by1 = zone["bounds_mm"]
+            inside_obs = bx0 - 2 <= observed["pos_mm"][0] <= bx1 + 2 and by0 - 2 <= observed["pos_mm"][1] <= by1 + 2
+            if inside_plan:
+                assert inside_obs, (planned.id, zone["id"])
 
 
 def test_ack_is_reported_for_every_command(env):
@@ -351,6 +408,22 @@ def test_ack_is_reported_for_every_command(env):
     assert observation["ack"]["executor"] == "HOLD"
     assert observation["exec"]["seq"] == observation["ack"]["seq"]
     assert env.step(None)["ack"] is None
+
+
+def test_observe_moves_the_arm_to_the_observation_pose_and_records_it(e0):
+    """관측은 제자리 정지가 아니다 — 실행 기록은 실제 이동(OBSERVE, 경로 observe)을 말한다 (docs/02 OBSERVE)."""
+    controller = yaml.safe_load(CONTROLLER_CONFIG.read_text(encoding="utf-8"))
+    pose = controller["observe"]["pose_mm"]
+    observation = e0.reset(seed=17)
+    start = list(observation["robot"]["ee_pos_mm"])
+    assert math.dist(start, pose) > 50
+
+    for tick in range(100):
+        observation = e0.step({"kind": "OBSERVE", "duration_ms": 100} if tick % 5 == 0 else None)
+    assert observation["exec"]["executor"] == "OBSERVE"
+    assert observation["exec"]["path"] == "observe"
+    assert observation["ack"] is None or observation["ack"]["path"] == "observe"
+    assert math.dist(observation["robot"]["ee_pos_mm"], pose) < 15, observation["robot"]["ee_pos_mm"]
 
 
 def test_gripper_readiness_uses_the_real_distance_to_the_target(env):

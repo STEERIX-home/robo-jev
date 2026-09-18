@@ -361,6 +361,33 @@ def test_aux_answers_follow_the_commitment_phase():
     assert max(result["q_gripper"], key=result["q_gripper"].get) == PROFILES["gripper_by_phase"][phase]
 
 
+def test_the_gripper_closes_only_at_the_grasp_point():
+    """파지 국면이라도 말단이 파지점에 `grasp_ready_mm` 안으로 와야 닫는다 — 내려가는 중에 닫으면
+    패드가 물체 윗면을 잡고 팔이 물체를 작업면에 누른다 (E0 폐루프에서 관측된 정지 반복)."""
+    ready = CONFIG["thresholds"]["grasp_ready_mm"]
+    hrn = harness()
+    first = hrn.build_request(observation(), None, None)
+    geometry = first["harness"]["candidates"][candidate_id(GRASP)]
+    grasp_point = geometry["action_mm"]
+    commitment = {
+        "action_ref": candidate_id(GRASP), "key": GRASP, "phase": "grasp", "held_ticks": 4,
+        "last_switch_tick": 0, "goal_version": 1,
+    }
+
+    descending = observation(tick=1, sim_time_ms=100)
+    descending["robot"]["ee_pos_mm"] = [grasp_point[0], grasp_point[1], grasp_point[2] + ready + 20]
+    request = hrn.build_request(descending, None, commitment)
+    assert request["harness"]["candidates"][candidate_id(GRASP)]["phase"] == "grasp"
+    result = rule_judge(request)
+    assert max(result["q_gripper"], key=result["q_gripper"].get) == "open"
+
+    arrived = observation(tick=2, sim_time_ms=200)
+    arrived["robot"]["ee_pos_mm"] = [grasp_point[0], grasp_point[1], grasp_point[2] + ready - 3]
+    request = hrn.build_request(arrived, None, commitment)
+    result = rule_judge(request)
+    assert max(result["q_gripper"], key=result["q_gripper"].get) == "closed"
+
+
 def test_speed_is_lowered_next_to_a_fragile_object():
     scene = observation()
     scene["objects"][2]["pos_mm"] = [340, 40, -80]

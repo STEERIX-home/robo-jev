@@ -132,7 +132,7 @@ class RuleJudge:
             "q_observe": self._truth(self._needs_observation(state, goal, phase)),
             "q_retry": self._truth(self._retry_ok(model)),
             "q_stop": self._truth(self._must_stop(state, goal)),
-            "q_gripper": self._gripper(state, phase),
+            "q_gripper": self._gripper(state, phase, commitment, values),
             "q_path": self._path(paths, values, commitment),
             "q_speed": self._speed(state, phase, commitment, values),
             "q_force": self._force(phase),
@@ -174,6 +174,7 @@ class RuleJudge:
                 "path_clear": bool(geometry["path_clear"]),
                 "blocker": geometry.get("blocker"),
                 "geometry_age_ms": float(geometry.get("geometry_age_ms", 0)),
+                "action_mm": geometry.get("action_mm"),
             }
 
         text = str(entry.get("derived", ""))
@@ -188,6 +189,7 @@ class RuleJudge:
             "path_clear": found.get("path", "clear") == "clear",
             "blocker": None,
             "geometry_age_ms": float(found.get("geom", 0.0)),
+            "action_mm": None,
         }
 
     # -- 주 결정 ------------------------------------------------------------
@@ -414,10 +416,20 @@ class RuleJudge:
         share = (1.0 - mass) / len(rest) if rest else 0.0
         return _normalise({option: mass if option == chosen else share for option in options})
 
-    def _gripper(self, state: dict[str, Any], phase: str) -> dict[str, float]:
+    def _gripper(
+        self, state: dict[str, Any], phase: str, commitment: dict[str, Any] | None, values: dict[str, dict[str, Any]]
+    ) -> dict[str, float]:
+        """국면 프로파일의 그리퍼 상태. 파지 국면에서는 말단이 파지점에 와야 닫는다."""
         desired = str(self.profiles["gripper_by_phase"][phase])
         if desired == "current":
             desired = "closed" if state["robot"].get("holding") else "open"
+        if phase == "grasp" and desired == "closed" and not state["robot"].get("holding"):
+            value = values.get(str((commitment or {}).get("action_ref"))) if commitment else None
+            point = (value or {}).get("action_mm")
+            if point is not None:
+                ee = [float(item) for item in state["robot"]["ee_pose_mm"]]
+                if math.dist(ee, [float(item) for item in point]) > float(self.thresholds["grasp_ready_mm"]):
+                    desired = "open"
         return self._spread(desired, ["open", "closed"])
 
     def _path(

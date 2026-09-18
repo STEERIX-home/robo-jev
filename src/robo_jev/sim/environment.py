@@ -498,6 +498,17 @@ class Environment:
         """docs/08 §3.2의 직렬화 규약. 자릿수는 설정이 정한다."""
         return [round(float(value), self.quaternion_decimals) for value in quat]
 
+    def _zone_bounds_base_mm(self, zone) -> list[int]:
+        """테이블 중심 기준의 영역 경계 `[x0, y0, x1, y1]` → 로봇 기준 좌표계 (mm 정수)."""
+        shift = self._to_base_mm(self._env.table_offset)
+        x0, y0, x1, y1 = zone.bounds_mm
+        return [
+            int(round(x0 + shift[0])),
+            int(round(y0 + shift[1])),
+            int(round(x1 + shift[0])),
+            int(round(y1 + shift[1])),
+        ]
+
     def _visibility(self) -> dict[str, float]:
         """고정 시점에서 물체 윗면 표본으로 광선을 쏴 가시 비율을 잰다.
 
@@ -653,8 +664,10 @@ class Environment:
                 "text": instruction.text,
             },
             "objects": objects,
+            # 영역 경계도 물체·말단과 같은 로봇 기준 좌표계다. 장면 설정은 테이블 중심 기준으로
+            # 적으므로 여기서 옮긴다 — 한 관측 안에 두 좌표계가 섞이면 "영역 안"을 판정할 수 없다.
             "zones": [
-                {"id": zone.id, "desc": zone.desc, "bounds_mm": list(zone.bounds_mm)}
+                {"id": zone.id, "desc": zone.desc, "bounds_mm": self._zone_bounds_base_mm(zone)}
                 for zone in self.plan.zones
             ],
             "robot": {

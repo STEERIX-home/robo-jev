@@ -651,6 +651,13 @@ class Controller:
         운반 높이에서 놓으면 떨어뜨리는 일이다(docs/10 I2).
         """
         if desired == "closed":
+            if phase == "grasp" and target is not None:
+                # 파지 국면: 말단이 명령의 파지점에 와야 한다. 중심까지의 거리만 보면 내려가는
+                # 도중에 닫혀 패드가 윗면을 잡는다.
+                here = [float(value) for value in self.sensors["ee_pos_mm"]]
+                if math.dist(here, [float(value) for value in target["pos_mm"]]) > self.close_readiness_distance_mm:
+                    return "readiness"
+                return None
             distance = self.sensors.get("target_distance_mm")
             # 대상을 참조하지 않는 close에는 거리 조건이 없다.
             if distance is not None and float(distance) > self.close_readiness_distance_mm:
