@@ -14,6 +14,7 @@ import sys
 
 import pytest
 import torch
+from helpers import SMALL_VOCAB
 
 from robo_jev.contracts import QUESTION_SET_V0
 from robo_jev.loss import judgment_loss
@@ -33,7 +34,7 @@ TOKENIZER = WhitespaceTokenizer()
 
 @pytest.fixture(scope="module")
 def judge() -> Judge:
-    return Judge.from_config(seed=5)
+    return Judge.from_config(seed=5, vocab_size=SMALL_VOCAB)
 
 
 @pytest.fixture
@@ -55,12 +56,8 @@ def stream_batch(record: dict, **kwargs) -> dict:
     return {"layout": "stream_l1a", "stream": out}
 
 
-def state_batch(*records: dict, markers: dict[str, str] | None = None) -> dict:
-    """`markers`는 요청의 일부를 다시 직렬화할 때 표지를 전체 요청의 것으로 고정한다 (P0 microbatch)."""
-    return {
-        "layout": "state_first",
-        "states": [serialize_request(record, TOKENIZER, decision_markers=markers) for record in records],
-    }
+def state_batch(*records: dict) -> dict:
+    return {"layout": "state_first", "states": [serialize_request(record, TOKENIZER) for record in records]}
 
 
 def tick_labels(record: dict) -> dict:
@@ -69,6 +66,10 @@ def tick_labels(record: dict) -> dict:
 
 def parameter_gradients(module: torch.nn.Module) -> dict[str, torch.Tensor]:
     return {name: p.grad.clone() for name, p in module.named_parameters() if p.grad is not None}
+
+
+def readout_parameters(judge: Judge) -> set[str]:
+    return {name for name, _ in judge.named_parameters() if not name.startswith("backbone.")}
 
 
 # --------------------------------------------------------------------------
@@ -142,6 +143,18 @@ def test_state_first_outputs_feed_the_loss(judge, three):
     assert judge.U.weight.grad is not None and judge.backbone.embed.weight.grad is not None
 
 
+@pytest.mark.parametrize("readout", ["pointer", "candidate_branch"])
+def test_every_parameter_of_the_selected_readout_and_backbone_gets_gradient(three, readout):
+    """선택한 readout만 만든다 — 학습(Task 5)이 find_unused_parameters 없이 돌 수 있어야 한다."""
+    judge = Judge.from_config(seed=5, readout=readout, vocab_size=SMALL_VOCAB)
+    expected = {"U.weight", "V.weight", "bias"} if readout == "pointer" else {"w.weight", "w.bias"}
+    assert readout_parameters(judge) == expected
+    loss = judgment_loss(judge(state_batch(three)), {"labels": [three["labels"]]})
+    loss.backward()
+    missing = [name for name, p in judge.named_parameters() if p.grad is None]
+    assert missing == []
+
+
 def single_question_records(record: dict) -> list[dict]:
     singles = []
     for question in record["request"]["questions"]:
@@ -157,13 +170,12 @@ def single_question_records(record: dict) -> list[dict]:
 def test_state_first_single_vs_bundled_logits_loss_and_gradient_match(three, dtype):
     """P0의 경로는 독립이다: 질문 하나만 물어도 logits가 같고, 묶음 손실의 gradient = 단독 gradient의 평균.
 
-    결정 표지는 직렬화가 요청 순서로 주므로(4a) 단독 요청에는 전체 요청의 표지를 고정해 T_i 토큰을
-    같게 한다 — 비교 대상은 실행 경로의 독립성이지 표지 부여 규칙이 아니다.
+    L0의 결정 표지는 모든 질문이 같은 고정 토큰이라(docs/03 §3) 단독 요청의 T_i 토큰이 묶음 안의
+    것과 그대로 같다 — 표지를 고정해 줄 필요가 없다.
     """
     tolerance = FP32 if dtype == torch.float32 else EXACT64
-    judge = Judge.from_config(seed=7).to(dtype)
+    judge = Judge.from_config(seed=7, vocab_size=SMALL_VOCAB).to(dtype)
     batch = state_batch(three)
-    markers = batch["states"][0]["decision_markers"]
     bundled = judge(batch)
     loss_bundled = judgment_loss(bundled, {"labels": [three["labels"]]})
     loss_bundled.backward()
@@ -174,7 +186,7 @@ def test_state_first_single_vs_bundled_logits_loss_and_gradient_match(three, dty
     grads_single: dict[str, torch.Tensor] = {}
     for record in singles:
         judge.zero_grad(set_to_none=True)
-        out = judge(state_batch(record, markers=markers))
+        out = judge(state_batch(record))
         qid = record["request"]["questions"][0]["id"]
         torch.testing.assert_close(out["logits"][0][qid], bundled["logits"][0][qid], **tolerance)
         loss = judgment_loss(out, {"labels": [record["labels"]]})
@@ -189,25 +201,29 @@ def test_state_first_single_vs_bundled_logits_loss_and_gradient_match(three, dty
 
 
 def test_state_first_logits_do_not_depend_on_other_questions_or_their_order(judge, three):
-    """docs/03 §3: 질문 추가·삭제·재배열이 기존 질문의 결과를 바꾸지 않는다 (표지를 고정한 조건에서)."""
-    batch = state_batch(three)
-    markers = batch["states"][0]["decision_markers"]
-    reference = judge(batch)["logits"][0]
+    """docs/03 §3: 질문 추가·삭제·재배열이 기존 질문의 결과를 수치 오차 이상 바꾸지 않는다 — 구조로 성립한다."""
+    reference = judge(state_batch(three))["logits"][0]
     reordered = copy.deepcopy(three)
     reordered["request"]["questions"] = list(reversed(reordered["request"]["questions"]))
-    out = judge(state_batch(reordered, markers=markers))["logits"][0]
+    out = judge(state_batch(reordered))["logits"][0]
     for qid in reference:
         torch.testing.assert_close(out[qid], reference[qid], **FP32)
     two = copy.deepcopy(three)
-    two["request"]["questions"] = two["request"]["questions"][1:]
+    two["request"]["questions"] = two["request"]["questions"][1:]  # q_target 삭제
     two["labels"] = [l for l in two["labels"] if l["question_id"] != "q_target"]
     two["usage"]["questions_used"] = [q["id"] for q in two["request"]["questions"]]
-    out = judge(state_batch(two, markers=markers))["logits"][0]
+    out = judge(state_batch(two))["logits"][0]
+    assert set(out) == {"q_done", "q_speed"}
     for qid in out:
         torch.testing.assert_close(out[qid], reference[qid], **FP32)
-    # 표지를 고정하지 않으면 직렬화가 다른 표지 토큰을 주므로 결과가 달라진다 — 계약 우려로 보고
-    unpinned = judge(state_batch(two))["logits"][0]
-    assert not torch.allclose(unpinned["q_done"], reference["q_done"], **FP32)
+    added = copy.deepcopy(three)  # 질문 추가: 첫 질문의 복제를 새 id로 앞에 끼워 넣는다
+    extra = copy.deepcopy(added["request"]["questions"][0])
+    extra["id"] = "q_extra"
+    added["request"]["questions"].insert(0, extra)
+    added["usage"]["questions_used"] = [q["id"] for q in added["request"]["questions"]]
+    out = judge(state_batch(added))["logits"][0]
+    for qid in reference:
+        torch.testing.assert_close(out[qid], reference[qid], **FP32)
 
 
 def test_state_first_batches_several_states(judge, singles):
@@ -227,7 +243,7 @@ def test_state_first_batches_several_states(judge, singles):
 
 
 def test_stream_outputs_feed_the_loss_and_reach_static_candidates(stream):
-    judge = Judge.from_config(seed=9)
+    judge = Judge.from_config(seed=9, vocab_size=SMALL_VOCAB)
     batch = stream_batch(stream)
     outputs = judge(batch)
     ticks = batch["stream"]["ticks"]
@@ -249,13 +265,13 @@ def test_stream_outputs_feed_the_loss_and_reach_static_candidates(stream):
     assert labelled & set(static)
     for qid, boundaries in static.items():
         if qid in labelled:
-            assert (rows[boundaries].abs().sum(-1) > 0).all(), qid  # 정적 후보의 h_c는 prefix hidden
+            assert (rows[boundaries].norm(dim=-1) > 1e-3).all(), qid  # 정적 후보의 h_c는 prefix hidden (실측 ≥ 0.061)
     assert judge.backbone.embed.weight.grad is not None
 
 
 @pytest.mark.parametrize("window_ticks", [30, 1])
 def test_stream_incremental_matches_from_scratch(stream, window_ticks):
-    judge = Judge.from_config(seed=9)
+    judge = Judge.from_config(seed=9, vocab_size=SMALL_VOCAB)
     batch = stream_batch(stream, window_ticks=window_ticks)
     incremental = judge(batch)
     scratch = judge({**batch, "from_scratch": True})
@@ -273,7 +289,7 @@ def test_stream_incremental_matches_from_scratch(stream, window_ticks):
 
 def test_stream_state_can_be_continued_tick_by_tick(stream):
     """틱을 하나씩 넣어도(이전 상태에서 이어감) 한 번에 넣은 것과 같다 — TBPTT 구간 이어 붙이기의 근거."""
-    judge = Judge.from_config(seed=9)
+    judge = Judge.from_config(seed=9, vocab_size=SMALL_VOCAB)
     whole = judge(stream_batch(stream))
     first = copy.deepcopy(stream)
     first["ticks"] = first["ticks"][:1]
@@ -329,7 +345,7 @@ def keep_only_decisions(layout: dict, keep: set[str]) -> dict:
 
 
 def test_stream_decision_branches_do_not_change_each_other(stream):
-    judge = Judge.from_config(seed=9)
+    judge = Judge.from_config(seed=9, vocab_size=SMALL_VOCAB)
     batch = stream_batch(stream)
     reference = judge(batch)["logits"]
     shuffled = judge({"layout": "stream_l1a", "stream": reorder_decisions(batch["stream"], random.Random(3))})["logits"]
@@ -363,7 +379,7 @@ def state_distance(a, b) -> dict[str, object]:
 
 
 def test_perturbation_of_one_question_is_measured_not_asserted(stream, monkeypatch, capsys):
-    judge = Judge.from_config(seed=9)
+    judge = Judge.from_config(seed=9, vocab_size=SMALL_VOCAB)
     reference = judge(stream_batch(stream))
     report = []
 
@@ -404,7 +420,7 @@ def test_perturbation_of_one_question_is_measured_not_asserted(stream, monkeypat
 
 
 def test_stream_single_question_vs_bundled_difference_is_reported(stream, monkeypatch, capsys):
-    judge = Judge.from_config(seed=9)
+    judge = Judge.from_config(seed=9, vocab_size=SMALL_VOCAB)
     bundled = judge(stream_batch(stream))
     # 질문 세트를 q_main 하나로 줄인 스트림 (prefix에 다른 질문 텍스트·정적 후보가 없다)
     monkeypatch.setitem(serialize_module.QUESTION_SETS, "qs-v0", {"q_main": copy.deepcopy(QUESTION_SET_V0["q_main"])})
@@ -440,8 +456,12 @@ def test_stream_single_question_vs_bundled_difference_is_reported(stream, monkey
 # --------------------------------------------------------------------------
 
 
-def test_stream_loss_gradient_reaches_initial_state_conv_history_and_prefix(stream):
-    judge = Judge.from_config(seed=13)
+@pytest.mark.parametrize("seed", [13, 9])  # 9 = 망각 분석(보고 §4.5)과 같은 fixture
+def test_stream_loss_gradient_reaches_initial_state_conv_history_and_prefix(stream, seed):
+    """손실 → 초기 recurrent 상태·conv history·prefix. 하한은 실측의 1/10 아래로 잡아 게이트를 지나
+    살아남는 크기를 고정한다(실측: seed 13 recurrent 2.69/0.77, conv 0.72/0.041; seed 9 recurrent
+    1.59/0.32, conv 0.114/0.014; prefix_hidden 행 최소 0.053; prefix embedding 행 최소 0.032)."""
+    judge = Judge.from_config(seed=seed, vocab_size=SMALL_VOCAB)
     initial = judge.backbone.initial_state(1, requires_grad=True)
     batch = {**stream_batch(stream), "initial": initial}
     outputs = judge(batch)
@@ -449,24 +469,28 @@ def test_stream_loss_gradient_reaches_initial_state_conv_history_and_prefix(stre
     loss = judgment_loss(outputs, tick_labels(stream))
     loss.backward()
     for layer in initial:
-        for key in ("recurrent", "conv"):
+        for key, floor in (("recurrent", 0.03), ("conv", 1e-3)):
             grad = layer[key].grad
-            assert grad is not None and torch.isfinite(grad).all() and grad.abs().sum() > 0, key
-    prefix_rows = outputs["state"].prefix_hidden.grad.abs().sum(-1)
-    assert prefix_rows.sum() > 0  # 정적 후보 경계의 hidden을 readout이 읽는다
+            assert grad is not None and torch.isfinite(grad).all()
+            assert grad.norm() > floor, (key, grad.norm().item())
+    prefix_rows = outputs["state"].prefix_hidden.grad.norm(dim=-1)
+    static = batch["stream"]["static_candidate_boundaries"]
+    labelled = {l["question_id"] for tick in stream["ticks"] for l in tick["labels"] if l["kind"] == "single"}
+    read = [index for qid, rows in static.items() if qid in labelled for index in rows]
+    assert (prefix_rows[read] > 1e-3).all()  # 정적 후보 경계의 hidden을 readout이 읽는다
     prefix_tokens = batch["stream"]["tokens"][: batch["stream"]["prefix_end"]]
-    assert (judge.backbone.embed.weight.grad[prefix_tokens].abs().sum(-1) > 0).all()  # KV·recurrent를 거쳐 prefix 토큰까지
+    assert (judge.backbone.embed.weight.grad[prefix_tokens].norm(dim=-1) > 1e-3).all()  # KV·recurrent를 거쳐 prefix 토큰까지
 
 
 def test_state_first_loss_gradient_reaches_the_shared_state_tokens(three):
-    judge = Judge.from_config(seed=13)
+    judge = Judge.from_config(seed=13, vocab_size=SMALL_VOCAB)
     batch = state_batch(three)
     loss = judgment_loss(judge(batch), {"labels": [three["labels"]]})
     loss.backward()
     layout = batch["states"][0]
     state_tokens = sorted(set(layout["tokens"][: layout["state_end"]]))
-    rows = judge.backbone.embed.weight.grad[state_tokens].abs().sum(-1)
-    assert (rows > 0).all()
+    rows = judge.backbone.embed.weight.grad[state_tokens].norm(dim=-1)
+    assert (rows > 0.05).all()  # 실측 최소 0.86 (25개 S 토큰)
 
 
 # --------------------------------------------------------------------------
@@ -475,7 +499,7 @@ def test_state_first_loss_gradient_reaches_the_shared_state_tokens(three):
 
 
 def test_candidate_branch_reference_group_runs_with_the_documented_shape(three, stream):
-    judge = Judge.from_config(seed=11, readout="candidate_branch")
+    judge = Judge.from_config(seed=11, readout="candidate_branch", vocab_size=SMALL_VOCAB)
     assert judge.readout == "candidate_branch"
     batch = state_batch(three)
     outputs = judge(batch)
@@ -485,7 +509,11 @@ def test_candidate_branch_reference_group_runs_with_the_documented_shape(three, 
     loss = judgment_loss(outputs, {"labels": [three["labels"]]})
     assert torch.isfinite(loss)
     loss.backward()
-    assert judge.w.weight.grad is not None and judge.U.weight.grad is None  # R은 scalar readout w를 쓴다
+    # R은 scalar readout w만 가진다 — pointer의 U·V·b는 만들지 않는다(학습에서 쓰이지 않는 파라미터가 없다)
+    assert readout_parameters(judge) == {"w.weight", "w.bias"}
+    assert judge.w.weight.grad is not None and judge.w.bias.grad is not None
+    with pytest.raises(ValueError, match="readout"):
+        judge.pointer_logits(torch.zeros(64), torch.zeros(2, 64))
 
     one_tick = copy.deepcopy(stream)
     one_tick["ticks"] = one_tick["ticks"][:1]
@@ -510,7 +538,7 @@ def test_judge_rejects_unknown_layouts_and_mismatched_batches(judge, three):
     with pytest.raises(ValueError, match="layout"):
         judge({"layout": "stream_l1a", "stream": layout})
     with pytest.raises(ValueError, match="readout"):
-        Judge(TinyHybrid.from_config(), rank=4, readout="lm_head")
+        Judge(TinyHybrid.from_config(vocab_size=SMALL_VOCAB), rank=4, readout="lm_head")
 
 
 def test_model_code_does_not_import_generator_simulator_or_harness():

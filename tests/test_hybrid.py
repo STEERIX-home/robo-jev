@@ -11,6 +11,7 @@ import copy
 import pytest
 import torch
 import yaml
+from helpers import SMALL_VOCAB
 
 from robo_jev.model.hybrid import (
     DEFAULT_CONFIG,
@@ -164,7 +165,7 @@ def test_delta_gradient_reaches_initial_recurrent_state_and_conv_history(delta_l
     for key in ("recurrent", "conv"):
         assert state[key].grad is not None
         assert torch.isfinite(state[key].grad).all()
-        assert state[key].grad.abs().sum() > 0
+        assert state[key].grad.norm() > 0.1, key  # 실측 recurrent 1.86, conv 1.13 — 경로만이 아니라 크기
 
 
 def test_delta_short_sequence_keeps_old_conv_history(delta_layer):
@@ -245,17 +246,34 @@ def test_vocab_matches_the_real_tokenizer():
 
 
 def test_seeded_init_is_deterministic_and_the_default_is_cached():
-    a = TinyHybrid.from_config()
-    b = TinyHybrid.from_config()
+    a = TinyHybrid.from_config(vocab_size=SMALL_VOCAB)
+    b = TinyHybrid.from_config(vocab_size=SMALL_VOCAB)
     for (name, pa), (_, pb) in zip(a.named_parameters(), b.named_parameters()):
         assert torch.equal(pa, pb), name
-    c = TinyHybrid.from_config(seed=1)
+    c = TinyHybrid.from_config(seed=1, vocab_size=SMALL_VOCAB)
     assert not torch.equal(a.embed.weight, c.embed.weight)
     assert default_backbone() is default_backbone()
+    # 캐시된 기본 fixture는 gradient를 받지 않는다 — 그것을 통해 backward하지 않는다(검사는 자기 인스턴스를 만든다).
+    assert not any(parameter.requires_grad for parameter in default_backbone().parameters())
+    assert all(parameter.requires_grad for parameter in a.parameters())
+
+
+def test_truncated_vocab_fixture_is_the_config_fixture_on_the_ids_it_covers():
+    """embedding은 자기 generator로 초기화하므로 작은 어휘의 fixture는 설정 fixture를 id < V로 제한한 것이다."""
+    full = default_backbone()
+    small = TinyHybrid.from_config(vocab_size=512)
+    assert torch.equal(small.embed.weight, full.embed.weight[:512])
+    for (name, a), (_, b) in zip(small.named_parameters(), full.named_parameters()):
+        if name != "embed.weight":
+            assert torch.equal(a, b), name
+    generator = torch.Generator().manual_seed(12)
+    tokens = torch.randint(0, 512, (1, 9), generator=generator)
+    positions = torch.arange(9)[None]
+    torch.testing.assert_close(small(tokens, positions)["hidden"], full(tokens, positions)["hidden"], rtol=0, atol=0)
 
 
 def test_backbone_forward_shapes_and_state_layout():
-    backbone = TinyHybrid.from_config()
+    backbone = TinyHybrid.from_config(vocab_size=SMALL_VOCAB)
     tokens = torch.tensor([[5, 7, 11, 13, 17]])
     out = backbone(tokens, torch.arange(5)[None])
     assert out["hidden"].shape == (1, 5, 64)
@@ -275,7 +293,7 @@ FP32 = {"rtol": 2e-5, "atol": 5e-5}
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_backbone_step_by_step_equals_whole_sequence_with_cache(dtype):
-    backbone = TinyHybrid.from_config().to(dtype)
+    backbone = TinyHybrid.from_config(vocab_size=SMALL_VOCAB).to(dtype)
     tolerance = FP32 if dtype == torch.float32 else {"rtol": 1e-10, "atol": 1e-12}
     generator = torch.Generator().manual_seed(10)
     tokens = torch.randint(0, 500, (1, 12), generator=generator)
@@ -300,7 +318,7 @@ def test_backbone_step_by_step_equals_whole_sequence_with_cache(dtype):
 
 def test_backbone_batch_rows_are_independent_under_right_padding():
     """오른쪽 padding은 causal 계산에 영향을 주지 않는다 — 질문별 경로를 한 배치로 돌릴 근거."""
-    backbone = TinyHybrid.from_config()
+    backbone = TinyHybrid.from_config(vocab_size=SMALL_VOCAB)
     generator = torch.Generator().manual_seed(11)
     short = torch.randint(0, 500, (1, 6), generator=generator)
     long = torch.randint(0, 500, (1, 9), generator=generator)

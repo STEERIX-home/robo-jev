@@ -462,10 +462,19 @@ class TinyHybrid(nn.Module):
         return cls(config, seed=seed)
 
     def reset_parameters(self, seed: int) -> None:
-        """모든 가중치를 seed에서 결정적으로 초기화한다 (전역 RNG와 무관)."""
-        generator = torch.Generator().manual_seed(int(seed))
+        """모든 가중치를 seed에서 결정적으로 초기화한다 (전역 RNG와 무관).
+
+        embedding은 자기 generator(``seed``)로, 나머지는 다른 generator(``seed + 1``)로 뽑는다. 그래서
+        어휘를 줄인 fixture(``from_config(vocab_size=V)``)는 설정 fixture의 embedding 앞 V행과 같은
+        나머지 가중치를 가진다 — id < V인 입력에 대해 두 fixture의 계산이 비트 단위로 같다(검사).
+        """
+        embed_generator = torch.Generator().manual_seed(int(seed))
+        generator = torch.Generator().manual_seed(int(seed) + 1)
         with torch.no_grad():
+            self.embed.weight.normal_(0.0, 1.0 / math.sqrt(self.config.d_model), generator=embed_generator)
             for name, parameter in self.named_parameters():
+                if name == "embed.weight":
+                    continue
                 if name.endswith("norm.weight") or ".norm1." in name or ".norm2." in name or name.startswith("norm."):
                     parameter.fill_(1.0)
                 elif parameter.dim() >= 2:
@@ -539,5 +548,9 @@ class TinyHybrid(nn.Module):
 
 @functools.lru_cache(maxsize=1)
 def default_backbone() -> TinyHybrid:
-    """설정 파일 그대로의 소형 fixture(한 번만 만든다). gradient 검사는 자기 인스턴스를 만든다."""
-    return TinyHybrid.from_config()
+    """설정 파일 그대로의 소형 fixture — 한 번만 만드는 **공유 singleton**이다.
+
+    가중치는 ``requires_grad=False``다: 이것을 통해 backward하지 않는다(여러 검사가 같은 객체를 쓰므로
+    gradient가 섞인다). gradient가 필요한 검사는 ``TinyHybrid.from_config(...)``로 자기 인스턴스를 만든다.
+    """
+    return TinyHybrid.from_config().requires_grad_(False)

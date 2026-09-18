@@ -11,6 +11,7 @@ import random
 
 import pytest
 import torch
+from helpers import SMALL_VOCAB
 
 from robo_jev.model.attention import build_reference_mask
 from robo_jev.model.hybrid import TinyHybrid, default_backbone
@@ -167,7 +168,7 @@ def test_branch_outputs_do_not_depend_on_order_or_company():
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.float64])
 def test_incremental_replay_matches_from_scratch_inside_the_window(small_stream, dtype):
-    backbone = TinyHybrid.from_config().to(dtype)
+    backbone = TinyHybrid.from_config(vocab_size=SMALL_VOCAB).to(dtype)
     tolerance = FP32 if dtype == torch.float32 else EXACT64
     scratch = forward_layout(small_stream, backbone=backbone)
     replay = replay_layout(small_stream, backbone=backbone)
@@ -227,20 +228,23 @@ def test_branch_loss_gradient_reaches_initial_state_conv_history_and_prefix():
     상태로 prefix를 본다. 그래서 여기서는 prefix 토큰의 embedding 행에 gradient가 닿는지로 확인하고,
     정적 후보의 `prefix_hidden`을 readout이 읽는 경로는 Judge 검사가 본다.
     """
-    backbone = TinyHybrid.from_config(seed=3)
+    backbone = TinyHybrid.from_config(seed=3, vocab_size=SMALL_VOCAB)
     initial = backbone.initial_state(1, requires_grad=True)
     base = StreamState.from_tokens(prefix_tokens, tick_tokens, backbone=backbone, initial=initial)
     branches = base.fork(2)
     loss = sum(branch.step(token).pow(2).sum() for branch, token in zip(branches, [65, 66]))
     loss.backward()
-    for layer in initial:
+    # 크기 하한은 실측(seed 3, float64와 5% 안에서 일치)의 1/10이다: recurrent 4.5e-4 / 1.4e-5,
+    # conv 2.7e-5 / 2.2e-6. 짧은 스트림(11 토큰)이라 작다 — 긴 스트림의 크기는 tests/test_judge.py가 본다.
+    floors = [{"recurrent": 4e-5, "conv": 2e-6}, {"recurrent": 1e-6, "conv": 2e-7}]
+    for layer, floor in zip(initial, floors):
         for key in ("recurrent", "conv"):
             assert layer[key].grad is not None and torch.isfinite(layer[key].grad).all()
-            assert layer[key].grad.abs().sum() > 0, key
+            assert layer[key].grad.norm() > floor[key], key
     rows = backbone.embed.weight.grad
     assert rows is not None
-    assert (rows[prefix_tokens].abs().sum(dim=-1) > 0).all()  # prefix 토큰 전부에 gradient
-    assert (rows[tick_tokens].abs().sum(dim=-1) > 0).all()
+    assert (rows[prefix_tokens].norm(dim=-1) > 1e-6).all()  # prefix 토큰 전부에 gradient (실측 최소 7.9e-5)
+    assert (rows[tick_tokens].norm(dim=-1) > 1e-6).all()  # (실측 최소 1.8e-4)
     assert rows[[900, 901]].abs().sum() == 0  # 쓰이지 않은 토큰은 0
 
 

@@ -107,7 +107,12 @@ def typed_outputs(
 
 
 class Judge(nn.Module):
-    """backbone + readout (모듈 설명 참조). ``forward(batch) -> dict``."""
+    """backbone + readout (모듈 설명 참조). ``forward(batch) -> dict``.
+
+    선택한 readout의 파라미터만 만든다 — pointer면 ``U``·``V``·``bias``, 참고군 R이면 ``w``. 그래서
+    손실이 있는 forward마다 모든 파라미터가 gradient를 받고, 학습은 쓰이지 않는 파라미터를 걸러낼
+    필요(`find_unused_parameters`)가 없다.
+    """
 
     def __init__(
         self, backbone: TinyHybrid, *, rank: int, readout: str = "pointer", seed: int | None = None
@@ -121,34 +126,51 @@ class Judge(nn.Module):
         self.rank = int(rank)
         self.readout = readout
         d = backbone.config.d_model
-        self.U = nn.Linear(d, rank, bias=False)
-        self.V = nn.Linear(d, rank, bias=False)
-        self.bias = nn.Parameter(torch.zeros(()))
-        self.w = nn.Linear(d, 1)  # 참고군 R의 scalar readout (bias 포함)
+        if readout == "pointer":
+            self.U = nn.Linear(d, rank, bias=False)
+            self.V = nn.Linear(d, rank, bias=False)
+            self.bias = nn.Parameter(torch.zeros(()))
+            linears = (self.U, self.V)
+        else:
+            self.w = nn.Linear(d, 1)  # 참고군 R의 scalar readout (bias 포함)
+            linears = (self.w,)
         if seed is not None:
             generator = torch.Generator().manual_seed(int(seed))
             with torch.no_grad():
-                for linear in (self.U, self.V, self.w):
+                for linear in linears:
                     linear.weight.normal_(0.0, 1.0 / math.sqrt(d), generator=generator)
-                self.w.bias.zero_()
+                    if linear.bias is not None:
+                        linear.bias.zero_()
 
     @classmethod
     def from_config(
-        cls, path: str | Path = DEFAULT_CONFIG, *, seed: int | None = None, readout: str | None = None
+        cls,
+        path: str | Path = DEFAULT_CONFIG,
+        *,
+        seed: int | None = None,
+        readout: str | None = None,
+        vocab_size: int | None = None,
     ) -> Judge:
+        """설정 파일의 fixture + readout. ``vocab_size``는 검사용 작은 어휘(설정 fixture와 앞 V행이 같다)."""
         config = HybridConfig.load(path)
+        if vocab_size is not None:
+            config = HybridConfig(**{**config.__dict__, "vocab_size": int(vocab_size)})
         seed = config.seed if seed is None else int(seed)
         backbone = TinyHybrid(config, seed=seed)
-        return cls(backbone, rank=config.readout_rank, readout=readout or config.readout_mode, seed=seed + 1)
+        return cls(backbone, rank=config.readout_rank, readout=readout or config.readout_mode, seed=seed + 1000)
 
     # -- readout --
 
     def pointer_logits(self, h_d: Tensor, h_c: Tensor) -> Tensor:
         """``z_k = (U h_d)ᵀ (V h_{c_k}) / √r + b``. ``h_d [d]``, ``h_c [K, d]`` → ``[K]``."""
+        if self.readout != "pointer":
+            raise ValueError(f"readout: pointer readout이 아니다 ({self.readout!r})")
         return (self.V(h_c) @ self.U(h_d)) / math.sqrt(self.rank) + self.bias
 
     def branch_logits(self, h: Tensor) -> Tensor:
         """참고군 R: ``z_k = wᵀ h_k + b``. ``h [K, d]`` → ``[K]``."""
+        if self.readout != "candidate_branch":
+            raise ValueError(f"readout: 참고군 R(candidate_branch)이 아니다 ({self.readout!r})")
         return self.w(h)[:, 0]
 
     # -- 공개 API --
