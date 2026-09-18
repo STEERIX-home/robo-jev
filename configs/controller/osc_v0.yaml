@@ -2,7 +2,7 @@
 #
 # 계약의 수치는 전부 여기에만 둔다. `sim/controller.py`에는 상수를 쓰지 않는다.
 # 값은 실험 시작값이며 버전(`version`)과 함께 레코드에 기록한다(docs/08 §8 `versions.controller`).
-version: c0.2
+version: c0.3
 
 # 하네스↔실행기 계약의 표현 규약 (docs/02 §4, docs/05 §2 "좌표계·회전 표현·delta/absolute 설정을 기록").
 frame:
@@ -77,6 +77,19 @@ gripper:                     # docs/08 §6 "그리퍼" — readiness·ID·ACK·�
   close_readiness_distance_mm: 60   # 대상까지 이 안이어야 close를 실행한다
   open_readiness_force_n: 25.0      # 이보다 큰 하중에서는 open을 보류한다
   event_id_prefix: ge
+
+retreat:                     # docs/08 §6 `path: retreat`
+  # 로봇 기준 좌표계에서의 후퇴 방향. "뒤로 물러나며 위로 든다". 국소 플래너(3b)가
+  # 경유점을 채우기 전에도 retreat은 **실제 움직임**이어야 한다 — 제자리 유지를
+  # MOVE_EE라고 기록하면 실행 이력이 거짓이 된다.
+  vector_mm: [-40.0, 0.0, 120.0]
+  distance_mm: 120.0
+
+defaults:                    # 원시 명령(`{"kind": ...}`)이 빠뜨린 값의 기본치
+  speed_level_moving: 2      # MOVE_EE·PUSH_SEGMENT
+  speed_level_still: 0       # HOLD·OBSERVE·SET_GRIPPER·REQUEST_REPLAN
+  force_level: avoid
+  push_force_level: push
 
 reach:                       # docs/08 §6 "거절" — 국소 도달·충돌 검사
   workspace_radius_mm: 900   # 로봇 기준 원점에서의 도달 반경 (Panda 공칭 855mm보다 약간 넓게)

@@ -26,13 +26,15 @@ from typing import Any
 
 import mujoco
 import numpy as np
+import robosuite.macros
 
 from robo_jev.sim.controller import (
     Controller,
     load_controller_config,
     resolve_config_path,
 )
-from robo_jev.sim.scene import ScenePlan, TidyClutter, build_plan, merge_profile
+from robo_jev.sim.scene import ScenePlan, build_plan, merge_profile
+from robo_jev.sim.tidy_clutter import TidyClutter
 
 __all__ = ["Environment"]
 
@@ -53,10 +55,16 @@ _BASE_ORIENTATION_TOLERANCE = 1e-9
 #: 설정의 `reach.min_height_mm`가 실제 테이블 윗면과 이만큼 넘게 어긋나면 실패한다.
 _TABLE_HEIGHT_TOLERANCE_MM = 2.0
 
+#: 물리 timestep 비교 허용 오차(초). 설정은 ms 정수이므로 부동소수 표현 오차만 흡수한다.
+_TIMESTEP_TOLERANCE_S = 1e-12
 
-def _round_quat(quat: list[float]) -> list[float]:
-    """docs/08 §3.2: 자세는 quaternion 소수 2자리."""
-    return [round(float(value), 2) for value in quat]
+#: 모의 시각과 MuJoCo 시간의 허용 차이(ms). 누적 부동소수 오차만 흡수한다.
+_CLOCK_TOLERANCE_MS = 1e-3
+
+
+def _json_constant(name: str) -> float:
+    """표준 JSON이 아닌 토큰(`Infinity`·`NaN`)을 만나면 그 자리에서 막는다."""
+    raise ValueError(f"snapshot에 표준 JSON이 아닌 값이 들어 있다: {name}")
 
 
 def _encode_array(array: np.ndarray) -> str:
@@ -147,6 +155,8 @@ class Environment:
         self.profile = profile or str(self.config["default_profile"])
         self.settings = merge_profile(self.config, self.profile)
         self.serializer_version = str(self.config.get("version", "s0"))
+        # docs/08 §3.2의 직렬화 규약. 자릿수는 serializer 버전과 함께 고정한다.
+        self.quaternion_decimals = int(self.settings["serialization"]["quaternion_decimals"])
 
         simulator = self.settings["simulator"]
         self.control_hz = int(simulator["control_hz"])
@@ -162,16 +172,29 @@ class Environment:
 
         self.controller_config = load_controller_config(simulator["controller_config"])
         self.controller = Controller(self.controller_config)
+        # 두 설정이 같은 주기를 말해야 한다. 컨트롤러는 혼합·감속을 시각으로 계산하고
+        # 환경은 그 시각만큼 물리를 돌리므로, 어긋나면 계약의 100ms가 100ms가 아니게 된다.
         if self.controller.period_ms != self.period_ms:
             raise ValueError(
                 f"제어 주기가 설정 둘에서 다르다: sim {self.period_ms}ms, controller "
                 f"{self.controller.period_ms}ms"
+            )
+        if self.controller.physics_dt_ms != self.physics_dt_ms:
+            raise ValueError(
+                f"물리 timestep이 설정 둘에서 다르다: sim {self.physics_dt_ms}ms, controller "
+                f"{self.controller.physics_dt_ms}ms"
             )
 
         self.plan: ScenePlan | None = None
         self._env: TidyClutter | None = None
         self._model_signature: tuple | None = None
         self.seed: int | None = None
+        # 에피소드 RNG. 3a는 여기서 뽑지 않지만(장면·일정은 reset seed가 통째로 정한다)
+        # snapshot에 담아 둔다. 뒤 slice가 에피소드 안에서 난수를 써야 할 때 **이 두 개**를
+        # 쓰라는 자리다 — `numpy.random`·`random`의 전역 상태는 이 과정 밖에서도 바뀌므로
+        # 재현을 보장할 수 없고, 그래서 reset이 전역을 건드리지도 않는다.
+        self.rng = np.random.default_rng(0)
+        self.py_rng = random.Random(0)
 
     # ------------------------------------------------------------------
     # reset
@@ -184,9 +207,8 @@ class Environment:
 
         # 장면 난수와 별개로, 에피소드 안에서 쓰는 난수는 파생 seed로 둔다. 파생이므로
         # reset seed 하나가 여전히 에피소드 전체를 정한다.
-        self._rng = np.random.default_rng([self.seed, 0xB0B0])
-        self._python_rng = random.Random(self.seed)
-        np.random.seed(self.seed % (2**32))
+        self.rng = np.random.default_rng([self.seed, 0xB0B0])
+        self.py_rng = random.Random(self.seed)
 
         self._build_sim()
         self._reset_episode_state()
@@ -197,6 +219,11 @@ class Environment:
         assert self.plan is not None
         signature = self.plan.model_signature()
         simulator = self.settings["simulator"]
+        # robosuite는 물리 timestep을 **모델 XML을 쓸 때** `macros.SIMULATION_TIMESTEP`에서
+        # 읽고(`models/world.py`), 하위 스텝 수도 거기서 온 `env.model_timestep`으로 센다
+        # (`environments/base.py`). 그래서 `sim.model.opt.timestep`에 나중에 값을 넣어 봐야
+        # hard reset이 XML을 다시 쓰면서 지워진다. 모델을 짓기 **전에** macro를 맞춰야 한다.
+        robosuite.macros.SIMULATION_TIMESTEP = self.physics_dt_ms / 1000.0
         if self._env is not None and signature == self._model_signature:
             # 모델이 같으면 다시 짓지 않는다. 자세·일정은 새 plan이 정한다.
             self._env.plan = self.plan
@@ -218,11 +245,44 @@ class Environment:
                 seed=self.seed,
             )
             self._model_signature = signature
-        self._env.sim.model.opt.timestep = self.physics_dt_ms / 1000.0
         # robosuite는 생성자에서 `_reset_internal`을 부르지 않는다. 물체 자세는 거기서
         # 놓이므로 새로 지었든 재사용하든 여기서 한 번 reset한다.
         self._env.reset()
+        self._check_timing()
         self._check_frame_assumptions()
+
+    def _check_timing(self) -> None:
+        """설정의 주기가 실제 모델에 걸렸는지 reset마다 확인한다 (docs/05 §2).
+
+        `physics_dt_ms`는 조용히 무시되기 쉬운 값이다 — macro를 거쳐 XML로 가므로
+        어느 한 군데만 어긋나도 물리는 기본값(2ms)으로 돌면서 설정만 4ms라고 말한다.
+        그래서 모델·robosuite·우리 설정 셋을 매번 맞대 본다.
+        """
+        expected_s = self.physics_dt_ms / 1000.0
+        actual_s = float(self._env.sim.model.opt.timestep)
+        if abs(actual_s - expected_s) > _TIMESTEP_TOLERANCE_S:
+            raise RuntimeError(
+                f"모델의 물리 timestep이 설정과 다르다: {actual_s}s vs {expected_s}s"
+            )
+        if abs(float(self._env.model_timestep) - expected_s) > _TIMESTEP_TOLERANCE_S:
+            raise RuntimeError(
+                "robosuite가 세는 하위 스텝의 기준이 설정과 다르다: "
+                f"{self._env.model_timestep}s vs {expected_s}s"
+            )
+        actual_substeps = round(self._env.control_timestep / self._env.model_timestep)
+        if actual_substeps != self.substeps:
+            raise RuntimeError(
+                f"제어 주기당 물리 스텝 수가 다르다: {actual_substeps} vs {self.substeps}"
+            )
+
+    def _check_sim_clock(self) -> None:
+        """모의 시각이 실제 물리 시간과 같이 흐르는지 본다. 일정이 여기에 걸리기 때문이다."""
+        drift_ms = abs(float(self._env.sim.data.time) * 1000.0 - self.sim_time_ms)
+        if drift_ms > _CLOCK_TOLERANCE_MS:
+            raise RuntimeError(
+                f"모의 시각이 물리 시간과 어긋났다: {self._env.sim.data.time * 1000.0}ms "
+                f"vs {self.sim_time_ms}ms"
+            )
 
     def _composite_controller_config(self) -> dict[str, Any]:
         """`configs/controller/osc_v0.yaml`의 `osc` 블록을 robosuite 형식으로 옮긴다."""
@@ -302,6 +362,7 @@ class Environment:
 
         self.sim_time_ms += self.period_ms
         self.tick += 1
+        self._check_sim_clock()
         self._apply_schedules()
         self._track_contacts()
         self._track_holding()
@@ -429,6 +490,10 @@ class Environment:
         quat = [float(quat_wxyz[1]), float(quat_wxyz[2]), float(quat_wxyz[3]), float(quat_wxyz[0])]
         return position, quat
 
+    def _round_quat(self, quat: list[float]) -> list[float]:
+        """docs/08 §3.2의 직렬화 규약. 자릿수는 설정이 정한다."""
+        return [round(float(value), self.quaternion_decimals) for value in quat]
+
     def _visibility(self) -> dict[str, float]:
         """고정 시점에서 물체 윗면 표본으로 광선을 쏴 가시 비율을 잰다.
 
@@ -477,7 +542,7 @@ class Environment:
         거리"를 보므로(docs/08 §4) 명령에서 대상을 받아 그 거리만 채운다.
         """
         position, quat = self._ee_pose_mm()
-        nearest = math.inf
+        clearances: list[float] = []
         target_distance_mm = None
         for plan_object in self.plan.objects:
             object_position, _ = self._object_pose(plan_object.id)
@@ -488,7 +553,9 @@ class Environment:
                 continue  # 들고 있는 물체는 근접 반사의 장애물이 아니다
             # 중심 거리에서 물체의 외접 반지름을 빼 표면까지의 여유로 본다.
             radius = math.dist((0.0, 0.0, 0.0), plan_object.half_size_mm)
-            nearest = min(nearest, distance - radius)
+            clearances.append(distance - radius)
+        # 볼 장애물이 하나도 없으면 "없음"은 `None`이다. `inf`는 표준 JSON으로 적을 수 없다.
+        nearest = min(clearances) if clearances else None
         slip_mm = 0.0
         if self._holding is not None and self._holding in self._grasp_pose_mm:
             current, _ = self._object_pose(self._holding)
@@ -556,7 +623,7 @@ class Environment:
                     "shape": plan_object.shape,
                     "colour": plan_object.colour,
                     "pos_mm": [round(value) for value in position],
-                    "quat": _round_quat(quat),
+                    "quat": self._round_quat(quat),
                     "obb_mm": [int(value) for value in plan_object.obb_mm],
                     "visible": visible,
                     "visible_ratio": round(ratio, 2),
@@ -584,7 +651,7 @@ class Environment:
             ],
             "robot": {
                 "ee_pos_mm": [round(value) for value in ee_position],
-                "ee_quat": _round_quat(ee_quat),
+                "ee_quat": self._round_quat(ee_quat),
                 "gripper_mm": round(self._gripper_mm()),
                 "holding": self._holding,
                 "contact_force_n": round(self._contact_force_n(), 2),
@@ -604,6 +671,8 @@ class Environment:
                 "gripper": self.controller.gripper_desired,
                 "stop": bool(self.controller.stopping),
                 "stale": bool(self.controller.stale),
+                # 감속 구간과 HOLD 절차를 실행 이력에서 구분한다 (docs/08 §6 "stale").
+                "hold_after_stale": bool(self.controller.holding_after_stale),
             },
             "versions": {
                 "serializer": self.serializer_version,
@@ -669,24 +738,31 @@ class Environment:
                 "robosuite_cur_time": float(self._env.cur_time),
                 "robosuite_done": bool(self._env.done),
             },
-            # 6. 모든 RNG.
+            # 6. 모든 RNG. 전역(`numpy.random`·`random`)은 담지 않는다 — 이 과정 밖에서도
+            #    바뀌므로 담아도 재현을 보장하지 못하고, 담으면 복원이 남의 상태를 덮는다.
+            #    대신 에피소드 RNG 두 개를 환경이 들고 있고 그것만 담는다.
             "rng": {
-                "scene": self._rng.bit_generator.state,
+                "scene": self.rng.bit_generator.state,
                 "robosuite": self._env.rng.bit_generator.state,
-                "numpy_global": _encode_legacy_state(np.random.get_state()),
-                "python": _encode_python_state(self._python_rng.getstate()),
+                "python": _encode_python_state(self.py_rng.getstate()),
             },
         }
 
     def snapshot(self) -> bytes:
         """이어 붙일 수 있는 모든 상태 (docs/05 §2). gzip한 JSON이라 열어 볼 수 있다."""
-        payload = json.dumps(self._snapshot_dict(), ensure_ascii=False, sort_keys=True)
+        # `allow_nan=False`: 파이썬의 json은 기본으로 `Infinity`·`NaN`을 적는데 그것은 표준
+        # JSON이 아니다. 다른 언어의 파서가 거절하므로 여기서 먼저 막는다.
+        payload = json.dumps(
+            self._snapshot_dict(), ensure_ascii=False, sort_keys=True, allow_nan=False
+        )
         return gzip.compress(payload.encode("utf-8"), mtime=0)
 
     @staticmethod
     def describe_snapshot(snapshot: bytes) -> dict[str, Any]:
         """snapshot 바이트를 dict로 편다. 검사와 진단이 쓴다."""
-        return json.loads(gzip.decompress(snapshot).decode("utf-8"))
+        return json.loads(
+            gzip.decompress(snapshot).decode("utf-8"), parse_constant=_json_constant
+        )
 
     def restore(self, snapshot: bytes) -> None:
         state = self.describe_snapshot(snapshot)
@@ -708,6 +784,12 @@ class Environment:
         model, data = self._env.sim.model._model, self._env.sim.data._data
         buffer = _decode_array(state["mujoco"]["integration"])
         mujoco.mj_setState(model, data, buffer, _STATE_SPEC)
+        # 적분 상태에 든 시각과 따로 적어 둔 시각이 어긋나면 snapshot이 깨진 것이다.
+        if abs(float(data.time) - float(state["mujoco"]["time"])) > _TIMESTEP_TOLERANCE_S:
+            raise ValueError(
+                f"snapshot의 물리 시각이 적분 상태와 다르다: {state['mujoco']['time']}s "
+                f"vs {data.time}s"
+            )
 
         osc_state = state["osc"]
         osc = self._osc
@@ -751,13 +833,12 @@ class Environment:
         self._env.done = bool(wrapper["robosuite_done"])
 
         rng = state["rng"]
-        self._rng = np.random.default_rng()
-        self._rng.bit_generator.state = rng["scene"]
+        self.rng = np.random.default_rng()
+        self.rng.bit_generator.state = rng["scene"]
         self._env.rng = np.random.default_rng()
         self._env.rng.bit_generator.state = rng["robosuite"]
-        np.random.set_state(_decode_legacy_state(rng["numpy_global"]))
-        self._python_rng = random.Random()
-        self._python_rng.setstate(_decode_python_state(rng["python"]))
+        self.py_rng = random.Random()
+        self.py_rng.setstate(_decode_python_state(rng["python"]))
 
     def close(self) -> None:
         if self._env is not None:
@@ -769,28 +850,6 @@ class Environment:
 # --------------------------------------------------------------------------
 # RNG 상태 직렬화
 # --------------------------------------------------------------------------
-
-
-def _encode_legacy_state(state: tuple) -> dict[str, Any]:
-    name, keys, position, has_gauss, cached_gaussian = state
-    return {
-        "name": name,
-        "keys": base64.b64encode(np.asarray(keys, dtype=np.uint32).tobytes()).decode("ascii"),
-        "pos": int(position),
-        "has_gauss": int(has_gauss),
-        "cached_gaussian": float(cached_gaussian),
-    }
-
-
-def _decode_legacy_state(state: dict[str, Any]) -> tuple:
-    keys = np.frombuffer(base64.b64decode(state["keys"].encode("ascii")), dtype=np.uint32).copy()
-    return (
-        state["name"],
-        keys,
-        int(state["pos"]),
-        int(state["has_gauss"]),
-        float(state["cached_gaussian"]),
-    )
 
 
 def _encode_python_state(state: tuple) -> dict[str, Any]:

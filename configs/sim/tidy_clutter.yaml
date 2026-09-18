@@ -2,7 +2,7 @@
 #
 # 장면·지시 변경·외란은 전부 reset seed에서 만든다. 외란은 **모의 시간**으로 정의하며
 # 정책 호출 횟수와 무관하다(docs/05 §2). 모든 수치는 여기에만 둔다.
-version: s0.1
+version: s0.2
 default_profile: E1
 
 simulator:
@@ -16,6 +16,12 @@ simulator:
   # headless. 렌더·카메라는 쓰지 않는다(YAGNI: E2에서 시뮬 3D 카메라를 붙인다).
   has_renderer: false
   has_offscreen_renderer: false
+
+# docs/08 §3.2 직렬화 규약. serializer 버전(`version`)과 함께 고정한다.
+serialization:
+  position_unit: mm          # 위치는 mm 정수
+  quaternion_decimals: 2     # 자세는 quaternion 소수 2자리
+  time_unit: ms              # 시간은 ms 정수
 
 table:
   full_size_m: [0.8, 0.8, 0.05]
@@ -81,6 +87,10 @@ disturbance:
 
 episode:
   max_ms: 30000
+  # 지시 변경·외란 시각을 내리는 격자. 제어 주기와 **무관한** 고정 격자여야 한다 —
+  # 주기로 양자화하면 같은 seed라도 제어 주기를 바꾼 순간 일정이 달라져서
+  # "외란은 모의 시간으로 정해진다"를 검사할 수 없다.
+  schedule_grid_ms: 20
 
 # E0는 참조 상태다: 정적 장면, 지시 변경·외란 없음 (docs/05 §2 표).
 profiles:

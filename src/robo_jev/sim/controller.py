@@ -49,6 +49,9 @@ _PATH_KINDS = ("direct", "via", "retreat", "hold")
 
 _GRIPPER_STATES = ("open", "closed")
 
+#: 이 모듈이 쓰는 quaternion 순서. 설정의 `frame.quaternion_order`와 대조한다.
+_QUATERNION_ORDER = "xyzw"
+
 _PACKAGE_ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -103,9 +106,18 @@ class Controller:
         self.config = copy.deepcopy(config)
         self.version = str(config.get("version", "c0"))
 
+        # 자세 표현 규약. 코드가 xyzw를 가정하므로 설정이 다른 순서를 말하면 그 자리에서 막는다.
+        order = str(config["frame"]["quaternion_order"])
+        if order != _QUATERNION_ORDER:
+            raise ValueError(
+                f"이 컨트롤러는 quaternion {_QUATERNION_ORDER} 순서만 쓴다 (설정: {order!r})"
+            )
+
         timing = config["timing"]
         self.control_hz: int = int(timing["control_hz"])
         self.period_ms: int = 1000 // self.control_hz
+        # 물리 timestep은 컨트롤러가 직접 쓰지 않는다. 환경이 자기 설정과 대조하는
+        # 값이며(`Environment._check_timing`), 두 설정이 어긋나면 reset이 실패한다.
         self.physics_dt_ms: int = int(timing["physics_dt_ms"])
 
         lifetime = config["lifetime"]
@@ -127,7 +139,23 @@ class Controller:
             }
             for name, values in config["force_levels"].items()
         }
-        self.default_force_level = next(iter(self.force_levels))
+
+        defaults = config["defaults"]
+        self.default_speed_level_moving = int(defaults["speed_level_moving"])
+        self.default_speed_level_still = int(defaults["speed_level_still"])
+        self.default_force_level = str(defaults["force_level"])
+        self.push_force_level = str(defaults["push_force_level"])
+        for name in (self.default_force_level, self.push_force_level):
+            if name not in self.force_levels:
+                raise ValueError(f"defaults가 없는 force_level을 가리킨다: {name!r}")
+
+        retreat = config["retreat"]
+        vector = [float(value) for value in retreat["vector_mm"]]
+        length = _norm(vector)
+        if length == 0.0:
+            raise ValueError("retreat.vector_mm이 길이 0이다 — 후퇴 방향을 정할 수 없다")
+        self.retreat_direction = [value / length for value in vector]
+        self.retreat_distance_mm = float(retreat["distance_mm"])
 
         reflex = config["reflex"]
         self.force_limit_n = float(reflex["force_limit_n"])
@@ -193,6 +221,8 @@ class Controller:
 
         self.force_level = self.default_force_level
         self.stopping = False
+        self.holding_after_stale = False
+        self.force_reflex_active = False
         self.decel_start_ms = now_ms
         self.decel_from_speed_mm_s = 0.0
 
@@ -212,7 +242,9 @@ class Controller:
             "gripper_mm": float(gripper_mm),
             "gripper_load_n": 0.0,
             "contact_force_n": 0.0,
-            "nearest_obstacle_mm": math.inf,
+            # "장애물 없음"은 `None`이다. `math.inf`는 표준 JSON으로 적을 수 없어
+            # snapshot이 `Infinity`라는 비표준 토큰을 뱉게 된다.
+            "nearest_obstacle_mm": None,
             "target_distance_mm": None,
             "holding": None,
             "slip_mm": 0.0,
@@ -239,86 +271,82 @@ class Controller:
     # 명령 해석
     # ------------------------------------------------------------------
 
-    def _normalise_command(self, command: dict[str, Any], now_ms: int) -> dict[str, Any] | None:
-        """명령을 실행기 하나 + 수명 필드로 편다.
+    def _normalise_command(
+        self, command: dict[str, Any], now_ms: int
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        """명령을 실행기 하나 + 수명 필드로 편다. 실패하면 `(None, 사유)`.
 
         두 형식을 받는다. docs/08 §6의 전체 명령과, 계획서의 `{"kind": "HOLD", …}`처럼
         실행기를 직접 부르는 원시 형식이다. 원시 형식에는 수명 필드가 없으므로
         "지금 관측해 지금 발행한" 명령으로 채운다 — 값이 `now_ms`와 순번에서만 오므로
-        snapshot 복원 뒤에도 같은 명령이 같은 수명을 갖는다.
+        snapshot 복원 뒤에도 같은 명령이 같은 수명을 갖는다. 두 형식이 다른 것은
+        실행기·경로·목표를 어디서 읽느냐뿐이므로 그 셋만 갈라 읽고 나머지는 한 군데서 만든다.
         """
         kind = command.get("kind")
         if kind is not None:
             if kind not in EXECUTORS:
-                return None
-            executor = kind
-            path_kind = "hold" if executor not in _MOVING_EXECUTORS else "direct"
-            target = command.get("target_mm")
-            speed_level = command.get("speed_level")
-            if speed_level is None:
-                speed_level = 0 if executor not in _MOVING_EXECUTORS else 2
-            force_level = command.get("force_level")
-            if force_level is None:
-                force_level = "push" if executor == "PUSH_SEGMENT" else self.default_force_level
-            normalised = {
-                "executor": executor,
-                "seq": command.get("seq", self.last_seq + 1),
-                "observed_at": command.get("observed_at", now_ms),
-                "issued_at": command.get("issued_at", now_ms),
-                "lease_until": command.get("lease_until"),
-                "path_kind": path_kind,
-                "target_mm": target,
+                return None, "unknown_executor"
+            moving = kind in _MOVING_EXECUTORS
+            shape = {
+                "executor": kind,
+                "path_kind": "direct" if moving else "hold",
+                "target_mm": command.get("target_mm"),
                 "target_quat": command.get("target_quat"),
-                "speed_level": speed_level,
-                "force_level": force_level,
-                "gripper": command.get("gripper"),
-                "stop": bool(command.get("stop", False)),
-                "geometry_age_ms": command.get("geometry_age_ms"),
-                "target_moving": bool(command.get("target_moving", False)),
+                "speed_level": command.get(
+                    "speed_level",
+                    self.default_speed_level_moving if moving else self.default_speed_level_still,
+                ),
+                "force_level": command.get(
+                    "force_level",
+                    self.push_force_level if kind == "PUSH_SEGMENT" else self.default_force_level,
+                ),
                 "forbidden_segment": bool(command.get("forbidden_segment", False)),
-                "action_ref": command.get("action_ref"),
-                "phase": command.get("phase"),
             }
         else:
             path = command.get("path") or {}
             path_kind = path.get("kind", "hold")
             if path_kind not in _PATH_KINDS:
-                return None
-            target = path.get("target_mm") if path_kind != "via" else path.get("waypoint_mm")
-            if path_kind == "via" and target is None:
-                target = path.get("target_mm")
-            executor = self._executor_for(command, path_kind)
-            constraints = command.get("constraints") or {}
-            normalised = {
-                "executor": executor,
-                "seq": command.get("seq", self.last_seq + 1),
-                "observed_at": command.get("observed_at", now_ms),
-                "issued_at": command.get("issued_at", now_ms),
-                "lease_until": command.get("lease_until"),
+                return None, "invalid_path"
+            if path_kind == "via" and path.get("waypoint_mm") is None:
+                # 경유점 없는 via를 직선으로 바꾸지 않는다. 하네스가 그 직선을 피하려고
+                # 경유점을 고른 것이므로, 대신 직진하면 계약을 어기는 쪽이 더 위험하다.
+                return None, "waypoint_missing"
+            shape = {
+                "executor": self._executor_for(command, path_kind),
                 "path_kind": path_kind,
-                "target_mm": target,
+                "target_mm": path.get("waypoint_mm") if path_kind == "via" else path.get("target_mm"),
                 "target_quat": path.get("target_quat"),
-                "speed_level": command.get("speed_level", 0),
+                "speed_level": command.get("speed_level", self.default_speed_level_still),
                 "force_level": command.get("force_level", self.default_force_level),
-                "gripper": command.get("gripper"),
-                "stop": bool(command.get("stop", False)),
-                "geometry_age_ms": command.get("geometry_age_ms"),
-                "target_moving": bool(command.get("target_moving", False)),
-                "forbidden_segment": bool(constraints.get("forbidden_segment", False)),
-                "action_ref": command.get("action_ref"),
-                "phase": command.get("phase"),
+                "forbidden_segment": bool(
+                    (command.get("constraints") or {}).get("forbidden_segment", False)
+                ),
             }
 
+        normalised = {
+            **shape,
+            "seq": command.get("seq", self.last_seq + 1),
+            "observed_at": command.get("observed_at", now_ms),
+            "issued_at": command.get("issued_at", now_ms),
+            "lease_until": command.get("lease_until"),
+            "gripper": command.get("gripper"),
+            "stop": bool(command.get("stop", False)),
+            "geometry_age_ms": command.get("geometry_age_ms"),
+            "target_moving": bool(command.get("target_moving", False)),
+            "action_ref": command.get("action_ref"),
+            "phase": command.get("phase"),
+        }
+
         if normalised["force_level"] not in self.force_levels:
-            return None
+            return None, "invalid_force_level"
         level = normalised["speed_level"]
-        if not isinstance(level, int) or isinstance(level, bool):
-            return None
+        if isinstance(level, bool) or not isinstance(level, int):
+            return None, "invalid_speed_level"
         if not 0 <= level < len(self.speed_levels_mm_s):
-            return None
+            return None, "invalid_speed_level"
         if normalised["gripper"] is not None and normalised["gripper"] not in _GRIPPER_STATES:
-            return None
-        return normalised
+            return None, "invalid_gripper"
+        return normalised, None
 
     def _executor_for(self, command: dict[str, Any], path_kind: str) -> str:
         """docs/02 §4의 대응표. 명령 하나는 원시 기능 하나로 간다."""
@@ -353,37 +381,20 @@ class Controller:
             "stop_transition": False,
             "request_observation": False,
             "executor": executor,
+            "path": None,
             "lease_until": int(self.lease_until),
         }
         ack.update(fields)
         return ack
 
-    def apply(self, command: dict[str, Any], now_ms: int) -> dict[str, Any]:
-        """명령 하나를 계약대로 검사하고 ACK를 돌려준다 (docs/08 §6)."""
-        self.now_ms = int(now_ms)
-        normalised = self._normalise_command(command, self.now_ms)
-        if normalised is None:
-            seq = command.get("seq", self.last_seq + 1)
-            self._record("rejected", seq=seq, reason="unknown_executor")
-            return self._ack(seq, None, rejected=True, reason="unknown_executor")
+    def _lifetime_fault(self, normalised: dict[str, Any]) -> str | None:
+        """수명 검사의 결과 사유. 걸리는 것이 없으면 `None`.
 
-        seq = int(normalised["seq"])
-        executor = normalised["executor"]
-
-        # 1. 순번 역행은 폐기한다. lease도 last_seq도 건드리지 않는다.
-        if seq <= self.last_seq:
-            self._record("discarded", seq=seq, reason="seq_regression")
-            return self._ack(seq, executor, rejected=True, reason="seq_regression")
-        # 검사를 통과한 순번은 적용 여부와 무관하게 기록한다. 그래야 폐기된 명령보다
-        # 오래된 명령이 나중에 되살아나지 않는다.
-        self.last_seq = seq
-
-        # 2. 관측 deadline. 늦은 응답에는 lease가 새로 붙지 않는다.
+        관측 deadline과 기하 나이를 한 군데서 본다. 정지는 이 사유를 **기록만** 하고
+        진행하며, 나머지 명령은 여기서 멈춘다.
+        """
         if self.now_ms - int(normalised["observed_at"]) > self.observation_deadline_ms:
-            self._record("discarded", seq=seq, reason="observation_deadline")
-            return self._ack(seq, executor, stale=True, reason="observation_deadline")
-
-        # 3. 기하 나이 허용치. 넘으면 적용하지 않고 관측을 요청한다.
+            return "observation_late"
         age = normalised["geometry_age_ms"]
         if age is not None and normalised["target_mm"] is not None:
             tolerance = (
@@ -392,25 +403,75 @@ class Controller:
                 else self.geometry_age_static_ms
             )
             if float(age) > tolerance:
-                self._record("discarded", seq=seq, reason="geometry_age", age_ms=age)
-                return self._ack(
-                    seq, executor, reason="geometry_age", request_observation=True
-                )
+                return "geometry_age"
+        return None
 
-        # 4. 정지는 혼합을 우회한다. 반사와 같은 우선순위이므로 다른 검사보다 앞선다.
+    def apply(self, command: dict[str, Any], now_ms: int) -> dict[str, Any]:
+        """명령 하나를 계약대로 검사하고 ACK를 돌려준다 (docs/08 §6)."""
+        self.now_ms = int(now_ms)
+        normalised, fault = self._normalise_command(command, self.now_ms)
+        if normalised is None:
+            seq = command.get("seq", self.last_seq + 1)
+            self._record("rejected", seq=seq, reason=fault)
+            return self._ack(seq, None, rejected=True, reason=fault)
+
+        seq = int(normalised["seq"])
+        executor = normalised["executor"]
+
+        # 1. 순번 역행은 폐기한다. lease도 last_seq도 건드리지 않는다. 정지도 예외가 아니다 —
+        #    역행한 명령은 지금 상태에 대한 판단이 아니다.
+        if seq <= self.last_seq:
+            self._record("discarded", seq=seq, reason="seq_regression")
+            return self._ack(seq, executor, rejected=True, reason="seq_regression")
+        # 검사를 통과한 순번은 적용 여부와 무관하게 기록한다. 그래야 폐기된 명령보다
+        # 오래된 명령이 나중에 되살아나지 않는다.
+        self.last_seq = seq
+
+        lifetime_fault = self._lifetime_fault(normalised)
+
+        # 2. 정지는 반사와 같은 우선순위다(docs/08 §5 1항: "허용 지연이 없다"). 관측이 늦었거나
+        #    기하가 오래됐다는 이유로 **버리지 않는다** — 늦은 정지도 정지다. 사유는 ACK에
+        #    남겨 하네스가 집계할 수 있게 하고, 늦은 명령이므로 lease만 새로 붙이지 않는다.
         if normalised["stop"]:
             self._begin_stop("command")
-            self._refresh_lease(normalised)
-            return self._ack(seq, "HOLD", applied=True, stop_transition=True)
+            if lifetime_fault is None:
+                self._refresh_lease(normalised)
+            else:
+                self._record("stop_late", seq=seq, reason=lifetime_fault)
+            # 그리퍼 답은 정지 중에도 본다. 다만 `stop.hold_grasp`가 참이고 파지 중이면
+            # 해제는 기다린다 — 감속하며 물체를 놓으면 그대로 떨어뜨린다.
+            event_id, wait = self._set_gripper(normalised["gripper"])
+            return self._ack(
+                seq,
+                "HOLD",
+                applied=True,
+                stop_transition=True,
+                reason=lifetime_fault,
+                stale=lifetime_fault == "observation_late",
+                gripper_event=event_id,
+                gripper_wait=wait,
+                path="hold",
+            )
 
-        # 5. 국소 도달·충돌 검사.
+        # 3. 나머지 명령은 수명 검사에서 멈춘다. 늦은 응답에는 lease가 새로 붙지 않고,
+        #    기하가 오래됐으면 관측 분기로 보낸다.
+        if lifetime_fault == "observation_late":
+            self._record("discarded", seq=seq, reason=lifetime_fault)
+            return self._ack(seq, executor, stale=True, reason=lifetime_fault)
+        if lifetime_fault == "geometry_age":
+            self._record(
+                "discarded", seq=seq, reason=lifetime_fault, age_ms=normalised["geometry_age_ms"]
+            )
+            return self._ack(seq, executor, reason=lifetime_fault, request_observation=True)
+
+        # 4. 국소 도달·충돌 검사.
         target = self._resolve_target(normalised)
         rejection = self._check_reach(target)
         if rejection is not None:
             self._record("rejected", seq=seq, reason=rejection)
             return self._ack(seq, executor, rejected=True, reason=rejection)
 
-        # 6. 전환 구간 검사. 걸리면 명령 대신 정지 전이를 한다.
+        # 5. 전환 구간 검사. 걸리면 명령 대신 정지 전이를 한다.
         if normalised["forbidden_segment"]:
             self._begin_stop("transition_collision")
             self._record("rejected", seq=seq, reason="transition_collision")
@@ -418,11 +479,11 @@ class Controller:
                 seq, executor, stop_transition=True, reason="transition_collision"
             )
 
-        # 7. 채택. 목표 속도를 100ms 동안 보간한다.
+        # 6. 채택. 목표 속도를 100ms 동안 보간한다.
         self._adopt(normalised, target)
         self._refresh_lease(normalised)
 
-        # 8. 그리퍼. 상태가 바뀔 때만 readiness를 보고 이벤트를 한 번 낸다.
+        # 7. 그리퍼. 상태가 바뀔 때만 readiness를 보고 이벤트를 한 번 낸다.
         event_id, wait = self._set_gripper(normalised["gripper"])
         return self._ack(
             seq,
@@ -430,6 +491,7 @@ class Controller:
             applied=True,
             gripper_event=event_id,
             gripper_wait=wait,
+            path=normalised["path_kind"],
         )
 
     def _refresh_lease(self, normalised: dict[str, Any]) -> None:
@@ -444,8 +506,18 @@ class Controller:
     def _resolve_target(self, normalised: dict[str, Any]) -> dict[str, Any]:
         """경로 종류를 말단 목표로 바꾼다."""
         kind = normalised["path_kind"]
-        if kind in ("hold", "retreat") or normalised["target_mm"] is None:
-            # retreat은 국소 플래너(3b)가 경유점을 채우기 전까지 제자리 유지다.
+        if kind == "retreat":
+            # 설정된 후퇴 방향으로 실제로 물러난다. 제자리에 두고 MOVE_EE라고 기록하면
+            # 실행 이력이 하지 않은 일을 말하게 된다.
+            here = [float(value) for value in self.sensors["ee_pos_mm"]]
+            return {
+                "pos_mm": [
+                    value + direction * self.retreat_distance_mm
+                    for value, direction in zip(here, self.retreat_direction)
+                ],
+                "quat": list(self.setpoint_quat),
+            }
+        if kind == "hold" or normalised["target_mm"] is None:
             return {"pos_mm": list(self.sensors["ee_pos_mm"]), "quat": list(self.setpoint_quat)}
         quat = normalised["target_quat"]
         return {
@@ -485,6 +557,17 @@ class Controller:
         if desired is None or desired == self.gripper_desired:
             return None, None
 
+        # docs/08 §6 "정지 전이 … 파지 중이면 유지". 멈추는 중에 파지를 푸는 명령은
+        # 물체를 떨어뜨리므로 기다린다.
+        if (
+            self.stopping
+            and self.hold_grasp_on_stop
+            and desired == "open"
+            and self.sensors.get("holding") is not None
+        ):
+            self._record("gripper_wait", desired=desired, reason="stop_holds_grasp")
+            return None, "stop_holds_grasp"
+
         reason = self._gripper_readiness(desired)
         if reason is not None:
             self._record("gripper_wait", desired=desired, reason=reason)
@@ -514,32 +597,48 @@ class Controller:
     # advance — 명령이 없어도 매 주기 돈다
     # ------------------------------------------------------------------
 
-    def _begin_stop(self, cause: str, at_ms: int | None = None) -> None:
+    def _begin_stop(self, cause: str, at_ms: int | None = None, *, hold: bool = True) -> None:
         """감속 프로파일을 건다.
 
         `at_ms`는 감속이 **시작된 시각**이다. lease 만료는 주기가 그것을 알아차린
         시각이 아니라 만료 시각부터 감속한다. 그래야 주기 경계가 어디에 놓이든
         같은 모의 시각에 같은 속도가 된다.
+
+        `hold`는 이것이 곧 HOLD 절차인지를 가른다. 명령 정지·반사·전환 구간 충돌은
+        그 자리에서 HOLD다. lease 만료는 아니다 — docs/08 §6은 "감속 정지"와 "1초 이상
+        지속되면 HOLD 절차"를 나눠 적으므로, 감속 중에는 하던 행동이 실행 기록에 남는다.
         """
         if self.stopping:
             return
         self.stopping = True
         self.decel_start_ms = self.now_ms if at_ms is None else int(at_ms)
         self.decel_from_speed_mm_s = self.speed_mm_s
-        self.executor = "HOLD"
+        if hold:
+            self._enter_hold()
         self.path_kind = "hold"
         self.goal_mm = list(self.setpoint_mm)
         self.goal_quat = list(self.setpoint_quat)
         self._record("stop_transition", cause=cause)
 
+    def _enter_hold(self) -> None:
+        """HOLD 절차에 든다. 사건은 들어갈 때 한 번만 난다."""
+        self.executor = "HOLD"
+        if not self.holding_after_stale:
+            self.holding_after_stale = True
+            self._record("hold_entered")
+
     def _reflexes(self) -> float:
         """반사는 모델 응답을 기다리지 않는다 (docs/08 §6 "반사"). 속도 계수를 돌려준다."""
         factor = 1.0
-        if float(self.sensors.get("contact_force_n") or 0.0) > self.force_limit_n:
-            if not self.stopping:
+        over_force = float(self.sensors.get("contact_force_n") or 0.0) > self.force_limit_n
+        if over_force:
+            # 이미 멈추는 중이어도 힘 한계 초과는 그 자체로 사건이다. 다만 주기마다
+            # 되풀이하지 않도록 발생(onset)에서만 적는다.
+            if not self.force_reflex_active:
                 self._record("reflex_stop", force_n=float(self.sensors["contact_force_n"]))
-                self._begin_stop("reflex_force")
+            self._begin_stop("reflex_force")
             factor = 0.0
+        self.force_reflex_active = over_force
         nearest = self.sensors.get("nearest_obstacle_mm")
         if nearest is not None and float(nearest) < self.proximity_mm:
             factor = min(factor, self.proximity_speed_factor)
@@ -563,16 +662,17 @@ class Controller:
         reflex_factor = self._reflexes()
 
         # lease 만료: 감속 정지하고 그리퍼 상태를 유지한다. 1초 이상 이어지면 HOLD 절차.
-        holding_after_stale = False
+        # 두 단계는 실행 기록에서 구분된다 — 감속 중에는 하던 실행기가 그대로 남고,
+        # HOLD로 넘어갈 때 `hold_entered` 사건이 한 번 난다.
         if self.now_ms > self.lease_until:
             if not self.stale:
                 self.stale = True
                 self.stale_since_ms = self.lease_until
-                self._record("stale", lease_until=int(self.lease_until))
-            self._begin_stop("lease_expired", at_ms=self.stale_since_ms)
-            if self.now_ms - int(self.stale_since_ms or self.lease_until) >= self.hold_after_stale_ms:
-                holding_after_stale = True
-                self.executor = "HOLD"
+                self._record("stale", lease_until=int(self.lease_until), reason="lease_expired")
+            self._begin_stop("lease_expired", at_ms=self.stale_since_ms, hold=False)
+            since = int(self.stale_since_ms if self.stale_since_ms is not None else self.lease_until)
+            if self.now_ms - since >= self.hold_after_stale_ms:
+                self._enter_hold()
 
         if self.stopping:
             elapsed_s = max(0, self.now_ms - self.decel_start_ms) / 1000.0
@@ -611,7 +711,7 @@ class Controller:
             "blend_alpha": blend_alpha,
             "stopping": self.stopping,
             "stale": self.stale,
-            "holding_after_stale": holding_after_stale,
+            "holding_after_stale": self.holding_after_stale,
         }
 
     def _advance_setpoint(self, speed_mm_s: float, dt_s: float, blend_alpha: float) -> None:
@@ -653,6 +753,8 @@ class Controller:
         "speed_mm_s",
         "force_level",
         "stopping",
+        "holding_after_stale",
+        "force_reflex_active",
         "decel_start_ms",
         "decel_from_speed_mm_s",
         "gripper_desired",

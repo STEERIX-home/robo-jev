@@ -16,14 +16,21 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
-from robosuite.environments.manipulation.manipulation_env import ManipulationEnv
-from robosuite.models.arenas import TableArena
-from robosuite.models.objects import BoxObject, CylinderObject
-from robosuite.models.tasks import ManipulationTask
 
-__all__ = ["Disturbance", "Instruction", "SceneObject", "ScenePlan", "TidyClutter", "Zone", "build_plan"]
+__all__ = [
+    "Disturbance",
+    "Instruction",
+    "SceneObject",
+    "ScenePlan",
+    "Zone",
+    "build_plan",
+    "merge_profile",
+]
 
 _ATTRIBUTES = ("fragile", "forbidden")
+
+#: 일정 시각 하나를 잡는 데 쓰는 최대 시도 횟수. 넘으면 설정이 모순이다.
+_SCHEDULE_ATTEMPTS = 200
 
 
 @dataclass(frozen=True)
@@ -147,9 +154,13 @@ def merge_profile(config: dict[str, Any], profile: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-def _quantise(value: float, period_ms: int) -> int:
-    """제어 주기의 배수로 내린다. 주기 경계와 일정이 항상 맞물리게 한다."""
-    return int(value // period_ms) * period_ms
+def _quantise(value: float, grid_ms: int) -> int:
+    """고정 격자의 배수로 내린다.
+
+    격자는 **제어 주기와 무관**하다. 주기로 내리면 제어 주기를 바꾼 순간 같은 seed의
+    일정까지 달라져서, "외란은 모의 시간으로 정해진다"가 주기마다 다른 말이 된다.
+    """
+    return int(value // grid_ms) * grid_ms
 
 
 def build_plan(config: dict[str, Any], seed: int, profile: str) -> ScenePlan:
@@ -159,12 +170,12 @@ def build_plan(config: dict[str, Any], seed: int, profile: str) -> ScenePlan:
     """
     settings = merge_profile(config, profile)
     rng = np.random.default_rng(seed)
-    period_ms = 1000 // int(settings["simulator"]["control_hz"])
+    grid_ms = int(settings["episode"]["schedule_grid_ms"])
 
     objects = _sample_objects(settings, rng)
     zones = _sample_zones(settings, rng)
-    instructions = _sample_instructions(settings, rng, objects, zones, period_ms)
-    disturbances = _sample_disturbances(settings, rng, objects, period_ms)
+    instructions = _sample_instructions(settings, rng, objects, zones, grid_ms)
+    disturbances = _sample_disturbances(settings, rng, objects, grid_ms)
     return ScenePlan(
         seed=int(seed),
         profile=profile,
@@ -246,9 +257,13 @@ def _assign_attributes(
     for attribute in _ATTRIBUTES:
         low, high = spec[f"{attribute}_count"]
         count = int(rng.integers(low, high + 1))
+        if cursor + count > len(order):
+            # 속성은 겹치지 않는다. 물체가 모자라면 장면 설정이 모순이므로 그 자리에서 멈춘다.
+            raise RuntimeError(
+                f"{attribute} {count}개를 붙일 물체가 없다: 물체 {len(order)}개 중 "
+                f"{cursor}개가 이미 쓰였다 — objects.count_min과 *_count를 확인하라"
+            )
         for _ in range(count):
-            if cursor >= len(order):
-                break
             attributes[int(order[cursor])] = (attribute,)
             cursor += 1
     return tuple(
@@ -277,7 +292,7 @@ def _sample_instructions(
     rng: np.random.Generator,
     objects: tuple[SceneObject, ...],
     zones: tuple[Zone, ...],
-    period_ms: int,
+    grid_ms: int,
 ) -> tuple[Instruction, ...]:
     spec = settings["instruction"]
     labels = dict(settings["objects"]["shape_labels"])
@@ -304,8 +319,8 @@ def _sample_instructions(
         return tuple(steps)
     second = others[int(rng.integers(len(others)))]
     low, high = spec["change_window_ms"]
-    at_ms = _quantise(float(rng.uniform(low, high)), period_ms)
-    at_ms = min(max(at_ms, _quantise(low, period_ms) + period_ms), _quantise(high, period_ms))
+    at_ms = _quantise(float(rng.uniform(low, high)), grid_ms)
+    at_ms = min(max(at_ms, _quantise(low, grid_ms) + grid_ms), _quantise(high, grid_ms))
     steps.append(
         Instruction(
             version=2,
@@ -326,7 +341,7 @@ def _sample_disturbances(
     settings: dict[str, Any],
     rng: np.random.Generator,
     objects: tuple[SceneObject, ...],
-    period_ms: int,
+    grid_ms: int,
 ) -> tuple[Disturbance, ...]:
     spec = settings["disturbance"]
     low, high = spec["count"]
@@ -337,13 +352,19 @@ def _sample_disturbances(
     window_low, window_high = spec["window_ms"]
     gap = int(spec["min_gap_ms"])
     times: list[int] = []
-    for _ in range(count):
-        for _ in range(200):
-            candidate = _quantise(float(rng.uniform(window_low, window_high)), period_ms)
-            candidate = max(candidate, period_ms)
+    for index in range(count):
+        for _ in range(_SCHEDULE_ATTEMPTS):
+            candidate = _quantise(float(rng.uniform(window_low, window_high)), grid_ms)
+            candidate = max(candidate, grid_ms)
             if all(abs(candidate - other) >= gap for other in times):
                 times.append(candidate)
                 break
+        else:
+            # 조용히 적게 만들면 "외란 N개인 장면"이라고 믿은 쪽이 틀린 수를 쓴다.
+            raise RuntimeError(
+                f"외란 {index + 1}/{count}번째 시각을 {_SCHEDULE_ATTEMPTS}번 안에 잡지 못했다 "
+                f"— disturbance.window_ms {[window_low, window_high]}와 min_gap_ms {gap}을 확인하라"
+            )
     times.sort()
 
     return tuple(
@@ -358,94 +379,3 @@ def _sample_disturbances(
         )
         for at_ms in times
     )
-
-
-# --------------------------------------------------------------------------
-# robosuite 환경
-# --------------------------------------------------------------------------
-
-
-class TidyClutter(ManipulationEnv):
-    """`ScenePlan`을 그대로 세우는 단일 팔 정리 장면.
-
-    robosuite의 placement sampler를 쓰지 않는다. 자세는 이미 `ScenePlan`이 seed에서
-    정했고, 여기서 다시 뽑으면 난수 소비가 두 군데로 갈라져 재현이 흐려진다.
-    """
-
-    def __init__(self, plan: ScenePlan, settings: dict[str, Any], **kwargs: Any) -> None:
-        self.plan = plan
-        self.settings = settings
-        table = settings["table"]
-        self.table_full_size = tuple(float(value) for value in table["full_size_m"])
-        self.table_friction = tuple(float(value) for value in table["friction"])
-        self.table_offset = np.array([float(value) for value in table["offset_m"]])
-        self.scene_objects: list[Any] = []
-        super().__init__(**kwargs)
-
-    def reward(self, action: Any = None) -> float:
-        """성공 판정은 하네스(3b)가 목표·영역으로 한다. 환경은 보상을 만들지 않는다."""
-        return 0.0
-
-    def _load_model(self) -> None:
-        super()._load_model()
-        xpos = self.robots[0].robot_model.base_xpos_offset["table"](self.table_full_size[0])
-        self.robots[0].robot_model.set_base_xpos(xpos)
-
-        arena = TableArena(
-            table_full_size=self.table_full_size,
-            table_friction=self.table_friction,
-            table_offset=self.table_offset,
-        )
-        arena.set_origin([0, 0, 0])
-
-        spec = self.settings["objects"]
-        self.scene_objects = [self._build_object(obj, spec) for obj in self.plan.objects]
-        self.model = ManipulationTask(
-            mujoco_arena=arena,
-            mujoco_robots=[robot.robot_model for robot in self.robots],
-            mujoco_objects=self.scene_objects,
-        )
-
-    @staticmethod
-    def _build_object(obj: SceneObject, spec: dict[str, Any]) -> Any:
-        density = float(spec["density"])
-        friction = [float(value) for value in spec["friction"]]
-        rgba = list(obj.rgba)
-        if obj.shape == "box":
-            size = [value / 1000.0 for value in obj.half_size_mm]
-            return BoxObject(
-                name=obj.id, size=size, rgba=rgba, density=density, friction=friction
-            )
-        size = [obj.half_size_mm[0] / 1000.0, obj.half_size_mm[2] / 1000.0]
-        return CylinderObject(
-            name=obj.id, size=size, rgba=rgba, density=density, friction=friction
-        )
-
-    def _setup_references(self) -> None:
-        super()._setup_references()
-        self.object_body_ids = {
-            plan_object.id: self.sim.model.body_name2id(model.root_body)
-            for plan_object, model in zip(self.plan.objects, self.scene_objects)
-        }
-        self.object_joints = {
-            plan_object.id: model.joints[0]
-            for plan_object, model in zip(self.plan.objects, self.scene_objects)
-        }
-        self.object_geom_names = {
-            plan_object.id: list(model.contact_geoms)
-            for plan_object, model in zip(self.plan.objects, self.scene_objects)
-        }
-
-    def _reset_internal(self) -> None:
-        super()._reset_internal()
-        if self.deterministic_reset:
-            return
-        for plan_object, model in zip(self.plan.objects, self.scene_objects):
-            position = [
-                self.table_offset[0] + plan_object.pos_mm[0] / 1000.0,
-                self.table_offset[1] + plan_object.pos_mm[1] / 1000.0,
-                self.table_offset[2] + plan_object.pos_mm[2] / 1000.0,
-            ]
-            half = math.radians(plan_object.yaw_deg) / 2.0
-            quat = [math.cos(half), 0.0, 0.0, math.sin(half)]  # MuJoCo는 wxyz
-            self.sim.data.set_joint_qpos(model.joints[0], np.array(position + quat))

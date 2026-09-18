@@ -5,18 +5,42 @@
 더한다. 마지막 하나는 실제 물리에서 짧은 E0 에피소드를 돌린다.
 """
 
+import gzip
+import json
 import math
 
 import numpy as np
 import pytest
 import yaml
-from helpers import SIM_CONFIG
+from helpers import CONTROLLER_CONFIG, SIM_CONFIG
 
 from robo_jev.sim.environment import Environment
 
 CONFIG = yaml.safe_load(SIM_CONFIG.read_text(encoding="utf-8"))
 PERIOD_MS = 1000 // CONFIG["simulator"]["control_hz"]
 HOLD = {"kind": "HOLD", "duration_ms": 100}
+
+
+def write_config(tmp_path, **overrides):
+    """주기만 바꾼 설정 사본을 tmp에 쓴다.
+
+    컨트롤러 설정도 같이 쓴다 — 두 설정의 주기가 어긋나면 환경이 생성에서 거절하므로
+    (그 자체가 검사다) 한쪽만 바꾼 사본은 만들 수 없다.
+    """
+    controller = yaml.safe_load(CONTROLLER_CONFIG.read_text(encoding="utf-8"))
+    settings = yaml.safe_load(SIM_CONFIG.read_text(encoding="utf-8"))
+    for key, value in overrides.items():
+        settings["simulator"][key] = value
+        if key in controller["timing"]:
+            controller["timing"][key] = value
+
+    controller_path = tmp_path / "osc.yaml"
+    controller_path.write_text(yaml.safe_dump(controller, allow_unicode=True), encoding="utf-8")
+    settings["simulator"]["controller_config"] = str(controller_path)
+
+    path = tmp_path / "tidy_clutter.yaml"
+    path.write_text(yaml.safe_dump(settings, allow_unicode=True), encoding="utf-8")
+    return path
 
 
 @pytest.fixture
@@ -122,8 +146,8 @@ def env_instruction_versions(environment) -> list[int]:
 # --------------------------------------------------------------------------
 
 
-def test_disturbances_fire_by_sim_time_not_by_policy_calls(env):
-    """정책 호출 횟수가 달라도 외란은 같은 모의 시각에 난다."""
+def test_disturbances_do_not_depend_on_which_commands_were_issued(env):
+    """어떤 명령을 냈는지와 무관하게 외란은 같은 모의 시각에 난다."""
     seed = 11
     env.reset(seed=seed)
     horizon = env.plan.disturbances[0].sim_ms + 400
@@ -149,6 +173,42 @@ def test_disturbances_fire_by_sim_time_not_by_policy_calls(env):
 
 def schedule_of(observation: dict) -> list[tuple[int, str]]:
     return [(entry["sim_ms"], entry["object"]) for entry in observation["disturbance_log"]]
+
+
+def test_disturbances_fire_by_sim_time_not_by_step_count(tmp_path):
+    """제어 주기를 절반으로 늦춰 **step 호출 수를 반으로** 줄여도 같은 모의 시각에 난다.
+
+    이것이 docs/05 §2의 "외란은 정책의 호출 횟수 대신 모의 시간과 seed로 정의한다"를
+    실제로 가르는 검사다 — 명령 종류만 바꾸는 것으로는 호출 수가 달라지지 않는다.
+    """
+    seed = 11
+    fast_hz = CONFIG["simulator"]["control_hz"]
+    slow_hz = fast_hz // 2
+    slow_period_ms = 1000 // slow_hz
+    horizon_ms = None
+    logs = {}
+    steps = {}
+    for control_hz in (fast_hz, slow_hz):
+        env = Environment(config_path=str(write_config(tmp_path, control_hz=control_hz)))
+        try:
+            env.reset(seed=seed)
+            assert env.period_ms == 1000 // control_hz
+            if horizon_ms is None:
+                # 두 주기 모두로 나누어떨어지는 지평이라야 호출 수를 정확히 비교할 수 있다.
+                raw = env.plan.disturbances[0].sim_ms + 400
+                horizon_ms = -(-raw // slow_period_ms) * slow_period_ms
+            count = 0
+            while env.sim_time_ms < horizon_ms:
+                observation = env.step(HOLD)
+                count += 1
+            logs[control_hz] = schedule_of(observation)
+            steps[control_hz] = count
+        finally:
+            env.close()
+
+    fast, slow = fast_hz, slow_hz
+    assert steps[fast] == 2 * steps[slow], f"step 호출 수가 달라지지 않았다: {steps}"
+    assert logs[fast] and logs[fast] == logs[slow], f"같은 모의 시각에 나지 않았다: {logs}"
 
 
 def test_disturbance_moves_the_object_and_reports_an_event(env):
@@ -345,7 +405,145 @@ def test_snapshot_is_bytes_and_carries_every_rng(env):
     assert isinstance(state, bytes)
     parts = env.describe_snapshot(state)
     assert {"mujoco", "controller", "schedules", "wrapper", "rng", "osc"} <= set(parts)
-    assert {"scene", "numpy_global", "python"} <= set(parts["rng"])
+    assert {"scene", "python", "robosuite"} == set(parts["rng"])
+
+
+def test_snapshot_is_standard_json(env):
+    """`Infinity`·`NaN`은 표준 JSON이 아니다 — 다른 언어의 파서가 거절한다."""
+    env.reset(seed=5)
+    env.step({"kind": "MOVE_EE", "target_mm": [500, 40, 200]})
+    state = env.snapshot()
+
+    def reject(constant):
+        raise AssertionError(f"snapshot에 {constant}가 들어 있다")
+
+    text = gzip.decompress(state).decode("utf-8")
+    parsed = json.loads(text, parse_constant=reject)
+    assert "Infinity" not in text and "NaN" not in text
+    assert parsed["controller"]["sensors"]["nearest_obstacle_mm"] is not None
+
+
+def test_no_obstacle_round_trips_as_null(env):
+    """장애물이 하나도 없는 상태(`None`)도 그대로 담기고 되돌아온다."""
+    env.reset(seed=5)
+    env.controller.observe({"nearest_obstacle_mm": None})
+    state = env.snapshot()
+    assert env.describe_snapshot(state)["controller"]["sensors"]["nearest_obstacle_mm"] is None
+
+    env.step(HOLD)
+    env.restore(state)
+    assert env.controller.sensors["nearest_obstacle_mm"] is None
+
+
+def test_reset_leaves_the_global_random_state_alone(env):
+    """전역 RNG를 건드리지 않는다 — 같은 과정의 다른 코드가 우리 seed에 끌려가면 안 된다."""
+    import random as py_random
+
+    np.random.seed(1234)
+    py_random.seed(1234)
+    before = (np.random.get_state()[2], py_random.getstate()[1][0])
+
+    env.reset(seed=77)
+    env.step(HOLD)
+
+    assert (np.random.get_state()[2], py_random.getstate()[1][0]) == before
+    # 대신 에피소드 RNG는 환경이 들고 있고 snapshot에 담긴다.
+    assert env.rng is not np.random
+    assert env.describe_snapshot(env.snapshot())["rng"]["scene"]["bit_generator"] == "PCG64"
+
+
+# --------------------------------------------------------------------------
+# 주기 설정이 실제로 걸리는가 (docs/05 §2 "물리 timestep 2ms")
+# --------------------------------------------------------------------------
+
+
+def test_physics_timestep_from_config_reaches_the_model(env):
+    observation = env.reset(seed=4)
+    configured = CONFIG["simulator"]["physics_dt_ms"] / 1000.0
+    assert env._env.sim.model.opt.timestep == pytest.approx(configured, abs=1e-12)
+    assert env._env.model_timestep == pytest.approx(configured, abs=1e-12)
+    assert env.substeps == PERIOD_MS // CONFIG["simulator"]["physics_dt_ms"]
+    assert round(env._env.control_timestep / env._env.model_timestep) == env.substeps
+    assert observation["sim_time_ms"] == 0
+
+    for _ in range(7):
+        observation = env.step(HOLD)
+    assert env._env.sim.data.time * 1000.0 == pytest.approx(observation["sim_time_ms"], abs=1e-3)
+
+
+def test_a_different_physics_timestep_changes_the_integration(tmp_path):
+    """`physics_dt_ms`는 죽은 손잡이가 아니다 — 모델·하위 스텝 수·물리 시간이 같이 움직인다."""
+    coarse_ms = 4
+    path = write_config(tmp_path, physics_dt_ms=coarse_ms)
+    env = Environment(config_path=str(path))
+    try:
+        env.reset(seed=4)
+        assert env._env.sim.model.opt.timestep == pytest.approx(coarse_ms / 1000.0, abs=1e-12)
+        assert env.substeps == PERIOD_MS // coarse_ms
+        assert env.substeps != PERIOD_MS // CONFIG["simulator"]["physics_dt_ms"]
+
+        before = env._env.sim.data.time
+        observation = env.step(HOLD)
+        advanced_ms = (env._env.sim.data.time - before) * 1000.0
+        assert advanced_ms == pytest.approx(PERIOD_MS, abs=1e-6)
+        assert observation["sim_time_ms"] == PERIOD_MS
+    finally:
+        env.close()
+
+
+def test_a_control_period_that_is_not_a_multiple_of_the_timestep_is_refused(tmp_path):
+    path = write_config(tmp_path, physics_dt_ms=3)
+    with pytest.raises(ValueError, match="배수가 아니다"):
+        Environment(config_path=str(path))
+
+
+def test_the_two_configs_must_agree_on_the_timestep(tmp_path):
+    """장면 설정과 컨트롤러 설정이 다른 물리 주기를 말하면 생성에서 막는다."""
+    controller = yaml.safe_load(CONTROLLER_CONFIG.read_text(encoding="utf-8"))
+    controller["timing"]["physics_dt_ms"] = 4
+    controller_path = tmp_path / "osc.yaml"
+    controller_path.write_text(yaml.safe_dump(controller, allow_unicode=True), encoding="utf-8")
+
+    settings = yaml.safe_load(SIM_CONFIG.read_text(encoding="utf-8"))
+    settings["simulator"]["controller_config"] = str(controller_path)
+    path = tmp_path / "tidy_clutter.yaml"
+    path.write_text(yaml.safe_dump(settings, allow_unicode=True), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="물리 timestep이 설정 둘에서 다르다"):
+        Environment(config_path=str(path))
+
+
+def test_exec_record_separates_deceleration_from_the_hold_procedure(env):
+    """docs/08 §6의 두 단계가 실행 이력에서 구분돼야 한다."""
+    env.reset(seed=5)
+    env.step({"kind": "MOVE_EE", "target_mm": [500, 40, 200]})
+    lease_ms = env.controller.lease_ms
+    hold_after = env.controller.hold_after_stale_ms
+
+    while env.sim_time_ms <= lease_ms + PERIOD_MS:
+        observation = env.step(None)
+    assert observation["exec"]["stop"] is True
+    assert observation["exec"]["stale"] is True
+    assert observation["exec"]["hold_after_stale"] is False
+    assert observation["exec"]["executor"] == "MOVE_EE"
+
+    # `advance`는 그 틱의 **시작** 시각으로 돈다. 1초 경계에서 도는 주기까지 가야 한다.
+    while env.sim_time_ms <= lease_ms + hold_after:
+        observation = env.step(None)
+    assert observation["exec"]["hold_after_stale"] is True
+    assert observation["exec"]["executor"] == "HOLD"
+    assert [event["kind"] for event in observation["events"]].count("hold_entered") == 1
+
+
+def test_a_stale_simulator_macro_is_caught(env, monkeypatch):
+    """robosuite의 전역 macro가 우리 설정과 어긋나면 reset이 그 자리에서 실패한다."""
+    import robosuite.macros
+
+    env.reset(seed=4)
+    monkeypatch.setattr(robosuite.macros, "SIMULATION_TIMESTEP", 0.002)
+    monkeypatch.setattr(env, "physics_dt_ms", 5)
+    with pytest.raises(RuntimeError, match="timestep"):
+        env._check_timing()
 
 
 # --------------------------------------------------------------------------

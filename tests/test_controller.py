@@ -19,6 +19,8 @@ SPEEDS = CONFIG["speed_levels_m_s"]
 GRIPPER = CONFIG["gripper"]
 REFLEX = CONFIG["reflex"]
 REACH = CONFIG["reach"]
+RETREAT = CONFIG["retreat"]
+DEFAULTS = CONFIG["defaults"]
 
 START_MM = [400, 0, 200]
 START_QUAT = [1.0, 0.0, 0.0, 0.0]  # xyzw: 말단이 아래를 보는 초기 자세
@@ -91,7 +93,8 @@ def test_late_response_gets_no_fresh_lease():
 
     assert ack["applied"] is False
     assert ack["stale"] is True
-    assert ack["reason"] == "observation_deadline"
+    # lease 만료(`lease_expired`)와 이름으로 구분한다 — 둘 다 "stale"이지만 원인이 다르다.
+    assert ack["reason"] == "observation_late"
     assert ctrl.state_dict()["lease_until"] == lease, "늦은 응답이 lease를 늘렸다"
 
 
@@ -125,6 +128,7 @@ def test_geometry_age_over_tolerance_requests_observation():
 
 
 def test_lease_expiry_decelerates_then_holds_after_one_second():
+    """감속 구간과 HOLD 절차는 다른 상태다 — 실행 기록에서 구분돼야 한다 (docs/08 §6 "stale")."""
     lease_ms = LIFETIME["lease_ms"]
     hold_after = LIFETIME["hold_after_stale_ms"]
     ctrl = controller()
@@ -134,15 +138,31 @@ def test_lease_expiry_decelerates_then_holds_after_one_second():
     moving = ctrl.advance(lease_ms)
     assert moving["stale"] is False
     assert moving["speed_mm_s"] > 0.0
+    ctrl.drain_events()
 
     just_after = ctrl.advance(lease_ms + PERIOD_MS)
     assert just_after["stale"] is True
     assert just_after["speed_mm_s"] < moving["speed_mm_s"], "lease가 끝났는데 감속하지 않는다"
     assert just_after["gripper"] == "open", "정지 중에 그리퍼 상태를 바꿨다"
+    # 감속은 아직 HOLD 절차가 아니다. 진행 중이던 행동이 무엇이었는지 남아 있어야 한다.
+    assert just_after["executor"] == "MOVE_EE"
+    assert just_after["holding_after_stale"] is False
+    assert "hold_entered" not in [event["kind"] for event in ctrl.drain_events()]
+
+    edge = ctrl.advance(lease_ms + hold_after - PERIOD_MS)
+    assert edge["executor"] == "MOVE_EE", "1초가 되기 전에 HOLD로 넘어갔다"
 
     held = ctrl.advance(lease_ms + hold_after)
     assert held["executor"] == "HOLD"
+    assert held["holding_after_stale"] is True
     assert held["speed_mm_s"] == pytest.approx(0.0)
+    assert [event["kind"] for event in ctrl.drain_events()].count("hold_entered") == 1
+
+    later = ctrl.advance(lease_ms + hold_after + PERIOD_MS)
+    assert later["executor"] == "HOLD"
+    assert [event["kind"] for event in ctrl.drain_events()].count("hold_entered") == 0, (
+        "HOLD 진입 사건이 주기마다 반복된다"
+    )
 
 
 # --------------------------------------------------------------------------
@@ -186,6 +206,53 @@ def test_stop_bypasses_blend_with_a_fixed_deceleration():
     assert stopped["speed_mm_s"] == pytest.approx(0.0)
 
 
+def test_stop_survives_a_late_observation():
+    """정지는 반사와 같은 우선순위다 — 수명 검사가 그것을 버리면 안 된다 (docs/08 §6)."""
+    ctrl = controller()
+    ctrl.apply(move(seq=1, now_ms=0), now_ms=0)
+    for i in range(BLEND_MS // PERIOD_MS + 1):
+        ctrl.advance(i * PERIOD_MS)
+
+    late_at = 400
+    stale_observation = late_at - LIFETIME["observation_deadline_ms"] - 1
+    ack = ctrl.apply(
+        move(seq=2, now_ms=late_at, observed_at=stale_observation, stop=True), now_ms=late_at
+    )
+
+    assert ack["applied"] is True
+    assert ack["stop_transition"] is True
+    assert ack["stale"] is True, "늦게 온 정지라는 사실은 기록돼야 한다"
+    assert ack["reason"] == "observation_late"
+    assert ctrl.advance(late_at)["stopping"] is True
+
+
+def test_stop_survives_stale_geometry():
+    ctrl = controller()
+    ctrl.apply(move(seq=1, now_ms=0), now_ms=0)
+    for i in range(BLEND_MS // PERIOD_MS + 1):
+        ctrl.advance(i * PERIOD_MS)
+
+    age = LIFETIME["geometry_age_static_ms"] + 1
+    ack = ctrl.apply(move(seq=2, now_ms=BLEND_MS, geometry_age_ms=age, stop=True), now_ms=BLEND_MS)
+
+    assert ack["applied"] is True
+    assert ack["stop_transition"] is True
+    assert ack["reason"] == "geometry_age"
+    assert ctrl.advance(BLEND_MS)["stopping"] is True
+
+
+def test_a_late_stop_does_not_refresh_the_lease():
+    ctrl = controller()
+    ctrl.apply(move(seq=1, now_ms=0), now_ms=0)
+    lease = ctrl.state_dict()["lease_until"]
+
+    late_at = 400
+    ctrl.apply(
+        move(seq=2, now_ms=late_at, observed_at=late_at - 300, stop=True), now_ms=late_at
+    )
+    assert ctrl.state_dict()["lease_until"] == lease
+
+
 def test_speed_level_sets_the_cruise_cap():
     for level, metres_per_second in enumerate(SPEEDS):
         ctrl = controller()
@@ -221,6 +288,52 @@ def test_force_limit_reflex_stops_without_a_policy_command():
     assert reflex["stopping"] is True
     kinds = [event["kind"] for event in ctrl.drain_events()]
     assert "reflex_stop" in kinds
+
+
+def test_force_reflex_during_a_stop_still_reports_the_event():
+    """이미 멈추는 중이어도 힘 한계 초과는 사건이다 — 상태만 보고 기록을 건너뛰지 않는다."""
+    ctrl = controller()
+    ctrl.apply(move(seq=1, now_ms=0), now_ms=0)
+    for i in range(BLEND_MS // PERIOD_MS + 1):
+        ctrl.advance(i * PERIOD_MS)
+    ctrl.apply(move(seq=2, now_ms=BLEND_MS, stop=True), now_ms=BLEND_MS)
+    ctrl.drain_events()
+    assert ctrl.advance(BLEND_MS)["stopping"] is True
+
+    ctrl.observe(sensors(contact_force_n=REFLEX["force_limit_n"] + 5.0))
+    ctrl.advance(BLEND_MS + PERIOD_MS)
+    assert [event["kind"] for event in ctrl.drain_events()].count("reflex_stop") == 1
+
+
+def test_force_reflex_reports_once_per_onset():
+    ctrl = controller()
+    ctrl.observe(sensors(contact_force_n=REFLEX["force_limit_n"] + 5.0))
+    for i in range(4):
+        ctrl.advance(i * PERIOD_MS)
+    assert [event["kind"] for event in ctrl.drain_events()].count("reflex_stop") == 1
+
+
+def test_stop_holds_the_grasp():
+    """docs/08 §6 "정지 전이 … 파지 중이면 유지" — 설정의 stop.hold_grasp를 실제로 따른다."""
+    assert CONFIG["stop"]["hold_grasp"] is True
+    ctrl = controller(gripper_mm=GRIPPER["closed_mm"], holding="o3")
+    ctrl.apply(move(seq=1, gripper="closed", target_distance_mm=0.0), now_ms=0)
+
+    # 감속하면서 물체를 놓으라는 명령은 그대로 떨어뜨리는 일이다.
+    stopping = ctrl.apply(move(seq=2, now_ms=PERIOD_MS, stop=True, gripper="open"), now_ms=PERIOD_MS)
+
+    assert stopping["applied"] is True
+    assert stopping["stop_transition"] is True
+    assert stopping["gripper_event"] is None
+    assert stopping["gripper_wait"] == "stop_holds_grasp"
+    assert ctrl.advance(PERIOD_MS)["gripper"] == "closed"
+
+
+def test_stop_still_accepts_a_close():
+    """유지해야 하는 것은 파지다. 정지 중에 더 쥐는 것은 막지 않는다."""
+    ctrl = controller(target_distance_mm=0.0)
+    ack = ctrl.apply(move(seq=1, stop=True, gripper="closed"), now_ms=0)
+    assert ack["gripper_event"] is not None
 
 
 def test_proximity_reflex_slows_without_stopping():
@@ -304,6 +417,77 @@ def test_open_waits_while_the_gripper_is_loaded():
 # --------------------------------------------------------------------------
 # 거절
 # --------------------------------------------------------------------------
+
+
+def test_via_without_a_waypoint_is_rejected():
+    """경유점 없는 via를 직선으로 바꾸지 않는다 — 하네스가 피하려던 바로 그 경로다."""
+    ctrl = controller()
+    command = move(seq=1)
+    command["path"] = {"kind": "via", "target_ref": "o1", "target_mm": [600, 0, 200]}
+
+    ack = ctrl.apply(command, now_ms=0)
+
+    assert ack["applied"] is False
+    assert ack["rejected"] is True
+    assert ack["reason"] == "waypoint_missing"
+    assert ctrl.advance(PERIOD_MS)["ee_pos_mm"] == pytest.approx(START_MM)
+
+
+def test_via_with_a_waypoint_moves_to_the_waypoint():
+    ctrl = controller()
+    command = move(seq=1)
+    command["path"] = {
+        "kind": "via",
+        "target_ref": "o1",
+        "target_mm": [600, 0, 200],
+        "waypoint_mm": [450, 120, 260],
+    }
+    ack = ctrl.apply(command, now_ms=0)
+    assert ack["applied"] is True
+
+    for i in range(1, 40):
+        setpoint = ctrl.advance(i * PERIOD_MS)
+    assert setpoint["ee_pos_mm"][1] > START_MM[1], "경유점 쪽으로 가지 않았다"
+
+
+def test_retreat_moves_along_the_configured_vector():
+    """retreat은 제자리 유지가 아니라 실제 후퇴다. 기록된 실행기가 움직임과 맞아야 한다."""
+    ctrl = controller()
+    # 후퇴가 끝날 때까지 도는 것을 보려고 lease를 길게 준다. 10Hz 재발행은
+    # 하네스(3b)의 몫이고, 여기서 보는 것은 "기록된 실행기가 실제 움직임과 맞는가"다.
+    command = move(seq=1, speed_level=2, lease_until=5000)
+    command["path"] = {"kind": "retreat"}
+    ack = ctrl.apply(command, now_ms=0)
+
+    assert ack["applied"] is True
+    assert ack["executor"] == "MOVE_EE", "움직이는데 HOLD라고 기록했다"
+    assert ack["path"] == "retreat"
+
+    for i in range(1, 60):
+        setpoint = ctrl.advance(i * PERIOD_MS)
+
+    moved = [after - before for after, before in zip(setpoint["ee_pos_mm"], START_MM)]
+    distance = sum(value * value for value in moved) ** 0.5
+    assert distance == pytest.approx(RETREAT["distance_mm"], rel=1e-6)
+
+    vector = RETREAT["vector_mm"]
+    length = sum(value * value for value in vector) ** 0.5
+    expected = [value / length * RETREAT["distance_mm"] for value in vector]
+    assert moved == pytest.approx(expected)
+
+
+def test_retreat_out_of_reach_is_rejected_not_silently_frozen():
+    """후퇴가 도달 범위를 벗어나면 거절한다. 조용히 제자리에 두지 않는다."""
+    ctrl = controller()
+    # 후퇴는 위로 드는 방향이므로, 이미 높은 곳에서는 도달 반경을 넘는다.
+    ctrl.observe(sensors(ee_pos_mm=[0.0, 0.0, REACH["workspace_radius_mm"] - 20.0]))
+    command = move(seq=1)
+    command["path"] = {"kind": "retreat"}
+
+    ack = ctrl.apply(command, now_ms=0)
+    assert ack["applied"] is False
+    assert ack["rejected"] is True
+    assert ack["reason"] == "unreachable"
 
 
 def test_rejection_returns_a_reason():
@@ -418,6 +602,45 @@ def test_unknown_command_is_rejected_with_a_reason():
     assert ack["reason"] == "unknown_executor"
 
 
+@pytest.mark.parametrize(
+    ("override", "reason"),
+    [
+        ({"force_level": "crush"}, "invalid_force_level"),
+        ({"speed_level": 9}, "invalid_speed_level"),
+        ({"speed_level": "fast"}, "invalid_speed_level"),
+        ({"gripper": "ajar"}, "invalid_gripper"),
+    ],
+)
+def test_invalid_fields_get_their_own_reason(override, reason):
+    """무엇이 틀렸는지 사유로 구분한다 — 전부 `unknown_executor`로 뭉뚱그리지 않는다."""
+    ctrl = controller()
+    ack = ctrl.apply(move(seq=1, **override), now_ms=0)
+    assert ack["rejected"] is True
+    assert ack["reason"] == reason
+
+
+def test_invalid_path_kind_gets_its_own_reason():
+    ctrl = controller()
+    command = move(seq=1)
+    command["path"] = {"kind": "teleport"}
+    assert ctrl.apply(command, now_ms=0)["reason"] == "invalid_path"
+
+
+def test_primitive_defaults_come_from_config():
+    """원시 명령의 기본 속도 수준은 코드가 아니라 설정이 정한다."""
+    ctrl = controller()
+    ctrl.apply({"kind": "MOVE_EE", "target_mm": [600, 0, 200]}, now_ms=0)
+    for i in range(BLEND_MS // PERIOD_MS + 1):
+        ctrl.advance(i * PERIOD_MS)
+    moving = SPEEDS[DEFAULTS["speed_level_moving"]] * 1000.0
+    assert ctrl.advance(BLEND_MS)["speed_cap_mm_s"] == pytest.approx(moving)
+
+    still = controller()
+    still.apply({"kind": "HOLD", "duration_ms": 100}, now_ms=0)
+    still_cap = SPEEDS[DEFAULTS["speed_level_still"]] * 1000.0
+    assert still.advance(PERIOD_MS)["speed_cap_mm_s"] == pytest.approx(still_cap)
+
+
 def test_state_dict_round_trips():
     ctrl = controller(target_distance_mm=0.0)
     ctrl.apply(move(seq=3, gripper="closed"), now_ms=0)
@@ -445,3 +668,33 @@ def test_state_dict_is_json_safe():
     ctrl.apply(move(seq=1, gripper="closed"), now_ms=0)
     ctrl.advance(PERIOD_MS)
     assert json.loads(json.dumps(ctrl.state_dict())) == ctrl.state_dict()
+
+
+def test_state_dict_holds_no_infinities():
+    """`Infinity`는 표준 JSON이 아니다. "장애물 없음"은 null로 적는다."""
+    import json
+
+    ctrl = Controller.from_config_path(CONTROLLER_CONFIG)
+    ctrl.reset(ee_pos_mm=START_MM, ee_quat=START_QUAT, gripper_mm=GRIPPER["open_mm"], now_ms=0)
+    assert ctrl.state_dict()["sensors"]["nearest_obstacle_mm"] is None
+
+    ctrl.observe(sensors(nearest_obstacle_mm=None))
+    ctrl.advance(PERIOD_MS)
+    text = json.dumps(ctrl.state_dict(), allow_nan=False)
+
+    def reject(constant):
+        raise AssertionError(f"JSON에 {constant}가 들어 있다")
+
+    restored = json.loads(text, parse_constant=reject)
+    assert restored["sensors"]["nearest_obstacle_mm"] is None
+
+
+def test_quaternion_order_is_declared_and_checked():
+    """설정의 frame.quaternion_order를 코드가 실제로 확인한다 (죽은 키를 두지 않는다)."""
+    import copy as copy_module
+
+    assert CONFIG["frame"]["quaternion_order"] == "xyzw"
+    broken = copy_module.deepcopy(CONFIG)
+    broken["frame"]["quaternion_order"] = "wxyz"
+    with pytest.raises(ValueError, match="quaternion"):
+        Controller(broken)
