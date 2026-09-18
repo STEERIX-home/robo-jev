@@ -33,9 +33,37 @@ from robo_jev.data.robot_episodes import (
 from robo_jev.harness.rule_judge import RULE_JUDGE_VERSION, RuleJudge
 from robo_jev.sim.expert import Expert, load_expert_config
 
-__all__ = ["DAGGER_VERSION", "PolicyClient", "count_policy_behaviour", "main", "relabel", "run_cycle", "rule_judge_policy"]
+__all__ = [
+    "DAGGER_VERSION",
+    "DEFAULT_CYCLE_OFFSET",
+    "PolicyClient",
+    "count_policy_behaviour",
+    "dagger_seed_schedule",
+    "main",
+    "relabel",
+    "run_cycle",
+    "rule_judge_policy",
+]
 
 DAGGER_VERSION = "dagger-v0.1"
+
+#: 사이클마다 seed를 띄우는 기본 간격 (설정 `seeds.dagger_cycle_offset`). D1 전문가 배치(`seeds.base`부터 편수만큼)와
+#: 겹치지 않을 만큼 크고, 한 사이클(200편)이 다음 사이클의 시작에 닿지 않는다.
+DEFAULT_CYCLE_OFFSET = 100_000
+
+
+def dagger_seed_schedule(config: dict[str, Any], episodes: int, *, cycle: int) -> list[tuple[str, int]]:
+    """DAgger 사이클 `cycle`의 seed 일정 — 생성기의 일정(프로파일을 번갈아, `count`의 prefix 성질)을 그대로 두고 시작만
+    `seeds.base + (cycle + 1) × seeds.dagger_cycle_offset`으로 띄운다. 전문가 에피소드와 같은 seed·같은 id를 다시 만들지
+    않는다(id에는 따로 `-dagger{cycle}`도 붙는다)."""
+    seeds = config["seeds"]
+    offset = int(seeds.get("dagger_cycle_offset", DEFAULT_CYCLE_OFFSET))
+    if offset < 1:
+        raise ValueError(f"seeds.dagger_cycle_offset: 1 이상이어야 한다 (받은 값: {offset})")
+    if int(cycle) < 0:
+        raise ValueError(f"cycle: 0 이상이어야 한다 (받은 값: {cycle})")
+    base = int(seeds["base"]) + (int(cycle) + 1) * offset
+    return seed_schedule({**config, "seeds": {**seeds, "base": base}}, episodes)
 
 
 class PolicyClient:
@@ -65,14 +93,15 @@ def rule_judge_policy(config: dict[str, Any] | None = None) -> PolicyClient:
     return PolicyClient(policy, name="RuleJudge", version=str(getattr(judge, "version", RULE_JUDGE_VERSION)))
 
 
-def relabel(record: dict[str, Any], *, cycle: int, policy: PolicyClient) -> dict[str, Any]:
-    """라벨에 재라벨 표지를 붙이고 provenance에 사이클을 적는다. 실행된 필드는 건드리지 않는다."""
+def relabel(record: dict[str, Any], *, cycle: int, policy: PolicyClient, seed_base: int | None = None) -> dict[str, Any]:
+    """라벨에 재라벨 표지를 붙이고 provenance에 사이클(과 그 사이클의 seed 시작)을 적는다. 실행된 필드는 건드리지 않는다."""
     for tick in record["ticks"]:
         for label in tick.get("labels") or ():
             label["relabel"] = True
     record["provenance"]["dagger"] = {
         "version": DAGGER_VERSION,
         "cycle": int(cycle),
+        "seed_base": seed_base,
         "policy": {"name": policy.name, "version": policy.version},
         "relabel_source": "expert_v0",
     }
@@ -137,14 +166,22 @@ def run_cycle(
     max_ticks: int | None = None,
     log: Any = None,
 ) -> dict[str, Any]:
-    """정책으로 `episodes`편을 실행·재라벨해 쓰고 집계를 돌려준다. seed 일정은 D1 생성기와 같다(설정의 `seeds.base`)."""
+    """정책으로 `episodes`편을 실행·재라벨해 쓰고 집계를 돌려준다.
+
+    seed 일정은 :func:`dagger_seed_schedule` — 생성기의 일정과 같은 꼴이되 사이클마다 `seeds.dagger_cycle_offset`만큼
+    띄운 시작에서 센다 — 이고 id에는 `-dagger{cycle}`이 붙는다. 그래서 전문가 배치 옆에 써도 파일·manifest·키프레임
+    라벨의 열쇠(id)가 겹치지 않는다. split은 장면 계열에서 나오므로(:func:`new_episode`) 같은 계열의 전문가
+    에피소드와 같은 split을 받는다.
+    """
     from robo_jev.sim.environment import Environment
 
     started = time.perf_counter()
     config = config or load_generator_config()
     paths = config_paths(config)
     expert = expert or Expert(load_expert_config(paths["expert_config"]))
-    schedule = seed_schedule(config, episodes)
+    schedule = dagger_seed_schedule(config, episodes, cycle=cycle)
+    seed_base = schedule[0][1] if schedule else None
+    suffix = f"-dagger{int(cycle)}"
     envs: dict[str, Any] = {}
     per_episode: list[dict[str, Any]] = []
     try:
@@ -152,8 +189,10 @@ def run_cycle(
             env = envs.get(profile)
             if env is None:
                 env = envs[profile] = Environment(config_path=paths["sim_config"], profile=profile)
-            record = generate_episode(profile, seed, policy=policy, expert=expert, config=config, env=env, max_ticks=max_ticks)
-            relabel(record, cycle=cycle, policy=policy)
+            record = generate_episode(
+                profile, seed, policy=policy, expert=expert, config=config, env=env, max_ticks=max_ticks, id_suffix=suffix,
+            )
+            relabel(record, cycle=cycle, policy=policy, seed_base=seed_base)
             validate_record(record)
             write_episode(record, out)
             behaviour = count_policy_behaviour(record)
@@ -181,6 +220,8 @@ def run_cycle(
     manifest["dagger"] = {
         "version": DAGGER_VERSION,
         "cycle": int(cycle),
+        "seed_base": seed_base,
+        "id_suffix": suffix,
         "policy": {"name": policy.name, "version": policy.version},
         "relabel_source": "expert_v0",
         "episodes": len(per_episode),

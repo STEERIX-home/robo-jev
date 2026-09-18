@@ -5,8 +5,24 @@ import json
 import pytest
 
 from robo_jev.contracts import model_input, validate_record
-from robo_jev.data.dagger import DAGGER_VERSION, PolicyClient, count_policy_behaviour, rule_judge_policy, run_cycle
-from robo_jev.data.robot_episodes import load_generator_config, read_episodes
+from robo_jev.data.dagger import (
+    DAGGER_VERSION,
+    PolicyClient,
+    count_policy_behaviour,
+    dagger_seed_schedule,
+    rule_judge_policy,
+    run_cycle,
+)
+from robo_jev.data.robot_episodes import (
+    build_manifest,
+    episode_id,
+    generate_episode,
+    load_generator_config,
+    read_episodes,
+    seed_schedule,
+    write_episode,
+)
+from robo_jev.data.split import SplitPolicy, assign_split
 from robo_jev.harness.robot import parse_exec_history
 
 CONFIG = load_generator_config()
@@ -15,9 +31,60 @@ CONFIG = load_generator_config()
 @pytest.fixture(scope="module")
 def cycle(tmp_path_factory):
     out = tmp_path_factory.mktemp("dagger")
-    manifest = run_cycle(rule_judge_policy(), episodes=2, out=out, config=CONFIG, cycle=3, max_ticks=20)
+    # cycle 1 → seed 200100부터: E0·E1 모두 20틱을 다 돈다 (cycle 3의 E1 seed 400100은 대상이 처음부터 영역 안이라 done 꼬리로 11틱에 끝난다).
+    manifest = run_cycle(rule_judge_policy(), episodes=2, out=out, config=CONFIG, cycle=1, max_ticks=20)
     records = [record for _, record in read_episodes(out)]
     return {"out": out, "manifest": manifest, "records": records}
+
+
+def test_dagger_seeds_and_ids_never_collide_with_the_expert_batch():
+    """DAgger 사이클의 seed는 `seeds.base + (cycle + 1) × seeds.dagger_cycle_offset`부터이고 id에는 `-dagger{cycle}`이
+    붙는다 — D1 전문가 에피소드(`ep-E0-000100`)와 같은 id로 파일·manifest·`by_id`를 덮어쓰지 않는다."""
+    offset = CONFIG["seeds"]["dagger_cycle_offset"]
+    base = CONFIG["seeds"]["base"]
+    assert offset >= 100_000
+    assert dagger_seed_schedule(CONFIG, 4, cycle=0) == [
+        ("E0", base + offset), ("E1", base + offset), ("E0", base + offset + 1), ("E1", base + offset + 1),
+    ]
+    assert dagger_seed_schedule(CONFIG, 2, cycle=3) == [("E0", base + 4 * offset), ("E1", base + 4 * offset)]
+    expert_seeds = {seed for _, seed in seed_schedule(CONFIG, offset)}
+    for cycle_index in range(3):
+        for _, seed in dagger_seed_schedule(CONFIG, offset, cycle=cycle_index):
+            assert seed not in expert_seeds
+    assert episode_id("E0", base + offset, "-dagger0") == f"ep-E0-{base + offset:06d}-dagger0"
+    assert dagger_seed_schedule(CONFIG, 200, cycle=1)[:2] == dagger_seed_schedule(CONFIG, 2, cycle=1)  # prefix 성질 그대로
+    without = {**CONFIG, "seeds": {"base": base}}
+    assert dagger_seed_schedule(without, 1, cycle=0) == [("E0", base + 100_000)]  # 기본 offset
+
+
+def test_a_dagger_cycle_written_next_to_an_expert_batch_shares_no_id_and_the_manifest_merges(cycle, tmp_path):
+    import shutil
+
+    from robo_jev.sim.expert import Expert
+
+    out = tmp_path / "merged"
+    shutil.copytree(cycle["out"] / "episodes", out / "episodes")  # DAgger 사이클의 파일을 전문가 배치 옆에 둔다
+    expert = Expert()
+    expert_ids = []
+    for profile, seed in seed_schedule(CONFIG, 2):
+        record = generate_episode(profile, seed, policy=expert, expert=expert, config=CONFIG, max_ticks=3)
+        assert record["episode_id"] == episode_id(profile, seed) and "dagger" not in record["episode_id"]
+        write_episode(record, out)
+        expert_ids.append(record["episode_id"])
+    dagger_ids = [record["episode_id"] for record in cycle["records"]]
+    assert all(identifier.endswith("-dagger1") for identifier in dagger_ids)
+    assert not set(expert_ids) & set(dagger_ids)
+    merged = build_manifest(out, CONFIG, batch_wall_s=1.0)
+    assert merged["episodes"] == 4
+    assert set(merged["files"]) == {f"episodes/{identifier}/streams.jsonl" for identifier in expert_ids + dagger_ids}
+    assert {entry["episode_id"] for entry in merged["files"].values()} == set(expert_ids + dagger_ids)
+    assert len(read_episodes(out)) == 4
+    policy = SplitPolicy.from_config(CONFIG["split"])
+    for record in cycle["records"]:
+        assert record["split"] == assign_split(record["origin_group"], policy)  # 같은 장면 계열 → 같은 split
+        assert record["provenance"]["seed"] >= CONFIG["seeds"]["base"] + 2 * CONFIG["seeds"]["dagger_cycle_offset"]
+        assert record["provenance"]["dagger"]["seed_base"] == CONFIG["seeds"]["base"] + 2 * CONFIG["seeds"]["dagger_cycle_offset"]
+    assert cycle["manifest"]["dagger"]["seed_base"] == CONFIG["seeds"]["base"] + 2 * CONFIG["seeds"]["dagger_cycle_offset"]
 
 
 def test_two_short_episodes_keep_the_executed_history_and_carry_expert_relabels(cycle):
@@ -26,7 +93,7 @@ def test_two_short_episodes_keep_the_executed_history_and_carry_expert_relabels(
     for record in records:
         validate_record(record)
         assert record["provenance"]["policy"] == {"name": "RuleJudge", "version": rule_judge_policy().version}
-        assert record["provenance"]["dagger"]["cycle"] == 3 and record["provenance"]["dagger"]["version"] == DAGGER_VERSION
+        assert record["provenance"]["dagger"]["cycle"] == 1 and record["provenance"]["dagger"]["version"] == DAGGER_VERSION
         ticks = record["ticks"]
         assert len(ticks) == 20 and ticks[0]["request"]["exec_history"] == "none"
         for previous, tick in zip(ticks, ticks[1:]):

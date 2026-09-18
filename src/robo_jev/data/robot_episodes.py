@@ -135,8 +135,10 @@ def origin_group(profile: str, plan: ScenePlan) -> str:
     return f"robot/{profile}/{family_id(plan)}"
 
 
-def episode_id(profile: str, seed: int) -> str:
-    return f"ep-{profile}-{int(seed):06d}"
+def episode_id(profile: str, seed: int, suffix: str = "") -> str:
+    """`ep-<profile>-<seed 6자리>[suffix]`. 전문가 에피소드는 suffix가 없고, DAgger 사이클은 `-dagger{cycle}`을 붙인다
+    (:func:`robo_jev.data.dagger.run_cycle`) — id가 파일 경로·manifest·키프레임 라벨의 열쇠라 겹치면 조용히 덮어쓴다."""
+    return f"ep-{profile}-{int(seed):06d}{suffix}"
 
 
 def seed_schedule(config: dict[str, Any], count: int) -> list[tuple[str, int]]:
@@ -167,12 +169,14 @@ def generate_episode(
     config: dict[str, Any],
     env: Any | None = None,
     max_ticks: int | None = None,
+    id_suffix: str = "",
 ) -> dict[str, Any]:
     """에피소드 하나를 10Hz로 돌려 레코드를 만든다.
 
     `policy`는 행동하는 쪽이다(`act(request, commitment, observation)` → 10답). D1에서는 `expert`
     자신이고, DAgger에서는 학습 모델의 클라이언트다. `expert`는 라벨의 원천이다. 둘이 같은 객체면
     답을 한 번만 계산한다. `env`를 주면 다시 쓴다(같은 모델 서명이면 reset이 물리를 다시 짓지 않는다).
+    `id_suffix`는 에피소드 id 뒤에 붙는다(DAgger의 `-dagger{cycle}`; :func:`episode_id`).
     """
     from robo_jev.sim.environment import Environment
 
@@ -197,7 +201,7 @@ def generate_episode(
         tick_ms = int(env.period_ms) * control_steps
         limit = int(max_ticks if max_ticks is not None else env.max_ms // tick_ms)
         record = new_episode(
-            episode_id(profile, seed),
+            episode_id(profile, seed, id_suffix),
             group,
             instructions=[scene["instruction"]],
             policy=split_policy(config),
@@ -352,13 +356,14 @@ def _outcome(scene: dict[str, Any], plan: ScenePlan, env: Any, done_tick: int | 
 # --------------------------------------------------------------------------
 
 
-def episode_path(out: Path, profile: str, seed: int) -> Path:
+def episode_path(out: Path, identifier: str) -> Path:
     """`episodes/<id>/streams.jsonl` — 자동 QA(`python -m robo_jev.data.validate`)가 찾는 이름이다."""
-    return out / "episodes" / episode_id(profile, seed) / "streams.jsonl"
+    return out / "episodes" / str(identifier) / "streams.jsonl"
 
 
 def write_episode(record: dict[str, Any], out: Path) -> Path:
-    path = episode_path(out, record["provenance"]["profile"], record["provenance"]["seed"])
+    """레코드를 제 `episode_id`의 파일에 쓴다 — id가 다르면(DAgger의 suffix) 다른 파일이다."""
+    path = episode_path(out, record["episode_id"])
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = json.dumps(record, ensure_ascii=False, sort_keys=False, separators=(",", ":")) + "\n"
     path.write_bytes(payload.encode("utf-8"))
@@ -515,7 +520,7 @@ def run(
     produced = skipped = 0
     try:
         for profile, seed in schedule:
-            path = episode_path(out, profile, seed)
+            path = episode_path(out, episode_id(profile, seed))
             if resume and path.is_file():
                 skipped += 1
                 continue

@@ -20,6 +20,10 @@ events_config: configs/sim/events.yaml
 profiles: [E0, E1]
 seeds:
   base: 100
+  # DAgger 사이클 c(`scripts/dagger_cycle.py --cycle c`)는 base + (c + 1) × 이 값부터 센다 — 전문가 배치와 같은 seed·
+  # 같은 id(`ep-E0-000100`)를 다시 만들지 않는다(id에는 `-dagger{c}`도 붙는다). 사이클 한 번(200편)이 다음 시작에
+  # 닿지 않을 만큼 크다.
+  dagger_cycle_offset: 100000
 
 episode:
   control_steps_per_tick: 5      # 판단 틱 10Hz = 50Hz 제어 5회
