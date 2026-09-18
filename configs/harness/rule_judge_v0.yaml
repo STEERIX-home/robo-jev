@@ -1,0 +1,72 @@
+# 규칙 기반 판단기 기준군 v0 — docs/02 §9, docs/08 §5.
+#
+# 모델 자리에 들어가 **같은 요청**을 받고 **같은 형식**으로 10개 답을 낸다. 가중치와
+# 임계값은 여기에 고정해 공개하고 레코드의 `versions.rules`에 버전을 적는다. 이 기준군이
+# 어떤 조건 층에서 모델과 같은 성공률을 내면 그 층에서는 모델의 기여를 주장하지 않는다.
+version: rj0.1
+
+# 주 결정 — 적합성 필터 → 고정 가중 기하 비용 → 결정적 분포.
+main:
+  # 비용을 확률로 옮기는 온도. 작을수록 최선 후보에 몰린다.
+  temperature: 0.35
+  # 부적합 후보가 나눠 갖는 총 질량. 0으로 두면 "후보 집합에 대한 분포"가 아니게 되므로
+  # 작게 남긴다 (docs/08 §4의 "적합 후보 집합에 대한 확률").
+  inadmissible_mass: 0.05
+  weights:
+    clearance: 1.0        # 여유가 좁을수록 비싸다
+    distance: 1.0         # 멀수록 비싸다
+    reach: 0.5            # 도달 여유가 없으면 비싸다
+    failed_approach: 1.5  # 직전에 실패한 접근 유형의 감점 (실행 이력에서 읽는다)
+    blocked_path: 0.8     # 직선 경로가 막혔으면 비싸다
+  references:             # 비용을 무차원으로 만드는 기준값
+    clearance_mm: 60
+    distance_mm: 600
+  # 관측·보류·재계획 후보의 비용. 규칙 라벨로만 정답이 되므로 기하 비용이 없다
+  # (docs/08 §7). 적합 후보가 있으면 뒤로 가도록 상수 비용을 준다.
+  fixed_cost:
+    observe: 1.2
+    hold: 1.4
+    replan: 1.8
+
+# 규칙이 참·거짓이라고 말할 때 쓰는 확률. 결정적이며 보정된 확률 주장이 아니다.
+confidence:
+  high: 0.95
+  low: 0.03
+  # choice·ordinal 답에서 고른 수준이 갖는 질량. 나머지는 다른 수준이 고르게 나눈다.
+  choice_mass: 0.9
+
+thresholds:
+  observe_geom_age_ms: 400        # 대상 기하가 이보다 오래되면 관측
+  observe_visible_ratio: 0.5      # 대상이 이보다 덜 보이면 관측
+  stop_force_n: 25.0              # 접촉력이 이보다 크면 정지
+  stop_forbidden_mm: 40           # 금지 물체가 말단에서 이보다 가까우면 정지
+  retry_max_same_approach: 1      # 같은 접근 유형의 재시도 허용 횟수
+  fragile_proximity_mm: 120       # 취약 물체가 이 안이면 속도를 한 단계 내린다
+
+# 국면별 프로파일. 부가 질문은 commitment의 국면 기준으로 답한다 (docs/08 §4).
+profiles:
+  speed_by_phase:
+    approach: 2
+    grasp: 1
+    lift: 1
+    transport: 2
+    place: 1
+    push: 1
+    none: 0
+  force_by_phase:
+    approach: 0
+    grasp: 1
+    lift: 0
+    transport: 0
+    place: 1
+    push: 2
+    none: 0
+  gripper_by_phase:
+    approach: open
+    grasp: closed
+    lift: closed
+    transport: closed
+    place: open
+    push: open
+    none: current
+  fragile_speed_cap: 1

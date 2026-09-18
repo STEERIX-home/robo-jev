@@ -1,0 +1,155 @@
+# 로봇 스트림 하네스 v0 — docs/08 §3~§5, docs/02 §3~§4.
+#
+# 하네스의 수치는 전부 여기에만 둔다. `harness/robot.py`·`perception/pointworld.py`에는
+# 상수를 쓰지 않는다. 값은 실험 시작값이며 버전(`version`)과 함께 레코드에 기록한다
+# (docs/08 §8 `versions.harness`).
+#
+# 실행기와 공유하는 수치(수명·속도 수준·힘 수준·그리퍼 폭·도달 범위)는 여기 **복사하지
+# 않는다**. 컨트롤러 설정이 그 단일 출처이고 하네스가 그것을 읽는다 — 두 곳에 적으면
+# 언젠가 어긋나고, 그때 하네스는 컨트롤러가 거절할 명령을 만든다.
+version: h0.1
+controller_config: configs/controller/osc_v0.yaml
+
+# 질문 세트 v0 (docs/08 §4). 세트는 하네스 버전으로 고정하고 후보만 틱마다 바뀐다.
+# `language`는 후보 설명(`desc`)과 질문 문구를 고른다. ko 문구는 계약의
+# `contracts.QUESTION_SET_V0`와 같아야 한다(검사가 대조한다).
+language: ko
+question_set_id:
+  ko: qs-v0
+  en: qs-v0-en
+questions:
+  q_main:
+    ko: "지금 실행할 행동을 고르라."
+    en: "Choose the action to execute now."
+  q_done:
+    ko: "현재 목표를 이미 만족했는가."
+    en: "Is the current goal already satisfied?"
+  q_instr:
+    ko: "실행에 필요한 지시가 충분한가."
+    en: "Is the instruction sufficient to execute?"
+  q_observe:
+    ko: "관측을 더 얻어야 하는가."
+    en: "Should more observation be gathered?"
+  q_retry:
+    ko: "직전 실패와 같은 방식의 재시도가 적절한가."
+    en: "Is retrying the same way as the last failure appropriate?"
+  q_stop:
+    ko: "지금 즉시 멈춰야 하는가."
+    en: "Must the robot stop right now?"
+  q_gripper:
+    ko: "commitment의 행동·국면 기준으로 원하는 그리퍼 상태를 고르라."
+    en: "Choose the desired gripper state for the committed action and phase."
+  q_path:
+    ko: "commitment의 행동·국면 기준으로 경로를 고르라."
+    en: "Choose the path for the committed action and phase."
+  q_speed:
+    ko: "commitment의 행동·국면 기준으로 속도 수준을 고르라."
+    en: "Choose the speed level for the committed action and phase."
+  q_force:
+    ko: "commitment의 행동·국면 기준으로 접촉·힘 수준을 고르라."
+    en: "Choose the contact/force level for the committed action and phase."
+
+# 앞단(3D 재구성) 요약. D1의 참값 어댑터가 채우는 값이며, E2에서 시뮬 3D 카메라로
+# 바뀌어도 **스키마와 이 키들**은 그대로다 (docs/08 §3.2 "앞단 조건").
+perception:
+  geom_period_ms: 200        # 3D 재구성 갱신 주기 (기하 5Hz 시작값)
+  visible_ratio_threshold: 0.6
+  precision_mm:              # 자세 정밀도 추정 (mm 오차 범위). 참값을 쓰지 않는 공칭값이다
+    visible: 3
+    occluded: 12
+  surface_conf:
+    visible: 0.92
+    occluded: 0.55
+  points_visible: 480        # 점군 점 수 요약
+  points_occluded: 60
+  moving_window_ms: 1000     # 외란 사건 뒤 이 시간 동안은 '이동 대상'으로 본다
+  graspable_faces:           # 형상별 파지 가능 면 (앞단이 표면에서 뽑는 값의 자리)
+    box: [top, side]
+    cylinder: [top, side]
+  max_graspable_width_mm: 78 # 그리퍼 개방 폭보다 넓은 면은 파지면이 아니다
+
+# 결합 행동 후보 (docs/08 §4 `q_main`, docs/02 §3).
+candidates:
+  max: 32                    # K≤32
+  reserved: 3                # observe·hold·replan은 상한 안에서 자리를 예약한다
+  faces: [top, side]
+  push_directions: ["+x", "-x", "+y", "-y"]
+  profiles: [slow, fast]     # 운동 프로파일. 의미 키의 마지막 칸이다
+  profile_speed_level:
+    slow: 1
+    fast: 2
+  min_visible_ratio: 0.4     # 이보다 덜 보이는 물체는 **실행 불가**다 (적합성이 아니라 가능성)
+  max_geometry_age_ms: 500   # 이보다 오래된 기하의 물체로는 후보를 만들지 않는다
+  approach_clearance_mm: 60  # 접근 지점의 여유 (윗면 위 / 옆면 밖)
+  grasp_clearance_mm: 12     # 실제 파지 지점의 여유
+  side_clearance_mm: 40      # side 접근 지점의 옆면 밖 거리
+  place_height_mm: 60        # 놓기 목표의 작업면 위 높이
+  push_contact_mm: 30        # 밀기 접촉점의 물체 표면 밖 거리
+  push_segment_mm: 80        # 밀기 한 구간의 길이 (완료 판정에도 쓴다)
+
+# 후보 설명 문구. 언어는 `language`가 고른다 (docs/08 §4 "후보에 `action_ref`·설명").
+descriptions:
+  ko:
+    grasp: "{target}을 {approach} 면으로 잡아 {destination}로 옮긴다 [{profile}]"
+    place: "들고 있는 {target}을 {destination}에 놓는다 [{profile}]"
+    push: "{target}을 {approach} 방향으로 민다 [{profile}]"
+    observe: "관측을 더 얻는다"
+    hold: "현 상태를 유지한다"
+    replan: "재계획한다"
+    direct: "대상으로 직접 간다"
+    via: "경유점 {waypoint}를 지나 간다"
+    retreat: "물러난다"
+    path_hold: "그 자리에 머문다"
+  en:
+    grasp: "Grasp {target} by its {approach} face and move it to {destination} [{profile}]"
+    place: "Place the held {target} into {destination} [{profile}]"
+    push: "Push {target} towards {approach} [{profile}]"
+    observe: "Gather more observation"
+    hold: "Hold the current state"
+    replan: "Ask for a replan"
+    direct: "Go straight to the target"
+    via: "Go through waypoint {waypoint}"
+    retreat: "Retreat"
+    path_hold: "Stay in place"
+
+# 국소 경유점 플래너 (docs/08 §4 `q_path`).
+planner:
+  max_waypoints: 3           # n≤3
+  margin_mm: 25              # 직선 구간과 물체 OBB 사이의 여유
+  over_clearance_mm: 60      # 위로 넘어가는 경유점의 물체 윗면 여유
+  side_offset_mm: 90         # 옆으로 도는 경유점의 가로 이동량
+
+# 조합 규칙 v0 (docs/08 §5).
+compose:
+  delta: 0.15                # 전환 여유 δ
+  m: 2                       # 같은 도전자가 이어져야 하는 틱 수
+  tolerance:                 # 의미 키의 연속 파라미터 허용 오차
+    distance_mm: 50
+    clearance_mm: 10
+  gates:                     # 이진 답을 게이트로 읽는 임계값
+    done: 0.5
+    instr: 0.5
+    observe: 0.5
+    retry: 0.5
+    stop: 0.5
+  initial_profile:           # 전환 틱에 적용하는 새 후보의 초기 프로파일 (docs/08 §5.4)
+    path: direct
+    speed_level: 1
+    force_level: 0
+  fragile_proximity_mm: 120  # 취약 물체가 이 안이면 속도 수준을 내린다
+  fragile_speed_cap: 1
+  forbidden_proximity_mm: 60 # 금지 물체가 이 안이면 힘 수준을 회피로 묶는다
+  observe_ticks: 3           # 관측·보류 후보의 완료 판정 (무한 반복 방지)
+  hold_ticks: 3
+
+# 국면 판정 (docs/08 §3.2 `commitment`의 국면).
+phases:
+  grasp_distance_mm: 80      # 파지 자세에 이만큼 들어오면 approach → grasp
+  lift_height_mm: 120        # 집은 뒤 이만큼 올리면 lift → transport
+  place_tolerance_mm: 60     # 목적지 중심에 이만큼 들어오면 transport → place
+  push_contact_mm: 40        # 접촉점에 이만큼 들어오면 approach → push
+
+# 명령 생성 (docs/08 §6).
+command:
+  frame: robot_base
+  request_id_prefix: r

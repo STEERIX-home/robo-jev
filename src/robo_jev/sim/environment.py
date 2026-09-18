@@ -614,6 +614,7 @@ class Environment:
         threshold = float(self.settings["visibility"]["visible_ratio_threshold"])
 
         objects = []
+        shape_labels = dict(self.settings["objects"]["shape_labels"])
         for plan_object in self.plan.objects:
             position, quat = self._object_pose(plan_object.id)
             ratio = ratios[plan_object.id]
@@ -623,6 +624,9 @@ class Environment:
             objects.append(
                 {
                     "id": plan_object.id,
+                    # 사람이 읽는 설명 (docs/08 §3.2 `objects[]`의 "설명"). 지시문이 물체를
+                    # 부르는 이름과 **같은 말**이어야 지시가 가리키는 대상을 풀 수 있다.
+                    "desc": plan_object.describe(shape_labels),
                     "class": plan_object.shape,
                     "shape": plan_object.shape,
                     "colour": plan_object.colour,

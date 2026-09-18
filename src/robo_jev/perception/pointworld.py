@@ -1,0 +1,521 @@
+"""3D 재구성 → 공통 구조화 상태 (docs/08 §3.2).
+
+robojev의 입력은 앞단이 무엇이든 **같은 상태 스키마**다. 이 모듈은 그 경계를 고정한다.
+
+* :class:`Reconstruction` — 앞단이 내는 값. 추적된 인스턴스(자세·정밀도·OBB·가시성·
+  점 수·파지 가능 면), 자유 공간 요약, 소스별 시각.
+* :func:`extract` — 재구성 + 로봇 고유 감각 → docs/08 §3.2의 상태 dict. **버전이 있고**
+  (:data:`EXTRACTOR_VERSION`) 모든 비교군이 같은 것을 쓴다.
+* :class:`GroundTruthAdapter` — D1의 앞단. 시뮬레이터 관측(:meth:`Environment.step`의
+  반환)을 같은 :class:`Reconstruction`으로 옮긴다.
+
+**정보 경계.** 가려진 물체의 참값은 상태에 들어가지 않는다. 어댑터는 마지막으로
+**관측된** 자세와 그 시각만 넘기고, 지금의 참값은 :meth:`GroundTruthAdapter.evidence`로만
+꺼낼 수 있다 — 그 자리는 레코드의 `evidence`이고 모델 입력이 아니다(docs/08 §3.2).
+
+E2의 시뮬 3D 카메라와 재구성 결함 모델(표면 결손·추적 id 흔들림·지연)은 같은
+:class:`Reconstruction`을 만드는 다른 어댑터로 붙는다. `extract`는 바뀌지 않는다.
+"""
+
+from __future__ import annotations
+
+import copy
+import math
+from dataclasses import dataclass, field
+from typing import Any
+
+__all__ = [
+    "EXTRACTOR_VERSION",
+    "GroundTruthAdapter",
+    "Reconstruction",
+    "SceneSummary",
+    "TrackedInstance",
+    "circumradius_mm",
+    "extract",
+    "named_target",
+    "segment_point_distance_mm",
+]
+
+#: 추출 모듈의 버전. 레코드의 `versions.extractor`에 들어간다 (docs/08 §3.2 "앞단 조건").
+EXTRACTOR_VERSION = "pw0.1"
+
+
+# --------------------------------------------------------------------------
+# 기하 원시 함수 — 하네스도 같은 것을 쓴다 (계산 규칙이 하나여야 한다)
+# --------------------------------------------------------------------------
+
+
+def circumradius_mm(obb_mm) -> float:
+    """OBB의 외접 반지름. yaw를 모르고도 보수적으로 쓸 수 있는 반지름이다."""
+    return math.dist((0.0, 0.0, 0.0), [value / 2.0 for value in obb_mm])
+
+
+def named_target(objects, text: str) -> str | None:
+    """지시문이 부르는 대상 물체의 id.
+
+    물체 설명이 지시문에 나오는 것 중 **마지막으로 불린 평범한 물체**를 고른다. 지시가
+    바뀌면 새 대상이 뒤에 오고("A 대신 B를 먼저 옮겨라"), 취약·금지 물체는 "건드리지
+    마라" 쪽이므로 뺀다. 구조화된 목표(`goal.target_ref`)가 있으면 그것이 먼저다 — 이
+    함수는 텍스트밖에 없을 때의 근사이며, 상태와 지시가 **같은 이름**으로 물체를 부른다는
+    조건에 기댄다(docs/08 §3.2의 `objects[].설명`).
+    """
+    mentioned: list[tuple[int, str]] = []
+    for entry in objects or ():
+        if entry.get("attributes"):
+            continue
+        description = str(entry.get("desc") or "")
+        position = text.find(description) if description else -1
+        if position >= 0:
+            mentioned.append((position, str(entry["id"])))
+    return max(mentioned)[1] if mentioned else None
+
+
+def segment_point_distance_mm(start, end, point) -> float:
+    """선분과 점 사이의 최단 거리."""
+    segment = [b - a for a, b in zip(start, end)]
+    length_sq = sum(value * value for value in segment)
+    if length_sq <= 1e-9:
+        return math.dist(start, point)
+    t = sum((p - a) * s for a, s, p in zip(start, segment, point)) / length_sq
+    t = min(1.0, max(0.0, t))
+    closest = [a + s * t for a, s in zip(start, segment)]
+    return math.dist(closest, point)
+
+
+# --------------------------------------------------------------------------
+# 앞단이 내는 값
+# --------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TrackedInstance:
+    """틱 사이에 안정된 추적 id를 가진 인스턴스 하나 (docs/08 §3.2 `objects[]`).
+
+    `pose_mm`은 **마지막으로 관측된** 자세다. 지금 가려져 있으면 `observed_now`가 거짓이고
+    `last_seen_ms`가 그 자세의 시각을 말한다. 지금의 참값은 여기 들어오지 않는다.
+    """
+
+    track_id: str
+    desc: str
+    cls: str
+    pose_mm: tuple[int, int, int]
+    quat: tuple[float, float, float, float]
+    precision_mm: int
+    obb_mm: tuple[int, int, int]
+    top_mm: int
+    graspable_faces: tuple[str, ...]
+    surface_conf: float
+    visible_ratio: float
+    points: int
+    last_seen_ms: int
+    observed_now: bool
+    reid: tuple[str, ...] = ()
+    attributes: tuple[str, ...] = ()
+    moving: bool = False
+
+    @property
+    def radius_mm(self) -> float:
+        return circumradius_mm(self.obb_mm)
+
+
+@dataclass(frozen=True)
+class SceneSummary:
+    """자유 공간·통로·작업면 요약 (docs/08 §3.2 `scene`)."""
+
+    work_surface_mm: int
+    free_width_mm: int
+    corridor_mm: int
+    clearance_mm: int
+
+
+@dataclass(frozen=True)
+class Reconstruction:
+    """한 틱의 재구성 결과. 값이고, 앞단의 내부 상태를 들고 있지 않다."""
+
+    instances: tuple[TrackedInstance, ...]
+    scene: SceneSummary
+    zones: tuple[dict[str, Any], ...] = ()
+    goal: dict[str, Any] = field(default_factory=dict)
+    events: tuple[dict[str, Any], ...] = ()
+    geom_ms: int = 0
+    tick: int = 0
+    sim_ms: int = 0
+    source: str = "ground-truth"
+
+
+# --------------------------------------------------------------------------
+# 추출 — 공통 스키마 (docs/08 §3.2)
+# --------------------------------------------------------------------------
+
+#: `exec`의 기본값. 이름에 `ack`를 쓰지 않는다 — `ack`는 레코드의 비입력 필드라서
+#: 상태 안에 같은 이름이 있으면 계약 검사가 요청 전체를 거절한다(contracts).
+_EXEC_DEFAULT: dict[str, Any] = {
+    "seq": 0,
+    "action_ref": None,
+    "phase": None,
+    "path": None,
+    "speed_level": 0,
+    "force_level": None,
+    "gripper": None,
+    "stop": False,
+    "progress": None,
+    "applied": None,
+    "reject": None,
+    "gripper_wait": None,
+    "events": [],
+}
+
+
+def _round_mm(values) -> list[int]:
+    return [int(round(float(value))) for value in values]
+
+
+def extract(recon: Reconstruction, robot: dict[str, Any], now_ms: int) -> dict[str, Any]:
+    """재구성 + 로봇 고유 감각 → docs/08 §3.2의 공통 상태.
+
+    `robot`은 로봇 쪽이 아는 것이다: 말단 자세, 그리퍼 폭, 파지 중인 물체, 접촉력, 속도와
+    그 관측 시각(`observed_at_ms`), 실행기의 자기 보고(`exec`), 틱 시작 시 확정된
+    `commitment`. 지각 모듈은 그 셋을 만들지 않고 그대로 옮긴다 — 만드는 것은 로봇과
+    하네스의 몫이고, 이 함수의 몫은 **스키마**다.
+
+    소스별 나이는 여기서 계산한다. 기하는 10Hz보다 느리게 갱신될 수 있으므로 로봇
+    고유 감각과 한 숫자로 합치지 않는다.
+    """
+    proprio_ms = int(robot.get("observed_at_ms", now_ms))
+    if now_ms < recon.geom_ms or now_ms < proprio_ms:
+        raise ValueError(
+            f"관측 시각이 현재보다 뒤에 있다: geom {recon.geom_ms}ms, proprio {proprio_ms}ms "
+            f"> now {now_ms}ms"
+        )
+
+    ee = [float(value) for value in robot["ee_pose_mm"]]
+    objects = [_object_entry(instance, now_ms) for instance in recon.instances]
+    derived = [_object_derived(instance, recon.instances, ee, recon.scene, now_ms) for instance in recon.instances]
+
+    return {
+        "t": {
+            "tick": int(recon.tick),
+            "sim_ms": int(recon.sim_ms),
+            "observed_at_ms": proprio_ms,
+            "age_ms": {"geom": now_ms - int(recon.geom_ms), "proprio": now_ms - proprio_ms},
+        },
+        "goal": copy.deepcopy(recon.goal),
+        "objects": objects,
+        "scene": {
+            "work_surface_mm": int(recon.scene.work_surface_mm),
+            "free_width_mm": int(recon.scene.free_width_mm),
+            "corridor_mm": int(recon.scene.corridor_mm),
+            "clearance_mm": int(recon.scene.clearance_mm),
+        },
+        "zones": [copy.deepcopy(zone) for zone in recon.zones],
+        "robot": {
+            "ee_pose_mm": _round_mm(ee),
+            "ee_quat": [float(value) for value in robot["ee_quat"]],
+            "gripper_mm": int(round(float(robot["gripper_mm"]))),
+            "holding": robot.get("holding"),
+            "contact_n": round(float(robot.get("contact_n") or 0.0), 2),
+            "speed_mm_s": int(round(float(robot.get("speed_mm_s") or 0.0))),
+        },
+        "exec": {**copy.deepcopy(_EXEC_DEFAULT), **copy.deepcopy(robot.get("exec") or {})},
+        "events": [copy.deepcopy(event) for event in recon.events],
+        "derived": derived,
+        "commitment": copy.deepcopy(robot.get("commitment")),
+        # 영상·기하 soft token 슬롯은 예약만 한다 (docs/08 §3.2, §12).
+        "image": [],
+        "geom": [],
+        "extractor": EXTRACTOR_VERSION,
+    }
+
+
+def _object_entry(instance: TrackedInstance, now_ms: int) -> dict[str, Any]:
+    return {
+        "id": instance.track_id,
+        "desc": instance.desc,
+        "class": instance.cls,
+        "pose_mm": _round_mm(instance.pose_mm),
+        "quat": [float(value) for value in instance.quat],
+        "precision_mm": int(instance.precision_mm),
+        "obb_mm": [int(value) for value in instance.obb_mm],
+        "top_mm": int(instance.top_mm),
+        "graspable_faces": list(instance.graspable_faces),
+        "surface_conf": round(float(instance.surface_conf), 2),
+        "visible_ratio": round(float(instance.visible_ratio), 2),
+        "last_seen_ms": int(instance.last_seen_ms),
+        "age_ms": now_ms - int(instance.last_seen_ms),
+        "reid": list(instance.reid),
+        "attributes": list(instance.attributes),
+    }
+
+
+def _object_derived(
+    instance: TrackedInstance,
+    instances: tuple[TrackedInstance, ...],
+    ee: list[float],
+    scene: SceneSummary,
+    now_ms: int,
+) -> dict[str, Any]:
+    """물체별 파생 값 (docs/08 §3.2 `derived[]`).
+
+    **관측된 자세로만** 계산한다. 가려진 물체는 마지막으로 본 자세를 쓰고 그 나이를 함께
+    낸다 — 그것이 하네스가 아는 전부이기 때문이다.
+    """
+    pose = [float(value) for value in instance.pose_mm]
+    others = [other for other in instances if other.track_id != instance.track_id]
+
+    clearance = min(
+        (math.dist(pose, other.pose_mm) - instance.radius_mm - other.radius_mm for other in others),
+        default=float(scene.clearance_mm),
+    )
+    corridor = min(
+        (
+            2.0 * (segment_point_distance_mm(ee, pose, other.pose_mm) - other.radius_mm)
+            for other in others
+        ),
+        default=float(scene.free_width_mm),
+    )
+    return {
+        "object": instance.track_id,
+        "relative_mm": _round_mm([p - e for p, e in zip(pose, ee)]),
+        "clearance_mm": int(round(clearance)),
+        "corridor_mm": max(0, min(int(round(corridor)), int(scene.free_width_mm))),
+        "age_ms": now_ms - int(instance.last_seen_ms),
+    }
+
+
+# --------------------------------------------------------------------------
+# D1 어댑터 — 시뮬레이터 참값
+# --------------------------------------------------------------------------
+
+
+class GroundTruthAdapter:
+    """시뮬레이터 관측 → :class:`Reconstruction` (D1의 앞단).
+
+    참값을 그대로 흘리지 않는다. 세 가지를 앞단처럼 흉내 낸다.
+
+    1. **가시성.** 시뮬레이터의 광선 검사(`visible`·`visible_ratio`)를 그대로 쓴다.
+       안 보이는 물체는 자세를 갱신하지 않고 마지막으로 본 자세와 그 시각만 남긴다.
+    2. **정밀도.** 자세 오차 범위는 설정의 공칭값이다(참값과 무관).
+    3. **갱신 주기.** 기하는 `geom_period_ms`마다만 갱신된다. 로봇 고유 감각은 매 틱이다.
+
+    에피소드마다 하나를 만든다 — 마지막으로 본 자세를 기억하기 때문이다.
+    """
+
+    def __init__(self, config: dict[str, Any]) -> None:
+        self.config = copy.deepcopy(config)
+        self.geom_period_ms = int(config["geom_period_ms"])
+        self.visible_ratio_threshold = float(config["visible_ratio_threshold"])
+        self.precision_mm = dict(config["precision_mm"])
+        self.surface_conf = dict(config["surface_conf"])
+        self.points_visible = int(config["points_visible"])
+        self.points_occluded = int(config["points_occluded"])
+        self.moving_window_ms = int(config["moving_window_ms"])
+        self.faces_by_class = {key: tuple(value) for key, value in config["graspable_faces"].items()}
+        self.max_graspable_width_mm = float(config["max_graspable_width_mm"])
+
+        self._tracks: dict[str, dict[str, Any]] = {}
+        self._geom_ms: int | None = None
+        self._moved_ms: dict[str, int] = {}
+        self._hidden: dict[str, list[int]] = {}
+
+    # -- 재구성 -------------------------------------------------------------
+
+    def reconstruct(self, observation: dict[str, Any]) -> Reconstruction:
+        """관측 하나를 재구성 결과로 옮긴다. 가려진 물체의 참값은 버린다."""
+        sim_ms = int(observation["sim_time_ms"])
+        fresh = self._geom_ms is None or sim_ms - self._geom_ms >= self.geom_period_ms
+        if fresh:
+            self._geom_ms = sim_ms
+        for event in observation.get("events") or ():
+            if event.get("kind") == "disturbance_applied" and event.get("object"):
+                self._moved_ms[str(event["object"])] = sim_ms
+
+        self._hidden = {}
+        instances = []
+        for entry in observation["objects"]:
+            instance = self._track(entry, sim_ms, fresh=fresh)
+            if instance is not None:
+                instances.append(instance)
+        return Reconstruction(
+            instances=tuple(instances),
+            scene=self._scene(observation, instances),
+            zones=tuple(copy.deepcopy(zone) for zone in observation.get("zones") or ()),
+            goal=self._goal(observation),
+            events=tuple(copy.deepcopy(event) for event in observation.get("events") or ()),
+            geom_ms=int(self._geom_ms or 0),
+            tick=int(observation.get("tick", 0)),
+            sim_ms=sim_ms,
+            source="ground-truth",
+        )
+
+    def _track(self, entry: dict[str, Any], sim_ms: int, *, fresh: bool) -> TrackedInstance | None:
+        """물체 하나의 추적 상태를 갱신한다. 한 번도 본 적 없으면 `None`.
+
+        자세는 **보이는 동안 기하가 갱신된 틱에만** 새로 쓴다. 그래서 본 적 없는 물체는
+        앞단이 아무 자세도 모르고(상태에서 빠지고), 가려진 물체는 마지막으로 본 자세에
+        머문다. 지금의 참값은 :meth:`evidence`로만 나간다.
+        """
+        object_id = str(entry["id"])
+        visible = bool(entry.get("visible", True))
+        ratio = float(entry.get("visible_ratio", 1.0))
+        known = self._tracks.get(object_id)
+
+        if not visible:
+            # 가려진 물체의 지금 참값은 근거로만 남기고 상태로는 보내지 않는다.
+            self._hidden[object_id] = [int(value) for value in entry["pos_mm"]]
+
+        reid: tuple[str, ...] = ()
+        if visible and fresh:
+            pose = tuple(int(value) for value in entry["pos_mm"])
+            quat = tuple(float(value) for value in entry["quat"])
+            last_seen = min(int(entry.get("last_seen_ms", sim_ms)), sim_ms)
+            if known is not None and not known["visible"]:
+                reid = (f"reacquired:{sim_ms}",)
+        elif known is None:
+            return None  # 앞단이 모르는 물체다. 참값으로 채우지 않는다
+        else:
+            pose = tuple(known["pose_mm"])
+            quat = tuple(known["quat"])
+            last_seen = int(known["last_seen_ms"])
+
+        self._tracks[object_id] = {
+            "pose_mm": pose,
+            "quat": quat,
+            "last_seen_ms": last_seen,
+            "visible": visible,
+        }
+
+        obb = tuple(int(value) for value in entry["obb_mm"])
+        state = "visible" if visible else "occluded"
+        return TrackedInstance(
+            track_id=object_id,
+            desc=self._describe(entry),
+            cls=str(entry.get("class") or entry.get("shape") or "object"),
+            pose_mm=pose,
+            quat=quat,
+            precision_mm=int(self.precision_mm[state]),
+            obb_mm=obb,
+            top_mm=int(pose[2]) + obb[2] // 2,
+            graspable_faces=self._faces(entry, obb, ratio),
+            surface_conf=float(self.surface_conf[state]),
+            visible_ratio=ratio,
+            points=self.points_visible if visible else self.points_occluded,
+            last_seen_ms=last_seen,
+            observed_now=visible,
+            reid=reid,
+            attributes=tuple(entry.get("attributes") or ()),
+            moving=sim_ms - self._moved_ms.get(object_id, -10**9) <= self.moving_window_ms,
+        )
+
+    def _faces(self, entry: dict[str, Any], obb: tuple[int, int, int], ratio: float) -> tuple[str, ...]:
+        """파지 가능 면. 표면을 못 본 물체의 윗면은 파지면으로 내지 않는다.
+
+        v0에서는 두 면 모두 **수평 폭**으로 판정한다 — 평행 그리퍼가 닫히는 방향이
+        어느 면에서든 수평이기 때문이다.
+        """
+        faces = self.faces_by_class.get(str(entry.get("class") or entry.get("shape")), ())
+        if min(obb[0], obb[1]) > self.max_graspable_width_mm:
+            return ()
+        if ratio < self.visible_ratio_threshold:
+            return tuple(face for face in faces if face != "top")
+        return faces
+
+    def _describe(self, entry: dict[str, Any]) -> str:
+        """물체 설명. 장면이 준 설명이 있으면 그것을 쓴다 — 지시문이 부르는 이름이다."""
+        if entry.get("desc"):
+            return str(entry["desc"])
+        colour = entry.get("colour")
+        cls = entry.get("class") or entry.get("shape") or "물체"
+        return f"{colour} {cls}" if colour else str(cls)
+
+    def _scene(self, observation: dict[str, Any], instances: list[TrackedInstance]) -> SceneSummary:
+        """자유 공간 요약. 관측된 자세에서만 계산한다."""
+        surface = min((int(inst.pose_mm[2]) - inst.obb_mm[2] // 2 for inst in instances), default=0)
+        gaps = [
+            math.dist(a.pose_mm, b.pose_mm) - a.radius_mm - b.radius_mm
+            for index, a in enumerate(instances)
+            for b in instances[index + 1 :]
+        ]
+        clearance = min(gaps) if gaps else 0.0
+        zones = observation.get("zones") or ()
+        widths = [abs(zone["bounds_mm"][2] - zone["bounds_mm"][0]) for zone in zones]
+        free_width = max(widths) if widths else 0
+        return SceneSummary(
+            work_surface_mm=int(surface),
+            free_width_mm=int(free_width),
+            corridor_mm=int(round(max(0.0, clearance))),
+            clearance_mm=int(round(clearance)),
+        )
+
+    def _goal(self, observation: dict[str, Any]) -> dict[str, Any]:
+        """지시와 구조화된 제약 (docs/08 §3.2 `goal`).
+
+        구조화된 목표(`observation["goal"]`)가 오면 그것을 쓴다 — 실제 경로에서는 상위
+        작업 지능(L3)이나 장면 명세가 대상·목적지·금지를 넘긴다. 없으면 D1 어댑터가
+        관측 가능한 정보로 푼다: 금지 속성이 붙은 물체가 금지 접촉이고, 목표 영역은
+        지시문이 부르는 영역이며, 대상은 지시문이 **마지막으로 부른 평범한 물체**다
+        (지시가 바뀌면 새 대상이 뒤에 온다: "A 대신 B를 먼저 옮겨라").
+        """
+        instruction = observation.get("instruction") or {}
+        text = str(instruction.get("text", ""))
+        zones = observation.get("zones") or ()
+        given = dict(observation.get("goal") or {})
+
+        forbidden = [
+            str(entry["id"])
+            for entry in observation["objects"]
+            if "forbidden" in (entry.get("attributes") or ())
+        ]
+        fragile = [
+            str(entry["id"])
+            for entry in observation["objects"]
+            if "fragile" in (entry.get("attributes") or ())
+        ]
+        goal = {
+            "text": text,
+            "version": int(instruction.get("version", 1)),
+            "t_ms": int(instruction.get("t_ms", 0)),
+            "target_ref": given.get("target_ref") or self._named_target(observation, text),
+            "target_zone": given.get("target_zone")
+            or next((zone["id"] for zone in zones if str(zone.get("desc", "")) in text), None),
+            "forbidden_contact": given.get("forbidden_contact") or forbidden,
+            "fragile": given.get("fragile") or fragile,
+        }
+        if "priority" in given:
+            goal["priority"] = given["priority"]
+        return goal
+
+    def _named_target(self, observation: dict[str, Any], text: str) -> str | None:
+        """지시문이 부르는 대상. 설명은 이 어댑터가 상태에 실을 것과 같은 말로 맞춘다."""
+        described = [
+            {**entry, "desc": self._describe(entry)} for entry in observation["objects"]
+        ]
+        return named_target(described, text)
+
+    # -- 로봇 고유 감각 -----------------------------------------------------
+
+    def robot(
+        self, observation: dict[str, Any], commitment: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        """관측의 로봇 부분을 `extract`가 받는 형태로 옮긴다."""
+        robot = observation["robot"]
+        return {
+            "ee_pose_mm": list(robot["ee_pos_mm"]),
+            "ee_quat": list(robot["ee_quat"]),
+            "gripper_mm": robot["gripper_mm"],
+            "holding": robot.get("holding"),
+            "contact_n": robot.get("contact_force_n", 0.0),
+            "speed_mm_s": robot.get("speed_mm_s", 0),
+            "observed_at_ms": int(observation["sim_time_ms"]),
+            "exec": copy.deepcopy(observation.get("exec") or {}),
+            "commitment": copy.deepcopy(commitment),
+        }
+
+    # -- 근거 ---------------------------------------------------------------
+
+    def evidence(self) -> dict[str, Any]:
+        """마지막 재구성에서 **버린** 참값. 레코드의 `evidence` 자리에만 쓴다."""
+        return {"occluded_true_poses": copy.deepcopy(self._hidden), "source": "ground-truth"}
+
+    def moving(self, object_id: str) -> bool:
+        """외란으로 최근에 움직인 대상인가 (기하 나이 허용치를 가른다)."""
+        return object_id in self._moved_ms

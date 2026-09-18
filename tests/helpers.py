@@ -19,6 +19,8 @@ BUILDER = FIXTURES / "build_d0.py"
 REPO = Path(__file__).resolve().parent.parent
 SIM_CONFIG = REPO / "configs" / "sim" / "tidy_clutter.yaml"
 CONTROLLER_CONFIG = REPO / "configs" / "controller" / "osc_v0.yaml"
+HARNESS_CONFIG = REPO / "configs" / "harness" / "robot.yaml"
+RULE_JUDGE_CONFIG = REPO / "configs" / "harness" / "rule_judge_v0.yaml"
 
 
 def all_keys(node) -> set[str]:

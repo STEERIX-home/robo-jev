@@ -1,0 +1,219 @@
+"""에피소드 스트림 레코드의 조립과 집계 (docs/08 §8).
+
+데이터의 독립 단위는 **에피소드**다. 이 모듈은 세 가지만 한다.
+
+* :func:`new_episode` — prefix(지시·질문 세트)와 split을 정해 빈 레코드를 연다. 분할은
+  **장면 계열 단위로 생성 전에** 배정하므로(docs/08 §8) 계열 id 하나만 받는다.
+* :func:`append_tick` — 하네스가 만든 틱 요청에 `model_output`·`adopted`·`ack`·`labels`를
+  **분리 필드로** 붙여 레코드에 넣는다. 하네스 블록(기하·회계)은 레코드에 가지 않는다.
+  지시가 바뀐 틱에서는 prefix에 새 지시를 덧붙인다(리셋하지 않는다, docs/08 §3.1).
+* :func:`finalize` — 버전(하네스·컨트롤러·전문가·규칙·serializer·추출기)과 provenance를
+  붙이고 계약 검사를 돌린다. 어기면 그 자리에서 `ValueError`다.
+
+:func:`aggregate`는 에피소드·틱·질문 수를 센다. 세는 규칙은 자동 QA
+(:mod:`robo_jev.data.validate`)와 같아야 하므로 "그 틱이 실제로 던진 질문"만 센다.
+"""
+
+from __future__ import annotations
+
+import copy
+from functools import lru_cache
+from pathlib import Path
+from typing import Any
+
+from robo_jev.contracts import QUESTION_SET_V0, SCHEMA_STREAM, validate_record
+from robo_jev.data.split import SplitPolicy, assign_split
+
+__all__ = [
+    "REQUIRED_VERSIONS",
+    "aggregate",
+    "append_tick",
+    "default_versions",
+    "finalize",
+    "new_episode",
+    "posed_questions",
+]
+
+#: 레코드가 반드시 적어야 하는 버전 (docs/08 §8). `expert`는 전문가 에피소드에만 붙는다.
+REQUIRED_VERSIONS = ("harness", "controller", "rules", "serializer", "extractor")
+
+#: 요청 안에만 사는 하네스 장부. 레코드에는 넣지 않는다.
+_HARNESS_BLOCK = "harness"
+
+
+@lru_cache(maxsize=1)
+def default_versions() -> dict[str, str]:
+    """설정과 모듈 상수에서 읽은 기본 버전.
+
+    하네스·규칙·추출기는 코드가, 컨트롤러·serializer는 설정이 단일 출처다. 한 군데서
+    모아야 레코드의 `versions`가 실제로 돌아간 것을 가리킨다.
+    """
+    import yaml
+
+    from robo_jev.harness.robot import HARNESS_VERSION, load_harness_config
+    from robo_jev.harness.rule_judge import RULE_JUDGE_VERSION
+    from robo_jev.perception.pointworld import EXTRACTOR_VERSION
+    from robo_jev.sim.controller import load_controller_config, resolve_config_path
+
+    harness_config = load_harness_config()
+    controller = load_controller_config(harness_config["controller_config"])
+    serializer = yaml.safe_load(
+        resolve_config_path(Path("configs/sim/tidy_clutter.yaml")).read_text(encoding="utf-8")
+    )
+    return {
+        "harness": HARNESS_VERSION,
+        "controller": str(controller.get("version", "c0")),
+        "rules": RULE_JUDGE_VERSION,
+        "serializer": str(serializer.get("version", "s0")),
+        "extractor": EXTRACTOR_VERSION,
+    }
+
+
+def new_episode(
+    episode_id: str,
+    scene_family: str,
+    *,
+    instructions: list[dict[str, Any]],
+    question_set: str | None = None,
+    policy: SplitPolicy | None = None,
+) -> dict[str, Any]:
+    """빈 스트림 레코드. split은 장면 계열에서 나온다 (docs/08 §8)."""
+    if not instructions:
+        raise ValueError("prefix에는 시작 지시가 하나 이상 있어야 한다")
+    if question_set is None:
+        from robo_jev.harness.robot import RobotHarness
+
+        question_set = RobotHarness.from_config_path().question_set_id()
+    return {
+        "schema_version": SCHEMA_STREAM,
+        "episode_id": str(episode_id),
+        "origin_group": str(scene_family),
+        "split": assign_split(str(scene_family), policy),
+        "prefix": {
+            "instructions": [_instruction(item) for item in instructions],
+            "question_set": str(question_set),
+        },
+        "ticks": [],
+    }
+
+
+def append_tick(
+    record: dict[str, Any],
+    request: dict[str, Any],
+    *,
+    model_output: dict[str, Any] | None = None,
+    adopted: dict[str, Any] | None = None,
+    ack: dict[str, Any] | None = None,
+    labels: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """틱 하나를 레코드에 넣는다. 네 출력은 끝까지 분리해 둔다 (docs/08 §8).
+
+    `request`는 :meth:`robo_jev.harness.robot.RobotHarness.build_request`가 낸 틱이다.
+    원본은 건드리지 않고 깊은 복사로 옮긴다.
+    """
+    tick = {
+        key: copy.deepcopy(value) for key, value in request.items() if key != _HARNESS_BLOCK
+    }
+    if model_output is not None:
+        tick["model_output"] = copy.deepcopy(model_output)
+    if adopted is not None:
+        tick["adopted"] = copy.deepcopy(adopted)
+    if ack is not None:
+        tick["ack"] = copy.deepcopy(ack)
+    if labels is not None:
+        tick["labels"] = copy.deepcopy(labels)
+
+    _extend_instructions(record, tick)
+    record["ticks"].append(tick)
+    return tick
+
+
+def finalize(
+    record: dict[str, Any],
+    *,
+    versions: dict[str, str] | None = None,
+    provenance: dict[str, Any] | None = None,
+    evidence: dict[str, Any] | None = None,
+    validate: bool = True,
+) -> dict[str, Any]:
+    """버전·provenance·evidence를 붙이고 계약을 확인한다."""
+    if not record.get("ticks"):
+        raise ValueError("틱이 하나도 없는 에피소드는 레코드가 아니다")
+    record["versions"] = {**default_versions(), **(versions or {})}
+    missing = [name for name in REQUIRED_VERSIONS if not record["versions"].get(name)]
+    if missing:
+        raise ValueError(f"레코드에 필요한 버전이 없다: {missing}")
+    if provenance is not None:
+        record["provenance"] = copy.deepcopy(provenance)
+    if evidence is not None:
+        record["evidence"] = copy.deepcopy(evidence)
+    if validate:
+        validate_record(record)
+    return record
+
+
+def posed_questions(tick: dict[str, Any]) -> int:
+    """그 틱이 실제로 던진 질문 수. 자동 QA와 같은 규칙이다."""
+    candidates = (tick.get("request") or {}).get("candidates")
+    if not isinstance(candidates, dict):
+        return 0
+    return sum(
+        1
+        for question_id, spec in QUESTION_SET_V0.items()
+        if spec["criteria"] or question_id in candidates
+    )
+
+
+def aggregate(records: list[dict[str, Any]]) -> dict[str, Any]:
+    """에피소드·틱·질문 수와 split별 편수 (docs/08 §8 "각각 집계한다")."""
+    episodes = ticks = questions = labels = 0
+    splits: dict[str, int] = {}
+    for record in records:
+        if record.get("schema_version") != SCHEMA_STREAM:
+            continue
+        episodes += 1
+        split = record.get("split")
+        if isinstance(split, str):
+            splits[split] = splits.get(split, 0) + 1
+        for tick in record.get("ticks") or ():
+            ticks += 1
+            questions += posed_questions(tick)
+            labels += len(tick.get("labels") or ())
+    return {
+        "episodes": episodes,
+        "ticks": ticks,
+        "questions": questions,
+        "labels": labels,
+        "splits": dict(sorted(splits.items())),
+    }
+
+
+# --------------------------------------------------------------------------
+
+
+def _instruction(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "version": int(item["version"]),
+        "t_ms": int(item.get("t_ms", 0)),
+        "text": str(item["text"]),
+    }
+
+
+def _extend_instructions(record: dict[str, Any], tick: dict[str, Any]) -> None:
+    """지시가 바뀌면 prefix 뒤에 붙인다 (docs/08 §3.1 "리셋 없이 뒤에 추가")."""
+    goal = ((tick.get("request") or {}).get("state") or {}).get("goal") or {}
+    version = goal.get("version")
+    if version is None:
+        return
+    instructions = record["prefix"]["instructions"]
+    if int(version) <= int(instructions[-1]["version"]):
+        return
+    instructions.append(
+        _instruction(
+            {
+                "version": int(version),
+                "t_ms": int(goal.get("t_ms", tick.get("sim_ms", 0))),
+                "text": str(goal.get("text", "")),
+            }
+        )
+    )
