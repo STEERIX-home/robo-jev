@@ -16,6 +16,10 @@ D0_STREAMS = FIXTURES / "d0_streams.jsonl"
 D0_MANIFEST = FIXTURES / "d0_manifest.json"
 BUILDER = FIXTURES / "build_d0.py"
 
+REPO = Path(__file__).resolve().parent.parent
+SIM_CONFIG = REPO / "configs" / "sim" / "tidy_clutter.yaml"
+CONTROLLER_CONFIG = REPO / "configs" / "controller" / "osc_v0.yaml"
+
 
 def all_keys(node) -> set[str]:
     """중첩 구조 안의 모든 키 이름. 정보 경계 검사가 쓴다."""

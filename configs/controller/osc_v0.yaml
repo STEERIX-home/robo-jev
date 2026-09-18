@@ -1,0 +1,95 @@
+# 컨트롤러 계약 v0 — docs/08 §6, docs/05 §2.
+#
+# 계약의 수치는 전부 여기에만 둔다. `sim/controller.py`에는 상수를 쓰지 않는다.
+# 값은 실험 시작값이며 버전(`version`)과 함께 레코드에 기록한다(docs/08 §8 `versions.controller`).
+version: c0.2
+
+# 하네스↔실행기 계약의 표현 규약 (docs/02 §4, docs/05 §2 "좌표계·회전 표현·delta/absolute 설정을 기록").
+frame:
+  # 명령·관측의 자세는 로봇 기준 좌표계. 직렬화만 mm 정수·quaternion 2자리(docs/08 §3.2).
+  reference: robot_base
+  rotation: quaternion
+  quaternion_order: xyzw     # scipy·robosuite와 같은 순서. 변환 실수를 줄이려고 맞춘다
+  # robosuite Panda의 base는 world에 대해 회전이 없다(단순 평행이동). 환경이 reset마다 확인한다.
+  assert_base_orientation_identity: true
+
+# robosuite OSC_POSE 설정 (robosuite 1.5.2의 키 이름 그대로). 말단 목표는 50Hz로 갱신하고
+# 토크·물리는 500Hz다.
+#
+# `input_type: absolute`인 이유: 수명·혼합·속도 상한·정지 전이는 **우리 Controller**가 계산한다.
+# 그 결과는 로봇 기준 좌표계의 절대 말단 목표 하나이고 OSC는 그것만 추종한다. delta를 쓰면
+# 같은 목표가 주기마다 다른 증분이 되어 lease·혼합의 의미가 OSC 내부 누적과 섞인다.
+osc:
+  part_controller: OSC_POSE
+  input_type: absolute
+  input_ref_frame: base
+  input_max: 1.0
+  input_min: -1.0
+  # absolute 입력에서는 scale_action을 거치지 않으므로 아래 두 값은 쓰이지 않는다.
+  # robosuite가 키를 요구하므로 기본값을 그대로 둔다.
+  output_max: [0.05, 0.05, 0.05, 0.5, 0.5, 0.5]
+  output_min: [-0.05, -0.05, -0.05, -0.5, -0.5, -0.5]
+  kp: 150.0                  # force_level이 주기마다 덮어쓴다 (force_levels.*.impedance_kp)
+  damping_ratio: 1.0
+  impedance_mode: fixed
+  uncouple_pos_ori: true
+
+timing:
+  control_hz: 50             # 말단 목표 갱신 (docs/08 §6 "주기")
+  physics_dt_ms: 2           # 500Hz 물리·토크
+
+lifetime:                    # docs/08 §6 "수명"
+  observation_deadline_ms: 200
+  lease_ms: 300              # lease_until 기본값 = issued_at + 300ms
+  geometry_age_static_ms: 500
+  geometry_age_moving_ms: 200
+  hold_after_stale_ms: 1000  # lease 만료가 1초 이어지면 HOLD 절차
+
+blend:                       # docs/08 §6 "혼합"
+  blend_ms: 100
+
+stop:                        # docs/08 §6 "정지 전이" — 혼합을 우회하는 고정 감속 프로파일
+  decel_mm_s2: 4000.0
+  hold_grasp: true           # 파지 중이면 유지
+
+speed_levels_m_s: [0.0, 0.1, 0.25, 0.5]   # q_speed의 4수준 (docs/08 §4)
+
+force_levels:                # q_force의 3수준 → 임피던스·접촉 허용 (docs/08 §4)
+  avoid:
+    impedance_kp: 150.0
+    contact_allowance_n: 5.0
+  light:
+    impedance_kp: 100.0
+    contact_allowance_n: 15.0
+  push:
+    impedance_kp: 60.0
+    contact_allowance_n: 40.0
+
+reflex:                      # docs/08 §6 "반사" — 모델 응답을 기다리지 않는다
+  force_limit_n: 30.0        # 초과 → 즉시 정지
+  proximity_mm: 30.0         # 근접 위험 → 감속
+  proximity_speed_factor: 0.4
+  slip_detect_mm: 8.0        # 파지 중 물체가 이만큼 미끄러지면 사건 보고 + 파지 유지
+
+gripper:                     # docs/08 §6 "그리퍼" — readiness·ID·ACK·멱등
+  open_mm: 80
+  closed_mm: 0
+  close_readiness_distance_mm: 60   # 대상까지 이 안이어야 close를 실행한다
+  open_readiness_force_n: 25.0      # 이보다 큰 하중에서는 open을 보류한다
+  event_id_prefix: ge
+
+reach:                       # docs/08 §6 "거절" — 국소 도달·충돌 검사
+  workspace_radius_mm: 900   # 로봇 기준 원점에서의 도달 반경 (Panda 공칭 855mm보다 약간 넓게)
+  # 로봇 기준 좌표계에서의 테이블 윗면. configs/sim의 table.offset_m와 Panda 마운트 높이에서
+  # 나온 값이며 환경이 reset마다 실제 모델과 비교한다(어긋나면 그 자리에서 실패한다).
+  min_height_mm: -112
+  clearance_mm: 5            # 국소 충돌 여유
+
+# 실행기 등록 목록 (docs/02 §4 표). 명령은 이 원시 기능 하나로 사상된다.
+executors:
+  - MOVE_EE
+  - SET_GRIPPER
+  - PUSH_SEGMENT
+  - OBSERVE
+  - HOLD
+  - REQUEST_REPLAN

@@ -1,0 +1,100 @@
+# E0/E1 장면 "어수선한 다물체 정리" — docs/02 §1, docs/05 §2.
+#
+# 장면·지시 변경·외란은 전부 reset seed에서 만든다. 외란은 **모의 시간**으로 정의하며
+# 정책 호출 횟수와 무관하다(docs/05 §2). 모든 수치는 여기에만 둔다.
+version: s0.1
+default_profile: E1
+
+simulator:
+  backend: robosuite
+  env_name: TidyClutter
+  robot: Panda
+  gripper: PandaGripper
+  controller_config: configs/controller/osc_v0.yaml
+  physics_dt_ms: 2
+  control_hz: 50
+  # headless. 렌더·카메라는 쓰지 않는다(YAGNI: E2에서 시뮬 3D 카메라를 붙인다).
+  has_renderer: false
+  has_offscreen_renderer: false
+
+table:
+  full_size_m: [0.8, 0.8, 0.05]
+  friction: [1.0, 0.005, 0.0001]
+  offset_m: [0.0, 0.0, 0.8]
+
+objects:
+  count_min: 6
+  count_max: 10
+  shapes: [box, cylinder]
+  shape_labels: {box: 상자, cylinder: 원통}   # 지시문에 들어가는 이름
+  box_half_size_mm: [16, 28]          # 반변 길이 범위
+  cylinder_radius_mm: [16, 26]
+  cylinder_half_height_mm: [24, 40]
+  density: 500.0
+  friction: [0.95, 0.005, 0.0001]
+  min_separation_mm: 85               # 중심 간 최소 거리
+  spawn_x_mm: [-260, 60]              # 테이블 중심 기준
+  spawn_y_mm: [-280, 280]
+  spawn_attempts: 400
+  fragile_count: [1, 2]
+  forbidden_count: [1, 2]
+  palette:                            # 색은 물체를 구분하는 설명이다. 이름이 상태에 들어간다
+    - {name: red, ko: 빨간, rgba: [0.80, 0.16, 0.16, 1.0]}
+    - {name: blue, ko: 파란, rgba: [0.16, 0.34, 0.80, 1.0]}
+    - {name: green, ko: 초록, rgba: [0.18, 0.62, 0.30, 1.0]}
+    - {name: yellow, ko: 노란, rgba: [0.90, 0.78, 0.18, 1.0]}
+    - {name: purple, ko: 보라, rgba: [0.55, 0.26, 0.72, 1.0]}
+    - {name: orange, ko: 주황, rgba: [0.92, 0.52, 0.14, 1.0]}
+    - {name: cyan, ko: 청록, rgba: [0.18, 0.70, 0.74, 1.0]}
+    - {name: pink, ko: 분홍, rgba: [0.90, 0.48, 0.66, 1.0]}
+    - {name: brown, ko: 갈색, rgba: [0.45, 0.31, 0.20, 1.0]}
+    - {name: grey, ko: 회색, rgba: [0.55, 0.55, 0.57, 1.0]}
+
+zones:
+  count_min: 2
+  count_max: 3
+  candidates:                          # bounds_mm = [x0, y0, x1, y1] (테이블 중심 기준)
+    - {id: zoneL, desc: "왼쪽 정리 영역", bounds_mm: [-120, 150, 180, 330]}
+    - {id: zoneR, desc: "오른쪽 정리 영역", bounds_mm: [-120, -330, 180, -150]}
+    - {id: zoneF, desc: "앞쪽 보관 영역", bounds_mm: [100, -80, 300, 80]}
+
+visibility:
+  # 고정 시점에서 물체 윗면 표본을 훑는 가림 근사. 앞단(3D 재구성)이 채울 수 있는 값만 만든다.
+  viewpoint_mm: [-150, 0, 700]         # 테이블 윗면 기준 상대 위치
+  samples: 5                            # 중심 + 윗면 네 모서리
+  visible_ratio_threshold: 0.6
+  inflate_mm: 4.0
+
+instruction:
+  enabled: true
+  change_window_ms: [5000, 15000]      # docs/02 §1 "에피소드 도중(5~15초 사이)에 지시가 바뀌고"
+  v1_template: "{color} {shape}를 {zone}으로 옮기고 {fragile}는 건드리지 마라"
+  v2_template: "{color} {shape} 대신 {color2} {shape2}를 {zone}으로 먼저 옮겨라"
+
+disturbance:
+  count: [1, 3]
+  window_ms: [1200, 20000]
+  min_gap_ms: 600                       # 외란 사이 최소 간격
+  delta_x_mm: [-70, 70]
+  delta_y_mm: [-70, 70]
+  delta_yaw_deg: [-35, 35]
+
+episode:
+  max_ms: 30000
+
+# E0는 참조 상태다: 정적 장면, 지시 변경·외란 없음 (docs/05 §2 표).
+profiles:
+  E0:
+    objects:
+      count_min: 3
+      count_max: 3
+      fragile_count: [1, 1]
+      forbidden_count: [1, 1]
+    zones:
+      count_min: 2
+      count_max: 2
+    instruction:
+      enabled: false
+    disturbance:
+      count: [0, 0]
+  E1: {}

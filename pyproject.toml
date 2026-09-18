@@ -5,7 +5,12 @@ description = "robojev: 로봇용 typed judgment 모델 — 입력·라벨 계�
 readme = "docs/README.md"
 requires-python = ">=3.11"
 dependencies = [
+    # 시뮬레이터는 MuJoCo + robosuite 1.5 계열 (docs/05 §2). `sim/`은 1.5의 API
+    # (part_controllers, load_composite_controller_config, OSC_POSE의 absolute 입력)에
+    # 맞춰 쓰였으므로 상한을 둔다. macOS arm64 / Python 3.11에서 3.9.0 + 1.5.2로 잠갔다.
+    "mujoco>=3.3,<3.10",
     "pyyaml>=6.0.3",
+    "robosuite>=1.5.2,<1.6",
 ]
 
 [dependency-groups]
