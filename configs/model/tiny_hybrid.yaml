@@ -1,0 +1,30 @@
+# 소형 random-weight hybrid — 계산 검사용 fixture이지 연구 모델이 아니다 (docs/06 §2, docs/03 §1
+# "소형 계산 검사: 임의 가중치의 소형 attention/DeltaNet fixture. mask·상태 분기·gradient의 수학적
+# 정합성만 검사하며 성능 비교에 사용하지 않는다"). 가중치는 seed로 고정한 난수이고 학습하지 않는다.
+# 구조는 Qwen3.8/3.5 계열의 hybrid(linear attention 3 : full attention 1)를 축약한 것이다.
+name: tiny-hybrid-v0
+seed: 20260918
+
+# 어휘 = 실제 backbone tokenizer(Qwen/Qwen3.8-27B, `tokenizer.json`, added tokens 포함)의 크기.
+# embedding만 이 크기이고 값은 난수다. 검사가 받아 둔 tokenizer의 `get_vocab_size()`와 대조한다.
+vocab_size: 248077
+d_model: 64
+layers: [deltanet, deltanet, attention]
+mlp_hidden: 128
+norm_eps: 1.0e-6
+
+deltanet:            # 기준(reference) gated DeltaNet — 순수 PyTorch, kernel 없음
+  heads: 2
+  head_k: 16
+  head_v: 16
+  conv_kernel: 4     # 짧은 causal conv(depthwise), history = kernel - 1 = 3 토큰
+
+attention:           # full attention 1층, 명시적 mask(build_reference_mask) + windowed KV
+  heads: 2
+  head_dim: 32
+  rope_theta: 10000.0
+  window_ticks: 30   # 정적 prefix + 최근 30틱 (docs/08 §3.1)
+
+readout:
+  rank: 16           # pointer readout z = (U h_d)ᵀ(V h_c)/√r + b 의 r (docs/03 §3)
+  mode: pointer      # 주 경로. `candidate_branch` = 참고군 R(후보별 분기 + scalar readout, docs/03 §3)

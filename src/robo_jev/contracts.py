@@ -90,25 +90,31 @@ _INSTRUCTION_FIELDS = ("version", "t_ms", "text")
 _BOOLEAN_CRITERIA = [{"id": "true", "description": "예"}, {"id": "false", "description": "아니오"}]
 
 
-def _question(question_type: str, instructions: str, criteria: list[dict]) -> dict[str, Any]:
-    return {"type": question_type, "instructions": instructions, "criteria": criteria}
+def _question(question_type: str, instructions: str, criteria: list[dict], marker: str) -> dict[str, Any]:
+    return {"type": question_type, "instructions": instructions, "criteria": criteria, "marker": marker}
 
 
 #: 질문 세트 v0 (docs/08 §4). 후보가 빈 질문은 틱마다 후보가 바뀌는 동적 질문이고,
 #: 나머지는 하네스 버전에 고정된 정적 후보를 쓴다.
+#:
+#: ``marker``는 스트림(L1-a)에서 그 질문의 결정 위치가 쓰는 표지 토큰이다 (docs/08 §3.1, docs/03 §3):
+#: 질문 세트 버전이 id마다 고정해 정적 prefix에 선언하며, 틱마다 묻는 부분집합·순서나 세트 안의 자리에
+#: 따라 바뀌지 않는다. 세트에 질문을 끼워 넣을 때는 남는 예약 토큰(대문자 한 글자, 직렬화가 검사)을
+#: 새로 주고 기존 표지는 그대로 둔다.
 QUESTION_SET_V0: dict[str, dict[str, Any]] = {
-    "q_main": _question("choice", "지금 실행할 행동을 고르라.", []),
-    "q_done": _question("boolean", "현재 목표를 이미 만족했는가.", _BOOLEAN_CRITERIA),
-    "q_instr": _question("boolean", "실행에 필요한 지시가 충분한가.", _BOOLEAN_CRITERIA),
-    "q_observe": _question("boolean", "관측을 더 얻어야 하는가.", _BOOLEAN_CRITERIA),
-    "q_retry": _question("boolean", "직전 실패와 같은 방식의 재시도가 적절한가.", _BOOLEAN_CRITERIA),
-    "q_stop": _question("boolean", "지금 즉시 멈춰야 하는가.", _BOOLEAN_CRITERIA),
+    "q_main": _question("choice", "지금 실행할 행동을 고르라.", [], "A"),
+    "q_done": _question("boolean", "현재 목표를 이미 만족했는가.", _BOOLEAN_CRITERIA, "B"),
+    "q_instr": _question("boolean", "실행에 필요한 지시가 충분한가.", _BOOLEAN_CRITERIA, "C"),
+    "q_observe": _question("boolean", "관측을 더 얻어야 하는가.", _BOOLEAN_CRITERIA, "D"),
+    "q_retry": _question("boolean", "직전 실패와 같은 방식의 재시도가 적절한가.", _BOOLEAN_CRITERIA, "E"),
+    "q_stop": _question("boolean", "지금 즉시 멈춰야 하는가.", _BOOLEAN_CRITERIA, "F"),
     "q_gripper": _question(
         "choice",
         "commitment의 행동·국면 기준으로 원하는 그리퍼 상태를 고르라.",
         [{"id": "open", "description": "열림"}, {"id": "closed", "description": "닫힘"}],
+        "G",
     ),
-    "q_path": _question("choice", "commitment의 행동·국면 기준으로 경로를 고르라.", []),
+    "q_path": _question("choice", "commitment의 행동·국면 기준으로 경로를 고르라.", [], "H"),
     "q_speed": _question(
         "ordinal",
         "commitment의 행동·국면 기준으로 속도 수준을 고르라.",
@@ -118,6 +124,7 @@ QUESTION_SET_V0: dict[str, dict[str, Any]] = {
             {"id": "2", "description": "중속 (0.25 m/s)", "value": 0.25},
             {"id": "3", "description": "고속 (0.5 m/s)", "value": 0.5},
         ],
+        "I",
     ),
     "q_force": _question(
         "ordinal",
@@ -127,6 +134,7 @@ QUESTION_SET_V0: dict[str, dict[str, Any]] = {
             {"id": "1", "description": "가벼운 접촉", "value": 1.0},
             {"id": "2", "description": "밀기", "value": 2.0},
         ],
+        "J",
     ),
 }
 

@@ -23,6 +23,11 @@ HARNESS_CONFIG = REPO / "configs" / "harness" / "robot.yaml"
 RULE_JUDGE_CONFIG = REPO / "configs" / "harness" / "rule_judge_v0.yaml"
 REPO_CONFIGS = REPO / "configs"
 
+#: 모델 검사용 작은 어휘. 소형 fixture는 embedding을 별도 generator로 초기화하므로
+#: `TinyHybrid.from_config(vocab_size=SMALL_VOCAB)`는 설정 fixture를 id < SMALL_VOCAB에 제한한 것과
+#: 비트 단위로 같다(tests/test_hybrid.py가 확인). tokenizer 크기가 중요한 검사(어휘 대조)만 설정값을 쓴다.
+SMALL_VOCAB = 4096
+
 
 def all_keys(node) -> set[str]:
     """중첩 구조 안의 모든 키 이름. 정보 경계 검사가 쓴다."""
