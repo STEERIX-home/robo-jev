@@ -1,0 +1,61 @@
+# 키프레임 counterfactual rollout의 사건 정의 — docs/04 §4("관측된 사건 결과"의 기록 필드), docs/04
+# §"Counterfactual rollout의 제작 예산", docs/08 §7 (Task 3c-2).
+#
+# 결합 후보의 기능(grasp / place / push)마다 사건 하나를 둔다. 사건은 **행동 + 고정된 후속 정책 + horizon +
+# 성공 기준 + 외란 분포**의 묶음이고, 다른 후속 정책의 결과를 같은 사건으로 합치지 않는다. 라벨은 규칙
+# 버전과 원시 횟수를 함께 보존하므로 여기 값을 바꾸면 `version`을 올린다.
+version: ev0.1
+
+# 후속 정책: 전문가(e0.1)의 부가 답(그리퍼·경로·속도·힘)과 정지 규칙 위에 주 결정을 후보 하나로 못박고
+# 게이팅(완료·지시·관측)을 끈 것. `sim/label.py`의 `FollowupPolicy`. 이 문자열이 사건 기록의
+# `followup_policy_version`이다.
+followup_policy_version: followup-v0/expert-e0.1
+followup:
+  harness_config: configs/harness/robot.yaml
+  expert_config: configs/sim/expert_v0.yaml
+  control_steps_per_tick: 5      # 판단 틱 10Hz = 50Hz 제어 5회 (에피소드 생성과 같다)
+  # rollout 하나가 이보다 오래 걸리면 인프라 timeout으로 censoring한다 (docs/04 §4). 실측 0.5~1초.
+  wall_time_limit_s: 60
+
+# paired seed의 외란 분포 (docs/04 §4 "같은 관측에 부합하는 숨은 상태·외란 분포를 명시해 반복한다").
+# 같은 snapshot + 같은 seed는 같은 궤적이고, seed가 다르면 아래 잡음만 다르다.
+randomization:
+  pose_jitter:
+    # 물체 자세를 관측 상태가 보고한 정밀도(`precision_mm`, 보이면 3·가려지면 12) 안에서 균등하게 흔든다.
+    # 상태를 모르면(`action`에 `precision_mm`가 없으면) 기본값을 쓴다. 들고 있는 물체는 흔들지 않는다.
+    xy_within_precision: true
+    default_precision_mm: 3
+    yaw_deg: 2.0
+  controller_noise:
+    # 제어 주기마다 말단 목표에 더하는 가우스 잡음(mm, 각 축). 환경의 에피소드 RNG에서 뽑는다.
+    setpoint_sigma_mm: 1.0
+seeds: 8                         # 후보당 paired seed 수 (docs/04 §4 표: D1 8, D2 16)
+
+events:
+  grasp:
+    event_id: grasp-lift-v0
+    # 아직 들고 있지 않은 대상의 grasp 후보. 후속: 접근 → 파지 → 고정 들기(하네스 `phases.lift_height_mm`).
+    applies_to: {function: [grasp], holding_target: false}
+    horizon_seconds: 5.0
+    success_rule:
+      kind: held_above
+      lift_height_mm: 100        # 물체 중심이 시작 자세보다 이만큼 올라와 있고 (들기 목표 120 − 추종 오차)
+      hold_seconds: 0.5          # 그 상태가 이만큼 이어지며 손에 있다
+  place:
+    event_id: place-release-v0
+    # 들고 있는 물체의 place 후보(또는 진행 중인 grasp 후보). 후속: 들기 → 이동 → 놓기 → 해제.
+    applies_to: {function: [place, grasp], holding_target: true}
+    horizon_seconds: 5.0
+    success_rule:
+      kind: released_inside_zone_at_rest
+      rest_mm: 2                 # 마지막 rest_seconds 동안 물체 변위가 이 안이면 정지
+      rest_seconds: 0.3
+  push:
+    event_id: push-segment-v0
+    # push 후보. 후속: 접촉점 접근 → 밀기 구간(PUSH_SEGMENT, 닫힌 손가락, force_level push).
+    applies_to: {function: [push]}
+    horizon_seconds: 3.0
+    success_rule:
+      kind: displaced_along
+      segment_fraction: 0.5      # 하네스 `candidates.push_segment_mm`(80)의 절반 = 40mm 이상, 방향 성분으로
+      max_contact_force_n: 30.0  # 실행기 반사 한계와 같다 — 넘으면 그 시점에 실패

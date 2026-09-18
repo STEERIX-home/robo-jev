@@ -202,6 +202,9 @@ class Environment:
         # 재현을 보장할 수 없고, 그래서 reset이 전역을 건드리지도 않는다.
         self.rng = np.random.default_rng(0)
         self.py_rng = random.Random(0)
+        #: 제어 주기마다 말단 목표에 더하는 가우스 잡음(mm, 각 축). 0이면 없다. 키프레임 rollout의 외란
+        #: 분포(`configs/sim/events.yaml randomization.controller_noise`)가 켜고, 난수는 `self.rng`에서 뽑는다.
+        self.setpoint_noise_mm = 0.0
 
     # ------------------------------------------------------------------
     # reset
@@ -217,9 +220,16 @@ class Environment:
         self.rng = np.random.default_rng([self.seed, 0xB0B0])
         self.py_rng = random.Random(self.seed)
 
+        self.setpoint_noise_mm = 0.0
         self._build_sim()
         self._reset_episode_state()
         self._apply_schedules()
+        return self._observation(ack=None)
+
+    def observe(self) -> dict[str, Any]:
+        """지금의 관측 (`step` 없이). snapshot을 복원한 뒤 첫 요청을 만들 때 쓴다."""
+        if self._env is None:
+            raise RuntimeError("reset(seed)나 restore(snapshot)를 먼저 불러야 한다")
         return self._observation(ack=None)
 
     def _build_sim(self) -> None:
@@ -365,6 +375,9 @@ class Environment:
         self._drain_controller_events()
 
         self._set_impedance(setpoint["impedance_kp"])
+        if self.setpoint_noise_mm > 0.0:
+            noise = self.rng.normal(0.0, self.setpoint_noise_mm, size=3)
+            setpoint = {**setpoint, "ee_pos_mm": [value + float(delta) for value, delta in zip(setpoint["ee_pos_mm"], noise)]}
         self._env.step(self._action_from(setpoint))
 
         self.sim_time_ms += self.period_ms
@@ -412,12 +425,20 @@ class Environment:
             self._emit("instruction_changed", version=step.version, text=step.text)
             self._next_instruction += 1
 
-    def _apply_disturbance(self, item) -> None:
-        joint = self._env.object_joints[item.object]
+    def nudge(self, object_id: str, delta_mm, delta_yaw_deg: float = 0.0) -> None:
+        """물체 하나를 xy·yaw로 옮긴다 — 일정의 외란과 같은 물리 조작이지만 **기록하지 않는다**.
+
+        키프레임 rollout의 자세 흔들기(docs/04 §4 "같은 관측에 부합하는 숨은 상태 분포")가 쓴다: 관측이
+        보고한 정밀도 안의 차이는 사건이 아니므로 외란 로그·`disturbance_applied` 사건을 남기지 않는다.
+        """
+        self._move_object(object_id, (float(delta_mm[0]), float(delta_mm[1])), float(delta_yaw_deg))
+
+    def _move_object(self, object_id: str, delta_mm: tuple[float, float], delta_yaw_deg: float) -> None:
+        joint = self._env.object_joints[object_id]
         qpos = np.array(self._env.sim.data.get_joint_qpos(joint))
-        qpos[0] += item.delta_mm[0] / 1000.0
-        qpos[1] += item.delta_mm[1] / 1000.0
-        half = math.radians(item.delta_yaw_deg) / 2.0
+        qpos[0] += delta_mm[0] / 1000.0
+        qpos[1] += delta_mm[1] / 1000.0
+        half = math.radians(delta_yaw_deg) / 2.0
         delta_quat = np.array([math.cos(half), 0.0, 0.0, math.sin(half)])
         rotated = np.empty(4)
         mujoco.mju_mulQuat(rotated, delta_quat, qpos[3:7])
@@ -425,6 +446,9 @@ class Environment:
         self._env.sim.data.set_joint_qpos(joint, qpos)
         self._env.sim.data.set_joint_qvel(joint, np.zeros(6))
         self._env.sim.forward()
+
+    def _apply_disturbance(self, item) -> None:
+        self._move_object(item.object, (float(item.delta_mm[0]), float(item.delta_mm[1])), float(item.delta_yaw_deg))
 
         self.disturbance_log.append(
             {
@@ -788,6 +812,7 @@ class Environment:
                 "robosuite_timestep": int(self._env.timestep),
                 "robosuite_cur_time": float(self._env.cur_time),
                 "robosuite_done": bool(self._env.done),
+                "setpoint_noise_mm": float(self.setpoint_noise_mm),
             },
             # 6. 모든 RNG. 전역(`numpy.random`·`random`)은 담지 않는다 — 이 과정 밖에서도
             #    바뀌므로 담아도 재현을 보장하지 못하고, 담으면 복원이 남의 상태를 덮는다.
@@ -882,6 +907,7 @@ class Environment:
         self._env.timestep = int(wrapper["robosuite_timestep"])
         self._env.cur_time = float(wrapper["robosuite_cur_time"])
         self._env.done = bool(wrapper["robosuite_done"])
+        self.setpoint_noise_mm = float(wrapper.get("setpoint_noise_mm", 0.0))
 
         rng = state["rng"]
         self.rng = np.random.default_rng()
