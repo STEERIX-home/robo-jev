@@ -341,6 +341,8 @@ seed: 17
 torchrun --standalone --nproc_per_node=8 -m robo_jev.train --config configs/train/qwen38-27b-pilot.yaml
 ```
 
+**클라우드(GPU) 단계의 전제 — CPU 검증에서 드러난 것(2026-09-19).** (1) sampler가 에피소드를 토큰 단위 Python 리스트로 미리 직렬화해 들고 있어 D1 규모(400 에피소드 × ≈165K 토큰)에서는 10GB를 넘는다 — 단위별 지연 직렬화와 배열 기반 layout으로 바꾼 뒤에 D1 학습을 시작한다. (2) `torch` 핀은 Linux에서 CUDA 13 휠 묶음을 받으므로 클라우드 이미지·드라이버에 맞는 index를 05에 고정한다. (3) `configs/`는 wheel에 포함되지 않으므로 Dockerfile이 저장소째 담는다. (4) step 중간 checkpoint는 누적 gradient(실제 backbone 크기)를 담으므로 선점(preemption) 환경에서만 켠다. (5) 질문 수·후보 수의 프로파일 상한(Q≤16, K≤32)은 `validate_record`가 아직 강제하지 않는다 — 실제 backbone 실행 전에 넣는다. (6) 서빙 클라이언트는 응답에 `meta`(observed_at·goal_version·후보 집합 버전·seq)를 반드시 실어야 하네스의 유효성 검사(08 §5.0)가 동작한다.
+
 인수 검사의 핵심 비교는 `동일 seed의 20 step 연속 실행` 대 `10 step 저장 + 프로세스 재시작 + 10 step`이다. loss뿐 아니라 sampler 위치·optimizer step·선택한 parameter tensor의 차이를 보고한다. GPU 정밀도에 맞는 허용 오차를 고정하고 실패하면 긴 run을 시작하지 않는다.
 
 ### Task 6: 평가·비용·실행 종료를 포함한 첫 run
