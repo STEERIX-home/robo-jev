@@ -1066,6 +1066,7 @@ source = { editable = "." }
 dependencies = [
     { name = "huggingface-hub" },
     { name = "mujoco" },
+    { name = "numpy" },
     { name = "pyyaml" },
     { name = "robosuite" },
     { name = "tokenizers" },
@@ -1081,6 +1082,7 @@ dev = [
 requires-dist = [
     { name = "huggingface-hub", specifier = ">=1.32.0" },
     { name = "mujoco", specifier = ">=3.3,<3.10" },
+    { name = "numpy", specifier = ">=1.26" },
     { name = "pyyaml", specifier = ">=6.0.3" },
     { name = "robosuite", specifier = ">=1.5.2,<1.6" },
     { name = "tokenizers", specifier = ">=0.23.2" },

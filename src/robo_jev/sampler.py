@@ -55,6 +55,7 @@ __all__ = [
     "MixedSampler",
     "Unit",
     "load_items",
+    "sha256_of",
     "tick_class",
     "tick_weights",
     "valid_label_ticks",
@@ -104,7 +105,8 @@ def _tag(record: dict, path: str) -> Any:
     return node
 
 
-def _sha256(path: Path) -> str:
+def sha256_of(path: Path) -> str:
+    """파일의 sha256 (manifest 대조와 checkpoint의 manifest 참조가 같은 함수를 쓴다)."""
     digest = hashlib.sha256()
     with path.open("rb") as handle:
         for block in iter(lambda: handle.read(1 << 20), b""):
@@ -151,7 +153,7 @@ def load_items(
         expected = (entry or {}).get("sha256")
         if not expected:
             raise ValueError(f"{manifest_file}: files[{name}].sha256이 없다")
-        actual = _sha256(path)
+        actual = sha256_of(path)
         if actual != expected:
             raise ValueError(f"{path}: sha256이 manifest와 다르다 ({actual[:12]}… != {expected[:12]}…)")
         for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines()):

@@ -20,6 +20,8 @@ dependencies = [
     "torch==2.14.0",
     "tokenizers>=0.23.2",
     "huggingface-hub>=1.32.0",
+    # 학습 checkpoint가 numpy RNG 상태도 저장한다 (Task 5). 이미 mujoco/robosuite가 끌어오는 버전 그대로.
+    "numpy>=1.26",
 ]
 
 [dependency-groups]

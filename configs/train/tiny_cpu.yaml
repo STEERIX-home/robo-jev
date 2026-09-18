@@ -1,0 +1,62 @@
+# Task 5-CPU 학습 설정 — 소형 hybrid fixture(4b)로 학습 step·truncated BPTT·혼합 sampler·checkpoint/재개를
+# CPU에서 검증한다 (docs/06 Task 5의 GPU-bound 부분 제외). 키는 계획서(docs/06 Task 5)의 YAML을 따르고
+# 값만 fixture용이다. 실행: uv run python -m robo_jev.train --config configs/train/tiny_cpu.yaml
+# 재개:   uv run python -m robo_jev.train --config configs/train/tiny_cpu.yaml --resume artifacts/runs/<run_id>/checkpoint.pt
+# 경로는 저장소 뿌리(현재 작업 디렉터리) 기준이다.
+run_name: tiny-cpu
+run_id: null                              # null이면 <run_name>-<시각>. 산출물은 artifacts/runs/<run_id>/
+
+model_id: tiny_hybrid                      # 계획서: Qwen/Qwen3.8-27B. 여기서는 4b의 계산 fixture (연구 모델이 아니다)
+model_config: configs/model/tiny_hybrid.yaml
+model_vocab_size: 4096                     # 공백 tokenizer의 id < 4096. 설정 fixture를 앞 4096행으로 제한한 것과 비트 단위로 같다
+                                           # (4b 검사). 실제 tokenizer(어휘 248,077)로 학습하면 null(설정값)이어야 한다.
+model_seed: null                           # null = fixture 설정의 seed(고정 가중치)
+model_revision_manifest: null              # 계획서 키. fixture에는 revision manifest가 없다
+dataset_manifest: tests/fixtures/d0_manifest.json
+splits: [train]                            # D0 train split: 단일 요청 32 + 스트림 2 (dev/test는 학습에 쓰지 않는다)
+tokenizer: whitespace                      # 구조 검사용 공백 tokenizer. 실제 tokenizer는 Hub id (예: Qwen/Qwen3.8-27B)
+dtype: float32                             # CPU 검증은 FP32. bfloat16 허용 오차는 클라우드 단계
+execution_backend: independent_paths       # P0 — 질문별 독립 causal 경로 (state_first)
+readout: decision_pointer                  # 결정 위치 pointer readout. 참고군 R은 candidate_branch
+layout:                                    # 레코드 종류별 배치
+  single: state_first                      # 비로봇 단일 요청 (judgment-v0)
+  stream: stream_l1a                       # 로봇 스트림 (stream-v0)
+stream_chunk_seconds: 5                    # truncated BPTT 구간 (계획서 10초; D0의 10초 에피소드가 2구간이 되게 5초)
+stream_window_ticks: 30                    # full-attention 윈도우 (정적 prefix 별도 보존)
+stream_max_ticks: null                     # CPU 검사용 — 에피소드를 앞 N틱으로 자른다. 실제 학습은 null
+trainable: text_backbone_and_readout       # T1. T0는 readout_only
+freeze_vision_encoder: true                # fixture에는 vision encoder가 없다 — 기록만
+optimizer: adamw
+backbone_lr: 0.00001
+readout_lr: 0.0001
+weight_decay: 0.01                         # 2차원 이상 tensor에만 (bias·norm·DeltaNet 게이트는 0)
+gradient_clip: 1.0
+warmup_ratio: 0.05                         # 선형 warmup 뒤 cosine decay
+microbatch_states_per_rank: 1
+gradient_accumulation: 4                   # step = 4 단위 (에피소드 하나 또는 단일 요청 1개씩)
+world_size: 1                              # 단일 프로세스. FSDP/8 GPU는 클라우드 단계
+max_total_tokens: 8192
+max_state_tokens: 2048
+activation_checkpointing: false            # fixture 경로에는 없다
+max_steps: 30
+max_wall_hours: null                       # 예산. 넘으면 구간 경계에서 checkpoint를 쓰고 멈춘다
+seed: 17
+torch_threads: 1                           # 기준 fixture의 grouped conv1d는 스레드 동기화 비용이 커 1 스레드가 가장 빠르다 (보고서)
+checkpoint_every: 30                       # null이면 max_steps (마지막에만)
+artifacts_dir: artifacts/runs
+stop_after: null                           # 결정적 중단 검사용: {step: n} 또는 {step: n, unit: u, chunk: c}
+
+sampler:
+  robot_token_share: 0.6                   # 로봇/비로봇 — 토큰 기준 60/40 (docs/04 §2)
+  material_shares:                         # 기존 자료 / 오류 계열 / 새 의미 계열 — 70/20/10 (docs/04 §7). 빈 묶음은 재정규화
+    existing: 0.7
+    error_family: 0.2
+    new_semantic_family: 0.1
+  domain_tag: provenance.domain            # 레코드 태그 (없으면 스트림 = robot, 단일 요청 = non_robot)
+  material_tag: provenance.material        # 레코드 태그 (없으면 existing)
+  tick_weights:                            # 틱 종류별 손실 가중치 (시작값). 정상 유지 하향, 이벤트·목표 변경 상향
+    steady: 0.25
+    event: 2.0
+    goal_change: 2.0
+    other: 1.0
+  steady_min_held_ticks: 3                 # commitment가 이 틱 수 이상 유지되면 정상 유지 틱
