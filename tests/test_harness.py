@@ -1358,14 +1358,20 @@ def controller_at(scene: dict, *, closed: bool = False) -> Controller:
 
 
 def test_a_known_blocker_is_never_sent_as_direct():
-    """docs/10 I1: 막힌 direct는 보내지 않는다 — 첫 경유 경로로 바꾸고 이유를 적는다 (docs/08 §5.4, §5.6)."""
+    """docs/10 I1: 막힌 direct는 보내지 않는다 — 첫 경유 경로로 바꾸고 이유를 적는다 (docs/08 §5.4, §5.6).
+
+    채택 틱(commitment 없음)에는 요청에 경유점이 없으므로 하네스가 즉석에서 계획한다. 그 경우에도
+    `adopted`와 다음 틱의 실행 이력은 **실제로 명령한 경로**(via + 경유점 id·좌표)를 말해야 하고
+    (docs/08 §3.3 — 이력은 학습 입력이다), 레코드(`append_tick`)만으로 경유점이 풀려야 한다.
+    """
     scene = i1_scene()
     hrn = harness()
     request = hrn.build_request(scene, None, None)
     geometry = request["harness"]["candidates"][candidate_id(GRASP)]
     assert geometry["path_clear"] is False and geometry["blocker"] == "o1"
+    assert not [entry for entry in request["request"]["candidates"]["q_path"] if entry["kind"] == "via"]
 
-    # 전환 틱: 초기 프로파일의 direct도 같은 규칙을 따른다.
+    # 채택 틱: 초기 프로파일의 direct도 같은 규칙을 따른다.
     out = hrn.compose(request, probe_answers(request, GRASP), None, 0)
     command = out["command"]
     assert command["path"]["kind"] == "via"
@@ -1378,37 +1384,97 @@ def test_a_known_blocker_is_never_sent_as_direct():
     ack = controller_at(scene).apply(command, 0)
     assert ack["applied"] is True and ack["path"] == "via"
 
-    # 유지 틱: 모델이 direct라고 답해도 마찬가지다.
+    # 채택 결과는 답한 direct(p0)가 아니라 실제로 명령한 경로다.
+    adopted = out["adopted"]
+    assert adopted["path"] is None  # 이 틱의 경로 후보 어느 것도 아니다
+    assert adopted["path_kind"] == "via"
+    assert adopted["waypoint"] == {"ref": command["path"]["waypoint_ref"], "pos_mm": command["path"]["waypoint_mm"]}
+    assert adopted["waypoint"]["ref"] == "w1"
+
+    # 레코드만으로 경유점이 풀린다 (하네스 블록은 레코드에 가지 않는다).
+    record = new_episode("ep-i1", "scene-family-i1", instructions=[scene["instruction"]])
+    tick = append_tick(record, request, model_output=probe_answers(request, GRASP), adopted=adopted, ack=ack)
+    assert "harness" not in tick
+    assert tick["adopted"]["waypoint"]["pos_mm"] == command["path"]["waypoint_mm"]
+    finalize(record)
+
+    # 다음 틱의 실행 이력은 경유점 이름과 좌표를 말한다.
     commitment = out["commitment"]
     later = i1_scene(tick=1, sim_time_ms=PERIOD_MS)
-    request = hrn.build_request(later, {"adopted": out["adopted"], "ack": ack, "gate": None}, commitment)
+    request = hrn.build_request(later, {"adopted": adopted, "ack": ack, "gate": None}, commitment)
+    history = request["request"]["exec_history"]
+    x, y, z = command["path"]["waypoint_mm"]
+    assert f"path=via:w1@{x},{y},{z}" in history, history
+    assert "path=p0" not in history
+    assert len(history.split()) <= 12
+
+    # 유지 틱: 모델이 direct라고 답해도 마찬가지고, 요청의 경유 경로가 이 후보 것이면 그 id를 적는다.
     out = hrn.compose(request, probe_answers(request, GRASP), commitment, PERIOD_MS)
     assert out["command"]["path"]["kind"] == "via"
     assert out["adopted"]["path"] == "p1"
+    assert out["adopted"]["path_kind"] == "via"
+    assert out["adopted"]["waypoint"]["ref"] == "w1"
     assert [r["reason"] for r in out["records"] if r["kind"] == "conflict"] == ["path_blocked"]
+    following = hrn.build_request(i1_scene(tick=2, sim_time_ms=2 * PERIOD_MS),
+                                  {"adopted": out["adopted"], "ack": ack, "gate": None}, out["commitment"])
+    assert "path=p1" in following["request"]["exec_history"]
 
 
-def test_a_blocked_direct_with_no_detour_holds():
-    """경유점도 없으면 hold와 충돌 기록이다 (docs/08 §5.4)."""
-    walled = observation(objects=[
-        obj("o0", (400, 0, 0)),
-        obj("o1", (200, 0, 140), colour="blue"),
-        obj("o2", (200, 160, 140), colour="green"),
-        obj("o3", (200, -160, 140), colour="grey"),
-        obj("o4", (200, 0, 300), colour="pink"),
-    ])
+def test_the_exec_history_says_what_the_executor_actually_did_on_an_observe_tick():
+    """게이팅 관측 틱의 채택 기록은 hold·속도 0이지만 실행기는 관측 자세로 움직인다 — 이력은 실행된 것을 말한다."""
     hrn = harness()
-    request = hrn.build_request(walled, None, None)
-    out = hrn.compose(request, probe_answers(request, GRASP), None, 0)
-    assert out["command"]["path"]["kind"] == "hold"
-    assert out["command"]["path"].get("target_mm") is None
-    conflicts = [r for r in out["records"] if r["kind"] == "conflict"]
-    assert conflicts[0]["reason"] == "path_blocked" and conflicts[0]["resolution"] == "hold"
-    assert controller_at(walled).apply(out["command"], 0)["executor"] == "HOLD"
+    scene = observation()
+    request = hrn.build_request(scene, None, None)
+    out = hrn.compose(request, answers(q_observe=1.0), None, 0)
+    assert out["gate"] == "observe"
+    assert out["adopted"]["path_kind"] == "observe" and out["adopted"]["path"] is None
+    assert out["adopted"]["speed"] == 0  # 게이팅 틱의 부가 답은 버린다
+
+    ctrl = controller_at(scene)
+    ack = ctrl.apply(out["command"], 0)
+    assert ack["applied"] is True and ack["executor"] == "OBSERVE" and ack["path"] == "observe"
+    assert ack["speed_level"] == CONTROLLER["observe"]["speed_level"]
+
+    following = hrn.build_request(observation(tick=1, sim_time_ms=PERIOD_MS),
+                                  {"adopted": out["adopted"], "ack": ack, "gate": out["gate"]}, None)
+    history = following["request"]["exec_history"]
+    assert "path=observe" in history and f"speed={CONTROLLER['observe']['speed_level']}" in history
+    assert "gate=observe" in history and "ack=ok" in history
+
+    # 운반 중의 관측은 실제로 hold다.
+    carrying = observation()
+    carrying["robot"].update(holding="o0", ee_pos_mm=[300, 0, 40], gripper_mm=0)
+    carrying["exec"] = {"seq": 1, "gripper": "closed"}
+    request = hrn.build_request(carrying, None, None)
+    out = hrn.compose(request, answers(q_observe=1.0), None, 0)
+    ack = controller_at(carrying, closed=True).apply(out["command"], 0)
+    assert ack["path"] == "hold" and ack["speed_level"] == 0
+    following = hrn.build_request(observation(tick=1, sim_time_ms=PERIOD_MS),
+                                  {"adopted": out["adopted"], "ack": ack, "gate": out["gate"]}, None)
+    assert "path=ph" in following["request"]["exec_history"] and "speed=0" in following["request"]["exec_history"]
 
 
-def test_a_forbidden_blocker_produces_a_forbidden_segment_and_a_stop_transition():
-    """docs/10 I1 (금지 물체): 금지 접촉 물체가 구간에 걸리면 `forbidden_segment`로 실행기가 정지 전이한다."""
+def test_unsupported_faces_are_counted_not_silently_dropped():
+    """앞단이 낸 파지면 중 실행기가 못 쓰는 면(`candidates.faces` 밖)은 회계에 남는다 (실행기 역량이지 물체의 실행 가능성이 아니다)."""
+    request = harness().build_request(observation(), None, None)
+    accounting = request["harness"]["accounting"]
+    faces = {face for entry in request["request"]["state"]["objects"] for face in entry["graspable_faces"]}
+    assert "side" in faces and CANDIDATES["faces"] == ["top"]
+    zones, profiles = len(request["request"]["state"]["zones"]), len(CANDIDATES["profiles"])
+    assert accounting["dropped"]["unsupported_face"] == 3 * zones * profiles
+    assert accounting["enumerated"] == accounting["feasible"] + sum(
+        accounting["dropped"][reason] for reason in ("unsupported_face", "stale", "unreachable")
+    )
+
+    wrist = copy.deepcopy(CONFIG)
+    wrist["candidates"]["faces"] = ["top", "side"]
+    request = RobotHarness(wrist).build_request(observation(), None, None)
+    assert request["harness"]["accounting"]["dropped"]["unsupported_face"] == 0
+    assert "grasp:o0:side:zoneL:slow" in keys_of(request)
+
+
+def test_a_forbidden_blocker_is_rerouted_with_extra_margin():
+    """docs/10 I1 (금지 물체): 금지 접촉 물체는 더 큰 여유의 장애물이다 — 경유 경로가 있으면 그리로 간다."""
     scene = i1_scene(attributes=["forbidden"])
     hrn = harness()
     request = hrn.build_request(scene, None, None)
@@ -1416,17 +1482,108 @@ def test_a_forbidden_blocker_produces_a_forbidden_segment_and_a_stop_transition(
     out = hrn.compose(request, probe_answers(request, GRASP), None, 0)
     command = out["command"]
 
-    assert command["constraints"]["forbidden_segment"] is True
-    assert command["path"]["kind"] != "direct"
+    assert command["path"]["kind"] == "via"
+    assert command["constraints"]["forbidden_segment"] is False
     conflicts = [r for r in out["records"] if r["kind"] == "conflict"]
-    assert conflicts[0]["reason"] == "forbidden_segment" and conflicts[0]["blocker"] == "o1"
+    assert [r["reason"] for r in conflicts] == ["forbidden_reroute"] and conflicts[0]["blocker"] == "o1"
+    assert out["adopted"]["path_kind"] == "via" and out["adopted"]["waypoint"]["ref"] == "w1"
+
+    # 경유점의 두 소구간은 금지 물체를 추가 여유만큼 더 멀리 비껴간다.
+    from robo_jev.perception.pointworld import circumradius_mm, segment_point_distance_mm
+
+    blocker = next(entry for entry in scene["objects"] if entry["id"] == "o1")
+    clearance = circumradius_mm(blocker["obb_mm"]) + PLANNER["margin_mm"] + PLANNER["forbidden_margin_mm"]
+    ee = scene["robot"]["ee_pos_mm"]
+    waypoint = command["path"]["waypoint_mm"]
+    for start, end in ((ee, waypoint), (waypoint, command["path"]["target_mm"])):
+        assert segment_point_distance_mm(start, end, blocker["pos_mm"]) >= clearance - 1e-6
+
+    ack = controller_at(scene).apply(command, 0)
+    assert ack["applied"] is True and ack["path"] == "via" and ack["stop_transition"] is False
+
+
+def test_a_target_beside_a_forbidden_object_is_still_reachable_directly():
+    """추가 여유는 피할 수 있는 곳에만 적용한다 — 목표점이 금지 물체의 넓힌 구 안이면 기본 여유로 본다.
+
+    최소 간격 85mm의 장면에서 넓힌 여유를 목표점에도 적용하면 금지 물체 곁의 대상은 어떤 경로로도
+    닿을 수 없다(E0 seed 17에서 파지 직전에 retreat로 빠지던 원인).
+    """
+    scene = observation(objects=[
+        obj("o0", (300, 0, -80)),
+        obj("o1", (300, 120, -80), colour="blue", attributes=["forbidden"]),
+    ])
+    hrn = harness()
+    request = hrn.build_request(scene, None, None)
+    geometry = request["harness"]["candidates"][candidate_id(GRASP)]
+    assert geometry["path_clear"] is True and geometry["blocker"] is None
+    out = hrn.compose(request, probe_answers(request, GRASP), None, 0)
+    assert out["command"]["path"]["kind"] == "direct"
+    assert out["command"]["constraints"]["forbidden_segment"] is False
+    assert not [r for r in out["records"] if r["kind"] == "conflict"]
+
+    # 그립 국면(수직 하강)도 마찬가지다.
+    descending = observation(objects=copy.deepcopy(scene["objects"]), tick=1, sim_time_ms=PERIOD_MS)
+    descending["robot"]["ee_pos_mm"] = [300, 0, 0]
+    request = hrn.build_request(descending, None, out["commitment"])
+    assert request["harness"]["candidates"][candidate_id(GRASP)]["phase"] == "grasp"
+    out = hrn.compose(request, probe_answers(request, GRASP), out["commitment"], PERIOD_MS)
+    assert out["command"]["path"]["kind"] == "direct" and out["command"]["phase"] == "grasp"
+
+
+def walled_scene(**blocker_over) -> dict:
+    """유일한 직선을 o1이 막고 위·양옆도 막힌 장면 — 경유점이 없다."""
+    return observation(objects=[
+        obj("o0", (400, 0, 0)),
+        obj("o1", (200, 0, 140), colour="blue", **blocker_over),
+        obj("o2", (200, 160, 140), colour="green"),
+        obj("o3", (200, -160, 140), colour="grey"),
+        obj("o4", (200, 0, 300), colour="pink"),
+    ])
+
+
+def test_a_blocked_direct_with_no_detour_holds():
+    """경유점도 없으면 hold와 충돌 기록이다 (docs/08 §5.4)."""
+    walled = walled_scene()
+    hrn = harness()
+    request = hrn.build_request(walled, None, None)
+    out = hrn.compose(request, probe_answers(request, GRASP), None, 0)
+    assert out["command"]["path"]["kind"] == "hold"
+    assert out["command"]["path"].get("target_mm") is None
+    conflicts = [r for r in out["records"] if r["kind"] == "conflict"]
+    assert conflicts[0]["reason"] == "path_blocked" and conflicts[0]["resolution"] == "hold"
+    assert out["adopted"]["path"] == "ph" and out["adopted"]["path_kind"] == "hold"
+    assert controller_at(walled).apply(out["command"], 0)["executor"] == "HOLD"
+
+
+def test_a_forbidden_blocker_with_no_route_holds_then_releases_after_m_ticks():
+    """경유 경로가 없으면 hold+`forbidden_segment`(실행기 정지 전이)이고, `m` 틱 이어지면 commitment를 풀어
+    모델이 다른 행동을 고를 수 있게 한다."""
+    hrn = harness()
+    scene = walled_scene(attributes=["forbidden"])
+    request = hrn.build_request(scene, None, None)
+    out = hrn.compose(request, probe_answers(request, GRASP), None, 0)
+    command = out["command"]
+    assert command["path"]["kind"] == "hold"
+    assert command["constraints"]["forbidden_segment"] is True
+    assert [r["reason"] for r in out["records"] if r["kind"] == "conflict"] == ["forbidden_segment"]
+    assert out["commitment"] is not None and out["commitment"]["forbidden_ticks"] == 1
 
     ctrl = controller_at(scene)
     ack = ctrl.apply(command, 0)
-    assert ack["stop_transition"] is True
-    assert ack["reason"] == "transition_collision"
-    assert ack["applied"] is False
+    assert ack["stop_transition"] is True and ack["reason"] == "transition_collision" and ack["applied"] is False
     assert ctrl.advance(20)["executor"] == "HOLD"
+
+    commitment = out["commitment"]
+    for tick in range(1, M):
+        request = hrn.build_request(walled_scene(attributes=["forbidden"], tick=tick, sim_time_ms=tick * PERIOD_MS),
+                                    {"adopted": out["adopted"], "ack": ack, "gate": None}, commitment)
+        out = hrn.compose(request, probe_answers(request, GRASP), commitment, tick * PERIOD_MS)
+        commitment = out["commitment"]
+    reasons = [r["reason"] for r in out["records"] if r["kind"] in ("conflict", "release")]
+    assert "forbidden_blocked" in reasons
+    assert [r["reason"] for r in out["records"] if r["kind"] == "release"] == ["forbidden_blocked"]
+    assert out["commitment"] is None
+    assert out["command"]["constraints"]["forbidden_segment"] is True  # 이 틱도 보내지 않는다
 
 
 def i2_scene(ee=(300, 0, 0)) -> dict:

@@ -77,9 +77,11 @@ perception:
 candidates:
   max: 32                    # K≤32
   reserved: 3                # observe·hold·replan은 상한 안에서 자리를 예약한다
-  # 접근 유형. v0 실행기는 손목 회전이 없어(손가락은 로봇 기준 y축으로 열린다) 옆에서 미끄러져
-  # 들어가는 `side` 파지가 물리적으로 성립하지 않는다 — 위에서 내려오는 `top`만 연다. 앞단의
-  # 파지 가능 면(`perception.graspable_faces`)은 그대로이고, 손목 제어가 붙으면 여기에 `side`를 더한다.
+  # 실행기가 쓸 수 있는 접근 유형(실행기 역량). v0 실행기는 손목 회전이 없어(손가락은 로봇 기준
+  # y축으로 열린다) 옆에서 미끄러져 들어가는 `side` 파지가 물리적으로 성립하지 않는다 — 위에서
+  # 내려오는 `top`만 연다. 앞단의 파지 가능 면(`perception.graspable_faces`)은 그대로 상태에 실리고,
+  # 여기 없는 면의 조합은 후보 회계의 `dropped.unsupported_face`로 센다(물체의 실행 가능성이 아니라
+  # 실행기 역량이다). 실행기가 손목 요(yaw)를 얻으면 여기에 `side`를 더한다 — 코드 변경 없이 돌아온다.
   faces: [top]
   push_directions: ["+x", "-x", "+y", "-y"]
   profiles: [slow, fast]     # 운동 프로파일. 의미 키의 마지막 칸이다
@@ -126,6 +128,10 @@ descriptions:
 planner:
   max_waypoints: 3           # n≤3
   margin_mm: 25              # 직선 구간과 물체 OBB 사이의 여유
+  # 금지 접촉 물체는 이만큼 더 큰 여유를 가진 장애물이다 (구간 대조·경유점 계획 모두). 그래서
+  # 금지 물체 곁의 direct는 먼저 경유 경로로 바뀌고(`conflict{forbidden_reroute}`), 경유 경로가
+  # 없을 때만 hold+`forbidden_segment`로 실행기가 정지 전이한다 (docs/08 §5.6).
+  forbidden_margin_mm: 60
   over_clearance_mm: 60      # 위로 넘어가는 경유점의 물체 윗면 여유
   side_offset_mm: 90         # 옆으로 도는 경유점의 가로 이동량
 

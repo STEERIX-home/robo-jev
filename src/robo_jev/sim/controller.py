@@ -414,6 +414,8 @@ class Controller:
             "request_observation": False,
             "executor": executor,
             "path": None,
+            # 실제로 적용한 속도 수준. 하네스가 실행 이력을 "실행된 것"으로 쓰는 데 쓴다 (docs/08 §3.3).
+            "speed_level": None,
             "lease_until": int(self.lease_until),
         }
         ack.update(fields)
@@ -499,6 +501,7 @@ class Controller:
                 stale=lifetime_fault == "observation_late",
                 gripper_wait=self._stop_tick_gripper(normalised["gripper"]),
                 path=self.path_kind,
+                speed_level=0,
             )
 
         # 3. 나머지 명령은 수명 검사에서 멈춘다. 늦은 응답에는 lease가 새로 붙지 않고,
@@ -545,6 +548,7 @@ class Controller:
             gripper_event=event_id,
             gripper_wait=wait,
             path=normalised["path_kind"],
+            speed_level=int(normalised["speed_level"]),
         )
 
     def _refresh_lease(self, normalised: dict[str, Any]) -> None:

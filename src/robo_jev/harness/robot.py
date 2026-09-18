@@ -348,7 +348,9 @@ class RobotHarness:
         `reserved`는 현재 commitment의 후보 id다. 실행 가능하면 상한과 무관하게 남긴다.
         """
         spec = self.candidates_config
-        dropped = {"stale": 0, "unreachable": 0, "cap": 0}
+        # `unsupported_face`는 앞단이 낸 파지면 중 실행기가 못 쓰는 면(`faces` 밖)의 조합이다 —
+        # 물체의 실행 가능성이 아니라 실행기 역량이며, 조용히 빠지지 않고 여기 남는다.
+        dropped = {"unsupported_face": 0, "stale": 0, "unreachable": 0, "cap": 0}
         enumerated = 0
         feasible: list[_Candidate] = []
 
@@ -357,13 +359,15 @@ class RobotHarness:
         holding = state["robot"].get("holding")
         ee = [float(value) for value in state["robot"]["ee_pose_mm"]]
         ages = {entry["object"]: entry["age_ms"] for entry in state["derived"] if "object" in entry}
+        margins = self._margins(state)
 
         for object_id, entry in objects.items():
             age = int(ages.get(object_id, 0))
-            combos = list(self._combinations(entry, zones, holding))
-            enumerated += len(combos)
+            combos, unsupported = self._combinations(entry, zones, holding)
+            enumerated += len(combos) + unsupported
+            dropped["unsupported_face"] += unsupported
             for combo in combos:
-                candidate = self._geometry_for(combo, entry, objects, state, ee, age)
+                candidate = self._geometry_for(combo, entry, objects, state, ee, age, margins)
                 if candidate is None:
                     dropped["unreachable"] += 1
                     continue
@@ -412,11 +416,12 @@ class RobotHarness:
 
     def _combinations(
         self, entry: dict[str, Any], zones: list[dict[str, Any]], holding: str | None
-    ) -> list[tuple[str, str, str, str, str]]:
-        """한 물체가 낳는 (기능, 대상, 접근, 목적지, 프로파일) 조합."""
+    ) -> tuple[list[tuple[str, str, str, str, str]], int]:
+        """한 물체가 낳는 (기능, 대상, 접근, 목적지, 프로파일) 조합과, 실행기가 못 쓰는 면의 조합 수."""
         spec = self.candidates_config
         object_id = str(entry["id"])
         combos: list[tuple[str, str, str, str, str]] = []
+        unsupported = 0
         for profile in spec["profiles"]:
             # 들고 있는 물체의 파지 후보는 **진행 중인 결합 행동**이다. 목적지가 의미 키에
             # 들어 있으므로 `grasp:o7:top:zoneL:slow`는 "집어서 zoneL로 옮긴다" 하나이고,
@@ -424,6 +429,7 @@ class RobotHarness:
             if holding is None or holding == object_id:
                 for face in entry["graspable_faces"]:
                     if face not in spec["faces"]:
+                        unsupported += len(zones)
                         continue
                     for zone in zones:
                         combos.append(("grasp", object_id, face, str(zone["id"]), profile))
@@ -433,7 +439,7 @@ class RobotHarness:
             elif holding is None:
                 for direction in spec["push_directions"]:
                     combos.append(("push", object_id, direction, "none", profile))
-        return combos
+        return combos, unsupported
 
     def _geometry_for(
         self,
@@ -443,6 +449,7 @@ class RobotHarness:
         state: dict[str, Any],
         ee: list[float],
         age_ms: int,
+        margins: dict[str, float] | None = None,
     ) -> _Candidate | None:
         """조합 하나의 기하. 도달 불가하거나 목적지가 없으면 `None` (실행 가능성 기준의 제거).
 
@@ -488,7 +495,7 @@ class RobotHarness:
             for other in objects.values()
             if str(other["id"]) != object_id and str(other["id"]) != holding
         ]
-        blocker = self._first_blocker(ee, target_mm, blockers)
+        blocker = self._first_blocker(ee, target_mm, blockers, margins)
         clearance = min(
             (
                 math.dist(pose, [float(v) for v in other["pose_mm"]])
@@ -555,22 +562,46 @@ class RobotHarness:
         return point[2] >= self.min_height_mm + self.reach_clearance_mm
 
     def _first_blocker(
-        self, start: list[float], end: list[float], objects: list[dict[str, Any]]
+        self,
+        start: list[float],
+        end: list[float],
+        objects: list[dict[str, Any]],
+        margins: dict[str, float] | None = None,
     ) -> str | None:
-        """직선 구간을 막는 첫 물체. OBB의 외접 구 + 여유로 보수적으로 본다."""
+        """직선 구간을 막는 첫 물체. OBB의 외접 구 + 여유로 보수적으로 본다.
+
+        `margins`는 물체별 추가 여유다(금지 접촉 물체는 `planner.forbidden_margin_mm`만큼 더 큰
+        장애물이다). 구간의 끝점(명령할 목표점)이 그 물체의 넓힌 구 안에 있으면 그 물체는 추가
+        여유 없이 본다 — 목표점 자체가 그 안이면 피할 길이 없고, 그때의 안전은 실행기의 근접
+        반사와 하네스의 힘 상한·정지 규칙이 맡는다. 그러지 않으면 금지 물체 곁의 대상은 어떤
+        경로로도 닿을 수 없다(최소 간격 85mm의 장면에서 외접 구 + 여유가 이미 대상에 걸친다).
+        """
         margin = float(self.planner_config["margin_mm"])
-        blocking = [
-            (segment_point_distance_mm(start, end, [float(v) for v in other["pose_mm"]]), other)
-            for other in objects
-        ]
-        hits = [
-            (distance, other)
-            for distance, other in blocking
-            if distance < circumradius_mm(other["obb_mm"]) + margin
-        ]
+        extra = margins or {}
+        hits: list[tuple[float, dict[str, Any]]] = []
+        for other in objects:
+            centre = [float(v) for v in other["pose_mm"]]
+            limit = circumradius_mm(other["obb_mm"]) + margin
+            inflation = float(extra.get(str(other["id"]), 0.0))
+            if inflation > 0.0 and math.dist(end, centre) >= limit + inflation:
+                limit += inflation
+            distance = segment_point_distance_mm(start, end, centre)
+            if distance < limit:
+                hits.append((distance, other))
         if not hits:
             return None
         return str(min(hits, key=lambda item: item[0])[1]["id"])
+
+    def _forbidden_ids(self, state: dict[str, Any]) -> set[str]:
+        """금지 접촉 물체: 구조화된 목표의 목록과 `forbidden` 속성."""
+        return set(str(item) for item in state["goal"].get("forbidden_contact") or ()) | {
+            str(entry["id"]) for entry in state["objects"] if "forbidden" in (entry.get("attributes") or ())
+        }
+
+    def _margins(self, state: dict[str, Any]) -> dict[str, float]:
+        """물체별 추가 여유. 금지 접촉 물체만 `forbidden_margin_mm`을 갖는다."""
+        extra = float(self.planner_config["forbidden_margin_mm"])
+        return {object_id: extra for object_id in self._forbidden_ids(state)}
 
     def _prune(
         self,
@@ -698,7 +729,7 @@ class RobotHarness:
             ee = [float(value) for value in state["robot"]["ee_pose_mm"]]
             blockers = self._obstacles(state, candidate.target_ref)
             for index, waypoint in enumerate(
-                self._plan_waypoints(ee, candidate.target_mm, blockers), start=1
+                self._plan_waypoints(ee, candidate.target_mm, blockers, self._margins(state)), start=1
             ):
                 name = f"w{index}"
                 waypoints[name] = waypoint
@@ -730,23 +761,28 @@ class RobotHarness:
         return entries, waypoints
 
     def _plan_waypoints(
-        self, start: list[float], target: list[float], blockers: list[dict[str, Any]]
+        self,
+        start: list[float],
+        target: list[float],
+        blockers: list[dict[str, Any]],
+        margins: dict[str, float] | None = None,
     ) -> list[dict[str, Any]]:
         """국소 경유점 플래너.
 
         직선 구간을 물체의 외접 구 + 여유로 검사하고, 막혔으면 막은 물체를 **넘어가거나
         돌아가는** 경유점을 만든다. 두 소구간(시작→경유점, 경유점→목표)이 모두 비어 있고
         도달 가능한 것만 남기고, 늘어나는 경로 길이가 짧은 순으로 `n≤3`개를 낸다.
+        금지 접촉 물체(`margins`)는 그만큼 더 멀리 돈다.
         """
         spec = self.planner_config
-        blocker_id = self._first_blocker(start, target, blockers)
+        blocker_id = self._first_blocker(start, target, blockers, margins)
         if blocker_id is None:
             return []
 
         blocker = next(entry for entry in blockers if str(entry["id"]) == blocker_id)
         pose = [float(value) for value in blocker["pose_mm"]]
         radius = circumradius_mm(blocker["obb_mm"])
-        margin = float(spec["margin_mm"])
+        margin = float(spec["margin_mm"]) + float((margins or {}).get(blocker_id, 0.0))
         direct = math.dist(start, target)
 
         closest = _closest_point(start, target, pose)
@@ -757,7 +793,7 @@ class RobotHarness:
         proposals = [
             (
                 "over",
-                [pose[0], pose[1], float(blocker["top_mm"]) + float(spec["over_clearance_mm"])],
+                [pose[0], pose[1], float(blocker["top_mm"]) + float(spec["over_clearance_mm"]) + margin - float(spec["margin_mm"])],
             ),
             ("side+", [closest[0] + perpendicular[0] * offset, closest[1] + perpendicular[1] * offset, closest[2]]),
             ("side-", [closest[0] - perpendicular[0] * offset, closest[1] - perpendicular[1] * offset, closest[2]]),
@@ -767,9 +803,9 @@ class RobotHarness:
         for kind, point in proposals:
             if not self._reachable(point):
                 continue
-            if self._first_blocker(start, point, blockers) is not None:
+            if self._first_blocker(start, point, blockers, margins) is not None:
                 continue
-            if self._first_blocker(point, target, blockers) is not None:
+            if self._first_blocker(point, target, blockers, margins) is not None:
                 continue
             extra = math.dist(start, point) + math.dist(point, target) - direct
             planned.append(
@@ -819,8 +855,11 @@ class RobotHarness:
         """틱 t−1에서 **실제로 채택·실행된** 답 한 줄 (docs/08 §3.3).
 
         라벨이 아니라 실행 결과다. 전문가 에피소드에서는 전문가의 실행이, DAgger
-        에피소드에서는 모델 답을 하네스가 채택한 결과가 여기로 온다. `fails`는 같은 방식
-        (기능·대상·접근)이 **연속으로** 실패한 횟수다 — 하네스가 에피소드 안에서 센다.
+        에피소드에서는 모델 답을 하네스가 채택한 결과가 여기로 온다. 경로와 속도는 실행기의
+        ACK가 말하는 것(관측 이동 `observe`, 적용한 속도 수준)을 채택 결과보다 앞세운다 — 게이팅
+        관측 틱의 채택 결과는 hold·속도 0이지만 실행기는 관측 자세로 움직인다. 요청의 경로 후보가
+        아닌 즉석 경유 경로는 `via:<이름>@x,y,z`로 좌표까지 적어 참조 없이 풀리게 한다. `fails`는
+        같은 방식(기능·대상·접근)이 **연속으로** 실패한 횟수다 — 하네스가 에피소드 안에서 센다.
         """
         if not exec_history:
             self._failure_streak = None
@@ -848,9 +887,14 @@ class RobotHarness:
             count = int(streak["count"]) + 1 if streak and streak["way"] == way else 1
             self._failure_streak = {"way": way, "count": count}
             fails = count
+
+        applied = bool(ack.get("applied"))
+        speed = adopted.get("speed")
+        if applied and ack.get("speed_level") is not None:
+            speed = int(ack["speed_level"])
         return (
             f"main={main} phase={adopted.get('phase')} "
-            f"path={adopted.get('path')} speed={adopted.get('speed')} "
+            f"path={_executed_path_text(adopted, ack if applied else {})} speed={speed} "
             f"force={adopted.get('force')} gripper={adopted.get('gripper')} "
             f"stop={int(bool(adopted.get('stop')))} gate={exec_history.get('gate') or 'none'} "
             f"ack={result} fails={fails}"
@@ -999,7 +1043,7 @@ class RobotHarness:
         # 6. 명령 생성 ------------------------------------------------------
         # 실행기 대응은 **채택된 후보**를 따른다 (docs/02 §4 표). 관측·재계획을 게이팅이
         # 아니라 주 결정으로 고른 틱도 같은 원시 기능으로 가야 한다.
-        command, path_id = self._command(
+        command, executed = self._command(
             header,
             action_ref=chosen,
             phase=phase,
@@ -1015,10 +1059,15 @@ class RobotHarness:
             records=records,
             branch=chosen_key if chosen_key in FIXED_KEYS else None,
         )
+        current = self._count_forbidden(current, command, records)
         adopted = {
             "main": chosen,
             "switch": switch,
-            "path": path_id if path_id is not None else aux["path"],
+            # 채택 결과는 **실제로 명령한 경로**다 (docs/08 §3.3 — 다음 틱의 실행 이력이 된다).
+            # 요청의 경로 후보가 아니면(즉석 경유점) `path`는 없고 종류·경유점이 말한다.
+            "path": executed["id"],
+            "path_kind": executed["kind"],
+            "waypoint": executed["waypoint"],
             "speed": aux["speed"],
             "force": aux["force"],
             "gripper": aux["gripper"],
@@ -1033,6 +1082,25 @@ class RobotHarness:
             "gate": None,
             "records": records,
         }
+
+    def _count_forbidden(
+        self, commitment: dict[str, Any] | None, command: dict[str, Any], records: list[dict[str, Any]]
+    ) -> dict[str, Any] | None:
+        """금지 구간으로 보내지 못한 틱을 센다. `m` 틱 이어지면 commitment를 풀어 다른 행동을 고르게 한다."""
+        if commitment is None:
+            return None
+        if not command["constraints"].get("forbidden_segment"):
+            return {**commitment, "forbidden_ticks": 0} if commitment.get("forbidden_ticks") else commitment
+        ticks = int(commitment.get("forbidden_ticks", 0)) + 1
+        if ticks >= int(self.compose_config["m"]):
+            records.append(
+                {"kind": "conflict", "reason": "forbidden_blocked", "action_ref": commitment["action_ref"], "ticks": ticks}
+            )
+            records.append(
+                {"kind": "release", "reason": "forbidden_blocked", "action_ref": commitment["action_ref"]}
+            )
+            return None
+        return {**commitment, "forbidden_ticks": ticks}
 
     @staticmethod
     def _geometry_missing_reason(key: str, state: dict[str, Any]) -> str:
@@ -1145,6 +1213,8 @@ class RobotHarness:
             "main": main,
             "switch": False,
             "path": hold_path,
+            "path_kind": "hold",
+            "waypoint": None,
             "speed": 0,
             "force": 0,
             "gripper": gripper,
@@ -1196,7 +1266,7 @@ class RobotHarness:
         records.append({"kind": "aux_discarded", "reason": gate})
 
         hold_path = _path_of_kind(paths, "hold")
-        command, _ = self._command(
+        command, executed = self._command(
             header,
             action_ref=main,
             phase="none",
@@ -1215,7 +1285,10 @@ class RobotHarness:
         adopted = {
             "main": main,
             "switch": True,
-            "path": hold_path,
+            # 관측 게이트의 실행기는 관측 자세로 움직인다 — 채택 결과도 그것을 말한다.
+            "path": executed["id"],
+            "path_kind": executed["kind"],
+            "waypoint": executed["waypoint"],
             "speed": 0,
             "force": 0,
             "gripper": gripper,
@@ -1597,13 +1670,14 @@ class RobotHarness:
         state: dict[str, Any],
         records: list[dict[str, Any]],
         branch: str | None = None,
-    ) -> tuple[dict[str, Any], str | None]:
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         """docs/08 §6의 명령. 실행기가 받는 필드만 만든다.
 
-        돌려주는 것은 (명령, 실제로 명령한 경로 후보의 id). 막힌 direct를 경유 경로로 바꾸면
-        그 경유 경로의 id가 채택 결과에 적힌다(이 틱의 목록에 없으면 `None`).
+        돌려주는 것은 (명령, 실제로 명령한 경로의 기술 `{id, kind, waypoint}`). 막힌 direct를
+        경유 경로로 바꾸면 채택 결과가 그 경유 경로를 말한다 — 요청의 경로 후보면 그 id로, 즉석
+        계획이면 id 없이(`None`) 종류·경유점 이름·좌표로.
         """
-        path, target_ref, forbidden, path_id = self._path_block(
+        path, target_ref, forbidden, executed = self._path_block(
             path_entry, info, phase, paths, waypoints, state, records, action_ref=action_ref
         )
         command = {
@@ -1633,9 +1707,12 @@ class RobotHarness:
         }
         if branch == "observe":
             command["observe"] = True
+            if state["robot"].get("holding") is None:
+                # 실행기는 관측 자세로 **이동**한다 (docs/08 §6 관측). 운반 중이면 제자리다.
+                executed = _executed(None, "observe")
         elif branch == "replan":
             command["replan"] = True
-        return command, path_id
+        return command, executed
 
     def _path_block(
         self,
@@ -1648,47 +1725,73 @@ class RobotHarness:
         records: list[dict[str, Any]],
         *,
         action_ref: str,
-    ) -> tuple[dict[str, Any], str | None, bool, str | None]:
+    ) -> tuple[dict[str, Any], str | None, bool, dict[str, Any]]:
         """경로 블록. **실제로 명령할 구간**을 관측된 장애물에 대조한다 (docs/08 §5.4, §5.6).
 
-        * 금지 접촉 물체가 구간에 걸리면 그 구간을 보내지 않고 `hold`에 `forbidden_segment`를
-          붙여 실행기가 정지 전이하게 한다.
+        * 금지 접촉 물체는 `forbidden_margin_mm`만큼 더 큰 장애물이다. 구간에 걸리면 먼저 경유
+          경로를 찾고(`conflict{forbidden_reroute}`), 없을 때만 그 구간을 보내지 않고 `hold`에
+          `forbidden_segment`를 붙여 실행기가 정지 전이하게 한다(`conflict{forbidden_segment}`).
         * 다른 물체에 막힌 direct는 보내지 않는다 — 국소 플래너의 첫 경유 경로(요청의 경유점이
           이 후보의 것이면 그것, 아니면 지금 계산한 것), 그것도 없으면 `hold`. 둘 다 충돌로 적는다.
         * via는 말단→경유점, 경유점→목표점 두 구간을 본다.
 
-        돌려주는 것은 (경로 블록, 대상 id, 금지 구간 여부, 명령한 경로 후보 id).
+        돌려주는 것은 (경로 블록, 대상 id, 금지 구간 여부, 실행 경로 기술). 실행 경로 기술은
+        `{"id": 요청의 경로 후보 id 또는 None, "kind": 실제 종류, "waypoint": {"ref", "pos_mm"} | None}`
+        이며 채택 결과·실행 이력이 **실제로 명령한 경로**를 말하게 한다 (docs/08 §3.3).
         """
         kind = (path_entry or {}).get("kind", "hold")
         target_ref = (info or {}).get("target_ref")
         if info is None or info.get("function") is None or kind in ("hold", "retreat"):
-            return {"kind": "hold" if kind != "retreat" else "retreat"}, target_ref, False, None
+            actual = "hold" if kind != "retreat" else "retreat"
+            return {"kind": actual}, target_ref, False, _executed(_path_of_kind(paths, actual), actual)
 
         point = [float(value) for value in (info.get("target_mm") or self._legacy_target(info, phase))]
         if not self._reachable(point):
             # 알면서 거절당할 명령을 내지 않는다 (docs/08 §5.6의 충돌 기록).
             records.append({"kind": "conflict", "reason": "unreachable", "target_ref": target_ref})
-            return {"kind": "hold"}, target_ref, False, None
+            return {"kind": "hold"}, target_ref, False, _executed(_path_of_kind(paths, "hold"), "hold")
 
         ee = [float(value) for value in state["robot"]["ee_pose_mm"]]
         obstacles = self._obstacles(state, target_ref)
-        forbidden_ids = set(state["goal"].get("forbidden_contact") or ()) | {
-            str(entry["id"]) for entry in state["objects"] if "forbidden" in (entry.get("attributes") or ())
-        }
+        forbidden_ids = self._forbidden_ids(state)
+        margins = self._margins(state)
+        hold = _executed(_path_of_kind(paths, "hold"), "hold")
 
         def crossing(start: list[float], end: list[float]) -> tuple[str | None, str | None]:
-            """(금지 물체, 다른 장애물) — 구간을 막는 첫 물체를 종류별로."""
+            """(금지 물체, 다른 장애물) — 구간을 막는 첫 물체를 종류별로 (금지 물체는 추가 여유)."""
             forbidden_hit = self._first_blocker(
-                start, end, [entry for entry in obstacles if str(entry["id"]) in forbidden_ids]
+                start, end, [entry for entry in obstacles if str(entry["id"]) in forbidden_ids], margins
             )
-            other_hit = self._first_blocker(start, end, obstacles)
+            other_hit = self._first_blocker(start, end, obstacles, margins)
             return forbidden_hit, other_hit
 
-        def stop_for(blocker: str) -> tuple[dict[str, Any], str | None, bool, str | None]:
+        def reroute(blocker: str, reason: str) -> tuple[dict[str, Any], str | None, bool, dict[str, Any]]:
+            """막힌 구간 대신 첫 경유 경로. 없으면 금지 물체는 정지 전이, 다른 물체는 hold."""
+            detour = self._first_detour(paths, waypoints, action_ref, ee, point, obstacles, margins)
+            if detour is None:
+                if reason == "forbidden_segment":
+                    records.append(
+                        {"kind": "conflict", "reason": "forbidden_segment", "blocker": blocker, "target_ref": target_ref}
+                    )
+                    return {"kind": "hold"}, target_ref, True, hold
+                records.append(
+                    {"kind": "conflict", "reason": "path_blocked", "blocker": blocker,
+                     "target_ref": target_ref, "resolution": "hold"}
+                )
+                return {"kind": "hold"}, target_ref, False, hold
+            name, waypoint, path_id = detour
             records.append(
-                {"kind": "conflict", "reason": "forbidden_segment", "blocker": blocker, "target_ref": target_ref}
+                {"kind": "conflict", "reason": "forbidden_reroute" if reason == "forbidden_segment" else "path_blocked",
+                 "blocker": blocker, "target_ref": target_ref, "resolution": "via", "waypoint": name}
             )
-            return {"kind": "hold"}, target_ref, True, _path_of_kind(paths, "hold")
+            block = {
+                "kind": "via",
+                "target_ref": target_ref,
+                "target_mm": _round_list(point),
+                "waypoint_ref": name,
+                "waypoint_mm": _round_list(waypoint["pos_mm"]),
+            }
+            return block, target_ref, False, _executed(path_id, "via", name, block["waypoint_mm"])
 
         if kind == "via":
             waypoint = waypoints.get(str(path_entry.get("ref")))
@@ -1700,13 +1803,13 @@ class RobotHarness:
                 for start, end in ((ee, waypoint_mm), (waypoint_mm, point)):
                     forbidden_hit, other_hit = crossing(start, end)
                     if forbidden_hit is not None:
-                        return stop_for(forbidden_hit)
+                        return reroute(forbidden_hit, "forbidden_segment")
                     if other_hit is not None:
                         records.append(
                             {"kind": "conflict", "reason": "path_blocked", "blocker": other_hit,
                              "target_ref": target_ref, "resolution": "hold"}
                         )
-                        return {"kind": "hold"}, target_ref, False, _path_of_kind(paths, "hold")
+                        return {"kind": "hold"}, target_ref, False, hold
                 block = {
                     "kind": "via",
                     "target_ref": target_ref,
@@ -1714,36 +1817,18 @@ class RobotHarness:
                     "waypoint_ref": str(path_entry["ref"]),
                     "waypoint_mm": _round_list(waypoint_mm),
                 }
-                return block, target_ref, False, str(path_entry["id"])
+                return block, target_ref, False, _executed(
+                    str(path_entry["id"]), "via", str(path_entry["ref"]), block["waypoint_mm"]
+                )
 
         forbidden_hit, other_hit = crossing(ee, point)
         if forbidden_hit is not None:
-            return stop_for(forbidden_hit)
-        if other_hit is None:
-            block = {"kind": "direct", "target_ref": target_ref, "target_mm": _round_list(point)}
-            return block, target_ref, False, (str(path_entry["id"]) if path_entry else _path_of_kind(paths, "direct"))
-
-        # 막힌 direct: 요청의 경유점이 이 후보의 것이면 그 첫 번째, 아니면 지금 계산한 첫 번째.
-        detour = self._first_detour(paths, waypoints, action_ref, ee, point, obstacles)
-        if detour is None:
-            records.append(
-                {"kind": "conflict", "reason": "path_blocked", "blocker": other_hit,
-                 "target_ref": target_ref, "resolution": "hold"}
-            )
-            return {"kind": "hold"}, target_ref, False, _path_of_kind(paths, "hold")
-        name, waypoint, path_id = detour
-        records.append(
-            {"kind": "conflict", "reason": "path_blocked", "blocker": other_hit,
-             "target_ref": target_ref, "resolution": "via", "waypoint": name}
-        )
-        block = {
-            "kind": "via",
-            "target_ref": target_ref,
-            "target_mm": _round_list(point),
-            "waypoint_ref": name,
-            "waypoint_mm": _round_list(waypoint["pos_mm"]),
-        }
-        return block, target_ref, False, path_id
+            return reroute(forbidden_hit, "forbidden_segment")
+        if other_hit is not None:
+            return reroute(other_hit, "path_blocked")
+        block = {"kind": "direct", "target_ref": target_ref, "target_mm": _round_list(point)}
+        path_id = str(path_entry["id"]) if path_entry else _path_of_kind(paths, "direct")
+        return block, target_ref, False, _executed(path_id, "direct")
 
     def _first_detour(
         self,
@@ -1753,17 +1838,22 @@ class RobotHarness:
         ee: list[float],
         point: list[float],
         obstacles: list[dict[str, Any]],
+        margins: dict[str, float] | None = None,
     ) -> tuple[str, dict[str, Any], str | None] | None:
-        """막힌 direct를 대신할 첫 경유점: (이름, 경유점, 요청의 경로 후보 id)."""
+        """막힌 direct를 대신할 첫 경유점: (이름, 경유점, 요청의 경로 후보 id).
+
+        요청의 경유점이 이 후보의 것이면 그것을 쓴다(모델이 본 이름 그대로). 아니면 지금 계획하고
+        요청의 경유점과 겹치지 않는 이름(`w<n+1>`)을 붙인다 — 이 경우 경로 후보 id는 없다.
+        """
         for path_id, entry in paths.items():
             if entry.get("kind") == "via" and str(entry.get("action_ref")) == str(action_ref):
                 waypoint = waypoints.get(str(entry.get("ref")))
                 if waypoint is not None:
                     return str(entry["ref"]), waypoint, str(path_id)
-        planned = self._plan_waypoints(ee, point, obstacles)
+        planned = self._plan_waypoints(ee, point, obstacles, margins)
         if not planned:
             return None
-        return "w1", planned[0], None
+        return f"w{len(waypoints) + 1}", planned[0], None
 
     @staticmethod
     def _legacy_target(info: dict[str, Any], phase: str) -> list[float]:
@@ -1842,7 +1932,7 @@ class RobotHarness:
             item["object"]: item.get("age_ms", 0) for item in state["derived"] if "object" in item
         }
         candidate = self._geometry_for(
-            tuple(parts), target, objects, state, ee, int(ages.get(parts[1], 0))
+            tuple(parts), target, objects, state, ee, int(ages.get(parts[1], 0)), self._margins(state)
         )
         return candidate.geometry() if candidate else None
 
@@ -1862,6 +1952,32 @@ class RobotHarness:
 
 def _round_list(values) -> list[int]:
     return [int(round(float(value))) for value in values]
+
+
+def _executed_path_text(adopted: dict[str, Any], ack: dict[str, Any]) -> str:
+    """실행 이력의 `path=` 값: 실행기가 관측으로 움직였으면 `observe`, 요청의 경로 후보면 그 id,
+    즉석 경유 경로면 `via:<이름>@x,y,z`, 아니면 실제 종류."""
+    if ack.get("path") == "observe":
+        return "observe"
+    if adopted.get("path") is not None:
+        return str(adopted["path"])
+    kind = str(adopted.get("path_kind") or "hold")
+    waypoint = adopted.get("waypoint")
+    if kind == "via" and waypoint and waypoint.get("pos_mm") is not None:
+        x, y, z = (int(round(float(value))) for value in waypoint["pos_mm"])
+        return f"via:{waypoint.get('ref') or 'w'}@{x},{y},{z}"
+    return kind
+
+
+def _executed(
+    path_id: str | None, kind: str, waypoint_ref: str | None = None, waypoint_mm: list[int] | None = None
+) -> dict[str, Any]:
+    """실제로 명령한 경로의 기술 (채택 결과 `path`·`path_kind`·`waypoint`의 원천)."""
+    return {
+        "id": path_id,
+        "kind": kind,
+        "waypoint": {"ref": waypoint_ref, "pos_mm": list(waypoint_mm)} if waypoint_ref else None,
+    }
 
 
 def _unit_xy(vector) -> tuple[float, float]:

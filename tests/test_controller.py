@@ -811,6 +811,10 @@ def test_ack_carries_the_contract_fields():
     assert isinstance(ack["applied"], bool)
     assert ack["reason"] is None
     assert ack["executor"] == "MOVE_EE"
+    # ACK는 실제로 적용한 속도 수준을 말한다 — 하네스의 실행 이력이 "실행된 것"을 적는 근거다.
+    assert ack["speed_level"] == 2
+    assert ctrl.apply(move(seq=2, now_ms=PERIOD_MS, stop=True), now_ms=PERIOD_MS)["speed_level"] == 0
+    assert ctrl.apply(move(seq=3, now_ms=2 * PERIOD_MS, force_level="crush"), now_ms=2 * PERIOD_MS)["speed_level"] is None
 
 
 def test_executors_match_the_plan_table():
