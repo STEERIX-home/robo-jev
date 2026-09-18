@@ -367,7 +367,7 @@ def test_rollout_candidates_include_the_commitment_and_the_expert_choice_and_spr
 # --------------------------------------------------------------------------
 
 
-def labelled_tick(*, commitment=None, admissible=("c1", "c2", "c3"), choice="c1", rule="expert-e0.2/goal_grasp") -> dict:
+def labelled_tick(*, commitment=None, admissible=("c1", "c2", "c3"), choice="c1", rule="expert-e0.2/goal_grasp", confidence="high") -> dict:
     ids = [f"c{index}" for index in range(1, 10)] + ["ch", "co", "cr"]
     keys = {f"c{index}": f"grasp:o{index}:top:zoneL:slow" for index in range(1, 10)}
     keys.update(ch="hold", co="observe", cr="replan")
@@ -380,7 +380,7 @@ def labelled_tick(*, commitment=None, admissible=("c1", "c2", "c3"), choice="c1"
             "candidates": {"q_main": [{"id": cid, "action_ref": cid, "key": keys[cid], "desc": cid} for cid in ids]},
         },
         "labels": [{"question_id": "q_main", "kind": "valid_set", "candidate_ids": [choice],
-                    "semantic_admissible": list(admissible), "source": "expert_v0", "rule": rule, "label_confidence": "high"}],
+                    "semantic_admissible": list(admissible), "source": "expert_v0", "rule": rule, "label_confidence": confidence}],
     }
 
 
@@ -464,6 +464,26 @@ def test_a_gate_tick_keeps_its_rule_label_but_carries_the_event_results():
     tick = labelled_tick(commitment=None, admissible=("ch",), choice="ch", rule="expert-e0.2/goal_done")
     label = label_main_decision(tick, table(c1=(8, 0, 0)), EVENTS)
     assert label["candidate_ids"] == ["ch"] and label["rollout_reason"] == "gate:goal_done"
+    assert label["event_results"]["c1"]["s"] == 8 and "c1" not in label["unknown"]
+    check_contract(tick, label)
+
+
+@pytest.mark.parametrize(
+    ("reason", "admissible"),
+    [("way_retry_blocked", ("c1",)), ("not_executable", ("c1",)), ("goal_candidate_missing", ())],
+)
+def test_a_retry_blocked_or_degenerate_tick_keeps_its_rule_label_like_a_gate_tick(reason, admissible):
+    """하네스가 한 틱 동안 재시도를 막았거나(`way_retry_blocked`) 실행기 사정으로 고를 수 없거나(`not_executable`)
+    목표를 실현할 후보가 목록에 없는(`goal_candidate_missing`) 틱의 정답은 규칙의 `hold`다. rollout은 그 차단을
+    모른 채(`rollout_event`는 `history=None`으로 시작한다) 후보를 성공시키므로 결과로 라벨을 바꾸면 안 된다."""
+    from robo_jev.sim.label import _GATE_REASONS, label_main_decision
+
+    assert reason in _GATE_REASONS
+    tick = labelled_tick(commitment=None, admissible=admissible, choice="ch", rule=f"expert-e0.2/{reason}", confidence="low")
+    label = label_main_decision(tick, table(c1=(8, 0, 0), c2=(7, 1, 0)), EVENTS)
+    assert label["candidate_ids"] == ["ch"] and label["rollout_reason"] == f"gate:{reason}"
+    assert label["label_confidence"] == "low"  # 규칙 라벨의 신뢰도 그대로
+    assert label["semantic_admissible"] == list(admissible)
     assert label["event_results"]["c1"]["s"] == 8 and "c1" not in label["unknown"]
     check_contract(tick, label)
 

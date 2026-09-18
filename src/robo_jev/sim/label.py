@@ -70,8 +70,18 @@ _PUSH_VECTORS = {"+x": (1.0, 0.0), "-x": (-1.0, 0.0), "+y": (0.0, 1.0), "-y": (0
 #: 키프레임 사건 종류와 그것을 알아보는 규칙 (docs/04 §4 "이벤트·전술 변경 시점").
 KEYFRAME_KINDS = ("switch", "instruction", "moved", "stop")
 
-#: 게이트에서 나온 규칙 라벨의 근거 — 이 틱의 `q_main` 정답은 규칙 후보이고 rollout으로 바꾸지 않는다.
-_GATE_REASONS = ("goal_done", "instruction_incomplete", "observe_target")
+#: 규칙 라벨이 정답인 근거 — 이 틱의 `q_main` 정답은 규칙 후보이고 rollout으로 바꾸지 않는다. 게이트(완료·지시·관측)에
+#: 더해 하네스가 한 틱 동안 재시도를 막은 틱(`way_retry_blocked`), 실행기 사정으로 고를 수 없는 틱(`not_executable`),
+#: 목표를 실현할 후보가 목록에 없는 틱(`goal_candidate_missing`)도 그렇다: rollout은 그 차단·사정을 모른 채
+#: (:func:`rollout_event`는 `history=None`으로 시작한다) 후보를 실행하므로 그 결과로 규칙의 `hold`를 뒤집으면 안 된다.
+_GATE_REASONS = (
+    "goal_done",
+    "instruction_incomplete",
+    "observe_target",
+    "way_retry_blocked",
+    "not_executable",
+    "goal_candidate_missing",
+)
 
 _QUESTIONS = tuple(QUESTION_SET_V0)
 
@@ -603,7 +613,8 @@ def label_main_decision(tick: dict[str, Any], results: dict[str, dict[str, Any]]
     유효 반복 수는 censoring을 뺀 수)을 비교한다. (3) 현재 commitment가 적합하고 최고 후보와의 차이가 `ε` 이내이며
     하한이 기준 이상이면 그 후보만 정답. 아니면 최고 후보의 `ε` 안이고 하한이 기준 이상인 후보의 허용 집합.
     근거가 약하면(하한 기준을 넘는 후보가 없다, 전부 실패) 전문가의 선택을 낮은 신뢰도로 둔다. rollout하지
-    않은 결합 후보는 `unknown`. 게이트 틱(완료·지시·관측)의 정답은 규칙 후보이고 rollout으로 바꾸지 않는다.
+    않은 결합 후보는 `unknown`. 규칙 라벨 틱(:data:`_GATE_REASONS` — 게이트(완료·지시·관측), 재시도 차단, 실행기
+    사정, 목표 후보 없음)의 정답은 규칙 후보이고 그 신뢰도 그대로이며 rollout으로 바꾸지 않는다.
 
     `results`는 :func:`summarise_results`의 형태다. 돌려주는 것은 라벨 dict 하나(계약 필드 + `rule` + `source`).
     """
