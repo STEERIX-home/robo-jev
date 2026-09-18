@@ -746,6 +746,70 @@ def test_a_missing_main_answer_keeps_the_commitment():
     assert "missing_answer" in count_records(out["records"])
 
 
+def failed_history(key: str = GRASP, reason: str = "collision") -> dict:
+    """직전 틱에 그 행동이 실패한 실행 이력 (docs/08 §3.3)."""
+    return {
+        "adopted": {
+            "main": candidate_id(key), "phase": "approach", "path": "p0", "speed": 1,
+            "force": 0, "gripper": "open", "stop": False,
+        },
+        "ack": {"seq": 1, "applied": False, "reason": reason, "rejected": True},
+    }
+
+
+def test_a_refused_retry_blocks_the_approach_that_just_failed():
+    """`q_retry`가 거짓이면 같은 방식의 후보는 이 틱에 실행하지 않는다 (docs/08 §4)."""
+    hrn = harness()
+    request = hrn.build_request(observation(), failed_history(), None)
+    out = hrn.compose(
+        request,
+        answers(probabilities(**{GRASP.replace(":", "__"): 0.9}), q_retry=0.0),
+        None,
+        0,
+    )
+    assert out["adopted"]["main"] != candidate_id(GRASP)
+    assert "retry_blocked" in count_records(out["records"])
+
+
+def test_an_accepted_retry_leaves_the_same_approach_available():
+    hrn = harness()
+    request = hrn.build_request(observation(), failed_history(), None)
+    out = hrn.compose(
+        request,
+        answers(probabilities(**{GRASP.replace(":", "__"): 0.9}), q_retry=1.0),
+        None,
+        0,
+    )
+    assert out["adopted"]["main"] == candidate_id(GRASP)
+    assert "retry_blocked" not in count_records(out["records"])
+
+
+def test_a_refused_retry_releases_a_commitment_on_the_failed_approach():
+    hrn = harness()
+    commitment = committed(hrn, GRASP)
+    request = hrn.build_request(observation(), failed_history(), commitment)
+    out = hrn.compose(
+        request,
+        answers(probabilities(**{GRASP.replace(":", "__"): 0.9}), q_retry=0.0),
+        commitment,
+        0,
+    )
+    assert [r["reason"] for r in out["records"] if r["kind"] == "release"] == ["retry_blocked"]
+    assert out["commitment"]["action_ref"] != candidate_id(GRASP)
+
+
+def test_without_a_failure_the_retry_answer_changes_nothing():
+    hrn = harness()
+    request = hrn.build_request(observation(), None, None)
+    out = hrn.compose(
+        request,
+        answers(probabilities(**{GRASP.replace(":", "__"): 0.9}), q_retry=0.0),
+        None,
+        0,
+    )
+    assert out["adopted"]["main"] == candidate_id(GRASP)
+
+
 # -- 4~6. 부가 답·그리퍼·명령 ----------------------------------------------
 
 
@@ -870,6 +934,21 @@ def test_stale_geometry_sends_the_chosen_candidate_to_the_observe_branch():
     assert out["gate"] == "observe"
     assert out["adopted"]["main"] == candidate_id("observe")
     assert out["commitment"] is None
+
+
+@pytest.mark.parametrize(("key", "executor"), [("observe", "OBSERVE"), ("replan", "REQUEST_REPLAN"), ("hold", "HOLD")])
+def test_a_chosen_observe_or_replan_candidate_reaches_its_executor(key, executor):
+    """후보를 고른 것이 게이팅이 아니어도 실행기 대응은 같다 (docs/02 §4의 대응표)."""
+    hrn = harness()
+    _, out = step(hrn, observation(), answers({candidate_id(key): 1.0}), None)
+    assert out["adopted"]["main"] == candidate_id(key)
+    assert out["command"]["speed_level"] == 0
+
+    ctrl = Controller.from_config_path(CONTROLLER_CONFIG)
+    ctrl.reset(ee_pos_mm=[0, 0, 200], ee_quat=[0.0, 0.0, 0.0, 1.0], gripper_mm=80, now_ms=0)
+    ack = ctrl.apply(out["command"], now_ms=0)
+    assert ack["applied"] is True
+    assert ack["executor"] == executor
 
 
 def test_the_command_carries_the_documented_contract_fields():

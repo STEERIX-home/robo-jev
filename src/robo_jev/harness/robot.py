@@ -53,6 +53,7 @@ __all__ = [
     "compose",
     "count_records",
     "load_harness_config",
+    "parse_exec_history",
 ]
 
 #: 하네스 버전. 질문 세트·후보 형식·조합 규칙의 묶음을 가리킨다 (docs/08 §3.1).
@@ -77,6 +78,22 @@ def load_harness_config(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any
 def candidate_id(key: str) -> str:
     """의미 키 → 후보 id. 같은 의미의 행동은 언제나 같은 id다."""
     return "c" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:6]
+
+
+def parse_exec_history(text: Any) -> dict[str, str]:
+    """실행 이력 한 줄(`main=c1 phase=approach … ack=ok`)을 필드로 푼다.
+
+    이 줄을 쓰는 쪽(:meth:`RobotHarness._exec_history_text`)과 읽는 쪽(조합 규칙의 재시도
+    조건, 규칙 기준군의 실패 감점)이 같은 형식을 봐야 하므로 파서를 한 군데 둔다.
+    """
+    if not isinstance(text, str) or text in ("", "none"):
+        return {}
+    fields: dict[str, str] = {}
+    for token in text.split():
+        if "=" in token:
+            key, value = token.split("=", 1)
+            fields[key] = value
+    return fields
 
 
 def count_records(records: list[dict[str, Any]]) -> dict[str, int]:
@@ -828,9 +845,12 @@ class RobotHarness:
             )
 
         # 3. 주 결정과 결정 유지 ------------------------------------------
+        blocked = self._retry_blocked(results, model.get("exec_history"), candidates, records)
         current = commitment
         if current is not None:
             reason = self._release_reason(current, state, candidates)
+            if reason is None and current["action_ref"] in blocked:
+                reason = "retry_blocked"
             if reason is not None:
                 records.append(
                     {"kind": "release", "reason": reason, "action_ref": current["action_ref"]}
@@ -838,7 +858,13 @@ class RobotHarness:
                 current = None
 
         chosen, current, switch = self._main_decision(
-            results, candidates, current, records, state=state, goal_version=goal_version
+            results,
+            candidates,
+            current,
+            records,
+            state=state,
+            goal_version=goal_version,
+            blocked=blocked,
         )
 
         # 0의 후속: 선택된 후보의 기하가 허용치를 넘으면 적용하지 않고 관측 분기로 보낸다.
@@ -866,6 +892,9 @@ class RobotHarness:
                 )
 
         # 6. 명령 생성 ------------------------------------------------------
+        # 실행기 대응은 **채택된 후보**를 따른다 (docs/02 §4 표). 관측·재계획을 게이팅이
+        # 아니라 주 결정으로 고른 틱도 같은 원시 기능으로 가야 한다.
+        chosen_key = str((candidates.get(chosen) or {}).get("key", ""))
         command = self._command(
             header,
             action_ref=chosen,
@@ -879,6 +908,7 @@ class RobotHarness:
             stop=False,
             state=state,
             records=records,
+            branch=chosen_key if chosen_key in _FIXED_KEYS else None,
         )
         adopted = {
             "main": chosen,
@@ -1113,6 +1143,41 @@ class RobotHarness:
             return False
         return state["robot"].get("holding") != target and _inside(entry["pose_mm"], zone)
 
+    def _retry_blocked(
+        self,
+        results: dict[str, Any],
+        exec_history: Any,
+        candidates: dict[str, Any],
+        records: list[dict[str, Any]],
+    ) -> set[str]:
+        """`q_retry`가 거짓이면 직전에 실패한 것과 **같은 방식**의 후보를 막는다.
+
+        docs/08 §4의 `q_retry` 사용처("같은 방식 후보의 실행 조건")다. 같은 방식은
+        기능·대상·접근 유형이 같은 것을 말한다(목적지·프로파일은 다를 수 있다). 실패가
+        없으면 이 답은 아무것도 바꾸지 않는다 — 근거가 없는 답으로 후보를 지우지 않는다.
+        """
+        if "q_retry" not in results or self._boolean(results, "q_retry", "retry", default=True):
+            return set()
+        history = parse_exec_history(exec_history)
+        result = history.get("ack")
+        if not history or result in (None, "ok", "none"):
+            return set()
+        failed = candidates.get(str(history.get("main")))
+        parts = str((failed or {}).get("key", "")).split(":")
+        if len(parts) != 5:
+            return set()
+        same = parts[:3]
+        blocked = {
+            candidate
+            for candidate, entry in candidates.items()
+            if str(entry.get("key", "")).split(":")[:3] == same
+        }
+        if blocked:
+            records.append(
+                {"kind": "retry_blocked", "reason": result, "action_ref": str(history["main"])}
+            )
+        return blocked
+
     def _main_decision(
         self,
         results: dict[str, Any],
@@ -1122,11 +1187,15 @@ class RobotHarness:
         *,
         state: dict[str, Any],
         goal_version: int,
+        blocked: set[str] | None = None,
     ) -> tuple[str, dict[str, Any] | None, bool]:
         """히스테리시스 (docs/08 §5.3). 돌려주는 것은 (채택 후보, commitment, 전환 여부)."""
         probabilities = results.get("q_main")
+        allowed = [
+            candidate for candidate in candidates if candidate not in (blocked or set())
+        ] or list(candidates)
         ranked = sorted(
-            candidates,
+            allowed,
             key=lambda cid: (-float((probabilities or {}).get(cid, 0.0)), cid),
         )
         top = ranked[0] if ranked else _id_for_key("hold", candidates)

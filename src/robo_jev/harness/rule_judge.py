@@ -28,6 +28,7 @@ from typing import Any
 
 import yaml
 
+from robo_jev.harness.robot import parse_exec_history
 from robo_jev.perception.pointworld import named_target
 from robo_jev.sim.controller import resolve_config_path
 
@@ -247,7 +248,7 @@ class RuleJudge:
         self, model: dict[str, Any], values: dict[str, dict[str, Any]]
     ) -> str | None:
         """직전에 실패한 접근 유형 (docs/08 §3.3의 실행 이력에서 읽는다)."""
-        history = _parse_history(model.get("exec_history"))
+        history = parse_exec_history(model.get("exec_history"))
         if not history or history.get("ack") in (None, "ok", "none"):
             return None
         value = values.get(str(history.get("main")))
@@ -307,7 +308,7 @@ class RuleJudge:
         기준군이 보는 것은 재입력된 실행 이력뿐이다(docs/08 §3.3). 실패가 한 번이면
         같은 방식을 한 번 더 해 볼 수 있고, 실패가 없으면 이 질문의 근거도 없다.
         """
-        history = _parse_history(model.get("exec_history"))
+        history = parse_exec_history(model.get("exec_history"))
         if not history or history.get("ack") in (None, "ok", "none"):
             return False
         return int(self.thresholds["retry_max_same_approach"]) >= 1
@@ -418,18 +419,6 @@ def _normalise(distribution: dict[str, float]) -> dict[str, float]:
     top = max(rounded, key=lambda key: (rounded[key], key))
     rounded[top] = round(rounded[top] + (1.0 - sum(rounded.values())), 6)
     return rounded
-
-
-def _parse_history(text: Any) -> dict[str, str]:
-    """`main=c1 phase=approach … ack=ok` 한 줄을 읽는다."""
-    if not isinstance(text, str) or text in ("", "none"):
-        return {}
-    fields: dict[str, str] = {}
-    for token in text.split():
-        if "=" in token:
-            key, value = token.split("=", 1)
-            fields[key] = value
-    return fields
 
 
 _DEFAULT: RuleJudge | None = None
