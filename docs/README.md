@@ -20,6 +20,7 @@
 | [스트리밍 입출력·데이터 계약](08-streaming-io-and-data-contract.md) | robojev의 계층(L2), 10Hz 스트림 입력, 10개 질문 세트, 조합 규칙, 컨트롤러 계약, 라벨·레코드 정의, 01~06 반영 목록 | 설계 합의안(리뷰 09 반영). 로봇 스트림의 정본이며 01~06에 반영 완료 |
 | [스트리밍 계약 검토](09-streaming-contract-review.md) | 08에 대한 외부 검토(S1~S7)와 수치 검산 | 검토 결과, 08에 반영 완료 |
 | [현재 구현 리뷰](10-current-implementation-review.md) | 구현 상태 외부 검토: 재현된 결함 I1~I6, E0 폐루프 연결 점검, 비로봇 2K 재생성 QA, 우선순위 | 검토 결과. I1~I6 모두 타당 확인(47258d6에서 재현). 계약 보강은 08·02에 반영, 코드 수정은 Task 3b 수정 라운드 |
+| [DGX Spark 인계 검토](11-dgx-spark-handoff-review.md) | main merge 뒤 외부 검토: 재개 정체 검사(S1), 미지원 model_id(S2), 인계 자료 전달(S3), 토큰 실측과 예산(S4), tokenizer 재현(S5) | 검토 결과. S1~S5 모두 타당. S3·S4는 `HANDOFF.md`·03·05·08에 반영, S1·S2·S5는 코드 수정(fix/handoff-review-11) |
 
 ## 현재 실행 방향
 
