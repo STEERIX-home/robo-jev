@@ -30,9 +30,9 @@ import numpy as np
 import yaml
 
 from robo_jev.contracts import QUESTION_SET_V0
-from robo_jev.harness.robot import FIXED_KEYS, RobotHarness, candidate_id, load_harness_config
+from robo_jev.harness.robot import FIXED_KEYS, RobotHarness, candidate_id, joint_key_parts, load_harness_config
 from robo_jev.sim.controller import resolve_config_path
-from robo_jev.sim.expert import Expert, load_expert_config
+from robo_jev.sim.expert import DEGENERATE_REASONS, GATE_REASONS, Expert, load_expert_config
 
 __all__ = [
     "DEFAULT_EVENTS_PATH",
@@ -74,14 +74,8 @@ KEYFRAME_KINDS = ("switch", "instruction", "moved", "stop")
 #: 더해 하네스가 한 틱 동안 재시도를 막은 틱(`way_retry_blocked`), 실행기 사정으로 고를 수 없는 틱(`not_executable`),
 #: 목표를 실현할 후보가 목록에 없는 틱(`goal_candidate_missing`)도 그렇다: rollout은 그 차단·사정을 모른 채
 #: (:func:`rollout_event`는 `history=None`으로 시작한다) 후보를 실행하므로 그 결과로 규칙의 `hold`를 뒤집으면 안 된다.
-_GATE_REASONS = (
-    "goal_done",
-    "instruction_incomplete",
-    "observe_target",
-    "way_retry_blocked",
-    "not_executable",
-    "goal_candidate_missing",
-)
+#: 퇴화 셋은 hold∉A 규칙(docs/08 §7)이라 적합 후보가 `unknown`으로 간다 — 전문가의 상수를 그대로 쓴다.
+_GATE_REASONS = GATE_REASONS + DEGENERATE_REASONS
 
 _QUESTIONS = tuple(QUESTION_SET_V0)
 
@@ -107,8 +101,8 @@ def event_for(key: str, *, holding: str | None, config: dict[str, Any]) -> dict[
 
     들고 있는 대상의 `grasp` 후보는 진행 중인 결합 행동(남은 절반: 옮기기)이므로 `place` 사건이다.
     """
-    parts = key.split(":")
-    if len(parts) != 5:
+    parts = joint_key_parts(key)
+    if parts is None:
         raise ValueError(f"결합 후보가 아니다 (사건이 없다): {key!r}")
     function, target = parts[0], parts[1]
     for spec in config["events"].values():
@@ -172,7 +166,9 @@ class _Rule:
     def __init__(self, event: dict[str, Any], key: str, start_scene: dict[str, Any], harness: RobotHarness) -> None:
         self.spec = event["success_rule"]
         self.kind = str(self.spec["kind"])
-        parts = key.split(":")
+        parts = joint_key_parts(key)
+        if parts is None:
+            raise ValueError(f"결합 후보가 아니다 (사건이 없다): {key!r}")
         self.target, self.approach, self.destination = parts[1], parts[2], parts[3]
         self.start_pose = list(self._pose(start_scene))
         self.zone = next((zone for zone in start_scene["zones"] if str(zone["id"]) == self.destination), None)
@@ -313,7 +309,8 @@ def rollout_event(
             commitment = None
             history = None
             for tick in range(horizon_ticks):
-                request = harness.build_request(scene, history, commitment)
+                # 실행할 후보는 commitment처럼 예약한다 — 자세 흔들기로 영역 쪽 축이 바뀌어도 실행 가능하면 목록에 남는다.
+                request = harness.build_request(scene, history, commitment, keep_key=key)
                 if tick == 0 and policy.candidate not in {entry["id"] for entry in request["request"]["candidates"]["q_main"]}:
                     return finish("censored", "candidate_unavailable")
                 answers = policy.act(request, commitment, scene)
@@ -544,7 +541,10 @@ def _key_rank(cid: str, entries: list[dict[str, Any]]) -> int:
 def _approach_point(key: str, state: dict[str, Any], harness_config: dict[str, Any] | None) -> list[float]:
     """후보의 접근점 (모델 입력의 상태에서 하네스와 같은 정의로). 파지 → 윗면 위, 밀기 → 접촉점, 놓기 → 영역 중심."""
     spec = (harness_config or load_harness_config())["candidates"]
-    function, target, approach, destination, _profile = key.split(":")
+    parts = joint_key_parts(key)
+    if parts is None:
+        return [0.0, 0.0, 0.0]
+    function, target, approach, destination = parts
     holding = state["robot"].get("holding")
     entry = next((item for item in state.get("objects") or () if str(item["id"]) == target), None)
     if function == "place" or (function == "grasp" and holding == target):
@@ -614,7 +614,9 @@ def label_main_decision(tick: dict[str, Any], results: dict[str, dict[str, Any]]
     하한이 기준 이상이면 그 후보만 정답. 아니면 최고 후보의 `ε` 안이고 하한이 기준 이상인 후보의 허용 집합.
     근거가 약하면(하한 기준을 넘는 후보가 없다, 전부 실패) 전문가의 선택을 낮은 신뢰도로 둔다. rollout하지
     않은 결합 후보는 `unknown`. 규칙 라벨 틱(:data:`_GATE_REASONS` — 게이트(완료·지시·관측), 재시도 차단, 실행기
-    사정, 목표 후보 없음)의 정답은 규칙 후보이고 그 신뢰도 그대로이며 rollout으로 바꾸지 않는다.
+    사정, 목표 후보 없음)의 정답은 규칙 후보이고 그 신뢰도 그대로이며 rollout으로 바꾸지 않는다; 퇴화 셋은 hold∉A
+    규칙이라 적합 후보가 rollout이 있어도 `unknown`이다. 낮은 신뢰도의 결과는 전문가 라벨과 같은 `weight`
+    (`labels.low_confidence_weight`)를 단다 — rollout 라벨이 전문가 라벨의 weight를 떨어뜨리지 않는다.
 
     `results`는 :func:`summarise_results`의 형태다. 돌려주는 것은 라벨 dict 하나(계약 필드 + `rule` + `source`).
     """
@@ -639,6 +641,11 @@ def label_main_decision(tick: dict[str, Any], results: dict[str, dict[str, Any]]
     admissible = [cid for cid in existing.get("semantic_admissible") or () if cid in keys]
     expert_choice = list(existing.get("candidate_ids") or [])
     rule_reason = str(existing.get("rule", "")).rsplit("/", 1)[-1]
+    # 낮은 신뢰도의 weight: 전문가 라벨의 값이 있으면 그것, 없으면 전문가 설정의 값 (같은 단일 출처).
+    low_weight = existing.get("weight")
+    if low_weight is None:
+        configured = float(load_expert_config().get("labels", {}).get("low_confidence_weight", 0.25))
+        low_weight = configured if configured != 1.0 else None
 
     rolled = {cid: entry for cid, entry in results.items() if cid in keys}
     event_results = {
@@ -665,13 +672,17 @@ def label_main_decision(tick: dict[str, Any], results: dict[str, dict[str, Any]]
         "rollout_rule": {"epsilon": epsilon, "success_lower_bound": lower_bound, "interval": "wilson", "z": z, "seeds": seeds},
     }
 
-    def finish(candidate_ids: list[str], confidence: str, reason: str) -> dict[str, Any]:
+    def finish(candidate_ids: list[str], confidence: str, reason: str, *, extra_unknown: list[str] = ()) -> dict[str, Any]:
         label = {**base, "candidate_ids": list(candidate_ids), "label_confidence": confidence, "rollout_reason": reason}
-        label["unknown"] = [cid for cid in unknown if cid not in candidate_ids]
+        label["unknown"] = [cid for cid in joint if (cid in unknown or cid in extra_unknown) and cid not in candidate_ids]
+        if confidence == "low" and low_weight is not None:
+            label["weight"] = float(low_weight)
         return label
 
     if rule_reason in _GATE_REASONS and expert_choice:
-        return finish(expert_choice, str(existing.get("label_confidence", "high")), f"gate:{rule_reason}")
+        # 퇴화 틱(hold∉A): 적합 후보는 판단하지 않는다 — rollout 결과는 event_results에 남되 정규화에서 빠진다.
+        extra = admissible if rule_reason in DEGENERATE_REASONS else []
+        return finish(expert_choice, str(existing.get("label_confidence", "high")), f"gate:{rule_reason}", extra_unknown=extra)
     if not stats:
         return finish(expert_choice or admissible[:1] or list(keys)[:1], "low", "no_rollout_evidence")
 

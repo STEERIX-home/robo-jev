@@ -19,6 +19,7 @@ from test_harness import GRASP, PERIOD_MS, harness, obj, observation
 
 from robo_jev.contracts import QUESTION_SET_V0
 from robo_jev.harness.robot import candidate_id
+from robo_jev.harness.rule_judge import candidate_values, read_goal
 from robo_jev.sim.expert import EXPERT_VERSION, Expert, load_expert_config
 
 CONFIG = load_expert_config()
@@ -158,8 +159,7 @@ def test_the_goal_grasp_to_the_goal_zone_is_chosen():
     request = request_for()
     out = expert().act(request, None, scene())
     chosen = key_of(request, top(out["q_main"]))
-    assert chosen.startswith("grasp:o0:top:zoneL:")
-    assert chosen.endswith(":" + CONFIG["goal"]["profile_preference"][0])
+    assert chosen == "grasp:o0:top:zoneL"
     assert out["q_main"][top(out["q_main"])] == pytest.approx(CONFIDENCE["choice_mass"], abs=1e-4)
     assert out["expert_meta"]["main"]["reason"] == "goal_grasp"
 
@@ -169,7 +169,7 @@ def test_a_different_structured_target_changes_the_choice_without_text_parsing()
     obs["goal"].update(target_ref="o1", target_desc="blue 상자")
     request = request_for(obs)
     out = expert().act(request, None, obs)
-    assert key_of(request, top(out["q_main"])).startswith("grasp:o1:top:zoneL:")
+    assert key_of(request, top(out["q_main"])).startswith("grasp:o1:top:zoneL")
 
 
 def test_a_forbidden_target_is_never_chosen():
@@ -204,7 +204,7 @@ def test_a_commitment_on_the_wrong_goal_is_not_kept_after_the_instruction_change
     obs["goal"].update(target_ref="o1", target_desc="blue 상자", version=2)
     request, commitment = committed_request(GRASP, obs=obs)
     out = expert().act(request, commitment, obs)
-    assert key_of(request, top(out["q_main"])).startswith("grasp:o1:top:zoneL:")
+    assert key_of(request, top(out["q_main"])).startswith("grasp:o1:top:zoneL")
 
 
 def test_place_is_chosen_while_holding_without_a_commitment():
@@ -212,7 +212,7 @@ def test_place_is_chosen_while_holding_without_a_commitment():
     obs["robot"].update(ee_pos_mm=[300, 0, 150], holding="o0")
     request = request_for(obs)
     out = expert().act(request, None, obs)
-    assert key_of(request, top(out["q_main"])).startswith("place:o0:release:zoneL:")
+    assert key_of(request, top(out["q_main"])).startswith("place:o0:release:zoneL")
 
 
 def two_object_scene(target_pos) -> dict:
@@ -226,7 +226,7 @@ def without_goal_grasp(request: dict) -> dict:
     trimmed.pop("harness", None)
     trimmed["request"]["candidates"]["q_main"] = [
         entry for entry in trimmed["request"]["candidates"]["q_main"]
-        if not entry["key"].startswith("grasp:o0:top:zoneL:")
+        if not entry["key"].startswith("grasp:o0:top:zoneL")
     ]
     return trimmed
 
@@ -238,7 +238,7 @@ def test_push_toward_the_zone_when_the_goal_grasp_is_unavailable():
     assert any(entry["key"].startswith("push:o0:-x:") for entry in request["request"]["candidates"]["q_main"])
     out = expert().act(request, None, obs)
     chosen = key_of(request, top(out["q_main"]))
-    assert chosen.startswith("push:o0:-x:none:")
+    assert chosen.startswith("push:o0:-x:none")
     assert out["expert_meta"]["main"]["reason"] == "push_toward_zone"
 
 
@@ -288,7 +288,7 @@ def test_low_confidence_labels_are_down_weighted_from_the_config():
     assert {l["question_id"]: l for l in heavier.labels(out, request)}["q_main"]["weight"] == 0.5
     normal = request_for()
     normal_labels = {l["question_id"]: l for l in expert().labels(expert().act(normal, None, scene()), normal)}
-    assert normal_labels["q_main"]["label_confidence"] == "high" and "weight" not in normal_labels["q_main"]
+    assert normal_labels["q_main"]["label_confidence"] == "medium" and "weight" not in normal_labels["q_main"]  # 비용 근거
 
     # 실행기 사정(`not_executable`)의 낮은 신뢰도도 같은 weight다.
     blocked = two_object_scene((100, 120, -80))
@@ -321,19 +321,20 @@ def test_a_plain_neighbour_blocking_the_grasp_with_no_detour_is_pushed_away():
     obs = blocked_descent_scene()
     request, commitment = committed_request(GRASP, obs=obs)
     assert request["request"]["commitment"]["phase"] == "grasp"
-    assert "path blocked" in next(e["derived"] for e in request["request"]["candidates"]["q_main"] if e["key"] == GRASP)
+    assert next(e["path"] for e in request["request"]["candidates"]["q_main"] if e["key"] == GRASP) == "blocked"
     assert not [e for e in request["request"]["candidates"]["q_path"] if e["kind"] == "via"]
     out = expert().act(request, commitment, obs)
     chosen = key_of(request, top(out["q_main"]))
-    # +y가 가장 멀리 밀지만 그 접촉점은 대상의 구 안이라 어떤 경로로도 닿을 수 없다 → 옆에서 미는 ±x (키 순).
-    assert chosen.startswith("push:o1:+x:none:"), out["expert_meta"]["main"]
+    # o1(300, 60)의 영역 쪽 밀기는 −x뿐이다(zoneL 중심까지 −x 성분이 더 크다, 계약 v0.3의 영역 방향 열거) — 대상에서
+    # 40mm 멀어지므로 이득 문턱(20)을 넘는다.
+    assert chosen == "push:o1:-x:none", out["expert_meta"]["main"]
     assert out["expert_meta"]["main"]["reason"] == "push_blocker"
     assert candidate_id(GRASP) in out["expert_meta"]["main"]["admissible"]
 
 
 def test_the_blocker_push_is_kept_while_it_still_blocks():
     obs = blocked_descent_scene()
-    push = "push:o1:+x:none:slow"
+    push = "push:o1:-x:none"
     request, commitment = committed_request(push, obs=obs)
     out = expert().act(request, commitment, obs)
     assert top(out["q_main"]) == candidate_id(push)
@@ -368,7 +369,7 @@ def test_push_directions_are_restricted_by_config_to_what_the_executor_can_push(
     sideways = two_object_scene((250, 240, -80))  # zoneL(x ≤ 180)까지 −x로 70mm
     request = without_goal_grasp(request_for(sideways))
     out = expert().act(request, None, sideways)
-    assert key_of(request, top(out["q_main"])).startswith("push:o0:-x:none:")
+    assert key_of(request, top(out["q_main"])).startswith("push:o0:-x:none")
 
 
 def test_semantic_admissibility_comes_from_the_goal_not_from_executor_capability():
@@ -381,7 +382,7 @@ def test_semantic_admissibility_comes_from_the_goal_not_from_executor_capability
     assert key_of(request, top(out["q_main"])) == "hold"
     assert main["reason"] == "not_executable" and main["confidence"] == "low"
     admissible = [key_of(request, candidate) for candidate in main["admissible"]]
-    assert admissible and all(key.startswith("push:o0:+y:none:") for key in admissible)
+    assert admissible and all(key.startswith("push:o0:+y:none") for key in admissible)
     assert set(main["excluded"].values()) == {"push_direction"}
     labels = {label["question_id"]: label for label in expert().labels(out, request)}
     assert labels["q_main"]["candidate_ids"] == [top(out["q_main"])]
@@ -404,10 +405,10 @@ def test_a_held_non_target_is_put_down_in_the_goal_zone_first():
     request = request_for(obs)
     assert not any(e["key"].startswith("grasp:o1:") for e in request["request"]["candidates"]["q_main"])
     out = expert().act(request, None, obs)
-    assert key_of(request, top(out["q_main"])).startswith("place:o0:release:zoneL:")
+    assert key_of(request, top(out["q_main"])).startswith("place:o0:release:zoneL")
     assert out["expert_meta"]["main"]["reason"] == "release_held_object"
 
-    request, commitment = committed_request("place:o0:release:zoneL:slow", obs=obs)
+    request, commitment = committed_request("place:o0:release:zoneL", obs=obs)
     out = expert().act(request, commitment, obs)
     assert out["expert_meta"]["main"]["reason"] == "keep_commitment"
 
@@ -434,11 +435,158 @@ def test_a_way_the_harness_just_retry_blocked_is_not_proposed_again():
     assert main["reason"] == "way_retry_blocked" and main["confidence"] == "low"
     assert main["blocked_ways"] == ["grasp:o0:top"]
     admissible = [key_of(request, candidate) for candidate in main["admissible"]]
-    assert admissible and all(key.startswith("grasp:o0:top:zoneL:") for key in admissible)
+    assert admissible and all(key.startswith("grasp:o0:top:zoneL") for key in admissible)
     assert main["excluded"] == {candidate: "retry_blocked" for candidate in main["admissible"]}
     labels = {label["question_id"]: label for label in expert().labels(out, request)}
     assert labels["q_main"]["candidate_ids"] == [candidate_id("hold")]
     assert candidate_id(GRASP) in labels["q_main"]["semantic_admissible"]
+    # hold∉A 규칙: 적합 후보는 판단하지 않는다 (`unknown`) — 손실이 그것을 누르지 않는다.
+    assert labels["q_main"]["unknown"] == labels["q_main"]["semantic_admissible"]
+    assert labels["q_main"]["weight"] == CONFIG["labels"]["low_confidence_weight"]
+
+
+# --------------------------------------------------------------------------
+# 비키프레임 허용 집합 (docs/08 §7, 계약 v0.3)
+# --------------------------------------------------------------------------
+
+
+def test_the_allowed_set_holds_admissible_candidates_within_the_cost_tolerance():
+    """A = {선택} ∪ {적합·실행 가능 후보 : cost ≤ cost(선택) × (1 + τ)}, 신뢰도 medium, unknown 없음.
+    들고 있는 대상을 두 영역 중 어디에 놓아도 되는 지시(구조화된 목표의 영역은 하나지만 놓기 후보는 목표 영역
+    것만 적합)와, 파지가 없어 밀기 두 방향이 적합한 장면으로 본다."""
+    from robo_jev.sim.expert import DEGENERATE_REASONS, GATE_REASONS
+
+    assert CONFIG["labels"]["cost_tolerance"] == 0.15 and expert().cost_tolerance == 0.15
+    # 대상 o0(0, 0)은 zoneL(+y)·zoneF(+x) 두 영역 쪽 밀기가 있고, 파지 후보를 빼면 둘 다 적합·실행 가능(±x·±y 중 +x는
+    # 실행기 역량 안, +y는 밖)이다 — 실행 가능한 밀기가 하나뿐이면 A는 그것뿐이다.
+    zones = [
+        {"id": "zoneL", "desc": "왼쪽 정리 영역", "bounds_mm": [-120, 150, 180, 330]},
+        {"id": "zoneF", "desc": "앞쪽 보관 영역", "bounds_mm": [100, -80, 300, 80]},
+    ]
+    obs = scene(objects=[obj("o0", (0, 0, -80)), obj("o2", (-200, -200, -80), colour="green", attributes=["fragile"])], zones=zones)
+    obs["goal"].update(zone_ref="zoneF")
+    request = without_goal_grasp(request_for(obs))
+    request["request"]["candidates"]["q_main"] = [
+        e for e in request["request"]["candidates"]["q_main"] if not e["key"].startswith("grasp:o0:top:zoneF")
+    ]
+    out = expert().act(request, None, obs)
+    main = out["expert_meta"]["main"]
+    assert main["reason"] == "push_toward_zone" and main["confidence"] == "medium"
+    assert main["reason"] not in GATE_REASONS + DEGENERATE_REASONS
+    assert set(main["costs_mm"]) == {c for c in main["admissible"] if c not in main["excluded"]}
+    assert main["allowed"] == [main["choice"]] and main["unknown"] == []
+    labels = {label["question_id"]: label for label in expert().labels(out, request)}
+    assert labels["q_main"]["candidate_ids"] == [main["choice"]] and "unknown" not in labels["q_main"]
+    assert labels["q_main"]["label_confidence"] == "medium" and "weight" not in labels["q_main"]
+
+    # 비용이 τ 안으로 비슷한 적합 후보 둘: 대상 바로 위에서 두 영역으로 가는 파지 — 같은 거리면 둘 다 허용 집합이다.
+    equidistant = scene(objects=[obj("o0", (0, 0, -80))], zones=[
+        {"id": "zoneL", "desc": "왼쪽 정리 영역", "bounds_mm": [-120, 150, 180, 330]},
+        {"id": "zoneR", "desc": "오른쪽 정리 영역", "bounds_mm": [-120, -330, 180, -150]},
+    ])
+    equidistant["goal"].update(zone_ref="zoneL", fragile_refs=[])
+    request = request_for(equidistant)
+    out = expert().act(request, None, equidistant)
+    main = out["expert_meta"]["main"]
+    assert main["reason"] == "goal_grasp" and main["allowed"] == [candidate_id("grasp:o0:top:zoneL")]
+    # 적합 집합은 목표 영역의 파지뿐이므로 zoneR 파지는 I다 — 허용 집합은 적합 집합 안에서만 넓어진다.
+    assert candidate_id("grasp:o0:top:zoneR") not in main["admissible"]
+
+    # τ를 키우면 더 비싼 적합 후보도 들어온다: 놓기 후보 둘(영역 중심까지의 xy 거리가 다르다).
+    holding = scene(objects=[obj("o0", (60, 100, -40))], zones=[
+        {"id": "zoneL", "desc": "왼쪽 정리 영역", "bounds_mm": [-120, 150, 180, 330]},
+        {"id": "zoneF", "desc": "앞쪽 보관 영역", "bounds_mm": [100, -80, 300, 80]},
+    ])
+    holding["goal"].update(zone_ref="zoneL", fragile_refs=[])
+    holding["robot"].update(holding="o0", ee_pos_mm=[60, 100, -40])
+    request = request_for(holding)
+    request["request"]["candidates"]["q_main"] = [
+        e for e in request["request"]["candidates"]["q_main"] if not e["key"].startswith("grasp:")
+    ]
+    out = expert().act(request, None, holding)
+    main = out["expert_meta"]["main"]
+    assert main["reason"] == "goal_place" and main["allowed"] == [candidate_id("place:o0:release:zoneL")]
+    assert set(main["costs_mm"]) == {candidate_id("place:o0:release:zoneL")}  # 적합 = 목표 영역의 놓기뿐
+
+
+def test_a_kept_commitment_within_the_cost_tolerance_is_the_unique_answer():
+    """commitment 규칙 (3): 지킨 commitment가 최선 비용의 (1 + τ) 안이면 그것만 정답이다 — 비용이 같은 대안이 있어도."""
+    request, commitment = committed_request()
+    out = expert().act(request, commitment, scene())
+    main = out["expert_meta"]["main"]
+    assert main["reason"] == "keep_commitment" and main["allowed"] == [candidate_id(GRASP)]
+    assert main["confidence"] == "medium"
+    labels = {label["question_id"]: label for label in expert().labels(out, request)}
+    assert labels["q_main"]["candidate_ids"] == [candidate_id(GRASP)] and labels["q_main"]["label_confidence"] == "medium"
+
+
+def test_plan_cost_is_the_remaining_command_path_length():
+    """플래너 비용 = 국면 목표점까지의 거리 + 남은 국면의 구간 (하네스와 같은 수치, 새 물리 없음)."""
+    ex = expert()
+    request = request_for()
+    state = request["request"]["state"]
+    goal = read_goal(state)
+    entry = next(e for e in request["request"]["candidates"]["q_main"] if e["key"] == GRASP)
+    value = candidate_values(entry)
+    centre = ((-120 + 180) / 2, (150 + 330) / 2)
+    expected = (
+        entry["d"] + HARNESS["candidates"]["approach_clearance_mm"] + HARNESS["candidates"]["grasp_depth_mm"]
+        + HARNESS["phases"]["lift_height_mm"] + math.dist((300, 0), centre) + HARNESS["candidates"]["approach_clearance_mm"]
+    )
+    assert ex.plan_cost_mm(value, state, goal) == pytest.approx(expected)
+    blocked = dict(value, path_clear=False)
+    assert ex.plan_cost_mm(blocked, state, goal) == pytest.approx(expected + 2 * HARNESS["planner"]["side_offset_mm"])
+    push = candidate_values(next(e for e in request["request"]["candidates"]["q_main"] if e["key"] == "push:o0:-x:none"))
+    remaining = math.hypot(300 - 180, 150 - 0)  # o0(300, 0)에서 zoneL 사각형까지
+    segments = math.ceil(remaining / HARNESS["candidates"]["push_segment_mm"])
+    assert ex.plan_cost_mm(push, state, goal) == pytest.approx(
+        push["distance_mm"] + segments * HARNESS["candidates"]["push_segment_mm"]
+        + (segments - 1) * (HARNESS["candidates"]["approach_clearance_mm"] + HARNESS["candidates"]["push_contact_mm"])
+    )
+    assert ex.plan_cost_mm(candidate_values({"id": "x", "key": "hold"}), state, goal) == 0.0
+
+
+def test_degenerate_ticks_follow_the_hold_not_in_a_rule():
+    """실행기 사정의 `hold`(not_executable·goal_candidate_missing): A = {hold}, unknown = 적합 집합, 신뢰도 low."""
+    obs = two_object_scene((100, 120, -80))  # +y만 영역 쪽 — 실행기 역량 밖
+    request = without_goal_grasp(request_for(obs))
+    out = expert().act(request, None, obs)
+    main = out["expert_meta"]["main"]
+    assert main["reason"] == "not_executable" and main["allowed"] == [candidate_id("hold")]
+    assert main["unknown"] == main["admissible"] and main["admissible"]
+    labels = {label["question_id"]: label for label in expert().labels(out, request)}
+    assert labels["q_main"]["candidate_ids"] == [candidate_id("hold")]
+    assert labels["q_main"]["unknown"] == main["admissible"] and labels["q_main"]["label_confidence"] == "low"
+    assert labels["q_main"]["weight"] == CONFIG["labels"]["low_confidence_weight"]
+    # 적합 후보가 아예 없으면 unknown도 없다 (I = hold 밖의 전부).
+    request["request"]["candidates"]["q_main"] = [
+        entry for entry in request["request"]["candidates"]["q_main"] if not entry["key"].startswith("push:o0:")
+    ]
+    out = expert().act(request, None, obs)
+    labels = {label["question_id"]: label for label in expert().labels(out, request)}
+    assert out["expert_meta"]["main"]["reason"] == "goal_candidate_missing"
+    assert labels["q_main"]["candidate_ids"] == [candidate_id("hold")] and "unknown" not in labels["q_main"]
+
+
+def test_contact_phases_gate_observation_on_readiness_not_on_geometry_age():
+    """접촉 국면·파지 중에는 대상 기하가 하네스의 실행 가능성 문턱보다 늙어도 관측을 요구하지 않는다 — 실행기의
+    readiness가 시점을 정한다(하네스 §5.0과 같은 면제; 계약 v0.3 이월 항목)."""
+    hrn = harness()
+    hrn.build_request(scene(), None, None)
+    stale_ms = HARNESS["candidates"]["max_geometry_age_ms"] + 3 * PERIOD_MS
+    descending = scene(tick=stale_ms // PERIOD_MS, sim_time_ms=stale_ms)
+    descending["robot"]["ee_pos_mm"] = [300, 0, -30]
+    descending["objects"][0].update(visible=False, visible_ratio=0.0)
+    request, commitment = committed_request(GRASP, obs=descending, hrn=hrn)
+    assert request["request"]["commitment"]["phase"] == "grasp"
+    target = next(entry for entry in request["request"]["state"]["objects"] if entry["id"] == "o0")
+    assert target["age_ms"] > HARNESS["candidates"]["max_geometry_age_ms"]
+    out = expert().act(request, commitment, descending)
+    assert out["q_observe"] == CONFIDENCE["low"]
+    assert out["expert_meta"]["gates"]["q_observe"]["reason"] == "contact_readiness"
+    from robo_jev.harness.rule_judge import rule_judge
+
+    assert rule_judge(request)["q_observe"] == CONFIDENCE["low"]
 
 
 # --------------------------------------------------------------------------
@@ -517,22 +665,22 @@ def test_a_push_whose_hand_occludes_the_target_does_not_gate_to_observe():
     hrn.build_request(scene(), None, None)
     stale_ms = THRESHOLDS["observe_geom_age_ms"] + PERIOD_MS
     pushing = scene(tick=stale_ms // PERIOD_MS, sim_time_ms=stale_ms)
-    pushing["robot"]["ee_pos_mm"] = [240, 0, -80]  # 접촉점 40mm 안 → push 국면
+    pushing["robot"]["ee_pos_mm"] = [400, 0, -80]  # −x 밀기의 접촉점(372, 0) 40mm 안 → push 국면
     pushing["objects"][0].update(visible=False, visible_ratio=0.0)  # 손이 대상을 가린다
-    request, commitment = committed_request("push:o0:+x:none:slow", obs=pushing, hrn=hrn)
+    request, commitment = committed_request("push:o0:-x:none", obs=pushing, hrn=hrn)
     assert request["request"]["commitment"]["phase"] == "push"
     target = next(entry for entry in request["request"]["state"]["objects"] if entry["id"] == "o0")
     assert THRESHOLDS["observe_geom_age_ms"] < target["age_ms"] <= HARNESS["candidates"]["max_geometry_age_ms"]
     out = expert().act(request, commitment, pushing)
     assert out["q_observe"] == CONFIDENCE["low"]
-    assert out["expert_meta"]["gates"]["q_observe"]["reason"] == "fresh"
+    assert out["expert_meta"]["gates"]["q_observe"]["reason"] == "contact_readiness"
     assert out["expert_meta"]["main"]["reason"] != "observe_target"
     assert key_of(request, top(out["q_main"])) != "observe"
 
     # 같은 나이의 대상을 접근 국면에서 밀러 가는 중이면(손이 아직 가리지 않는다) 관측이 맞다.
     approaching = copy.deepcopy(pushing)
     approaching["robot"]["ee_pos_mm"] = [100, 0, 100]
-    request, commitment = committed_request("push:o0:+x:none:slow", obs=approaching, hrn=hrn)
+    request, commitment = committed_request("push:o0:-x:none", obs=approaching, hrn=hrn)
     assert request["request"]["commitment"]["phase"] == "approach"
     assert expert().act(request, commitment, approaching)["q_observe"] == CONFIDENCE["high"]
 
@@ -548,7 +696,7 @@ def test_observation_waits_while_another_object_is_held():
     out = expert().act(request, None, obs)
     assert out["q_observe"] == CONFIDENCE["low"]
     assert out["expert_meta"]["gates"]["q_observe"]["reason"] == "holding_other_first"
-    assert key_of(request, top(out["q_main"])).startswith("place:o0:release:zoneL:")
+    assert key_of(request, top(out["q_main"])).startswith("place:o0:release:zoneL")
     assert out["expert_meta"]["main"]["reason"] == "release_held_object"
 
     # 손이 비면 다시 관측을 요구한다.
@@ -705,8 +853,7 @@ def test_retreat_when_the_hand_holding_the_target_sits_inside_a_forbidden_object
     obs["robot"].update(ee_pos_mm=[474, 97, -80], holding="o0", gripper_mm=30)
     request, commitment = committed_request(GRASP.replace("o0:top:zoneL", "o0:top:zoneL"), obs=obs)
     assert request["request"]["commitment"]["phase"] == "lift"
-    derived = next(e["derived"] for e in request["request"]["candidates"]["q_main"] if e["key"] == GRASP)
-    assert "path blocked" in derived
+    assert next(e["path"] for e in request["request"]["candidates"]["q_main"] if e["key"] == GRASP) == "blocked"
     kinds = {entry["id"]: entry["kind"] for entry in request["request"]["candidates"]["q_path"]}
     out = expert().act(request, commitment, obs)
     assert kinds[top(out["q_path"])] == "retreat"
@@ -715,18 +862,22 @@ def test_retreat_when_the_hand_holding_the_target_sits_inside_a_forbidden_object
 
 def test_a_clear_approach_outranks_a_larger_gain_for_a_blocker_push():
     """접촉점이 닿을 수 있는 방향들 가운데서는 접근이 비어 있는 쪽이 먼저다(이득은 그다음). 후보 설명의
-    `path`만 바꿔 순위 규칙을 본다: −x의 접근만 비어 있으면 키 순으로 앞서는 +x 대신 −x다."""
+    `path`만 바꿔 순위 규칙을 본다: −x의 접근만 비어 있으면 키 순으로 앞서는 +x 대신 −x다. 밀기는 영역 쪽 축만
+    만들어지므로(계약 v0.3) +x 쪽에 영역을 하나 더 둔다."""
     obs = blocked_descent_scene()
+    obs["zones"].append({"id": "zoneX", "desc": "앞쪽 영역", "bounds_mm": [500, -80, 700, 80]})
     request, commitment = committed_request(GRASP, obs=obs)
     request = copy.deepcopy(request)
     request.pop("harness")
+    keys = {entry["key"] for entry in request["request"]["candidates"]["q_main"]}
+    assert {"push:o1:-x:none", "push:o1:+x:none"} <= keys
     for entry in request["request"]["candidates"]["q_main"]:
-        if entry["key"].startswith("push:o1:-x:"):
-            entry["derived"] = entry["derived"].replace("path blocked", "path clear")
-        elif entry["key"].startswith("push:o1:+x:"):
-            entry["derived"] = entry["derived"].replace("path clear", "path blocked")
+        if entry["key"] == "push:o1:-x:none":
+            entry["path"] = "ok"
+        elif entry["key"] == "push:o1:+x:none":
+            entry["path"] = "blocked"
     out = expert().act(request, commitment, obs)
-    assert key_of(request, top(out["q_main"])).startswith("push:o1:-x:none:")
+    assert key_of(request, top(out["q_main"])) == "push:o1:-x:none"
 
 
 def test_a_push_whose_contact_point_sits_inside_another_object_is_never_chosen():
@@ -734,6 +885,11 @@ def test_a_push_whose_contact_point_sits_inside_another_object_is_never_chosen()
     접촉점 도달성은 실행기 쪽 조건이므로 선택에서만 뺀다: 목표에는 맞으니(막는 이웃을 대상에서
     멀리 민다) `semantic_admissible`에는 남고, 뺀 이유는 근거에 적힌다."""
     obs = blocked_descent_scene()
+    # 밀기는 영역 쪽 축만 만들어지므로(계약 v0.3) +y 쪽과 +x 쪽에 영역을 둔다 — o1의 밀기는 −x·+y·+x다.
+    obs["zones"].extend([
+        {"id": "zoneU", "desc": "위쪽 영역", "bounds_mm": [200, 300, 400, 500]},
+        {"id": "zoneX", "desc": "앞쪽 영역", "bounds_mm": [500, -80, 700, 80]},
+    ])
     request, commitment = committed_request(GRASP, obs=obs)
     every_direction = copy.deepcopy(CONFIG)
     every_direction["goal"]["push_directions"] = None  # 방향 설정과 무관하게 접촉점만 본다
@@ -741,11 +897,10 @@ def test_a_push_whose_contact_point_sits_inside_another_object_is_never_chosen()
     main = out["expert_meta"]["main"]
     assert not key_of(request, main["choice"]).startswith("push:o1:+y:")
     admissible = {key_of(request, candidate) for candidate in main["admissible"]}
-    assert any(key.startswith("push:o1:+y:") for key in admissible)
-    assert any(key.startswith("push:o1:+x:") for key in admissible)
+    assert "push:o1:+y:none" in admissible and "push:o1:+x:none" in admissible
     assert candidate_id(GRASP) in main["admissible"]
     excluded = {key_of(request, candidate): reason for candidate, reason in main["excluded"].items()}
-    assert excluded == {"push:o1:+y:none:slow": "contact_point", "push:o1:+y:none:fast": "contact_point"}
+    assert excluded == {"push:o1:+y:none": "contact_point"}
 
 
 def test_speed_is_reduced_next_to_a_fragile_object_and_in_place():
@@ -766,8 +921,8 @@ def test_force_is_push_only_for_push_candidates():
     assert top(expert().act(request, commitment, scene())["q_force"]) == "0"
 
     pushing = scene()
-    pushing["robot"]["ee_pos_mm"] = [240, 0, -80]  # 접촉점 40mm 안 → push 국면
-    request, commitment = committed_request("push:o0:+x:none:slow", obs=pushing)
+    pushing["robot"]["ee_pos_mm"] = [400, 0, -80]  # −x 밀기의 접촉점(372, 0) 40mm 안 → push 국면
+    request, commitment = committed_request("push:o0:-x:none", obs=pushing)
     assert request["request"]["commitment"]["phase"] == "push"
     assert top(expert().act(request, commitment, pushing)["q_force"]) == "2"
 
@@ -777,15 +932,15 @@ def test_push_candidates_close_the_fingers_before_contact():
     벌어져 ±y 접근에서 물체를 치고(3c-1 측정 45~78N), ±x에서는 물체가 손가락 사이로 빠진다."""
     approaching = scene()
     approaching["robot"]["ee_pos_mm"] = [100, 0, 100]
-    request, commitment = committed_request("push:o0:+x:none:slow", obs=approaching)
+    request, commitment = committed_request("push:o0:-x:none", obs=approaching)
     assert request["request"]["commitment"]["phase"] == "approach"
     out = expert().act(request, commitment, approaching)
     assert top(out["q_gripper"]) == "closed"
     assert out["expert_meta"]["aux"]["gripper"]["reason"] == "push_with_closed_fingers"
 
     pushing = scene()
-    pushing["robot"]["ee_pos_mm"] = [240, 0, -80]
-    request, commitment = committed_request("push:o0:+x:none:slow", obs=pushing)
+    pushing["robot"]["ee_pos_mm"] = [400, 0, -80]
+    request, commitment = committed_request("push:o0:-x:none", obs=pushing)
     assert request["request"]["commitment"]["phase"] == "push"
     assert top(expert().act(request, commitment, pushing)["q_gripper"]) == "closed"
 
@@ -905,7 +1060,7 @@ def test_a_push_moves_the_object_with_closed_fingers_at_mid_height():
         assert target["shape"] == "box"
         start = list(target["pos_mm"])
         hrn = RobotHarness(load_harness_config())
-        policy = ForcedMain(policy_expert, "push:o1:+x:none:slow")
+        policy = ForcedMain(policy_expert, "push:o1:+x:none")
         commitment = history = None
         max_force, closed_ticks = 0.0, 0
         for _ in range(40):
@@ -934,16 +1089,9 @@ def test_a_push_moves_the_object_with_closed_fingers_at_mid_height():
     assert closed_ticks >= 10
 
 
-CAP_BLOCKED = (
-    "E1 seed 29: 후보 상한(29 + 고정 3)이 지시의 대상×목표 영역 파지 후보를 목록에서 뺀다 — 전문가는 목록에 없는"
-    " 행동을 고를 수 없어 hold한다(3b 보고서 '남은 걱정 1', 3c-1 보고서 E1 표). 하네스가 고쳐지면 이 표시를 지운다."
-)
-
-
-@pytest.mark.parametrize(
-    "seed",
-    [17, 43, 11, pytest.param(29, marks=pytest.mark.xfail(strict=True, reason=CAP_BLOCKED))],
-)
+@pytest.mark.parametrize("seed", [17, 43, 11, 29])
 def test_the_expert_completes_an_e1_episode(seed):
-    """E1: 물체 6~10개, 취약·금지, 지시 변경(5~15초), 외란. 300틱 안에 대상이 영역 안에 놓이고 손은 빈다."""
+    """E1: 물체 6~10개, 취약·금지, 지시 변경(5~15초), 외란. 300틱 안에 대상이 영역 안에 놓이고 손은 빈다.
+    seed 29는 옛 후보 상한(29 + 고정 3)이 지시의 대상×목표 영역 파지를 목록에서 빼 hold하던 seed다 — 계약 v0.3의
+    지시 조합 예약(K ≤ 12 = 9 + 3, 대상×영역 조합 먼저)이 고쳤다."""
     assert_completed(run_episode("E1", seed))

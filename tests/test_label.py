@@ -15,7 +15,7 @@ from helpers import SIM_CONFIG
 from robo_jev.contracts import validate_record
 from robo_jev.harness.robot import candidate_id
 from robo_jev.sim.environment import Environment
-from robo_jev.sim.expert import Expert
+from robo_jev.sim.expert import Expert, load_expert_config
 from robo_jev.sim.label import (
     EVENT_FIELDS,
     FollowupPolicy,
@@ -26,7 +26,7 @@ from robo_jev.sim.label import (
 )
 
 EVENTS = load_events_config()
-GRASP = "grasp:o0:top:zoneL:slow"
+GRASP = "grasp:o0:top:zoneL"
 
 
 # --------------------------------------------------------------------------
@@ -44,9 +44,9 @@ def test_every_joint_function_has_a_versioned_event_with_the_documented_fields()
         assert event["followup_policy_version"] == EVENTS["followup_policy_version"]
         assert set(event["randomization"]) == {"pose_jitter", "controller_noise"}
         assert event["function"] == function
-    assert event_for("grasp:o0:top:zoneL:slow", holding=None, config=EVENTS)["event_id"] == "grasp-lift-v0"
-    assert event_for("grasp:o0:top:zoneL:slow", holding="o0", config=EVENTS)["event_id"] == "place-release-v0"
-    assert event_for("push:o0:+x:none:slow", holding=None, config=EVENTS)["event_id"] == "push-segment-v0"
+    assert event_for("grasp:o0:top:zoneL", holding=None, config=EVENTS)["event_id"] == "grasp-lift-v0"
+    assert event_for("grasp:o0:top:zoneL", holding="o0", config=EVENTS)["event_id"] == "place-release-v0"
+    assert event_for("push:o0:+x:none", holding=None, config=EVENTS)["event_id"] == "push-segment-v0"
     with pytest.raises(ValueError):
         event_for("hold", holding=None, config=EVENTS)
     # 후보는 같은 horizon 아래 비교한다 (docs/08 §7).
@@ -77,7 +77,7 @@ def action_for(scene: dict, key: str) -> dict:
 
 
 def goal_grasp_key(scene: dict) -> str:
-    return f"grasp:{scene['goal']['target_ref']}:top:{scene['goal']['zone_ref']}:slow"
+    return f"grasp:{scene['goal']['target_ref']}:top:{scene['goal']['zone_ref']}"
 
 
 def test_a_grasp_rollout_succeeds_and_records_the_event_fields(e0_seed5):
@@ -214,7 +214,7 @@ def test_a_bug_outside_the_simulator_is_censored_as_a_pipeline_error(e0_seed5, m
 
 def test_a_candidate_the_followup_cannot_see_is_censored(e0_seed5):
     scene = e0_seed5["scene"]
-    key = "grasp:o99:top:zoneL:slow"
+    key = "grasp:o99:top:zoneL"
     event = event_for(key, holding=None, config=EVENTS)
     result = rollout_event(e0_seed5["snapshot"], action_for(scene, key), event, seed=0)
     assert result["outcome"] == "censored" and result["reason"] == "candidate_unavailable"
@@ -228,7 +228,7 @@ def test_a_push_rollout_measures_displacement_along_the_direction():
         snapshot = env.snapshot()
     finally:
         env.close()
-    key = "push:o1:+x:none:slow"
+    key = "push:o1:+x:none"
     event = event_for(key, holding=None, config=EVENTS)
     result = rollout_event(snapshot, action_for(scene, key), event, seed=0)
     assert result["outcome"] == "success", result
@@ -243,8 +243,8 @@ def test_the_followup_policy_forces_the_main_decision_and_disables_the_gates(e0_
     from robo_jev.harness.robot import RobotHarness, load_harness_config
 
     scene = e0_seed5["scene"]
-    key = "push:o0:+x:none:slow"
     request = RobotHarness(load_harness_config()).build_request(scene, None, None)
+    key = next(entry["key"] for entry in request["request"]["candidates"]["q_main"] if entry["key"].startswith("push:o0:"))
     policy = FollowupPolicy(Expert(), key)
     out = policy.act(request, None, scene)
     assert max(out["q_main"], key=out["q_main"].get) == candidate_id(key)
@@ -343,8 +343,8 @@ def test_rollout_candidates_include_the_commitment_and_the_expert_choice_and_spr
     request = harness().build_request(observation(objects=crowd), None, None)
     tick = {key: value for key, value in request.items() if key != "harness"}
     keys = {entry["id"]: entry["key"] for entry in tick["request"]["candidates"]["q_main"]}
-    committed = next(cid for cid, key in keys.items() if key.startswith("push:o3:"))
-    choice = next(cid for cid, key in keys.items() if key.startswith("grasp:o0:top:zoneL:slow"))
+    committed = next(cid for cid, key in keys.items() if key.startswith("push:"))
+    choice = next(cid for cid, key in keys.items() if key.startswith("grasp:"))
     commitment = {"action_ref": committed, "key": keys[committed], "phase": "approach", "held_ticks": 1, "last_switch_tick": 0}
 
     chosen = choose_rollout_candidates(tick, commitment, choice, k=8)
@@ -369,7 +369,7 @@ def test_rollout_candidates_include_the_commitment_and_the_expert_choice_and_spr
 
 def labelled_tick(*, commitment=None, admissible=("c1", "c2", "c3"), choice="c1", rule="expert-e0.2/goal_grasp", confidence="high") -> dict:
     ids = [f"c{index}" for index in range(1, 10)] + ["ch", "co", "cr"]
-    keys = {f"c{index}": f"grasp:o{index}:top:zoneL:slow" for index in range(1, 10)}
+    keys = {f"c{index}": f"grasp:o{index}:top:zoneL" for index in range(1, 10)}
     keys.update(ch="hold", co="observe", cr="replan")
     return {
         "t": 7, "sim_ms": 700, "observed_at_ms": 700, "obs_age_ms": {"geom": 0, "proprio": 0},
@@ -476,16 +476,35 @@ def test_a_retry_blocked_or_degenerate_tick_keeps_its_rule_label_like_a_gate_tic
     """하네스가 한 틱 동안 재시도를 막았거나(`way_retry_blocked`) 실행기 사정으로 고를 수 없거나(`not_executable`)
     목표를 실현할 후보가 목록에 없는(`goal_candidate_missing`) 틱의 정답은 규칙의 `hold`다. rollout은 그 차단을
     모른 채(`rollout_event`는 `history=None`으로 시작한다) 후보를 성공시키므로 결과로 라벨을 바꾸면 안 된다."""
+    from robo_jev.sim.expert import DEGENERATE_REASONS
     from robo_jev.sim.label import _GATE_REASONS, label_main_decision
 
-    assert reason in _GATE_REASONS
+    assert reason in _GATE_REASONS and reason in DEGENERATE_REASONS
     tick = labelled_tick(commitment=None, admissible=admissible, choice="ch", rule=f"expert-e0.2/{reason}", confidence="low")
     label = label_main_decision(tick, table(c1=(8, 0, 0), c2=(7, 1, 0)), EVENTS)
     assert label["candidate_ids"] == ["ch"] and label["rollout_reason"] == f"gate:{reason}"
     assert label["label_confidence"] == "low"  # 규칙 라벨의 신뢰도 그대로
     assert label["semantic_admissible"] == list(admissible)
-    assert label["event_results"]["c1"]["s"] == 8 and "c1" not in label["unknown"]
+    # hold∉A 규칙: 적합 후보는 rollout이 있어도 판단하지 않는다(`unknown`) — 결과는 event_results에만 남는다.
+    assert label["event_results"]["c1"]["s"] == 8
+    assert all(cid in label["unknown"] for cid in admissible) and "c2" not in label["unknown"]
+    # 낮은 신뢰도의 rollout 라벨은 전문가 라벨과 같은 weight를 단다 (이월 결함: weight가 떨어지지 않는다).
+    assert label["weight"] == load_expert_config()["labels"]["low_confidence_weight"]
     check_contract(tick, label)
+
+
+def test_a_low_confidence_rollout_label_keeps_the_experts_weight():
+    from robo_jev.sim.label import label_main_decision
+
+    tick = labelled_tick(commitment="c1")
+    tick["labels"][0]["weight"] = 0.4  # 전문가가 단 weight가 있으면 그 값
+    label = label_main_decision(tick, table(c1=(0, 8, 0), c2=(0, 8, 0)), EVENTS)
+    assert label["label_confidence"] == "low" and label["weight"] == 0.4
+    kept = label_main_decision(tick, table(c1=(7, 1, 0), c2=(8, 0, 0)), EVENTS)
+    assert kept["label_confidence"] == "high" and "weight" not in kept
+    del tick["labels"][0]["weight"]
+    label = label_main_decision(tick, {}, EVENTS)  # 근거 없음 → low → 설정의 weight
+    assert label["label_confidence"] == "low" and label["weight"] == load_expert_config()["labels"]["low_confidence_weight"]
 
 
 def test_without_rollout_evidence_the_label_is_the_expert_choice_marked_low():

@@ -2,12 +2,12 @@
 #
 # 전문가는 모델 자리에 서서 10개 답을 내고, 그 답이 D1 로봇 에피소드의 라벨 원천이다. 답은 하네스
 # 요청(모델 입력)과 commitment의 함수이며 시뮬레이터 참값을 보지 않는다. 수치는 전부 여기에만 둔다.
-version: e0.2
+version: e0.3
 
 # 실행기·하네스와 공유하는 값은 복사하지 않고 그 설정을 읽는다 (단일 출처).
 #   controller_config → 속도·힘 수준의 개수
-#   harness_config    → candidates.max_geometry_age_ms (접촉 국면·파지 중의 관측 문턱),
-#                       candidates.grasp_depth_mm (파지점 높이), candidates.push_segment_mm (밀기 구간)
+#   harness_config    → candidates.grasp_depth_mm (파지점 높이), candidates.push_segment_mm (밀기 구간),
+#                       candidates.approach_clearance_mm·push_contact_mm, phases.lift_height_mm, planner.* (플래너 비용)
 controller_config: configs/controller/osc_v0.yaml
 harness_config: configs/harness/robot.yaml
 
@@ -19,8 +19,6 @@ confidence:
 
 # 주 결정 — 구조화된 목표를 실현하는 결합 후보.
 goal:
-  # 같은 행동의 프로파일이 여럿이면 앞의 것을 고른다.
-  profile_preference: [slow, fast]
   # 목표 대상→목표 영역의 파지 후보가 목록에 없을 때(실행 불가·상한) 대상을 영역 쪽으로 미는 후보를
   # 고른다 — "밀기는 파지가 불가능할 때만"(docs/02 §1). 예측 자세(한 구간만큼 이동)가 영역까지의
   # 거리를 이만큼 이상 줄여야 한다.
@@ -36,8 +34,9 @@ goal:
   push_directions: ["+x", "-x"]
 
 thresholds:
-  # 관측 (docs/08 §4 `q_observe`): 대상이 아직 추적되지 않았거나 대상 기하가 이보다 오래되면. 파지·놓기
-  # 국면과 파지 중(팔이 대상을 가린다)에는 하네스의 `candidates.max_geometry_age_ms`가 문턱이다.
+  # 관측 (docs/08 §4 `q_observe`): 대상이 아직 추적되지 않았거나 대상 기하가 이보다 오래되면. 접촉 국면(파지·놓기·
+  # 밀기)과 파지 중(팔이 대상을 가린다)에는 기하 나이가 아니라 실행기의 readiness가 시점을 정하므로 관측을 요구하지
+  # 않는다(계약 v0.3, 하네스 §5.0과 같은 면제).
   observe_geom_age_ms: 400
   stop_force_n: 25.0             # 접촉력이 이보다 크면 정지
   # 파지 중의 정상 하중(쥐는 힘·물체 무게)은 충돌이 아니다. 들고 있는 동안은 실행기의 반사 한계
@@ -73,6 +72,14 @@ labels:
   path_alternative_extra_mm: 60
   # 낮은 신뢰도 라벨(`label_confidence: low` — 목표를 실현할 후보가 목록에 없거나(상한·실행 불가), 재시도가
   # 막혔거나, 실행기 사정으로 고를 수 없어 `hold`로 물러난 퇴화 틱)의 손실 가중치 `weight`. 손실은 라벨의
-  # weight를 그대로 쓴다(docs/03 §4). 후보 공간 자체의 결정(E1 퇴화 틱 44%)이 나올 때까지의 완화이며 1이면
-  # 다른 라벨과 같다. 허용 집합이 빈 라벨은 weight가 아니라 마스크다(적지 않는다).
+  # weight를 그대로 쓴다(docs/03 §4). 그런 틱의 `q_main` 라벨은 hold∉A 규칙(docs/08 §7)이다: A = {hold},
+  # `unknown` = semantic_admissible(판단하지 않음 — 손실이 적합 후보를 누르지 않는다), 나머지가 I. 1이면 다른
+  # 라벨과 같다. 허용 집합이 빈 라벨은 weight가 아니라 마스크다(적지 않는다).
   low_confidence_weight: 0.25
+  # 비키프레임 허용 집합 (docs/08 §7, 계약 v0.3): rollout이 없는 틱의 `q_main`은
+  #   A = {전문가 선택} ∪ {c ∈ 적합·실행 가능 후보 : cost(c) ≤ cost(선택) × (1 + cost_tolerance)}
+  # 이고 나머지 적합 후보와 실행 가능하나 부적합한 후보가 I, unknown = ∅, `label_confidence: medium`(비용 근거).
+  # commitment 규칙(3)은 그대로다 — 지킨 commitment가 최선 비용의 (1 + τ) 안이면 그것만 정답. cost는 전문가의
+  # 플래너 비용(`Expert.plan_cost_mm`: 남은 명령 경로 길이 추정 mm — 하네스의 국면 목표점 거리 `d` + 남은 국면의
+  # 수직·이동 구간 + 막힌 경로의 우회 여유; 밀기는 남은 영역 거리를 구간 수로 환산). ε(0.15)와 같은 값이다.
+  cost_tolerance: 0.15

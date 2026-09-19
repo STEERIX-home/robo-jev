@@ -6,10 +6,10 @@
 # 버전과 원시 횟수를 함께 보존하므로 여기 값을 바꾸면 `version`을 올린다.
 version: ev0.1
 
-# 후속 정책: 전문가(e0.2)의 부가 답(그리퍼·경로·속도·힘)과 정지 규칙 위에 주 결정을 후보 하나로 못박고
+# 후속 정책: 전문가(e0.3)의 부가 답(그리퍼·경로·속도·힘)과 정지 규칙 위에 주 결정을 후보 하나로 못박고
 # 게이팅(완료·지시·관측)을 끈 것. `sim/label.py`의 `FollowupPolicy`. 이 문자열이 사건 기록의
 # `followup_policy_version`이다.
-followup_policy_version: followup-v0/expert-e0.2
+followup_policy_version: followup-v0/expert-e0.3
 followup:
   harness_config: configs/harness/robot.yaml
   expert_config: configs/sim/expert_v0.yaml

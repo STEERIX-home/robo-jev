@@ -8,6 +8,10 @@
   실현할 후보가 없으면 다른 물체를 집지 않고 `hold`한다(근거는 낮은 신뢰도로 남는다).
 * 같은 목표 아래에서는 국면이 바뀌어도 commitment를 지킨다.
 * 답마다 **근거 코드**(`expert_meta`)를 남겨 라벨의 `rule`이 된다.
+* rollout이 없는 틱의 `q_main` 라벨은 단일 정답이 아니라 **비용 허용 집합**이다(docs/08 §7, 계약 v0.3):
+  A = {선택} ∪ {적합·실행 가능 후보 중 플래너 비용이 선택의 (1 + τ) 안인 것}, τ = `labels.cost_tolerance`.
+  플래너 비용(:meth:`Expert.plan_cost_mm`)은 남은 명령 경로 길이의 추정(mm)이며 새 물리는 없다. 실행기
+  사정으로 `hold`로 물러난 퇴화 틱은 hold∉A 규칙 — A = {hold}, `unknown` = 적합 집합(판단하지 않음).
 
 **정보 경계.** 답은 하네스 요청의 모델 입력(`request["request"]`: 상태·실행 이력·commitment·
 후보)과 commitment의 함수다. 하네스 블록(`request["harness"]`)도, 시뮬레이터 관측도 읽지
@@ -32,10 +36,18 @@ from robo_jev.harness.rule_judge import Goal, candidate_values, normalise_distri
 from robo_jev.perception.pointworld import circumradius_mm, segment_point_distance_mm
 from robo_jev.sim.controller import load_controller_config, resolve_config_path
 
-__all__ = ["DEFAULT_CONFIG_PATH", "EXPERT_VERSION", "Expert", "load_expert_config"]
+__all__ = [
+    "DEFAULT_CONFIG_PATH",
+    "DEGENERATE_REASONS",
+    "EXPERT_VERSION",
+    "GATE_REASONS",
+    "Expert",
+    "load_expert_config",
+]
 
-#: 전문가 버전. 레코드의 `versions.expert`에 들어간다.
-EXPERT_VERSION = "e0.2"
+#: 전문가 버전. 레코드의 `versions.expert`에 들어간다. e0.3 = 계약 v0.3(비용 허용 집합, hold∉A, readiness 관측 게이트,
+#: 4조각 결합 키).
+EXPERT_VERSION = "e0.3"
 
 DEFAULT_CONFIG_PATH = "configs/sim/expert_v0.yaml"
 
@@ -48,8 +60,15 @@ _GATE_RULES = {
     "q_stop": "force-reflex-forbidden-contact-v0",
 }
 
-#: 기하 나이 대신 하네스의 `max_geometry_age_ms`가 관측 문턱인 국면 (docs/08 §4 `q_observe`, §5.0). 팔이 대상을
-#: 가리는 접촉 국면(파지·놓기·밀기)의 단일 출처는 하네스다 — 여기 따로 적으면 밀기가 빠진 채 어긋난다.
+#: 게이트가 주 결정을 정한 이유 — 답은 규칙 후보(hold·replan·observe) 하나이고 허용 집합도 그것뿐이다.
+GATE_REASONS = ("goal_done", "instruction_incomplete", "observe_target")
+
+#: 실행기 사정으로 `hold`로 물러난 퇴화 틱의 이유 — hold∉A 규칙(docs/08 §7): A = {hold}, `unknown` = 적합 집합,
+#: `label_confidence: low`(설정의 weight). 재시도 차단·실행 불가·목표 후보 없음.
+DEGENERATE_REASONS = ("way_retry_blocked", "not_executable", "goal_candidate_missing")
+
+#: 관측 게이트를 기하 나이로 보지 않는 국면 (docs/08 §4 `q_observe`, §5.0): 팔이 대상을 가리는 접촉 국면(파지·놓기·
+#: 밀기)과 파지 중에는 실행기의 readiness가 시점을 정한다 — 하네스와 같은 면제이며 단일 출처는 하네스다.
 _CONTACT_PHASES = CONTACT_PHASES
 
 #: 밀기 방향 벡터 (로봇 기준 xy). 하네스의 의미 키와 같은 이름이다.
@@ -84,13 +103,17 @@ class Expert:
         self.speed_levels = [str(index) for index in range(len(controller["speed_levels_m_s"]))]
         self.force_levels = [str(index) for index in range(len(controller["force_levels"]))]
         harness = harness_config or load_harness_config(self.config["harness_config"])
-        self.max_geometry_age_ms = float(harness["candidates"]["max_geometry_age_ms"])
         self.grasp_depth_mm = float(harness["candidates"]["grasp_depth_mm"])
         self.approach_clearance_mm = float(harness["candidates"]["approach_clearance_mm"])
         self.push_segment_mm = float(harness["candidates"]["push_segment_mm"])
         self.push_contact_mm = float(harness["candidates"]["push_contact_mm"])
+        self.lift_height_mm = float(harness["phases"]["lift_height_mm"])
         self.planner_margin_mm = float(harness["planner"]["margin_mm"])
         self.forbidden_margin_mm = float(harness["planner"]["forbidden_margin_mm"])
+        self.side_offset_mm = float(harness["planner"]["side_offset_mm"])
+        self.cost_tolerance = float(self.label_config.get("cost_tolerance", 0.15))
+        if self.cost_tolerance < 0:
+            raise ValueError(f"labels.cost_tolerance: 0 이상이어야 한다 (받은 값: {self.cost_tolerance})")
 
     @classmethod
     def from_config_path(cls, path: str | Path = DEFAULT_CONFIG_PATH) -> Expert:
@@ -211,6 +234,7 @@ class Expert:
         holding = state["robot"].get("holding")
 
         blocked_ways = self._retry_blocked_ways(model, values)
+        committed_id = committed["action_ref"] if committed else None
 
         def decision(
             choice: str,
@@ -219,12 +243,38 @@ class Expert:
             confidence: str = "high",
             excluded: dict[str, str] | None = None,
         ) -> dict[str, Any]:
+            """결정 하나 + 라벨의 허용 집합(docs/08 §7).
+
+            게이트 이유는 규칙 후보 하나(A = {choice}), 퇴화 이유는 hold∉A 규칙(A = {hold}, unknown = 적합 집합),
+            그 밖의 결합 결정은 비용 허용 집합 — A = {choice} ∪ {적합·실행 가능 후보 중 cost ≤ cost(choice)(1+τ)},
+            단 지킨 commitment가 최선 비용의 (1+τ) 안이면 그것만(commitment 규칙 (3)); 신뢰도는 medium(비용 근거).
+            """
+            excluded = dict(excluded or {})
+            usable = [candidate for candidate in admissible if candidate not in excluded]
+            allowed, unknown, costs = [choice], [], {}
+            if reason in DEGENERATE_REASONS:
+                unknown = [candidate for candidate in admissible if candidate != choice]
+                confidence = "low"
+            elif reason not in GATE_REASONS:
+                costs = {candidate: self.plan_cost_mm(values[candidate], state, goal) for candidate in usable}
+                if choice not in costs:
+                    costs[choice] = self.plan_cost_mm(values[choice], state, goal)
+                tolerance = 1.0 + self.cost_tolerance
+                kept_commitment = choice == committed_id and costs[choice] <= min(costs.values()) * tolerance
+                if not kept_commitment:
+                    allowed = sorted(
+                        {choice} | {c for c in usable if costs[c] <= costs[choice] * tolerance}, key=ids.index
+                    )
+                confidence = "medium"
             return {
                 "choice": choice,
                 "key": keys.get(choice),
                 "reason": reason,
                 "admissible": list(admissible),
-                "excluded": dict(excluded or {}),
+                "allowed": allowed,
+                "unknown": unknown,
+                "costs_mm": {candidate: round(cost, 1) for candidate, cost in costs.items()},
+                "excluded": excluded,
                 "confidence": confidence,
                 "blocked_ways": sorted(blocked_ways),
             }
@@ -271,7 +321,6 @@ class Expert:
             return decision(choice, "observe_target", [choice])
 
         target, zone = goal.target_ref, goal.zone
-        committed_id = committed["action_ref"] if committed else None
         has_via = any(entry.get("kind") == "via" for entry in paths)
 
         if holding is not None and holding != target:
@@ -381,18 +430,64 @@ class Expert:
         *,
         push_order: bool = False,
     ) -> str:
-        """프로파일 선호(설정 순서) → 경로가 비어 있는 것 → 의미 키 순."""
-        order = [str(profile) for profile in self.goal_config.get("profile_preference") or ()]
+        """경로가 비어 있는 것 → (밀기는 이득이 큰 것) → 의미 키 순."""
 
         def rank(candidate: str) -> tuple:
             value = values[candidate]
-            profile = order.index(value["profile"]) if value["profile"] in order else len(order)
             path = 0 if value["path_clear"] else 1
             gain = -float(value.get("push_gain_mm", 0.0)) if push_order else 0.0
             # 밀기는 접근이 비어 있는 것이 먼저다 — 대상에서 곧장 멀어지는 방향은 접촉점이 대상의 구 안이다.
-            return (path, gain, profile, keys[candidate]) if push_order else (profile, path, keys[candidate])
+            return (path, gain, keys[candidate])
 
         return min(options, key=rank)
+
+    # -- 플래너 비용 (docs/08 §7 비키프레임 허용 집합) ---------------------------------
+
+    def plan_cost_mm(self, value: dict[str, Any], state: dict[str, Any], goal: Goal) -> float:
+        """결합 후보 하나의 플래너 비용 — **남은 명령 경로 길이의 추정(mm)**. 새 물리는 없다.
+
+        하네스가 후보 줄에 실은 국면 목표점까지의 거리(`d`)에 그 뒤에 남는 국면의 구간을 하네스의 같은 수치로
+        더한다: 파지(아직 안 들었으면) 하강(접근 여유 + 파지 깊이) + 들기(`lift_height_mm`) + 대상→목적지 영역 중심의
+        xy 이동 + 놓기 하강(접근 여유); 들고 있는 대상의 파지·놓기는 말단→영역 중심 xy + 놓기 하강; 밀기는 접촉점까지
+        `d` 뒤에 남은 영역 거리를 구간(`push_segment_mm`) 수로 환산하고 구간 사이의 재접근을 더한다(막는 이웃 밀기는
+        한 구간). 막힌 직선 구간은 국소 플래너의 옆 우회 폭(`side_offset_mm`)의 두 배를 더한다. 고정 후보는 0이다.
+        """
+        function = value.get("function")
+        if function is None:
+            return 0.0
+        cost = float(value.get("distance_mm", 0.0))
+        if not value.get("path_clear", True):
+            cost += 2.0 * self.side_offset_mm
+        target = next((item for item in state.get("objects") or () if str(item["id"]) == value["target"]), None)
+        pose = [float(item) for item in target["pose_mm"]] if target is not None else None
+        ee = [float(item) for item in state["robot"]["ee_pose_mm"]]
+        holding = state["robot"].get("holding")
+        zone = next(
+            (item for item in state.get("zones") or () if str(item["id"]) == str(value.get("destination"))), None
+        )
+        centre = _zone_centre(zone["bounds_mm"]) if zone is not None else None
+
+        if function == "push":
+            bounds = next((item["bounds_mm"] for item in state.get("zones") or () if str(item["id"]) == goal.zone), None)
+            if value["target"] == goal.target_ref and pose is not None and bounds is not None:
+                remaining = _zone_distance_mm(pose, bounds)
+                segments = max(1, math.ceil(remaining / self.push_segment_mm)) if self.push_segment_mm > 0 else 1
+            else:
+                segments = 1  # 막는 이웃 밀기: 한 구간
+            reapproach = (segments - 1) * (self.approach_clearance_mm + self.push_contact_mm)
+            return cost + segments * self.push_segment_mm + reapproach
+
+        if holding == value["target"]:
+            # 들고 있는 대상(진행 중인 파지·놓기): 남은 것은 영역까지의 xy 이동과 놓기 하강이다.
+            if centre is not None:
+                cost += math.dist(ee[:2], centre)
+            return cost + self.approach_clearance_mm
+
+        # 아직 들지 않은 파지: 하강 → 들기 → 이동 → 놓기 하강.
+        cost += self.approach_clearance_mm + self.grasp_depth_mm + self.lift_height_mm
+        if pose is not None and centre is not None:
+            cost += math.dist(pose[:2], centre)
+        return cost + self.approach_clearance_mm
 
     def _pushes_toward_zone(
         self,
@@ -574,8 +669,9 @@ class Expert:
         return True, "text"
 
     def _needs_observation(self, state: dict[str, Any], goal: Goal, phase: str) -> tuple[bool, str]:
-        """대상이 아직 추적되지 않았거나 대상 기하가 문턱보다 오래됐다. 팔이 대상을 가리는 파지·놓기
-        국면과 파지 중에는 하네스의 실행 가능성 문턱이 기준이다 — 규칙 기준군과 같은 규칙.
+        """대상이 아직 추적되지 않았거나 대상 기하가 문턱보다 오래됐다. 팔이 대상을 가리는 접촉 국면(파지·놓기·
+        밀기)과 파지 중에는 기하 나이가 아니라 **실행기의 readiness**가 시점을 정하므로 관측을 요구하지 않는다 —
+        하네스(§5.0)·규칙 기준군과 같은 면제.
 
         손에 **다른** 물체가 있으면 관측은 지금 할 수 있는 일이 아니다: 운반 중의 관측은 제자리 hold이고
         (docs/08 §5.2) 가리는 것이 팔 자신이면 영영 풀리지 않는다. 먼저 놓는 것이 답이다(`_main`).
@@ -586,9 +682,10 @@ class Expert:
         target = self._target(state, goal)
         if target is None:
             return True, "target_untracked"
+        if phase in _CONTACT_PHASES or holding == target["id"]:
+            return False, "contact_readiness"
         age = float(target.get("age_ms", 0))
-        contact = phase in _CONTACT_PHASES or state["robot"].get("holding") == target["id"]
-        limit = self.max_geometry_age_ms if contact else float(self.thresholds["observe_geom_age_ms"])
+        limit = float(self.thresholds["observe_geom_age_ms"])
         return (age > limit), ("geometry_stale" if age > limit else "fresh")
 
     def _retry_ok(self, model: dict[str, Any]) -> tuple[bool, str]:
@@ -799,18 +896,20 @@ class Expert:
         main = meta["main"]
         source = self.label_source
         labels: list[dict[str, Any]] = []
-        self._finish_label(
-            labels,
-            {
-                "question_id": "q_main",
-                "kind": "valid_set",
-                "candidate_ids": [main["choice"]] if main["choice"] is not None else [],
-                "semantic_admissible": list(main["admissible"]),
-                "source": source,
-                "rule": f"expert-{self.version}/{main['reason']}",
-                "label_confidence": main["confidence"],
-            },
-        )
+        allowed = list(main.get("allowed") or ([main["choice"]] if main["choice"] is not None else []))
+        label: dict[str, Any] = {
+            "question_id": "q_main",
+            "kind": "valid_set",
+            "candidate_ids": allowed,
+            "semantic_admissible": list(main["admissible"]),
+            "source": source,
+            "rule": f"expert-{self.version}/{main['reason']}",
+            "label_confidence": main["confidence"],
+        }
+        unknown = [candidate for candidate in main.get("unknown") or () if candidate not in allowed]
+        if unknown:
+            label["unknown"] = unknown  # hold∉A 규칙: 적합 후보는 판단하지 않는다 (정규화에서 빠진다)
+        self._finish_label(labels, label)
         for question_id, gate in meta["gates"].items():
             self._finish_label(
                 labels,
@@ -863,6 +962,11 @@ def _inside(pose_mm, bounds_mm) -> bool:
     x0, y0, x1, y1 = [float(value) for value in bounds_mm]
     x, y = float(pose_mm[0]), float(pose_mm[1])
     return min(x0, x1) <= x <= max(x0, x1) and min(y0, y1) <= y <= max(y0, y1)
+
+
+def _zone_centre(bounds_mm) -> tuple[float, float]:
+    x0, y0, x1, y1 = [float(value) for value in bounds_mm]
+    return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
 
 
 def _zone_distance_mm(point, bounds_mm) -> float:
