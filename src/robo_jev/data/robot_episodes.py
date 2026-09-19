@@ -6,7 +6,8 @@
 한 에피소드는 이렇게 만든다.
 
 1. **split을 먼저 정한다.** 장면 계획의 구조 서명(물체 수·형상 다중집합·영역 집합)이 장면 계열
-   (:func:`family_id`)이고, `origin_group = "robot/<profile>/family-<k>"`를
+   (:func:`family_id`)이고, `origin_group = "robot/<profile>/<계열>/goal-<목표 영역>"`(:func:`origin_group`,
+   장면 계획 모듈이 정의한다 — 문구 변형도 이 group의 해시로 고른다)를 계획의 태그(:func:`plan_tags`)와 함께
    :func:`robo_jev.data.split.assign_split`에 넣는다 — 에피소드를 돌리기 **전에**, 그리고 설정의
    holdout 목록(`configs/data/d1_robot.yaml`)으로 (docs/04 §5).
 2. 판단 틱마다 하네스가 요청을 만들고(:meth:`RobotHarness.build_request`), **정책**이 답하고
@@ -43,7 +44,7 @@ from robo_jev.data.split import CONCEPT_TAG, TEMPLATE_TAG, SplitPolicy, assign_s
 from robo_jev.harness.robot import RobotHarness, count_records, load_harness_config
 from robo_jev.sim.controller import resolve_config_path
 from robo_jev.sim.expert import Expert, load_expert_config
-from robo_jev.sim.scene import ScenePlan, build_plan
+from robo_jev.sim.scene import ScenePlan, build_plan, family_id, family_signature, origin_group
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
@@ -71,10 +72,6 @@ DEFAULT_CONFIG_PATH = "configs/data/d1_robot.yaml"
 
 #: 정책이 내야 하는 답. 이 밖의 키(`phase`·`expert_meta`)는 모델 출력에 넣지 않는다.
 QUESTIONS = tuple(QUESTION_SET_V0)
-
-#: 영역 id → 계열 이름의 글자 (`zoneL` → `L`).
-_ZONE_LETTER_PREFIX = "zone"
-
 
 def load_generator_config(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
     return yaml.safe_load(resolve_config_path(path).read_text(encoding="utf-8"))
@@ -104,40 +101,8 @@ def config_paths(config: dict[str, Any]) -> dict[str, str]:
 # --------------------------------------------------------------------------
 
 
-def family_signature(plan: ScenePlan) -> dict[str, Any]:
-    """장면 계획의 구조 서명: 물체 수, 형상 다중집합, 영역 집합.
-
-    자세·색·속성 배정·일정은 넣지 않는다 — 같은 구조의 장면이 같은 계열이어야 표현만 다른 장면이
-    train/test로 갈라지지 않는다(docs/04 §5 "holdout이 단지 물체 이름과 후보 ID를 바꾼 버전인지").
-    """
-    shapes: dict[str, int] = {}
-    for obj in plan.objects:
-        shapes[obj.shape] = shapes.get(obj.shape, 0) + 1
-    return {
-        "objects": len(plan.objects),
-        "shapes": dict(sorted(shapes.items())),
-        "zones": sorted(zone.id for zone in plan.zones),
-    }
-
-
-def family_id(plan: ScenePlan) -> str:
-    """구조 서명 → 계열 id. 읽을 수 있고 결정적이다: `family-n8-b3c5-zLRF`
-    (물체 8개, 상자 3·원통 5, 영역 L·R·F)."""
-    signature = family_signature(plan)
-    boxes = int(signature["shapes"].get("box", 0))
-    cylinders = int(signature["shapes"].get("cylinder", 0))
-    letters = "".join(
-        zone[len(_ZONE_LETTER_PREFIX):] if zone.startswith(_ZONE_LETTER_PREFIX) else zone
-        for zone in signature["zones"]
-    )
-    return f"family-n{signature['objects']}-b{boxes}c{cylinders}-z{letters}"
-
-
-def origin_group(profile: str, plan: ScenePlan) -> str:
-    """`robot/<profile>/<계열>/goal-<목표 영역>` — 장면 계열에 목표 생성 계열(지시의 목표 영역)을 붙인다 (docs/04 §5
-    "목표 생성 계열의 계보"). 영역별 holdout(`robot:goal-zone:<zone>`)이 한 group을 두 split에 걸치게 하지 않는다."""
-    zone = plan.instructions[0].zone if plan.instructions and plan.instructions[0].zone else "none"
-    return f"robot/{profile}/{family_id(plan)}/goal-{zone}"
+# `family_signature`·`family_id`·`origin_group`은 :mod:`robo_jev.sim.scene`이 정의한다(계획의 순수 함수; 문구 변형이 group 해시를
+# 쓴다) — 여기서는 같은 이름으로 다시 내보낸다.
 
 
 def plan_concepts(plan: ScenePlan) -> list[str]:

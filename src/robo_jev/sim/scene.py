@@ -11,8 +11,10 @@ robosuite 모델로 옮긴다. 이렇게 나눠야 일정 생성을 물리 없�
 from __future__ import annotations
 
 import copy
+import hashlib
 import math
-from dataclasses import asdict, dataclass
+from collections.abc import Sequence
+from dataclasses import asdict, dataclass, replace
 from typing import Any
 
 import numpy as np
@@ -24,13 +26,23 @@ __all__ = [
     "ScenePlan",
     "Zone",
     "build_plan",
+    "family_id",
+    "family_signature",
     "merge_profile",
+    "origin_group",
 ]
 
 _ATTRIBUTES = ("fragile", "forbidden")
 
 #: 일정 시각 하나를 잡는 데 쓰는 최대 시도 횟수. 넘으면 설정이 모순이다.
 _SCHEDULE_ATTEMPTS = 200
+#: 물체 배치 전체를 다시 뽑는 최대 횟수 — 금지 물체를 이웃에서 떼어 놓을 자리가 없는 배치(E1 seed 243)는 그 배치를 버리고
+#: 같은 난수 스트림으로 다음 배치를 뽑는다. 처음 배치가 성립한 seed는 난수를 더 쓰지 않으므로 그대로다.
+_LAYOUT_ATTEMPTS = 8
+#: 목표 영역 재가중(기각 표본)의 최대 제안 횟수. 채택 확률이 min(w)/max(w) 이상이라 실제로는 몇 번 안에 끝난다.
+_REWEIGHT_ATTEMPTS = 64
+#: 영역 id → 계열 이름의 글자 (`zoneL` → `L`).
+_ZONE_LETTER_PREFIX = "zone"
 
 
 @dataclass(frozen=True)
@@ -189,11 +201,9 @@ def build_plan(config: dict[str, Any], seed: int, profile: str) -> ScenePlan:
 
     objects = _sample_objects(settings, rng)
     zones = _sample_zones(settings, rng)
-    instructions = _sample_instructions(settings, rng, objects, zones, grid_ms)
+    instructions, objects = _sample_instructions(settings, rng, objects, zones, grid_ms, seed=int(seed))
     disturbances = _sample_disturbances(settings, rng, objects, grid_ms)
-    # 문구 템플릿 변형은 **맨 뒤에** 뽑는다 — 앞의 난수 소비(장면·일정)가 변형 도입 전과 같다 (계약 v0.3, docs/04 §5).
-    instructions = _phrase_instructions(settings, rng, instructions, objects, zones)
-    return ScenePlan(
+    plan = ScenePlan(
         seed=int(seed),
         profile=profile,
         objects=objects,
@@ -201,10 +211,113 @@ def build_plan(config: dict[str, Any], seed: int, profile: str) -> ScenePlan:
         instructions=instructions,
         disturbances=disturbances,
     )
+    # 문구 템플릿 변형은 난수가 아니라 **origin group의 해시**로 고른다 — 같은 group(프로파일·장면 계열·목표 영역)의 에피소드는
+    # 같은 변형이라 템플릿 holdout이 한 group을 두 split에 걸치게 하지 않는다(docs/04 §5). 장면·일정의 난수 소비와 무관하다.
+    return replace(plan, instructions=_phrase_instructions(settings, instructions, objects, zones, group=origin_group(profile, plan)))
+
+
+# --------------------------------------------------------------------------
+# 보조 결정 — 장면·일정의 난수 스트림을 건드리지 않는 결정적 선택
+# --------------------------------------------------------------------------
+
+
+def _hash_unit(*parts: object) -> float:
+    """조각들의 sha256 앞 8바이트 → [0, 1). 장면·일정의 난수 스트림(`rng`)을 바꾸면 안 되는 선택(문구 변형, 목표 영역
+    재가중, 대체 영역)에 쓴다 — 같은 입력이면 같은 값이고, 도입 전 seed의 장면·일정은 그대로다."""
+    digest = hashlib.sha256("|".join(str(part) for part in parts).encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") / 2**64
+
+
+def _weighted_index(point: float, weights: Sequence[float]) -> int:
+    """[0, 1)의 점을 비중 구간에 떨어뜨린다 (비중은 상대값)."""
+    total = float(sum(weights))
+    if total <= 0:
+        raise ValueError(f"비중의 합이 양수여야 한다: {list(weights)}")
+    edge = 0.0
+    for index, weight in enumerate(weights):
+        edge += float(weight) / total
+        if point < edge:
+            return index
+    return len(weights) - 1
+
+
+def _zone_weights(spec: dict[str, Any], zones: Sequence[Zone]) -> list[float] | None:
+    """설정 `instruction.goal_zone_weights`를 이 장면의 영역 순서로. 없으면 None(균등). 표에 없는 영역은 설정의 모순이다."""
+    table = spec.get("goal_zone_weights")
+    if not table:
+        return None
+    missing = [zone.id for zone in zones if zone.id not in table]
+    if missing:
+        raise ValueError(f"instruction.goal_zone_weights에 영역이 없다: {missing} (있는 것: {sorted(table)})")
+    return [float(table[zone.id]) for zone in zones]
+
+
+def _reweight_zone(first: int, zones: Sequence[Zone], weights: list[float] | None, seed: int) -> Zone:
+    """주 난수의 **균등** 추첨(`first`)을 목표 영역 비중으로 다시 가중한다 — 기각 표본: 제안을 확률 w/max(w)로 채택하고,
+    기각하면 seed 해시로 균등 제안을 다시 낸다. 결과의 분포는 비중에 비례하고, 주 난수 스트림은 그대로다: 비중이 최대인
+    영역(zoneL/zoneR)을 뽑은 seed의 계획은 비중 도입 전과 같고, zoneF를 뽑은 seed만 일부가 L/R로 옮겨진다."""
+    if weights is None:
+        return zones[first]
+    top = max(weights)
+    index = first
+    for attempt in range(_REWEIGHT_ATTEMPTS):
+        if _hash_unit(seed, "goal-zone", attempt) * top < weights[index]:
+            return zones[index]
+        index = _weighted_index(_hash_unit(seed, "goal-zone-proposal", attempt), [1.0] * len(zones))
+    return zones[weights.index(top)]
+
+
+def family_signature(plan: ScenePlan) -> dict[str, Any]:
+    """장면 계획의 구조 서명: 물체 수, 형상 다중집합, 영역 집합.
+
+    자세·색·속성 배정·일정은 넣지 않는다 — 같은 구조의 장면이 같은 계열이어야 표현만 다른 장면이
+    train/test로 갈라지지 않는다(docs/04 §5 "holdout이 단지 물체 이름과 후보 ID를 바꾼 버전인지").
+    """
+    shapes: dict[str, int] = {}
+    for obj in plan.objects:
+        shapes[obj.shape] = shapes.get(obj.shape, 0) + 1
+    return {
+        "objects": len(plan.objects),
+        "shapes": dict(sorted(shapes.items())),
+        "zones": sorted(zone.id for zone in plan.zones),
+    }
+
+
+def family_id(plan: ScenePlan) -> str:
+    """구조 서명 → 계열 id. 읽을 수 있고 결정적이다: `family-n8-b3c5-zLRF`
+    (물체 8개, 상자 3·원통 5, 영역 L·R·F)."""
+    signature = family_signature(plan)
+    boxes = int(signature["shapes"].get("box", 0))
+    cylinders = int(signature["shapes"].get("cylinder", 0))
+    letters = "".join(
+        zone[len(_ZONE_LETTER_PREFIX):] if zone.startswith(_ZONE_LETTER_PREFIX) else zone
+        for zone in signature["zones"]
+    )
+    return f"family-n{signature['objects']}-b{boxes}c{cylinders}-z{letters}"
+
+
+def origin_group(profile: str, plan: ScenePlan) -> str:
+    """`robot/<profile>/<계열>/goal-<목표 영역>` — 장면 계열에 목표 생성 계열(지시의 목표 영역)을 붙인다 (docs/04 §5
+    "목표 생성 계열의 계보"). split의 단위이자 문구 변형의 열쇠라, 영역별 holdout도 템플릿 holdout도 한 group을 두 split에
+    걸치게 하지 않는다."""
+    zone = plan.instructions[0].zone if plan.instructions and plan.instructions[0].zone else "none"
+    return f"robot/{profile}/{family_id(plan)}/goal-{zone}"
 
 
 def _sample_objects(settings: dict[str, Any], rng: np.random.Generator) -> tuple[SceneObject, ...]:
+    """물체 배치. 금지 물체를 이웃에서 떼어 놓을 자리가 없는 배치는 버리고 같은 스트림으로 다시 뽑는다(`_LAYOUT_ATTEMPTS`번) —
+    처음 배치가 성립한 seed는 난수를 더 쓰지 않는다. 그래도 안 되면 설정의 모순이라 멈춘다."""
     spec = settings["objects"]
+    for attempt in range(_LAYOUT_ATTEMPTS):
+        try:
+            return _sample_layout(spec, rng)
+        except RuntimeError as error:
+            if attempt == _LAYOUT_ATTEMPTS - 1:
+                raise RuntimeError(f"{error} (배치를 {_LAYOUT_ATTEMPTS}번 다시 뽑아도 같다)") from error
+    raise AssertionError("unreachable")
+
+
+def _sample_layout(spec: dict[str, Any], rng: np.random.Generator) -> tuple[SceneObject, ...]:
     count = int(rng.integers(spec["count_min"], spec["count_max"] + 1))
     palette = list(spec["palette"])
     colour_indices = rng.permutation(len(palette))[:count]
@@ -387,7 +500,10 @@ def _sample_instructions(
     objects: tuple[SceneObject, ...],
     zones: tuple[Zone, ...],
     grid_ms: int,
-) -> tuple[Instruction, ...]:
+    *,
+    seed: int,
+) -> tuple[tuple[Instruction, ...], tuple[SceneObject, ...]]:
+    """지시 일정과, 대상이 목표 영역 밖으로 옮겨졌을 수 있는 물체 목록을 돌려준다 (:func:`_target_outside_zone`)."""
     spec = settings["instruction"]
     labels = dict(settings["objects"]["shape_labels"])
     plain = [obj for obj in objects if not obj.attributes]
@@ -396,15 +512,24 @@ def _sample_instructions(
         raise RuntimeError("지시를 만들 수 있는 평범한 물체가 없다 — 속성 개수를 줄여라")
 
     first = plain[int(rng.integers(len(plain)))]
-    zone = zones[int(rng.integers(len(zones)))]
+    # 목표 영역: 주 난수의 균등 추첨을 설정 `goal_zone_weights`(zoneF는 봉인 개념이라 드물게)로 다시 가중한다 — 주 스트림은 그대로.
+    weights = _zone_weights(spec, zones)
+    zone = _reweight_zone(int(rng.integers(len(zones))), zones, weights, seed)
     # 지시의 대상이 이미 목표 영역 안에 놓여 있으면 에피소드가 틱 0에 끝난다(E1 seed 400100). 난수 소비는 그대로
-    # 두고 **위반한 조합만** 바꾼다 — 대상을 담지 않는 영역이 있으면 그것을, 없으면 그 영역 밖의 다른 대상을.
-    fixed = _target_outside_zone(first, zone, plain, zones)
+    # 두고 **위반한 조합만** 바꾼다 — 영역은 두고 그 밖의 다른 대상(seed 해시로)을, 없으면 대상을 영역 밖의 빈자리로
+    # 옮기고(E0의 평범한 물체 하나), 그것도 안 되면 대상을 담지 않는 다른 영역(목표 영역 비중대로)을.
+    fixed = _target_outside_zone(
+        first, zone, plain, zones, weights=weights, unit=_hash_unit(seed, "zone-fix"),
+        relocate=lambda obj, area: _relocated_outside_zone(obj, area, objects, settings["objects"], seed),
+    )
     if fixed is None:
         raise RuntimeError(
-            f"지시의 대상 {first.id}가 모든 영역 안에 있고 영역 {zone.id} 밖의 평범한 물체도 없다 — 장면 설정을 확인하라"
+            f"지시의 대상 {first.id}가 모든 영역 안에 있고 영역 {zone.id} 밖의 평범한 물체도 빈자리도 없다 — 장면 설정을 확인하라"
         )
     first, zone = fixed
+    if first.id in {obj.id for obj in objects} and first not in objects:
+        objects = tuple(first if obj.id == first.id else obj for obj in objects)  # 옮겨진 대상
+        plain = [first if obj.id == first.id else obj for obj in plain]
     # 텍스트는 변형 0으로 먼저 채우고 :func:`_phrase_instructions`가 맨 뒤에 변형을 고른다.
     text = _instruction_text(spec, "v1", 0, first, zone, labels, fragile=fragile)
     protected = (fragile.id,) if fragile else ()
@@ -413,17 +538,17 @@ def _sample_instructions(
     ]
 
     if not spec.get("enabled", False):
-        return tuple(steps)
+        return tuple(steps), objects
 
     others = [obj for obj in plain if obj.id != first.id]
     if not others:
-        return tuple(steps)
+        return tuple(steps), objects
     second = others[int(rng.integers(len(others)))]
     # v2의 대상도 같은 영역 밖이어야 한다(영역은 v1의 것으로 고정이므로 대상만 바꾼다). 영역 밖의 다른 대상이
     # 없으면 지시 변경은 없다 — 틱 0에 끝난 두 번째 목표를 만들지 않는다.
-    fixed = _target_outside_zone(second, zone, others, (zone,))
+    fixed = _target_outside_zone(second, zone, others, (zone,), unit=_hash_unit(seed, "target-fix"))
     if fixed is None:
-        return tuple(steps)
+        return tuple(steps), objects
     second, _ = fixed
     low, high = spec["change_window_ms"]
     at_ms = _quantise(float(rng.uniform(low, high)), grid_ms)
@@ -440,7 +565,7 @@ def _sample_instructions(
             template="v2#0",
         )
     )
-    return tuple(steps)
+    return tuple(steps), objects
 
 
 def _instruction_text(
@@ -477,12 +602,14 @@ def _instruction_text(
 
 def _phrase_instructions(
     settings: dict[str, Any],
-    rng: np.random.Generator,
     instructions: tuple[Instruction, ...],
     objects: tuple[SceneObject, ...],
     zones: tuple[Zone, ...],
+    *,
+    group: str,
 ) -> tuple[Instruction, ...]:
-    """지시마다 문구 템플릿 변형을 고른다 (v1·v2 각각 `<version>_templates`에서 하나). 구조화된 목표는 그대로다."""
+    """지시마다 문구 템플릿 변형을 고른다 (v1·v2 각각 `<version>_templates`에서 하나, `template_weights`의 비중으로).
+    구조화된 목표는 그대로다. 변형은 **origin group의 해시**가 정한다 — 같은 group의 에피소드는 같은 변형(v1·v2는 따로)."""
     spec = settings["instruction"]
     labels = dict(settings["objects"]["shape_labels"])
     by_id = {obj.id: obj for obj in objects}
@@ -497,20 +624,9 @@ def _phrase_instructions(
             phrased.append(step)
             continue
         weights = spec.get("template_weights")
-        if weights:
-            if len(weights) != len(templates):
-                raise ValueError(f"instruction.template_weights는 {version}_templates와 길이가 같아야 한다")
-            total = float(sum(weights))
-            point = float(rng.uniform(0.0, total))
-            variant = len(templates) - 1
-            edge = 0.0
-            for index, weight in enumerate(weights):
-                edge += float(weight)
-                if point < edge:
-                    variant = index
-                    break
-        else:
-            variant = int(rng.integers(len(templates)))
+        if weights and len(weights) != len(templates):
+            raise ValueError(f"instruction.template_weights는 {version}_templates와 길이가 같아야 한다")
+        variant = _weighted_index(_hash_unit(group, "template", version), weights or [1.0] * len(templates))
         target = by_id[step.target]
         zone = zone_by_id[step.zone]
         if step.version == 1:
@@ -528,22 +644,60 @@ def _inside_zone(obj: SceneObject, zone: Zone) -> bool:
 
 
 def _target_outside_zone(
-    target: SceneObject, zone: Zone, targets: list[SceneObject], zones: tuple[Zone, ...]
+    target: SceneObject,
+    zone: Zone,
+    targets: list[SceneObject],
+    zones: tuple[Zone, ...],
+    *,
+    weights: list[float] | None = None,
+    unit: float = 0.0,
+    relocate: Any = None,
 ) -> tuple[SceneObject, Zone] | None:
     """지시의 (대상, 영역) 조합에서 대상이 영역 안에 놓인 것을 고친다 — 생성 제약(계약 v0.3 이월 항목).
 
-    조합이 이미 괜찮으면 그대로다. 아니면 먼저 대상을 담지 않는 다른 영역(설정 순서의 첫 것), 그것도 없으면 그
-    영역 밖의 다른 대상(id 순서의 첫 것)을 고른다. 둘 다 없으면 `None`. 난수를 더 쓰지 않으므로 위반이 없는
-    seed의 장면·일정은 그대로다.
+    조합이 이미 괜찮으면 그대로다. 아니면 **영역은 두고** (1) 그 영역 밖의 다른 대상 중 하나(`unit`(seed 해시)로 균등하게),
+    (2) 없으면 `relocate(대상, 영역)`로 대상을 영역 밖의 빈자리로 옮긴 것(E0의 평범한 물체 하나), (3) 그것도 안 되면 대상을
+    담지 않는 다른 영역 중 하나(`unit`으로 `weights`(목표 영역 비중, `zones` 순서)에 따라)를 고른다. 영역을 맨 뒤에 바꾸는
+    까닭: 목표 영역은 봉인 개념(zoneF)과 목표 생성 계열의 열쇠라 그 분포를 흔들지 않는다 — 설정 순서의 첫 영역으로 고정하면
+    zoneL에, 영역을 먼저 바꾸면 두 영역뿐인 장면에서 zoneF에 목표가 쏠린다. 셋 다 없으면 `None`. 주 난수를 쓰지 않으므로
+    위반이 없는 seed의 장면·일정은 그대로다.
     """
     if not _inside_zone(target, zone):
         return target, zone
-    for other in zones:
-        if not _inside_zone(target, other):
-            return target, other
-    for candidate in sorted(targets, key=lambda obj: obj.id):
-        if not _inside_zone(candidate, zone):
-            return candidate, zone
+    others = [candidate for candidate in sorted(targets, key=lambda obj: obj.id) if not _inside_zone(candidate, zone)]
+    if others:
+        return others[_weighted_index(unit, [1.0] * len(others))], zone
+    moved = relocate(target, zone) if relocate is not None else None
+    if moved is not None:
+        return moved, zone
+    outside = [index for index, other in enumerate(zones) if not _inside_zone(target, other)]
+    if outside:
+        chosen = outside[_weighted_index(unit, [1.0 if weights is None else weights[index] for index in outside])]
+        return target, zones[chosen]
+    return None
+
+
+def _relocated_outside_zone(
+    target: SceneObject, zone: Zone, objects: tuple[SceneObject, ...], spec: dict[str, Any], seed: int
+) -> SceneObject | None:
+    """대상을 목표 영역 밖의 빈자리로 옮긴 사본 — 영역 밖의 다른 대상이 없을 때(E0의 평범한 물체 하나). 자리는 seed 해시로
+    뽑고(주 난수는 그대로) 배치 규칙(간격·금지 물체 여유·생성 범위)을 지킨다. `spawn_attempts` 안에 자리가 없으면 None."""
+    margins = _forbidden_margins_mm(spec)
+    base = float(spec["min_separation_mm"])
+    x_low, x_high = spec["spawn_x_mm"]
+    y_low, y_high = spec["spawn_y_mm"]
+    others = [obj for obj in objects if obj.id != target.id]
+    for attempt in range(int(spec["spawn_attempts"])):
+        x = int(x_low) + int(_hash_unit(seed, "relocate", target.id, attempt, "x") * (int(x_high) - int(x_low) + 1))
+        y = int(y_low) + int(_hash_unit(seed, "relocate", target.id, attempt, "y") * (int(y_high) - int(y_low) + 1))
+        moved = replace(target, pos_mm=(x, y, target.pos_mm[2]))
+        if _inside_zone(moved, zone):
+            continue
+        if all(
+            math.dist(moved.pos_mm[:2], other.pos_mm[:2]) >= _required_separation_mm(moved, other, base, margins)
+            for other in others
+        ):
+            return moved
     return None
 
 
