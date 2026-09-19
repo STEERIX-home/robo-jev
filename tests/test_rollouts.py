@@ -159,6 +159,27 @@ def test_a_worker_pool_produces_the_same_evidence_as_the_serial_run(short_episod
         }
 
 
+def test_summarise_sweep_conditions_push_success_on_approach_time_and_start_distance(short_episode):
+    """128k 전 관문의 요약: 사건별 결과, 밀기 성공률을 접근 시간·시작 거리·방향·키프레임 종류로 조건화한 표(Wilson 구간),
+    censoring 사유, 키프레임 종류 혼합, 산정. rollout 파일에서만 만들고 다시 돌리지 않는다."""
+    from robo_jev.data.rollouts import summarise_sweep
+
+    out = short_episode["out"] / "sweep"
+    outcome = run(short_episode["out"], limit=16, workers=1, out=out)
+    summary = summarise_sweep(out)
+    assert (out / "sweep-summary.json").is_file()
+    assert summary["rollouts"] == 16 == sum(summary["outcomes"].values())
+    assert sum(sum(counts.values()) for counts in summary["by_event"].values()) == 16
+    assert set(summary["keyframes"]["kinds"]) and summary["keyframes"]["count"] == len(outcome["keyframes"])
+    for table in ("push_by_approach_s", "push_by_start_distance_mm", "push_by_direction", "push_by_keyframe_kind", "grasp_by_start_distance_mm"):
+        for row in summary[table].values():
+            assert row["rollouts"] == row["success"] + row["failure"] + row["censored"]
+            assert row["wilson"][0] <= (row["rate"] if row["rate"] is not None else 1.0) <= row["wilson"][1] + 1e-9
+    pushes = sum(row["rollouts"] for row in summary["push_by_direction"].values())
+    assert pushes == summary["by_event"].get("push", {}).get("success", 0) + summary["by_event"].get("push", {}).get("failure", 0) + summary["by_event"].get("push", {}).get("censored", 0)
+    assert summary["projections"]["d1_128k"]["cpu_hours"] > 0 and summary["wall_s_per_rollout"]["mean"] > 0
+
+
 def test_costing_counts_outcomes_by_function():
     def result(key, outcome, reason=None, wall=0.5):
         return {"outcome": outcome, "reason": reason, "evidence": {"wall_s": wall, "restore_s": 0.05, "ticks": 30},

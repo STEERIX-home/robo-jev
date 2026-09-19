@@ -28,7 +28,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from robo_jev.contracts import QUESTION_SET_V0, SCHEMA_SINGLE_REQUEST, validate_record
-from robo_jev.harness.robot import FIXED_KEYS, load_harness_config
+from robo_jev.harness.robot import load_harness_config
 from robo_jev.sim.expert import GATE_REASONS, Expert
 
 __all__ = [
@@ -37,8 +37,11 @@ __all__ = [
     "allowed_diff_paths",
     "build_pairs",
     "contrast_summary",
+    "default_question_texts",
     "deletion_outcome",
+    "flip",
     "flipped_answer",
+    "forget",
     "single_request_from_tick",
 ]
 
@@ -121,14 +124,14 @@ def single_request_from_tick(
 
 
 def _candidate_text(entry: dict[str, Any]) -> str:
-    """후보 줄의 설명: 의미 키와 기하 네 값 (서식 v0.3의 후보 줄과 같은 정보)."""
-    key = str(entry.get("key", entry.get("kind", "")))
-    parts = [key]
-    for name in ("d", "clr", "path", "g"):
-        if name in entry:
-            parts.append(f"{name}={entry[name]}")
-    if "kind" in entry and "key" not in entry:
-        parts = [str(entry["kind"])] + ([f"ref={entry['ref']}"] if entry.get("ref") else [])
+    """후보 줄의 설명: 결합 후보는 의미 키와 기하 네 값(서식 v0.3의 후보 줄과 같은 정보), 경로 후보는 종류(와 경유점 이름)."""
+    if "key" in entry:
+        parts = [str(entry["key"])]
+        parts.extend(f"{name}={entry[name]}" for name in ("d", "clr", "path", "g") if name in entry)
+        return " ".join(parts)
+    parts = [str(entry.get("kind", ""))]
+    if entry.get("ref"):
+        parts.append(f"ref={entry['ref']}")
     return " ".join(parts)
 
 
@@ -460,7 +463,3 @@ def default_question_texts(harness_config: str | None = None) -> dict[str, str]:
     config = load_harness_config(harness_config) if harness_config else load_harness_config()
     language = str(config.get("language", "ko"))
     return {question_id: str(texts[language]) for question_id, texts in config["questions"].items()}
-
-
-def is_fixed(key: str) -> bool:
-    return key in FIXED_KEYS

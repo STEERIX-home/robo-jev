@@ -163,6 +163,7 @@ def _contrast_report(records: Sequence[dict], errors: list[dict]) -> dict:
             by_request[request["request_id"]] = (index, record)
 
     checked = flip_failures = field_failures = deletion_failures = unpaired = 0
+    robot_expert = None  # 로봇 sibling의 삭제 analogue를 다시 돌릴 전문가 — 필요할 때 한 번 만든다
     for index, record in enumerate(records):
         if not isinstance(record, dict):
             continue
@@ -231,7 +232,9 @@ def _contrast_report(records: Sequence[dict], errors: list[dict]) -> dict:
                 deletion_failures += 1
                 errors.append(_error(index, "evidence.contrast", "삭제 analogue를 다시 돌릴 근거(틱의 후보·이력·commitment)가 없다"))
                 continue
-            outcome = robot_deletion(record["request"]["state"], tick_request, str(provenance.get("kind")), Expert())
+            if robot_expert is None:
+                robot_expert = Expert()
+            outcome = robot_deletion(record["request"]["state"], tick_request, str(provenance.get("kind")), robot_expert)
             if outcome is None:
                 deletion_failures += 1
                 errors.append(_error(index, "provenance.contrast.deletion", f"초점 사실 {contrast.get('focus_field')!r}을 지워도 전문가가 게이트로 가지 않는다"))
