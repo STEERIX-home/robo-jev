@@ -327,7 +327,8 @@ def test_screen_report_is_json_serialisable_and_carries_the_documented_keys(caps
     assert json.loads(checkpoint.read_text(encoding="utf-8"))["partial"] is True and "partial" not in report
     text = json.dumps(report, ensure_ascii=False)
     assert json.loads(text)["serializer"] == TOKEN_SERIALIZER_VERSION
-    assert {"task", "path", "environment", "tokenizer", "serializer", "settings", "profiles", "candidates", "budgets_ms", "notes", "generated_at"} <= set(report)
+    assert {"task", "path", "environment", "tokenizer", "serializer", "settings", "profiles", "candidates", "budgets_ms", "notes", "generated_at", "finished_at"} <= set(report)
+    assert report["finished_at"] >= report["generated_at"]  # generated_at = 시작, finished_at = 끝
     assert report["path"] == "native" and report["environment"]["gpu"] == "fake" and report["settings"]["max_miss_rate"] == 0.05
     candidate = report["candidates"]["Qwen/Qwen3.5-2B"]
     assert {"config", "manifest", "loaded", "conditions", "memory", "verdict"} <= set(candidate)

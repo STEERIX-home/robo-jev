@@ -817,6 +817,7 @@ def screen(
         if checkpoint is not None:
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
             checkpoint.write_text(json.dumps({**report, "partial": True}, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    report["finished_at"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")  # `generated_at`은 시작 시각이다
     return report
 
 
