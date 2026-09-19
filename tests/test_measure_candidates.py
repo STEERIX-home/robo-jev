@@ -343,12 +343,11 @@ def test_synthetic_episodes_extend_to_n_ticks_with_the_instruction_change_on_the
     assert [tick["request"]["state"]["goal"]["version"] for tick in record["ticks"]] == [1, 1, 1, 1, 2, 2, 2]
     assert [tick["t"] for tick in record["ticks"]] == list(range(7))
     assert len(record["ticks"][0]["request"]["candidates"]["q_main"]) == 12
-    assert all(tick["request"]["commitment"] is None for tick in record["ticks"])  # K=12는 그 grasp 후보가 잘려 measure_tokens와 같이 commitment 없음
+    # 계약 v0.3: 지시의 대상×영역 파지(grasp:o0:top:zoneL)는 상한과 무관하게 예약되므로 K=12에서도 commitment가 틱마다 이어진다.
+    assert record["ticks"][0]["request"]["commitment"] is None
+    assert [tick["request"]["commitment"]["held_ticks"] for tick in record["ticks"][1:]] == [1, 2, 3, 4, 5, 6]
     plain = module.synthetic_episode(6, 12, instruction_change=False, ticks=3)
     assert len(plain["prefix"]["instructions"]) == 1 and len(plain["ticks"]) == 3
-    held = module.synthetic_episode(6, 32, instruction_change=False, ticks=4)  # K=32에는 있어 commitment가 틱마다 이어진다
-    assert [tick["request"]["commitment"]["held_ticks"] for tick in held["ticks"][1:]] == [1, 2, 3]
-    assert held["ticks"][0]["request"]["commitment"] is None
 
 
 def test_profiles_are_built_from_the_serializer_and_v03_is_the_upper_stream_truncated_to_500():

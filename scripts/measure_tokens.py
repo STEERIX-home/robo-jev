@@ -5,8 +5,8 @@
 (a) D0 스트림 4 에피소드(`tests/fixtures/d0_streams.jsonl`): prefix 토큰, 틱당 새 토큰
     p50/p95/max, 그 틱의 K에서의 후보 블록, 결정 위치 부담.
 (b) D0 단일 요청 64건(`tests/fixtures/d0.jsonl`): 전체 토큰 p50/p95/max, 질문별 T_i 크기.
-(c) 합성 스트림 요청: `RobotHarness.build_request`로 물체 6·10개 × K=12·32 × 지시 변경
-    유무의 장면을 만들어 prefix·틱·후보 블록·결정 위치를 잰다.
+(c) 합성 스트림 요청: `RobotHarness.build_request`로 물체 6·10개 × K 상한(설정의 12; `upper`는 10물체에서
+    상한을 풀어 실행 가능한 후보 전부) × 지시 변경 유무의 장면을 만들어 prefix·틱·후보 블록·결정 위치를 잰다.
 
 **장면 빌더의 결합 규칙.** 아래 `obj`/`observation`은 `tests/test_harness.py`의 같은 이름
 빌더를 **복제**한 것이다(`tests/`는 패키지가 아니고, 그 파일은 다른 브랜치에서 고쳐지고 있어
@@ -317,17 +317,18 @@ def scene(n_objects: int) -> list[dict]:
     return objects
 
 
-def harness_with_cap(k_cap: int) -> RobotHarness:
+def harness_with_cap(k_cap: int | None) -> RobotHarness:
+    """K 상한을 바꾼 하네스. `None`이면 상한을 풀어(실행 가능한 후보 전부) 상한 없는 상계(`upper`)를 잰다."""
     config = copy.deepcopy(load_harness_config())
-    config["candidates"]["max"] = int(k_cap)
+    config["candidates"]["max"] = int(k_cap) if k_cap is not None else 10_000
     return RobotHarness(config)
 
 
-def synthetic_record(n_objects: int, k_cap: int, instruction_change: bool) -> dict:
+def synthetic_record(n_objects: int, k_cap: int | None, instruction_change: bool) -> dict:
     hrn = harness_with_cap(k_cap)
     first = hrn.build_request(observation(scene(n_objects)), None, None)
     hold = candidate_id("hold")
-    grasp_key = f"grasp:o0:top:zoneL:slow"
+    grasp_key = "grasp:o0:top:zoneL"
     grasp = next((c for c in first["request"]["candidates"]["q_main"] if c["key"] == grasp_key), None)
     commitment = (
         {"action_ref": grasp["id"], "key": grasp_key, "phase": "approach", "held_ticks": 1, "last_switch_tick": 0}
@@ -358,27 +359,30 @@ def synthetic_record(n_objects: int, k_cap: int, instruction_change: bool) -> di
     return record
 
 
+#: 합성 셀 (물체 수, K 상한 — None은 상한 없음). K=32는 계약 v0.3에 없다; `upper`는 10물체에서 상한을 푼 상계다.
+SYNTHETIC_CELLS = ((6, 12), (10, 12), (10, None))
+
+
 def measure_synthetic(tokenizer: Any) -> list[dict[str, Any]]:
     cells = []
-    for n_objects in (6, 10):
-        for k_cap in (12, 32):
-            for change in (False, True):
-                record = synthetic_record(n_objects, k_cap, change)
-                out = serialize_request(record, tokenizer, layout="stream_l1a")
-                ticks = [tick_breakdown(out, tick) for tick in out["ticks"]]
-                first_state = record["ticks"][0]["request"]["state"]
-                cells.append(
-                    {
-                        "objects": n_objects,
-                        "k_cap": k_cap,
-                        "instruction_change": change,
-                        "k_actual": ticks[0]["k"].get("q_main"),
-                        "prefix_tokens": out["prefix_end"],
-                        "tick0": ticks[0],
-                        "tick1": ticks[1],
-                        "state_lines_tick0": state_line_breakdown(tokenizer, first_state),
-                    }
-                )
+    for n_objects, k_cap in SYNTHETIC_CELLS:
+        for change in (False, True):
+            record = synthetic_record(n_objects, k_cap, change)
+            out = serialize_request(record, tokenizer, layout="stream_l1a")
+            ticks = [tick_breakdown(out, tick) for tick in out["ticks"]]
+            first_state = record["ticks"][0]["request"]["state"]
+            cells.append(
+                {
+                    "objects": n_objects,
+                    "k_cap": k_cap if k_cap is not None else "none",
+                    "instruction_change": change,
+                    "k_actual": ticks[0]["k"].get("q_main"),
+                    "prefix_tokens": out["prefix_end"],
+                    "tick0": ticks[0],
+                    "tick1": ticks[1],
+                    "state_lines_tick0": state_line_breakdown(tokenizer, first_state),
+                }
+            )
     return cells
 
 
@@ -483,7 +487,7 @@ def print_table(report: dict[str, Any]) -> None:
     for c in report["synthetic"]:
         t0, t1 = c["tick0"], c["tick1"]
         print(
-            f"{c['objects']:>5}{c['k_cap']:>6}{c['k_actual']:>4}{'yes' if c['instruction_change'] else 'no':>7}{c['prefix_tokens']:>8}"
+            f"{c['objects']:>5}{str(c['k_cap']):>6}{c['k_actual']:>4}{'yes' if c['instruction_change'] else 'no':>7}{c['prefix_tokens']:>8}"
             f"{t0['new_tokens']:>7}{t1['new_tokens']:>7}{t1['instruction_change']:>10}{t0['state']:>7}"
             f"{t0['candidate_block'].get('q_main', 0):>8}{t0['candidate_block'].get('q_path', 0):>8}{t0['decisions']:>5}"
             f"{fmt(c['state_lines_tick0'].get('object', {}).get('per_line', 0)):>9}{fmt(t0['tokens_per_candidate'].get('q_main', 0)):>10}"

@@ -46,11 +46,13 @@ def test_scene_builders_stay_in_sync_with_test_harness():
 
 def test_synthetic_scenes_are_valid_streams_with_the_requested_k():
     module = script()
-    for k_cap in (12, 32):
-        record = module.synthetic_record(6, k_cap, instruction_change=True)
+    assert module.SYNTHETIC_CELLS == ((6, 12), (10, 12), (10, None))  # K=32는 계약 v0.3에 없다
+    for n_objects, k_cap in module.SYNTHETIC_CELLS:
+        record = module.synthetic_record(n_objects, k_cap, instruction_change=True)
         validate_record(record)
         assert len(record["ticks"]) == 2
-        assert len(record["ticks"][0]["request"]["candidates"]["q_main"]) == k_cap
+        k = len(record["ticks"][0]["request"]["candidates"]["q_main"])
+        assert k > 12 if k_cap is None else k == k_cap  # 상한을 풀면 실행 가능한 후보 전부 (상계)
         assert [item["version"] for item in record["prefix"]["instructions"]] == [1, 2]
         assert record["ticks"][1]["request"]["state"]["goal"]["version"] == 2
     ten = module.synthetic_record(10, 12, instruction_change=False)

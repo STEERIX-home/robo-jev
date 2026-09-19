@@ -683,7 +683,7 @@ def synthetic_episode(n_objects: int, k_cap: int, *, instruction_change: bool, t
         raise ValueError(f"change_tick은 1 이상 ticks({ticks}) 미만이어야 한다 (받은 값: {change_tick})")
     hrn = measure_tokens.harness_with_cap(k_cap)
     first = hrn.build_request(measure_tokens.observation(measure_tokens.scene(n_objects)), None, None)
-    grasp_key = "grasp:o0:top:zoneL:slow"
+    grasp_key = "grasp:o0:top:zoneL"
     grasp = next((c for c in first["request"]["candidates"]["q_main"] if c["key"] == grasp_key), None)
     exec_history = {
         "adopted": {"main": candidate_id("hold"), "phase": "none", "path": "p0", "speed": 0, "force": 0, "gripper": "open", "stop": False},
