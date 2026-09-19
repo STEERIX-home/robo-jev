@@ -15,6 +15,9 @@ attention 층별 KV cache(``{"k", "v"}``, RoPE 적용 뒤의 k), cache 항목별
   공유한다. 분기는 ``advance``할 수 없다 — 다음 틱은 부모(분기 이전 공통 상태)에서 이어간다.
 * ``step(token) -> Tensor[d]`` — 토큰 하나를 이 상태에 이어 붙이고(분기의 결정 토큰) 그 hidden state를
   돌려준다. 분기의 갱신은 부모·형제에 닿지 않는다(자기 버퍼와 자기 KV 꼬리만 바뀐다).
+* ``branch_step(tokens) -> Tensor[n, d]`` — 결정 표지 n개의 분기를 한꺼번에(``fork(n)`` + ``step`` n번과 같다).
+  실제 backbone(:mod:`robo_jev.model.backbone_qwen`)은 이것을 한 배치 forward로 구현하며 :func:`replay_layout` 이
+  이것을 부른다. ``detach()``·``to_dict()``/``from_dict()``는 truncated BPTT의 구간 경계와 checkpoint가 쓴다.
 * ``clone()`` — 스냅샷(모든 tensor를 clone, 그래프 유지).
 
 position 규칙은 직렬화(:mod:`robo_jev.model.serialize`)와 같다: prefix 0부터, 틱 몸통은 이어서, 결정
@@ -39,7 +42,7 @@ from torch import Tensor
 from robo_jev.model.attention import build_reference_mask
 from robo_jev.model.hybrid import TinyHybrid, causal_mask, default_backbone, fork_delta_state
 
-__all__ = ["LAYOUT_WINDOW", "StreamState", "forward_layout", "replay_layout"]
+__all__ = ["LAYOUT_WINDOW", "StreamState", "forward_layout", "replay_layout", "stream_state_class"]
 
 #: `window_ticks` 인수의 기본값 — layout의 `window_ticks`(없으면 backbone 설정)를 쓴다.
 LAYOUT_WINDOW = "layout"
@@ -274,6 +277,82 @@ class StreamState:
         self.hidden = out["hidden"][0]
         return out["hidden"][0, 0]
 
+    def branch_step(self, tokens: Sequence[int]) -> Tensor:
+        """결정 표지 n개를 각각 1토큰 분기로 → hidden ``[n, d]``. ``fork(n)`` 뒤 분기마다 ``step``과 같다.
+
+        실제 backbone(:class:`robo_jev.model.backbone_qwen.QwenStreamState`)은 이것을 **한 배치 forward**로 구현하고,
+        fixture는 분기를 차례로 돈다 — 둘 다 상태·KV를 바꾸지 않는다.
+        """
+        tokens = _as_token_list(tokens, "tokens")
+        if not tokens:
+            raise ValueError("tokens: 결정 토큰이 하나 이상 필요하다")
+        return torch.stack([branch.step(token) for branch, token in zip(self.fork(len(tokens)), tokens)])
+
+    def detach(self, *, requires_grad: bool = False) -> StreamState:
+        """구간 경계에서 넘기는 공통 상태 — 모든 tensor를 detach한 새 상태 (값은 같고 gradient만 끊긴다).
+
+        `requires_grad=True`면 detach한 tensor를 leaf로 만들어 다음 구간의 gradient가 경계에 얼마나 닿는지 관찰할 수
+        있다(검사용). :func:`robo_jev.train.detach_stream_state` 가 부른다.
+        """
+        if self.is_branch:
+            raise ValueError("branch 상태는 넘기지 않는다 — 다음 구간은 분기 이전 공통 상태에서 이어간다")
+
+        def cut(tensor: Tensor | None) -> Tensor | None:
+            if tensor is None:
+                return None
+            out = tensor.detach()
+            if requires_grad and out.is_floating_point():
+                out.requires_grad_(True)
+            return out
+
+        return StreamState(
+            self.backbone,
+            delta=[{key: cut(value) for key, value in layer.items()} for layer in self.delta],
+            kv=[{key: cut(value) for key, value in layer.items()} for layer in self.kv],
+            cache_ticks=self.cache_ticks.detach(),
+            position=self.position,
+            tick=self.tick,
+            window_ticks=self.window_ticks,
+            prefix_hidden=cut(self.prefix_hidden),
+            hidden=cut(self.hidden),
+            is_branch=False,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        """checkpoint용 — 분기 이전 공통 상태를 detach된 tensor dict로 (:mod:`robo_jev.checkpoint`)."""
+        if self.is_branch:
+            raise ValueError("branch 상태는 저장하지 않는다 — 구간 경계의 상태는 분기 이전 공통 상태다")
+        return {
+            "kind": "tiny",
+            "delta": [{key: value.detach().clone() for key, value in layer.items()} for layer in self.delta],
+            "kv": [{key: value.detach().clone() for key, value in layer.items()} for layer in self.kv],
+            "cache_ticks": self.cache_ticks.detach().clone(),
+            "position": int(self.position),
+            "tick": int(self.tick),
+            "window_ticks": int(self.window_ticks),
+            "prefix_hidden": None if self.prefix_hidden is None else self.prefix_hidden.detach().clone(),
+            "hidden": None if self.hidden is None else self.hidden.detach().clone(),
+        }
+
+    @classmethod
+    def from_dict(cls, packed: dict[str, Any], backbone: TinyHybrid) -> StreamState:
+        """:meth:`to_dict` 의 역 — 주어진 backbone에 붙인 공통 상태."""
+        for key in ("delta", "kv", "cache_ticks", "position", "tick", "window_ticks"):
+            if key not in packed:
+                raise ValueError(f"carried_state.{key}: 없다")
+        return cls(
+            backbone,
+            delta=[dict(layer) for layer in packed["delta"]],
+            kv=[dict(layer) for layer in packed["kv"]],
+            cache_ticks=packed["cache_ticks"],
+            position=int(packed["position"]),
+            tick=int(packed["tick"]),
+            window_ticks=int(packed["window_ticks"]),
+            prefix_hidden=packed.get("prefix_hidden"),
+            hidden=packed.get("hidden"),
+            is_branch=False,
+        )
+
     def clone(self) -> StreamState:
         """스냅샷 — 모든 tensor를 clone한다(그래프 유지)."""
         return StreamState(
@@ -293,6 +372,11 @@ class StreamState:
 # --------------------------------------------------------------------------
 # 직렬화된 layout의 재생(증분)과 처음부터 계산
 # --------------------------------------------------------------------------
+
+
+def stream_state_class(backbone: Any) -> Any:
+    """backbone의 스트림 상태 클래스 — fixture는 :class:`StreamState`, 실제 backbone은 자기 것(`stream_state_class`)."""
+    return getattr(backbone, "stream_state_class", StreamState)
 
 
 def _resolve_window(layout: dict, backbone: TinyHybrid, window_ticks: Any) -> int | None:
@@ -320,6 +404,11 @@ def forward_layout(
     n = len(layout["tokens"])
     if window is None:
         window = max(int(t) for t in layout["tick"]) + 2 if n else 1  # 어떤 틱도 밖으로 나가지 않는다
+    own = getattr(backbone, "forward_layout", None)
+    if own is not None:  # 실제 backbone은 자기 기준 계산(공식 forward + 물질화한 기준 mask)으로
+        if return_layers:
+            raise ValueError("return_layers: 실제 backbone의 기준 계산은 층별 출력을 내지 않는다")
+        return own(layout, window_ticks=window)
     mask = build_reference_mask(layout, window_ticks=window)
     tokens = torch.tensor([layout["tokens"]], dtype=torch.long)
     positions = torch.tensor([layout["position"]], dtype=torch.long)
@@ -328,6 +417,10 @@ def forward_layout(
     if return_layers:
         return out["hidden"][0], [layer[0] for layer in out["layer_hidden"]]
     return out["hidden"][0]
+
+
+def _device_of(backbone: Any) -> torch.device:
+    return next(backbone.parameters()).device
 
 
 def _check_position(layout: dict, index: int, expected: int) -> None:
@@ -367,7 +460,7 @@ def replay_layout(
     if state is None:
         if start_tick:
             raise ValueError("start_tick: 앞 틱을 이미 읽은 state와 함께만 쓸 수 있다")
-        state = StreamState.initial(backbone, window_ticks=window, initial=initial)
+        state = stream_state_class(backbone).initial(backbone, window_ticks=window, initial=initial)
         if prefix_end:
             _check_position(layout, 0, state.position)
             state = state.extend_prefix(tokens[:prefix_end])
@@ -387,7 +480,12 @@ def replay_layout(
         if start != cursor:
             raise ValueError(f"ticks[{tick.get('index')}].start: {start} — 토큰 {cursor}부터 이어져야 한다")
         if int(tick["index"]) < start_tick:
-            pieces.append(torch.zeros(end - start, backbone.config.d_model, dtype=state.prefix_hidden.dtype if state.prefix_hidden is not None else torch.float32))
+            pieces.append(
+                torch.zeros(
+                    end - start, backbone.config.d_model,
+                    dtype=state.prefix_hidden.dtype if state.prefix_hidden is not None else torch.float32, device=_device_of(backbone),
+                )
+            )  # fmt: skip
             cursor = end
             continue
         _check_position(layout, start, state.position)
@@ -397,15 +495,17 @@ def replay_layout(
         decisions = list(range(body_end, end))
         outputs: dict[int, Tensor] = {}
         if decisions:
-            for index, branch in zip(decisions, state.fork(len(decisions))):
+            for index in decisions:
                 _check_position(layout, index, state.position)
-                outputs[index] = branch.step(tokens[index])
-            pieces.append(torch.stack([outputs[index] for index in decisions]))
+            branch_hidden_rows = state.branch_step([tokens[index] for index in decisions])  # 분기 n개 (실제 backbone은 한 배치)
+            for index, row in zip(decisions, branch_hidden_rows):
+                outputs[index] = row
+            pieces.append(branch_hidden_rows)
         branch_hidden.append(outputs)
         cursor = end
     if cursor != len(tokens):
         raise ValueError(f"ticks: 토큰 {cursor}까지만 틱에 속한다 (전체 {len(tokens)})")
-    hidden = torch.cat(pieces) if pieces else torch.zeros(0, backbone.config.d_model)
+    hidden = torch.cat(pieces) if pieces else torch.zeros(0, backbone.config.d_model, device=_device_of(backbone))
     return {
         "hidden": hidden,
         "final": state,

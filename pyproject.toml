@@ -32,7 +32,11 @@ dev = ["pytest>=8.3"]
 # 않고 Spark/클라우드에서만 `uv sync --group backbone`으로 넣는다. 둘 다 순수 Python wheel이며 fla는 torch가
 # 끌어온 triton의 kernel만 쓴다. `causal-conv1d`(sdist, CUDA C++)는 잠그지 않는다 — 있으면 transformers가
 # 쓰고 없으면 torch conv fallback이다. 어느 kernel이 돌았는지는 측정 보고서(backbone-screen.json)가 적는다.
-backbone = ["transformers==5.17.0", "flash-linear-attention==0.5.2"]
+backbone = [
+    "transformers==5.17.0",
+    "flash-linear-attention==0.5.2",
+    "peft>=0.21.0",
+]
 
 [build-system]
 requires = ["hatchling"]

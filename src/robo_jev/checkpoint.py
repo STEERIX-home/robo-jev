@@ -28,8 +28,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from robo_jev.model.hybrid import TinyHybrid
-from robo_jev.model.stream import StreamState
+from robo_jev.model.stream import StreamState, stream_state_class
 
 __all__ = [
     "CHECKPOINT_FORMAT",
@@ -166,36 +165,18 @@ def restore_rng_state(state: dict[str, Any]) -> None:
 # --------------------------------------------------------------------------
 
 
-def stream_state_to_dict(state: StreamState) -> dict[str, Any]:
-    """분기 이전 공통 상태를 detach된 tensor dict로 (구간 경계에서 넘기는 것과 같은 것)."""
-    if state.is_branch:
+def stream_state_to_dict(state: Any) -> dict[str, Any]:
+    """분기 이전 공통 상태를 detach된 tensor dict로 (구간 경계에서 넘기는 것과 같은 것). 상태 클래스의 ``to_dict``."""
+    if getattr(state, "is_branch", False):
         raise ValueError("branch 상태는 저장하지 않는다 — 구간 경계의 상태는 분기 이전 공통 상태다")
-    return {
-        "delta": [{key: value.detach().clone() for key, value in layer.items()} for layer in state.delta],
-        "kv": [{key: value.detach().clone() for key, value in layer.items()} for layer in state.kv],
-        "cache_ticks": state.cache_ticks.detach().clone(),
-        "position": int(state.position),
-        "tick": int(state.tick),
-        "window_ticks": int(state.window_ticks),
-        "prefix_hidden": None if state.prefix_hidden is None else state.prefix_hidden.detach().clone(),
-        "hidden": None if state.hidden is None else state.hidden.detach().clone(),
-    }
+    return state.to_dict()
 
 
-def stream_state_from_dict(packed: dict[str, Any], backbone: TinyHybrid) -> StreamState:
-    """:func:`stream_state_to_dict`의 역 — 주어진 backbone에 붙인 공통 상태."""
-    for key in ("delta", "kv", "cache_ticks", "position", "tick", "window_ticks"):
-        if key not in packed:
-            raise ValueError(f"carried_state.{key}: 없다")
-    return StreamState(
-        backbone,
-        delta=[dict(layer) for layer in packed["delta"]],
-        kv=[dict(layer) for layer in packed["kv"]],
-        cache_ticks=packed["cache_ticks"],
-        position=int(packed["position"]),
-        tick=int(packed["tick"]),
-        window_ticks=int(packed["window_ticks"]),
-        prefix_hidden=packed.get("prefix_hidden"),
-        hidden=packed.get("hidden"),
-        is_branch=False,
-    )
+def stream_state_from_dict(packed: dict[str, Any], backbone: Any) -> Any:
+    """:func:`stream_state_to_dict`의 역 — 주어진 backbone의 상태 클래스(fixture는 :class:`StreamState`)에 붙인 공통 상태."""
+    cls = stream_state_class(backbone)
+    kind = packed.get("kind", "tiny")
+    expected = "tiny" if cls is StreamState else "qwen"
+    if kind != expected:
+        raise ValueError(f"carried_state.kind: {expected!r} 상태여야 한다 (저장된 것: {kind!r}) — 다른 종류의 backbone에서 저장한 상태다")
+    return cls.from_dict(packed, backbone)

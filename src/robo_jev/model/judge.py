@@ -44,7 +44,7 @@ from typing import Any
 import torch
 from torch import Tensor, nn
 
-from robo_jev.model.hybrid import DEFAULT_CONFIG, HybridConfig, TinyHybrid, causal_mask
+from robo_jev.model.hybrid import DEFAULT_CONFIG, HybridConfig, TinyHybrid
 from robo_jev.model.stream import LAYOUT_WINDOW, StreamState, forward_layout, replay_layout
 
 __all__ = ["READOUTS", "Judge", "candidate_span", "typed_outputs"]
@@ -116,7 +116,13 @@ class Judge(nn.Module):
     """
 
     def __init__(
-        self, backbone: TinyHybrid, *, rank: int, readout: str = "pointer", seed: int | None = None
+        self,
+        backbone: Any,
+        *,
+        rank: int,
+        readout: str = "pointer",
+        seed: int | None = None,
+        readout_dtype: torch.dtype | None = None,
     ) -> None:
         super().__init__()
         if readout not in READOUTS:
@@ -127,19 +133,22 @@ class Judge(nn.Module):
         self.rank = int(rank)
         self.readout = readout
         d = backbone.config.d_model
+        device = next(backbone.parameters()).device
+        dtype = next(backbone.parameters()).dtype if readout_dtype is None else readout_dtype
         if readout == "pointer":
-            self.U = nn.Linear(d, rank, bias=False)
-            self.V = nn.Linear(d, rank, bias=False)
-            self.bias = nn.Parameter(torch.zeros(()))
+            self.U = nn.Linear(d, rank, bias=False, device=device, dtype=dtype)
+            self.V = nn.Linear(d, rank, bias=False, device=device, dtype=dtype)
+            self.bias = nn.Parameter(torch.zeros((), device=device, dtype=dtype))
             linears = (self.U, self.V)
         else:
-            self.w = nn.Linear(d, 1)  # 참고군 R의 scalar readout (bias 포함)
+            self.w = nn.Linear(d, 1, device=device, dtype=dtype)  # 참고군 R의 scalar readout (bias 포함)
             linears = (self.w,)
         if seed is not None:
-            generator = torch.Generator().manual_seed(int(seed))
+            generator = torch.Generator().manual_seed(int(seed))  # CPU generator — 장치와 무관하게 같은 초기값
             with torch.no_grad():
                 for linear in linears:
-                    linear.weight.normal_(0.0, 1.0 / math.sqrt(d), generator=generator)
+                    weight = torch.empty(linear.weight.shape, dtype=torch.float32).normal_(0.0, 1.0 / math.sqrt(d), generator=generator)
+                    linear.weight.copy_(weight)
                     if linear.bias is not None:
                         linear.bias.zero_()
 
@@ -162,17 +171,25 @@ class Judge(nn.Module):
 
     # -- readout --
 
+    @property
+    def readout_dtype(self) -> torch.dtype:
+        return (self.U if self.readout == "pointer" else self.w).weight.dtype
+
     def pointer_logits(self, h_d: Tensor, h_c: Tensor) -> Tensor:
-        """``z_k = (U h_d)ᵀ (V h_{c_k}) / √r + b``. ``h_d [d]``, ``h_c [K, d]`` → ``[K]``."""
+        """``z_k = (U h_d)ᵀ (V h_{c_k}) / √r + b``. ``h_d [d]``, ``h_c [K, d]`` → ``[K]``.
+
+        hidden state는 readout의 dtype으로 올려 곱한다 — BF16 backbone에 fp32 readout(docs/03 §5 "FP32 loss")을 붙일 때.
+        """
         if self.readout != "pointer":
             raise ValueError(f"readout: pointer readout이 아니다 ({self.readout!r})")
-        return (self.V(h_c) @ self.U(h_d)) / math.sqrt(self.rank) + self.bias
+        dtype = self.readout_dtype
+        return (self.V(h_c.to(dtype)) @ self.U(h_d.to(dtype))) / math.sqrt(self.rank) + self.bias
 
     def branch_logits(self, h: Tensor) -> Tensor:
         """참고군 R: ``z_k = wᵀ h_k + b``. ``h [K, d]`` → ``[K]``."""
         if self.readout != "candidate_branch":
             raise ValueError(f"readout: 참고군 R(candidate_branch)이 아니다 ({self.readout!r})")
-        return self.w(h)[:, 0]
+        return self.w(h.to(self.readout_dtype))[:, 0]
 
     # -- 공개 API --
 
@@ -200,7 +217,11 @@ class Judge(nn.Module):
     # -- state_first (P0) --
 
     def _run_paths(self, paths: list[tuple[list[int], list[int]]]) -> Tensor:
-        """경로들을 오른쪽 padding한 한 배치로 돌린다 → hidden ``[P, L, d]``."""
+        """경로들을 오른쪽 padding한 한 배치로 돌린다 → hidden ``[P, L, d]``.
+
+        mask는 주지 않는다 — 경로가 독립 causal 시퀀스라 backbone의 기본(plain causal)이 곧 규칙이고, 오른쪽 padding은
+        causal 아래에서 앞 토큰에 영향이 없다(fixture의 기본 mask = ``causal_mask(L)``과 비트 단위로 같다).
+        """
         length = max(len(tokens) for tokens, _ in paths)
         ids = torch.zeros(len(paths), length, dtype=torch.long)
         positions = torch.zeros(len(paths), length, dtype=torch.long)
@@ -208,7 +229,8 @@ class Judge(nn.Module):
             ids[row, : len(tokens)] = torch.tensor(tokens, dtype=torch.long)
             positions[row, : len(pos)] = torch.tensor(pos, dtype=torch.long)
             positions[row, len(pos) :] = pos[-1] + 1 + torch.arange(length - len(pos))
-        return self.backbone(ids, positions, mask=causal_mask(length))["hidden"]
+        device = next(self.backbone.parameters()).device
+        return self.backbone(ids.to(device), positions.to(device))["hidden"]
 
     @staticmethod
     def _question_span(layout: dict, branch: int, decision: int) -> tuple[int, int]:
@@ -280,13 +302,15 @@ class Judge(nn.Module):
         from_scratch: bool,
         window_ticks: Any,
         initial: list[dict] | None,
-        state: StreamState | None,
+        state: Any,
         start_tick: int,
     ) -> dict[str, Any]:
         if layout.get("layout") != "stream_l1a":
             raise ValueError(f"stream: layout이 stream_l1a가 아니다 ({layout.get('layout')!r})")
-        tick_states: list[StreamState] | None = None
-        final: StreamState | None = None
+        tick_states: list[Any] | None = None
+        final: Any = None
+        if self.readout != "pointer" and not isinstance(self.backbone, TinyHybrid):
+            raise ValueError("candidate_branch: 참고군 R의 스트림 경로는 fixture에서만 실행한다 (실제 backbone은 pointer readout)")
         if from_scratch:
             if state is not None or start_tick or initial is not None:
                 raise ValueError("from_scratch: 이어 붙이기(state·start_tick·initial)와 함께 쓸 수 없다")
