@@ -3,6 +3,8 @@
 import json
 
 import pytest
+from helpers import SIM_CONFIG
+import yaml
 
 from robo_jev.contracts import model_input, validate_record
 from robo_jev.data.dagger import (
@@ -18,14 +20,18 @@ from robo_jev.data.robot_episodes import (
     episode_id,
     generate_episode,
     load_generator_config,
+    origin_group,
+    plan_tags,
     read_episodes,
     seed_schedule,
     write_episode,
 )
 from robo_jev.data.split import SplitPolicy, assign_split
 from robo_jev.harness.robot import parse_exec_history
+from robo_jev.sim.scene import build_plan
 
 CONFIG = load_generator_config()
+SIM = yaml.safe_load(SIM_CONFIG.read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="module")
@@ -81,7 +87,10 @@ def test_a_dagger_cycle_written_next_to_an_expert_batch_shares_no_id_and_the_man
     assert len(read_episodes(out)) == 4
     policy = SplitPolicy.from_config(CONFIG["split"])
     for record in cycle["records"]:
-        assert record["split"] == assign_split(record["origin_group"], policy)  # 같은 장면 계열 → 같은 split
+        # 같은 장면 계열 → 같은 split. 봉인 태그(문구 변형·zoneF 목표)는 계획에서 나오므로 계획을 다시 지어 맞댄다.
+        plan = build_plan(SIM, record["provenance"]["seed"], record["provenance"]["profile"])
+        assert record["origin_group"] == origin_group(record["provenance"]["profile"], plan)
+        assert record["split"] == assign_split(record["origin_group"], policy, plan_tags(plan))
         assert record["provenance"]["seed"] >= CONFIG["seeds"]["base"] + 2 * CONFIG["seeds"]["dagger_cycle_offset"]
         assert record["provenance"]["dagger"]["seed_base"] == CONFIG["seeds"]["base"] + 2 * CONFIG["seeds"]["dagger_cycle_offset"]
     assert cycle["manifest"]["dagger"]["seed_base"] == CONFIG["seeds"]["base"] + 2 * CONFIG["seeds"]["dagger_cycle_offset"]

@@ -164,8 +164,8 @@ def test_costing_counts_outcomes_by_function():
         return {"outcome": outcome, "reason": reason, "evidence": {"wall_s": wall, "restore_s": 0.05, "ticks": 30},
                 "job": {"key": key, "env_rebuild_s": None}}
 
-    cost = costing([result("grasp:o0:top:zoneL:slow", "success"), result("push:o1:+x:none:slow", "failure", "horizon"),
-                    result("push:o1:+x:none:fast", "censored", "wall_time_limit", wall=2.0)], batch_wall_s=3.0, replay_s_total=1.0, workers=1)
+    cost = costing([result("grasp:o0:top:zoneL", "success"), result("push:o1:+x:none", "failure", "horizon"),
+                    result("push:o1:+x:none", "censored", "wall_time_limit", wall=2.0)], batch_wall_s=3.0, replay_s_total=1.0, workers=1)
     assert cost["outcomes"] == {"censored": 1, "failure": 1, "success": 1}
     assert cost["by_function"]["push"] == {"rollouts": 2, "success": 0, "failure": 1, "censored": 1}
     assert cost["reasons"] == {"horizon": 1, "wall_time_limit": 1}

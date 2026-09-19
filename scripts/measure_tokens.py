@@ -1,24 +1,28 @@
-"""B2 — 실제 tokenizer로 틱당 토큰을 잰다 (docs/08 §3.4의 추정과 대조).
+"""B2 — 실제 tokenizer로 틱당 토큰을 잰다 (docs/08 §3.4; 계약 v0.3의 예산과 대조).
 
-세 가지를 잰다.
+네 가지를 잰다.
 
 (a) D0 스트림 4 에피소드(`tests/fixtures/d0_streams.jsonl`): prefix 토큰, 틱당 새 토큰
-    p50/p95/max, 그 틱의 K에서의 후보 블록, 결정 위치 부담.
+    p50/p95/max, 그 틱의 K에서의 후보 블록, 결정 위치 부담. (옛 서식의 손으로 만든 fixture라 물체 줄이
+    v0.3의 소개/동적 분리를 온전히 타지 않는다 — 연속성 참고값.)
 (b) D0 단일 요청 64건(`tests/fixtures/d0.jsonl`): 전체 토큰 p50/p95/max, 질문별 T_i 크기.
-(c) 합성 스트림 요청: `RobotHarness.build_request`로 물체 6·10개 × K=12·32 × 지시 변경
-    유무의 장면을 만들어 prefix·틱·후보 블록·결정 위치를 잰다.
+(c) 합성 스트림 에피소드: `RobotHarness.build_request`로 물체 6·10개 × K 상한(설정의 12; 상한을 푼 상계 셀 하나) ×
+    지시 변경 유무의 장면을 100틱(10초 학습 구간) 돌려 prefix·첫 틱·통상 틱·갱신 틱(10틱마다)·소개 틱(30틱마다)·
+    지시 변경 틱과 **구간별** 토큰을 잰다. 말단이 대상 쪽으로 움직이고 물체 하나가 외란으로 옮겨지며 하나가 잠깐
+    가려지는 장면이라 통상 틱에도 작은 변화가 있다.
+(d) `--episodes DIR`: 실제 에피소드 배치(`episodes/*/streams.jsonl`)의 틱당 토큰 분포와 100틱 구간 합.
 
 **장면 빌더의 결합 규칙.** 아래 `obj`/`observation`은 `tests/test_harness.py`의 같은 이름
 빌더를 **복제**한 것이다(`tests/`는 패키지가 아니고, 그 파일은 다른 브랜치에서 고쳐지고 있어
 import로 묶지 않는다). 두 곳이 어긋나면 이 스크립트의 장면이 하네스 검사가 쓰는 관측과 달라져
 측정이 다른 것을 재게 되므로, `tests/test_measure_tokens.py`가 두 빌더의 출력이 같은지(영역
 목록만 이 스크립트의 `ZONES`로 다름) 검사로 대조한다. `tests/test_harness.py`의 빌더를 바꾸면
-여기도 같이 바꾼다.
+여기도 같이 바꾼다. `scripts/measure_candidates.py`는 이 장면·에피소드 빌더를 그대로 쓴다.
 
 결과는 `artifacts/reports/tokens-b2.json`(git 제외)에 쓰고 표로 찍는다. 이 스크립트는
 하네스를 import한다 — 모델 코드는 하지 않는다 (docs/06 §1).
 
-실행: `uv run python scripts/measure_tokens.py [--tokenizer <id|path>] [--out …]`
+실행: `uv run python scripts/measure_tokens.py [--tokenizer <id|path>] [--out …] [--episodes DIR] [--ticks 100]`
 """
 
 from __future__ import annotations
@@ -26,6 +30,7 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import statistics
 import sys
 from pathlib import Path
@@ -33,7 +38,7 @@ from typing import Any
 
 from robo_jev.data.episode import append_tick, new_episode
 from robo_jev.harness.robot import RobotHarness, candidate_id, load_harness_config
-from robo_jev.model.serialize import TOKEN_SERIALIZER_VERSION, serialize_request, state_lines
+from robo_jev.model.serialize import STREAM_FORMAT, TOKEN_SERIALIZER_VERSION, serialize_request
 from robo_jev.model.tokenizer import (
     FETCH_SCRIPT,
     MANIFEST_NAME,
@@ -47,15 +52,19 @@ D0 = REPO / "tests" / "fixtures" / "d0.jsonl"
 D0_STREAMS = REPO / "tests" / "fixtures" / "d0_streams.jsonl"
 DEFAULT_OUT = REPO / "artifacts" / "reports" / "tokens-b2.json"
 
-#: docs/08 §3.4의 추정치. 여기서는 대조만 하고 문서는 고치지 않는다.
-ESTIMATES = {
-    "prefix": (600, 1000),
-    "per_tick": (450, 700),
-    "candidate_block_k32": 480,
-    "tokens_per_object": 40,
-    "tokens_per_candidate": 15,
-    "decision_positions": 10,
-}
+#: 계약 v0.3의 예산 (HANDOFF 결정 1, decisions-1-2-v03 §0): 10물체·K=12 장면에서 틱당 p50 ≤ 500, p95 ≤ 800, 첫 틱 ≤ 1,200,
+#: 10초 학습 구간(100틱) ≤ 60K. 여기서는 대조만 하고 문서는 고치지 않는다.
+BUDGET = {"tick_p50": 500, "tick_p95": 800, "first_tick": 1200, "chunk_100_ticks": 60_000}
+
+#: 합성 셀 (물체 수, K 상한 — None은 상한 없음). K=32는 계약 v0.3에 없다; `(10, None)`은 10물체에서 상한을 푼 상계 참고값이다.
+SYNTHETIC_CELLS = ((6, 12), (10, 12), (10, None))
+
+#: 예산을 판정하는 셀 (10물체, K=12).
+BUDGET_CELL = (10, 12)
+
+#: 구간 이름 (직렬화 조각 이름 → 표의 열). 앞 열한 개가 상태 구간이다.
+STATE_SECTIONS = ("t", "goal", "objects_intro", "objects_dynamic", "zones", "scene", "robot", "exec", "events", "waypoints", "extra")
+SECTIONS = STATE_SECTIONS + ("commitment", "exec_history", "q_main", "q_path", "decisions", "instruction_change")
 
 
 # --------------------------------------------------------------------------
@@ -85,7 +94,7 @@ def summary(values: list[float]) -> dict[str, float]:
 
 
 def read_jsonl(path: Path) -> list[dict]:
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
 
 def count(tokenizer: Any, text: str) -> int:
@@ -101,57 +110,61 @@ def segment_tokens(segment: dict) -> int:
     return int(segment["end"] - segment["start"])
 
 
+def section_of(name: str) -> str:
+    """직렬화 조각 이름 → 구간 열 이름."""
+    if name.startswith("state:"):
+        return name.split(":", 1)[1]
+    if name.startswith("candidate:") or name.startswith("candidates:"):
+        return name.split(":")[1]
+    if name.startswith("decision:"):
+        return "decisions"
+    if name.startswith("instruction:"):
+        return "instruction_change"
+    return name
+
+
 def tick_breakdown(out: dict, tick: dict) -> dict[str, Any]:
-    """틱 하나의 새 토큰을 구간 종류별로 나눈다."""
+    """틱 하나의 새 토큰을 구간별로 나눈다."""
     own = [s for s in out["segments"] if s["tick"] == tick["index"]]
-    by_name: dict[str, int] = {}
-    candidate_blocks: dict[str, int] = {}
+    sections: dict[str, int] = {}
     candidate_lines: dict[str, list[int]] = {}
     for segment in own:
         name = segment["name"]
         tokens = segment_tokens(segment)
+        section = section_of(name)
+        sections[section] = sections.get(section, 0) + tokens
         if name.startswith("candidate:"):
-            _, question_id, _ = name.split(":")
-            candidate_blocks[question_id] = candidate_blocks.get(question_id, 0) + tokens
-            candidate_lines.setdefault(question_id, []).append(tokens)
-        elif name.startswith("candidates:"):
-            question_id = name.split(":")[1]
-            candidate_blocks[question_id] = candidate_blocks.get(question_id, 0) + tokens
-        elif name.startswith("decision:"):
-            by_name["decisions"] = by_name.get("decisions", 0) + tokens
-        elif name.startswith("instruction:"):
-            by_name["instruction_change"] = by_name.get("instruction_change", 0) + tokens
-        else:
-            by_name[name] = by_name.get(name, 0) + tokens
+            candidate_lines.setdefault(section, []).append(tokens)
     new_tokens = tick["end"] - tick["start"]  # 도중 지시 조각은 그 틱의 토큰이라 이미 들어 있다
-    change = by_name.get("instruction_change", 0)
+    change = sections.get("instruction_change", 0)
+    candidate_blocks = {qid: sections[qid] for qid in tick["candidate_mapping"] if qid in sections}
+    state = sum(tokens for section, tokens in sections.items() if section in STATE_SECTIONS)
     return {
         "t": tick["t"],
+        "index": tick["index"],
         "new_tokens": new_tokens,
         "new_tokens_without_instruction_change": new_tokens - change,
-        "state": by_name.get("state", 0),
-        "commitment": by_name.get("commitment", 0),
-        "exec_history": by_name.get("exec_history", 0),
+        "state": state,
+        "commitment": sections.get("commitment", 0),
+        "exec_history": sections.get("exec_history", 0),
         "instruction_change": change,
-        "decisions": by_name.get("decisions", 0),
+        "decisions": sections.get("decisions", 0),
         "posed": len(tick["posed"]),
         "k": {qid: len(ids) for qid, ids in tick["candidate_mapping"].items() if qid in candidate_blocks},
         "candidate_block": candidate_blocks,
-        "tokens_per_candidate": {
-            qid: round(statistics.fmean(lines), 1) for qid, lines in candidate_lines.items()
-        },
+        "tokens_per_candidate": {qid: round(statistics.fmean(lines), 1) for qid, lines in candidate_lines.items()},
+        "sections": {section: sections[section] for section in SECTIONS if sections.get(section)},
     }
 
 
-def state_line_breakdown(tokenizer: Any, state: dict) -> dict[str, Any]:
-    """상태 줄을 종류별로 토큰화한다 — 물체 한 줄이 몇 토큰인지 보기 위해."""
-    groups: dict[str, list[int]] = {}
-    for line in state_lines(state):
-        head = line.split(" ", 1)[0].split("=", 1)[0]
-        groups.setdefault(head, []).append(count(tokenizer, line + "\n"))
+def section_means(ticks: list[dict]) -> dict[str, float]:
+    """틱 묶음의 구간별 평균 토큰 (그 틱에 없는 구간은 0으로 센다)."""
+    if not ticks:
+        return {}
     return {
-        head: {"lines": len(values), "tokens": sum(values), "per_line": round(statistics.fmean(values), 1)}
-        for head, values in groups.items()
+        section: round(statistics.fmean(tick["sections"].get(section, 0) for tick in ticks), 1)
+        for section in SECTIONS
+        if any(tick["sections"].get(section, 0) for tick in ticks)
     }
 
 
@@ -181,7 +194,8 @@ def measure_streams(tokenizer: Any, records: list[dict]) -> dict[str, Any]:
                 "q_main_block_per_tick": summary([t["candidate_block"].get("q_main", 0) for t in ticks]),
                 "decisions_per_tick": summary([t["decisions"] for t in ticks]),
                 "posed_per_tick": summary([t["posed"] for t in ticks]),
-                "first_tick_state_lines": state_line_breakdown(tokenizer, record["ticks"][0]["request"]["state"]),
+                "first_tick_sections": ticks[0]["sections"],
+                "sections_mean": section_means(ticks),
             }
         )
     by_k: dict[int, list[int]] = {}
@@ -248,7 +262,7 @@ def measure_singles(tokenizer: Any, records: list[dict]) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
-# (c) 합성 스트림 요청 — 장면 빌더는 tests/test_harness.py의 obj/observation 복제 (모듈 설명의 결합 규칙)
+# (c) 합성 스트림 에피소드 — 장면 빌더는 tests/test_harness.py의 obj/observation 복제 (모듈 설명의 결합 규칙)
 # --------------------------------------------------------------------------
 
 COLOURS = ("red", "blue", "green", "yellow", "purple", "orange", "cyan", "pink", "brown", "grey")
@@ -317,69 +331,196 @@ def scene(n_objects: int) -> list[dict]:
     return objects
 
 
-def harness_with_cap(k_cap: int) -> RobotHarness:
+def harness_with_cap(k_cap: int | None) -> RobotHarness:
+    """K 상한을 바꾼 하네스. `None`이면 상한을 풀어(실행 가능한 후보 전부) 상한 없는 상계를 잰다."""
     config = copy.deepcopy(load_harness_config())
-    config["candidates"]["max"] = int(k_cap)
+    config["candidates"]["max"] = int(k_cap) if k_cap is not None else 10_000
     return RobotHarness(config)
 
 
-def synthetic_record(n_objects: int, k_cap: int, instruction_change: bool) -> dict:
+INSTRUCTION_V2 = "blue 상자를 오른쪽 정리 영역으로 옮기고 green 상자는 건드리지 마라"
+
+#: 합성 에피소드의 작은 변화 일정: 외란(물체 o3가 +x 30mm), 가림(o1이 3틱), 말단 이동(틱마다 10mm, 대상 접근점까지).
+DISTURBANCE_TICK = 15
+OCCLUSION_TICKS = (20, 21, 22)
+EE_STEP_MM = 10
+
+
+def synthetic_observation(n_objects: int, index: int, *, instruction_change: bool, change_tick: int | None) -> dict:
+    """틱 `index`의 관측: 정적 무리 배치에 작은 변화 일정을 얹는다 (모듈 설명 (c))."""
+    objects = scene(n_objects)
+    if index >= DISTURBANCE_TICK and n_objects > 3:
+        objects[3]["pos_mm"][0] += 30
+    if index in OCCLUSION_TICKS:
+        objects[1].update(visible=False, visible_ratio=0.2)
+    target = objects[0]["pos_mm"]
+    approach = [target[0], target[1], target[2] + 32 + 60]
+    start = [0, 0, 200]
+    full = math.dist(start, approach)
+    travelled = min(EE_STEP_MM * index, full)
+    fraction = travelled / full if full else 0.0
+    ee = [round(s + (a - s) * fraction) for s, a in zip(start, approach)]
+    over: dict[str, Any] = {"tick": index, "sim_time_ms": 100 * index}
+    if instruction_change and change_tick is not None and index >= change_tick:
+        over["instruction"] = {"version": 2, "t_ms": 100 * change_tick, "text": INSTRUCTION_V2}
+    out = observation(objects, **over)
+    out["robot"]["ee_pos_mm"] = ee
+    out["robot"]["speed_mm_s"] = EE_STEP_MM * 10 if 0 < travelled < full else 0
+    for entry in out["objects"]:
+        if not entry["visible"]:
+            entry["last_seen_ms"] = 100 * (min(OCCLUSION_TICKS) - 1)
+    return out
+
+
+def synthetic_episode(
+    n_objects: int, k_cap: int | None, *, instruction_change: bool, ticks: int, change_tick: int | None = None
+) -> dict[str, Any]:
+    """`ticks`틱의 합성 에피소드 — 같은 장면 빌더, 지시의 대상×영역 파지에 commitment가 틱마다 이어진다.
+
+    `instruction_change`면 `change_tick`(기본: 마지막 틱 앞)부터 지시 v2가 실리고 그 틱의 첫 토큰이 지시 조각이 된다.
+    """
+    if ticks < 1:
+        raise ValueError("ticks는 1 이상")
+    if instruction_change:
+        if change_tick is None:
+            change_tick = max(1, ticks - 1)
+        if not 1 <= change_tick < ticks:
+            raise ValueError(f"change_tick은 1 이상 ticks({ticks}) 미만이어야 한다 (받은 값: {change_tick})")
     hrn = harness_with_cap(k_cap)
-    first = hrn.build_request(observation(scene(n_objects)), None, None)
-    hold = candidate_id("hold")
-    grasp_key = f"grasp:o0:top:zoneL:slow"
+    first_obs = synthetic_observation(n_objects, 0, instruction_change=False, change_tick=None)
+    first = hrn.build_request(first_obs, None, None)
+    grasp_key = "grasp:o0:top:zoneL"
     grasp = next((c for c in first["request"]["candidates"]["q_main"] if c["key"] == grasp_key), None)
-    commitment = (
-        {"action_ref": grasp["id"], "key": grasp_key, "phase": "approach", "held_ticks": 1, "last_switch_tick": 0}
-        if grasp
-        else None
-    )
     exec_history = {
-        "adopted": {"main": hold, "phase": "none", "path": "p0", "speed": 0, "force": 0, "gripper": "open", "stop": False},
+        "adopted": {"main": candidate_id("hold"), "phase": "none", "path": "p0", "speed": 0, "force": 0, "gripper": "open", "stop": False},
         "ack": {"applied": True},
     }
-    second_obs = observation(scene(n_objects), tick=1, sim_time_ms=100)
-    if instruction_change:
-        second_obs["instruction"] = {
-            "version": 2,
-            "t_ms": 100,
-            "text": "blue 상자를 오른쪽 정리 영역으로 옮기고 green 상자는 건드리지 마라",
-        }
-    second = hrn.build_request(second_obs, exec_history, commitment)
-
+    cap = "none" if k_cap is None else k_cap
     record = new_episode(
-        "ep-b2",
+        f"ep-synth-{n_objects}-{cap}-{'chg' if instruction_change else 'same'}",
         "scene-family-b2",
-        instructions=[dict(observation(scene(n_objects))["instruction"])],
+        instructions=[dict(first_obs["instruction"])],
         question_set=hrn.question_set_id(),
     )
     append_tick(record, first)
-    append_tick(record, second)
+    for index in range(1, ticks):
+        observation_ = synthetic_observation(n_objects, index, instruction_change=instruction_change, change_tick=change_tick)
+        commitment = (
+            {"action_ref": grasp["id"], "key": grasp_key, "phase": "approach", "held_ticks": index, "last_switch_tick": 0}
+            if grasp
+            else None
+        )
+        append_tick(record, hrn.build_request(observation_, exec_history, commitment))
     return record
 
 
-def measure_synthetic(tokenizer: Any) -> list[dict[str, Any]]:
+def synthetic_record(n_objects: int, k_cap: int | None, instruction_change: bool) -> dict:
+    """옛 B2의 2틱 레코드 (지시 변경은 틱 1) — 검사·호환용."""
+    return synthetic_episode(n_objects, k_cap, instruction_change=instruction_change, ticks=2, change_tick=1 if instruction_change else None)
+
+
+def episode_profile(out: dict, ticks: list[dict], *, change_tick: int | None, rules: dict[str, Any]) -> dict[str, Any]:
+    """틱 종류별 토큰: 첫 틱, 통상 틱, 갱신 틱(동적 주기·지시 텍스트 주기), 소개 틱(소개 주기), 지시 변경 틱, 100틱 구간 합."""
+    period_dynamic = int(rules["object_dynamic_period_ticks"])
+    period_intro = int(rules["object_intro_period_ticks"])
+    period_text = int(rules["goal_text_period_ticks"])
+
+    def kind(tick: dict) -> str:
+        index = tick["index"]
+        if index == 0:
+            return "first"
+        if change_tick is not None and index == change_tick:
+            return "instruction_change"
+        if period_intro and index % period_intro == 0:
+            return "intro"
+        if (period_dynamic and index % period_dynamic == 0) or (period_text and index % period_text == 0):
+            return "refresh"
+        return "typical"
+
+    groups: dict[str, list[dict]] = {}
+    for tick in ticks:
+        groups.setdefault(kind(tick), []).append(tick)
+    profile = {
+        name: {"ticks": len(group), "new_tokens": summary([t["new_tokens"] for t in group]), "sections": section_means(group)}
+        for name, group in groups.items()
+    }
+    return {
+        "prefix_tokens": out["prefix_end"],
+        "ticks": len(ticks),
+        "k_actual": ticks[0]["k"].get("q_main"),
+        "all_ticks": summary([t["new_tokens"] for t in ticks]),
+        "by_kind": profile,
+        "chunk_100_ticks": sum(t["new_tokens"] for t in ticks[:100]) if len(ticks) >= 100 else None,
+        "first_tick_sections": ticks[0]["sections"],
+    }
+
+
+def measure_synthetic(tokenizer: Any, *, ticks: int = 100) -> list[dict[str, Any]]:
     cells = []
-    for n_objects in (6, 10):
-        for k_cap in (12, 32):
-            for change in (False, True):
-                record = synthetic_record(n_objects, k_cap, change)
-                out = serialize_request(record, tokenizer, layout="stream_l1a")
-                ticks = [tick_breakdown(out, tick) for tick in out["ticks"]]
-                first_state = record["ticks"][0]["request"]["state"]
-                cells.append(
-                    {
-                        "objects": n_objects,
-                        "k_cap": k_cap,
-                        "instruction_change": change,
-                        "k_actual": ticks[0]["k"].get("q_main"),
-                        "prefix_tokens": out["prefix_end"],
-                        "tick0": ticks[0],
-                        "tick1": ticks[1],
-                        "state_lines_tick0": state_line_breakdown(tokenizer, first_state),
-                    }
-                )
+    for n_objects, k_cap in SYNTHETIC_CELLS:
+        for change in (False, True):
+            change_tick = max(1, ticks // 2) if change else None
+            record = synthetic_episode(n_objects, k_cap, instruction_change=change, ticks=ticks, change_tick=change_tick)
+            out = serialize_request(record, tokenizer, layout="stream_l1a")
+            breakdown = [tick_breakdown(out, tick) for tick in out["ticks"]]
+            cells.append(
+                {
+                    "objects": n_objects,
+                    "k_cap": k_cap if k_cap is not None else "none",
+                    "instruction_change": change,
+                    "change_tick": change_tick,
+                    "tick0": breakdown[0],
+                    "tick1": breakdown[1] if len(breakdown) > 1 else None,
+                    **episode_profile(out, breakdown, change_tick=change_tick, rules=out["delta_rules"]),
+                }
+            )
     return cells
+
+
+# --------------------------------------------------------------------------
+# (d) 실제 에피소드 배치
+# --------------------------------------------------------------------------
+
+
+def measure_episodes(tokenizer: Any, records: list[dict]) -> dict[str, Any]:
+    """실제 배치의 틱당 토큰 분포·구간별 평균·100틱 구간 합 (에피소드별과 전체)."""
+    episodes = []
+    all_ticks: list[dict] = []
+    chunks: list[int] = []
+    for record in records:
+        out = serialize_request(record, tokenizer, layout="stream_l1a")
+        ticks = [tick_breakdown(out, tick) for tick in out["ticks"]]
+        all_ticks.extend(ticks)
+        for start in range(0, len(ticks), 100):
+            block = ticks[start : start + 100]
+            if len(block) == 100:
+                chunks.append(sum(t["new_tokens"] for t in block))
+        objects = [len(tick["request"]["state"].get("objects") or []) for tick in record["ticks"]]
+        episodes.append(
+            {
+                "episode_id": record.get("episode_id"),
+                "profile": (record.get("provenance") or {}).get("profile"),
+                "ticks": len(ticks),
+                "objects": max(objects) if objects else 0,
+                "prefix_tokens": out["prefix_end"],
+                "instruction_changes": len(out["instruction_positions"]) - 1,
+                "new_tokens_per_tick": summary([t["new_tokens"] for t in ticks]),
+                "first_tick": ticks[0]["new_tokens"],
+                "sections_mean": section_means(ticks),
+                "k": summary([t["k"].get("q_main", 0) for t in ticks]),
+            }
+        )
+    return {
+        "episodes": len(episodes),
+        "ticks": len(all_ticks),
+        "new_tokens": summary([t["new_tokens"] for t in all_ticks]),
+        "first_tick": summary([e["first_tick"] for e in episodes]),
+        "prefix_tokens": summary([e["prefix_tokens"] for e in episodes]),
+        "chunk_100_ticks": summary(chunks),
+        "sections_mean": section_means(all_ticks),
+        "k": summary([t["k"].get("q_main", 0) for t in all_ticks]),
+        "per_episode": episodes,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -387,66 +528,43 @@ def measure_synthetic(tokenizer: Any) -> list[dict[str, Any]]:
 # --------------------------------------------------------------------------
 
 
-#: 점 추정치와의 대조 허용 폭 (양쪽 ±15%).
-TOLERANCE = 0.15
-
-
-def within(value: float, bounds: tuple[float, float]) -> bool:
-    return bounds[0] <= value <= bounds[1]
-
-
-def near(value: float, estimate: float) -> bool:
-    return abs(value - estimate) <= TOLERANCE * estimate
+def _check(measured: Any, budget: float) -> dict[str, Any]:
+    return {"measured": measured, "budget": budget, "holds": measured is not None and measured <= budget}
 
 
 def verdicts(report: dict[str, Any]) -> dict[str, Any]:
-    streams = report["streams"]
-    synthetic = report["synthetic"]
-    prefix_values = [e["prefix_tokens"] for e in streams["episodes"]] + [c["prefix_tokens"] for c in synthetic]
-    tick_p50 = streams["all_ticks"]["new_tokens"]["p50"]
-    tick_p95 = streams["all_ticks"]["new_tokens"]["p95"]
-    synth_ticks = [c["tick0"]["new_tokens"] for c in synthetic]
-    k32 = [c["tick0"]["candidate_block"]["q_main"] for c in synthetic if c["k_actual"] == 32]
-    per_object = [
-        c["state_lines_tick0"]["object"]["per_line"] for c in synthetic if "object" in c["state_lines_tick0"]
-    ]
+    """계약 v0.3 예산과의 대조 — 10물체·K=12 셀(지시 변경 유무 둘 다)에서, 실제 배치가 있으면 그것도."""
+    cells = [c for c in report["synthetic"] if (c["objects"], c["k_cap"]) == BUDGET_CELL]
+    checks: dict[str, dict[str, Any]] = {}
+    for cell in cells:
+        name = "instruction_change" if cell["instruction_change"] else "same_instruction"
+        typical = cell["by_kind"].get("typical", {}).get("new_tokens", {})
+        checks[name] = {
+            "tick_p50": _check(cell["all_ticks"]["p50"], BUDGET["tick_p50"]),
+            "tick_p95": _check(cell["all_ticks"]["p95"], BUDGET["tick_p95"]),
+            "first_tick": _check(cell["tick0"]["new_tokens"], BUDGET["first_tick"]),
+            "chunk_100_ticks": _check(cell["chunk_100_ticks"], BUDGET["chunk_100_ticks"]),
+            "typical_tick_p50": _check(typical.get("p50"), BUDGET["tick_p50"]),
+        }
+    episodes = report.get("episodes")
+    if episodes and episodes.get("ticks"):
+        checks["real_episodes"] = {
+            "tick_p50": _check(episodes["new_tokens"]["p50"], BUDGET["tick_p50"]),
+            "tick_p95": _check(episodes["new_tokens"]["p95"], BUDGET["tick_p95"]),
+            "first_tick_max": _check(episodes["first_tick"].get("max"), BUDGET["first_tick"]),
+            "chunk_100_ticks_max": _check(episodes["chunk_100_ticks"].get("max"), BUDGET["chunk_100_ticks"]) if episodes["chunk_100_ticks"].get("n") else {"measured": None, "budget": BUDGET["chunk_100_ticks"], "holds": True},
+        }
     return {
-        "prefix": {
-            "estimate": ESTIMATES["prefix"],
-            "measured": {"min": min(prefix_values), "max": max(prefix_values)},
-            "holds": all(within(v, ESTIMATES["prefix"]) for v in prefix_values),
-            "note": "prefix는 지시 1개 + 질문 세트 v0 텍스트 + 정적 후보다. 추정 하한보다 작다.",
-        },
-        "per_tick": {
-            "estimate": ESTIMATES["per_tick"],
-            "measured": {
-                "d0_streams_p50": tick_p50,
-                "d0_streams_p95": tick_p95,
-                "synthetic_min": min(synth_ticks),
-                "synthetic_max": max(synth_ticks),
-            },
-            "holds": all(within(v, ESTIMATES["per_tick"]) for v in synth_ticks) and within(tick_p95, ESTIMATES["per_tick"]),
-        },
-        "candidate_block_k32": {
-            "estimate": ESTIMATES["candidate_block_k32"],
-            "measured": {"min": min(k32) if k32 else None, "max": max(k32) if k32 else None},
-            "holds": bool(k32) and all(near(v, ESTIMATES["candidate_block_k32"]) for v in k32),
-        },
-        "tokens_per_object": {
-            "estimate": ESTIMATES["tokens_per_object"],
-            "measured": {"min": min(per_object), "max": max(per_object)},
-            "holds": all(near(v, ESTIMATES["tokens_per_object"]) for v in per_object),
-        },
-        "decision_positions": {
-            "estimate": ESTIMATES["decision_positions"],
-            "measured": {"synthetic": [c["tick0"]["decisions"] for c in synthetic]},
-            "holds": all(c["tick0"]["decisions"] == c["tick0"]["posed"] for c in synthetic),
-            "note": "결정 위치는 묻는 질문당 1토큰이다. 후보 없는 동적 질문은 그 틱에 묻지 않는다.",
-        },
+        "budget": dict(BUDGET),
+        "cell": {"objects": BUDGET_CELL[0], "k_cap": BUDGET_CELL[1]},
+        "checks": checks,
+        "holds": all(check["holds"] for group in checks.values() for check in group.values()),
     }
 
 
 def fmt(value: Any) -> str:
+    if value is None:
+        return "-"
     if isinstance(value, float):
         return f"{value:.0f}" if value == int(value) else f"{value:.1f}"
     return str(value)
@@ -454,9 +572,9 @@ def fmt(value: Any) -> str:
 
 def print_table(report: dict[str, Any]) -> None:
     tok = report["tokenizer"]
-    print(f"\n[B2] tokenizer = {tok['id']} @ {tok.get('revision')}  serializer = {report['serializer']}\n")
+    print(f"\n[B2] tokenizer = {tok['id']} @ {tok.get('revision')}  serializer = {report['serializer']}  format = {report['format']}\n")
 
-    print("(a) D0 스트림 에피소드")
+    print("(a) D0 스트림 에피소드 (옛 서식의 손 fixture — 참고)")
     print(f"{'episode':<12}{'ticks':>6}{'objs':>6}{'prefix':>8}{'tick p50':>10}{'tick p95':>10}{'tick max':>10}{'state p50':>11}{'q_main p50':>12}{'decisions':>11}")
     s = report["streams"]
     for e in s["episodes"]:
@@ -467,31 +585,48 @@ def print_table(report: dict[str, Any]) -> None:
             f"{fmt(e['q_main_block_per_tick']['p50']):>12}{fmt(e['decisions_per_tick']['p50']):>11}"
         )
     a = s["all_ticks"]
-    print(f"  all 400 ticks: new tokens p50={fmt(a['new_tokens']['p50'])} p95={fmt(a['new_tokens']['p95'])} max={fmt(a['new_tokens']['max'])}; "
+    print(f"  all ticks: new tokens p50={fmt(a['new_tokens']['p50'])} p95={fmt(a['new_tokens']['p95'])} max={fmt(a['new_tokens']['max'])}; "
           f"state p50={fmt(a['state']['p50'])}; tokens/q_main candidate mean={fmt(a['tokens_per_q_main_candidate']['mean'])}")
-    print("  q_main block by K: " + ", ".join(f"K={k}: {v['mean']} ({v['per_candidate']}/cand, n={v['n']})" for k, v in s["q_main_block_by_k"].items()))
 
     print("\n(b) D0 단일 요청 64건")
     b = report["singles"]
     print(f"  total p50={fmt(b['total_tokens']['p50'])} p95={fmt(b['total_tokens']['p95'])} max={fmt(b['total_tokens']['max'])}; "
           f"state p50={fmt(b['state_tokens']['p50'])} max={fmt(b['state_tokens']['max'])}")
-    print(f"  T_i p50={fmt(b['question_tokens']['p50'])} p95={fmt(b['question_tokens']['p95'])} max={fmt(b['question_tokens']['max'])}; "
-          + "; ".join(f"{kind} p50={fmt(v['p50'])} max={fmt(v['max'])}" for kind, v in b["question_tokens_by_type"].items()))
 
-    print("\n(c) 합성 스트림 요청 (하네스 build_request; tick1은 지시 변경 조각을 포함한 새 토큰, 'of which instr'는 그 조각)")
-    print(f"{'objs':>5}{'Kcap':>6}{'K':>4}{'instr':>7}{'prefix':>8}{'tick0':>7}{'tick1':>7}{'of which':>10}{'state':>7}{'q_main':>8}{'q_path':>8}{'dec':>5}{'tok/obj':>9}{'tok/cand':>10}")
+    print(f"\n(c) 합성 스트림 에피소드 ({report['synthetic'][0]['ticks']}틱; 첫 틱은 prefix를 포함하지 않는다)")
+    print(f"{'objs':>5}{'Kcap':>6}{'K':>4}{'instr':>7}{'prefix':>8}{'first':>7}{'typ p50':>9}{'typ p95':>9}{'refresh':>9}{'intro':>7}{'change':>8}{'all p50':>9}{'all p95':>9}{'chunk100':>10}")
     for c in report["synthetic"]:
-        t0, t1 = c["tick0"], c["tick1"]
-        print(
-            f"{c['objects']:>5}{c['k_cap']:>6}{c['k_actual']:>4}{'yes' if c['instruction_change'] else 'no':>7}{c['prefix_tokens']:>8}"
-            f"{t0['new_tokens']:>7}{t1['new_tokens']:>7}{t1['instruction_change']:>10}{t0['state']:>7}"
-            f"{t0['candidate_block'].get('q_main', 0):>8}{t0['candidate_block'].get('q_path', 0):>8}{t0['decisions']:>5}"
-            f"{fmt(c['state_lines_tick0'].get('object', {}).get('per_line', 0)):>9}{fmt(t0['tokens_per_candidate'].get('q_main', 0)):>10}"
-        )
+        kinds = c["by_kind"]
+        typical = kinds.get("typical", {}).get("new_tokens", {})
 
-    print("\n판정 (docs/08 §3.4 추정과 대조)")
-    for name, v in report["verdicts"].items():
-        print(f"  {name:<22} estimate={v['estimate']}  measured={v['measured']}  holds={v['holds']}")
+        def mean_of(name: str) -> str:
+            return fmt(kinds.get(name, {}).get("new_tokens", {}).get("mean"))
+
+        print(
+            f"{c['objects']:>5}{str(c['k_cap']):>6}{c['k_actual']:>4}{'yes' if c['instruction_change'] else 'no':>7}{c['prefix_tokens']:>8}"
+            f"{c['tick0']['new_tokens']:>7}{fmt(typical.get('p50')):>9}{fmt(typical.get('p95')):>9}{mean_of('refresh'):>9}{mean_of('intro'):>7}"
+            f"{mean_of('instruction_change'):>8}{fmt(c['all_ticks']['p50']):>9}{fmt(c['all_ticks']['p95']):>9}{fmt(c['chunk_100_ticks']):>10}"
+        )
+    cell = next((c for c in report["synthetic"] if (c["objects"], c["k_cap"]) == BUDGET_CELL and not c["instruction_change"]), None)
+    if cell is not None:
+        print("\n  구간별 평균 토큰 (10물체·K=12, 지시 변경 없음):")
+        for name in ("first", "typical", "refresh", "intro"):
+            sections = cell["by_kind"].get(name, {}).get("sections", {})
+            print(f"    {name:<9}" + " ".join(f"{k}={fmt(v)}" for k, v in sections.items()))
+
+    if report.get("episodes"):
+        e = report["episodes"]
+        print(f"\n(d) 실제 에피소드 {e['episodes']}편 · {e['ticks']}틱: tick p50={fmt(e['new_tokens']['p50'])} p95={fmt(e['new_tokens']['p95'])} "
+              f"max={fmt(e['new_tokens']['max'])}; first tick p50={fmt(e['first_tick'].get('p50'))} max={fmt(e['first_tick'].get('max'))}; "
+              f"prefix p50={fmt(e['prefix_tokens'].get('p50'))}; chunk100 p50={fmt(e['chunk_100_ticks'].get('p50'))} max={fmt(e['chunk_100_ticks'].get('max'))}; K mean={fmt(e['k'].get('mean'))}")
+        print("    sections mean: " + " ".join(f"{k}={fmt(v)}" for k, v in e["sections_mean"].items()))
+
+    print("\n판정 (계약 v0.3 예산, 10물체·K=12)")
+    for name, checks in report["verdicts"]["checks"].items():
+        print(f"  {name}:")
+        for check, value in checks.items():
+            print(f"    {check:<20} measured={fmt(value['measured'])}  budget={value['budget']}  holds={value['holds']}")
+    print(f"  holds = {report['verdicts']['holds']}")
 
 
 # --------------------------------------------------------------------------
@@ -501,6 +636,8 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--tokenizer", help="tokenizer id 또는 경로 (기본: artifacts/tokenizers의 manifest)")
     parser.add_argument("--out", default=str(DEFAULT_OUT))
+    parser.add_argument("--ticks", type=int, default=100, help="합성 에피소드의 틱 수 (10초 구간 = 100)")
+    parser.add_argument("--episodes", type=Path, default=None, help="실제 에피소드 배치 디렉터리 (episodes/*/streams.jsonl)")
     args = parser.parse_args(argv)
 
     if args.tokenizer:
@@ -518,14 +655,21 @@ def main(argv: list[str] | None = None) -> int:
         meta = json.loads(manifest.read_text(encoding="utf-8")) if manifest.is_file() else {"id": identifier}
         meta = {key: meta.get(key) for key in ("id", "revision", "files")}
 
-    report = {
+    report: dict[str, Any] = {
         "tokenizer": meta,
         "serializer": TOKEN_SERIALIZER_VERSION,
-        "estimates": {key: list(value) if isinstance(value, tuple) else value for key, value in ESTIMATES.items()},
+        "format": STREAM_FORMAT,
+        "budget": dict(BUDGET),
         "streams": measure_streams(tokenizer, read_jsonl(D0_STREAMS)),
         "singles": measure_singles(tokenizer, read_jsonl(D0)),
-        "synthetic": measure_synthetic(tokenizer),
+        "synthetic": measure_synthetic(tokenizer, ticks=args.ticks),
     }
+    if args.episodes is not None:
+        records = []
+        for path in sorted(args.episodes.glob("episodes/*/streams.jsonl")):
+            records.extend(read_jsonl(path))
+        report["episodes"] = measure_episodes(tokenizer, records)
+        report["episodes"]["dataset"] = str(args.episodes)
     report["verdicts"] = verdicts(report)
 
     out = Path(args.out)

@@ -45,7 +45,7 @@ def test_merge_profile_overlays_deeply():
     # 덮어쓰지 않은 형제 키는 그대로 남는다.
     assert merged["objects"]["palette"] == CONFIG["objects"]["palette"]
     assert merged["instruction"]["enabled"] is False
-    assert merged["instruction"]["v1_template"] == CONFIG["instruction"]["v1_template"]
+    assert merged["instruction"]["v1_templates"] == CONFIG["instruction"]["v1_templates"]
     assert "profiles" not in merged
     assert CONFIG["objects"]["count_min"] != merged["objects"]["count_min"], "원본이 바뀌었다"
 
@@ -184,18 +184,32 @@ def test_the_forbidden_separation_is_computed_for_the_largest_shapes():
     assert seen > 0
 
 
-def test_an_impossible_forbidden_separation_raises_instead_of_narrowing_the_gap():
-    """자리를 못 찾으면 조용히 좁은 간격을 두지 않는다 — 설정의 모순이다."""
+def test_an_impossible_forbidden_separation_raises_instead_of_narrowing_the_gap(tmp_path):
+    """자리를 못 찾으면 조용히 좁은 간격을 두지 않는다 — 설정의 모순이다. 배치를 다시 뽑는 것(`_LAYOUT_ATTEMPTS`)도 모순을
+    풀지 못하면 그 횟수를 적어 멈춘다. 모순은 하네스 여유로 만든다(금지 물체의 장애물 반지름이 생성 범위보다 크다)."""
+    harness = yaml.safe_load(HARNESS_CONFIG.read_text(encoding="utf-8"))
+    harness["planner"]["forbidden_margin_mm"] = 2000
+    path = tmp_path / "harness.yaml"
+    path.write_text(yaml.safe_dump(harness), encoding="utf-8")
     impossible = copy.deepcopy(CONFIG)
-    impossible["objects"]["shapes"] = ["cylinder"]
-    impossible["objects"]["cylinder_radius_mm"] = [26, 26]
-    impossible["objects"]["cylinder_half_height_mm"] = [40, 40]
-    impossible["objects"]["count_min"] = impossible["objects"]["count_max"] = 10
-    impossible["objects"]["forbidden_count"] = [4, 4]
-    impossible["objects"]["fragile_count"] = [1, 1]
-    with pytest.raises(RuntimeError, match="금지 물체"):
+    impossible["objects"]["forbidden_separation"] = {"harness_config": str(path)}
+    with pytest.raises(RuntimeError, match="금지 물체") as error:
         for seed in range(10):
             build_plan(impossible, seed, "E1")
+    assert "다시 뽑아도" in str(error.value)
+
+
+def test_a_layout_that_cannot_separate_the_forbidden_object_is_redrawn_instead_of_raising():
+    """리뷰 1 M9: E1 seed 243은 금지 물체를 400번 안에 떼어 놓을 자리가 없는 배치였다 — 그 배치를 버리고 같은 스트림으로
+    다음 배치를 뽑는다. 처음 배치가 성립한 seed는 난수를 더 쓰지 않으므로 그대로다(계보 보존)."""
+    plan = build_plan(CONFIG, 243, "E1")
+    for a in plan.objects:
+        if "forbidden" not in a.attributes:
+            continue
+        for b in plan.objects:
+            if a.id != b.id:
+                assert xy_distance(a, b) >= forbidden_limit_mm(a) - 1e-9
+    assert len(plan.objects) >= CONFIG["objects"]["count_min"] and plan.instructions
 
 
 def test_scenes_without_a_violation_are_unchanged_by_the_forbidden_rule():
@@ -240,7 +254,9 @@ def test_instructions_carry_the_structured_goal_next_to_the_text():
             assert step.target in objects and step.zone in zones
             assert objects[step.target].attributes == ()  # 지시의 대상은 평범한 물체다
             assert zones[step.zone].desc in step.text
-        assert first.text.startswith(objects[first.target].describe(labels))
+        assert objects[first.target].describe(labels) in first.text
+        if first.template == "v1#0":
+            assert first.text.startswith(objects[first.target].describe(labels))
         assert second.target != first.target
         assert objects[second.target].describe(labels) in second.text
         assert second.zone == first.zone

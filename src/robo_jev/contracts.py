@@ -46,7 +46,8 @@ SCHEMA_STREAM = "stream-v0"
 QUESTION_TYPES = ("choice", "boolean", "ordinal")
 LABEL_KINDS = ("valid_set", "single", "distribution", "event")
 LABEL_CONFIDENCE_LEVELS = ("high", "medium", "low")
-SPLITS = ("train", "dev", "calibration", "test", "ood")
+#: 분할 이름. OOD는 개발용 `ood_dev`와 봉인 `ood_test`로 나뉜다(docs/04 §5); `ood`는 옛 레코드(D0 fixture)의 값이다.
+SPLITS = ("train", "dev", "calibration", "test", "ood", "ood_dev", "ood_test")
 
 #: 주 결정의 국면 (docs/08 §3.2 `commitment`).
 PHASES = ("approach", "grasp", "lift", "transport", "place", "push", "none")

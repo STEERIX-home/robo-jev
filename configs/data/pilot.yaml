@@ -5,7 +5,7 @@
 #
 # 여기 값은 `robo_jev.data.generate.DEFAULT_CONFIG`와 같아야 한다 (tests/test_data.py가 본다).
 # 비중은 상대값이므로 합이 100이 아니어도 된다.
-version: pilot-v0
+version: pilot-v0.3
 
 # 분야 비중. docs/04 §2는 브라우저·도구 15 / 업무 흐름 15 / 일반 규칙 10을 두고 나머지를
 # 색·위치·영역 문제가 채우게 했다. pilot에서는 넷을 고르게 두고 필요할 때 여기서 기울인다.
@@ -38,6 +38,12 @@ derivations:
   paraphrase: 20 # 같은 사실을 다른 언어·문장으로 다시 그린다 (라벨 재계산)
   reorder: 10 # 문장은 그대로, 후보 순서·id만 바꾼다
 
+# 봉인 문구 변형(`split.holdout_templates`)의 추첨 몫(%): 그 변형이 든 표에서 봉인 변형을 이 몫만큼만 뽑는다(나머지는 다른 변형이
+# 고르게). 봉인 변형을 고르게 뽑으면 계열의 13~19 %가 템플릿 holdout에 걸려 OOD가 목표(분야마다 ≈10~15 %)를 넘는다 — 봉인
+# id(한국어)는 그대로 두고 비중으로 맞춘다 (docs/04 §5). 개념 계열의 몫은 장면 생성 비중(`robo_jev.data.domains`의
+# `_GOAL_ZONE_WEIGHTS`·`template_weights`)이 맞춘다.
+sealed_phrasing_share: 10
+
 split:
   # 해시 분할 비중 (docs/04 §5). ood는 여기 넣지 않는다 — holdout 목록으로만 만든다.
   weights:
@@ -45,7 +51,25 @@ split:
     dev: 10
     calibration: 10
     test: 10
-  # 의미 계열·분야 holdout. 해시 분할보다 **먼저** 제외되어 ood로 간다.
+  # 의미 계열·분야 holdout. 해시 분할보다 **먼저** 제외되어 ood(ood_dev/ood_test, group 해시로 반분)로 간다.
   holdout_groups: []
   holdout_prefixes: []
   holdout_domains: []
+  # 봉인 holdout (docs/04 §5 표, 계약 v0.3). 레코드의 provenance(`phrasing`·`concepts`)와 맞대며, 한 계열의 레코드 중
+  # 하나라도 걸리면 계열 전체가 OOD다. 문구 템플릿 변형 id는 `<표>.<언어>#<번호>`(`robo_jev.data.domains.phrasing_vocabulary`),
+  # 개념 id는 `robo_jev.data.domains.CONCEPT_VOCABULARY`에서 고른다.
+  #   - 템플릿 변형 계열: 분야마다 문구 표 하나의 마지막 변형(한국어). 주 질문(target·action·next·governing)의 변형은
+  #     계열의 2/3 이상이 쓰므로 그보다 드문 표를 골랐다 — 2,000상태 실측(seed 17)에서 계열의 13~19%가 걸린다.
+  holdout_templates:
+    - "spatial.distance.ko#1"
+    - "dom.needs_input.ko#1"
+    - "workflow.load.ko#1"
+    - "rules.conflict.ko#1"
+  #   - 개념 계열: spatial = 목표 영역이 가운데(zoneC)인 지시(계열의 19%), dom = 숨김 해제 컨트롤(접힌 구역을 드러내는
+  #     조작이 먼저 필요, 29%), workflow = 자원 차단(담당 자원 오프라인, 22%), rules = 안내 요청 정책(지배 규칙의 조치가
+  #     a_escort뿐, 11%).
+  holdout_concepts:
+    - "spatial:goal-zone:zoneC"
+    - "dom:reveal"
+    - "workflow:resource_offline"
+    - "rules:escort-policy"

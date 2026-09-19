@@ -31,7 +31,7 @@ from robo_jev.data.generate import (
     load_config,
 )
 from robo_jev.data.generate import main as generate_main
-from robo_jev.data.split import DEFAULT_WEIGHTS, SplitPolicy, assign_split
+from robo_jev.data.split import CONCEPT_TAG, DEFAULT_WEIGHTS, OOD_SPLITS, TEMPLATE_TAG, SplitPolicy, assign_split, ood_split
 from robo_jev.data.validate import POSITION_BIAS_MIN_SAMPLES, validate_dataset
 from robo_jev.data.validate import main as validate_main
 
@@ -62,8 +62,8 @@ def test_generation_is_reproducible_and_groups_do_not_leak():
     for row in rows:
         groups[row["origin_group"]].add(row["split"])
     assert all(len(parts) == 1 for parts in groups.values())
-    report = validate_dataset(rows)
-    assert report["invalid_records"] == 0
+    report = validate_dataset(rows, holdouts=DEFAULT_CONFIG["split"])
+    assert report["invalid_records"] == 0 and report["errors"] == []
     assert report["states"] == 500
 
 
@@ -100,10 +100,14 @@ def test_records_carry_group_split_provenance_and_evidence(batch):
     for record in batch:
         assert record["schema_version"] == "judgment-v0"
         assert record["origin_group"].count("/") == 2, record["origin_group"]
-        assert record["split"] == assign_split(record["origin_group"])
         provenance = record["provenance"]
-        for field in ("generator", "domain", "template", "seed", "origin_group", "variants"):
+        for field in ("generator", "domain", "template", "seed", "origin_group", "variants", "phrasing", "concepts", "holdout"):
             assert field in provenance, field
+        # split은 계열의 해시 분할이거나(holdout 아님) 계열 해시로 반분한 OOD다(holdout 이유가 적힌다).
+        if provenance["holdout"]:
+            assert record["split"] == ood_split(record["origin_group"]) and record["split"] in OOD_SPLITS
+        else:
+            assert record["split"] == assign_split(record["origin_group"])
         assert record["evidence"]["rule_trace"], record["request"]["request_id"]
 
 
@@ -514,11 +518,32 @@ def test_holdouts_are_excluded_before_the_hashed_split():
             "holdout_domains": ["dom"],
         }
     )
-    assert policy.assign("rules/access-policy/0003") == "ood"
-    assert policy.assign("rules/energy-device/0007") == "ood"
-    assert policy.assign("dom/checkout-form/0001") == "ood"
+    assert policy.assign("rules/access-policy/0003") in OOD_SPLITS
+    assert policy.assign("rules/energy-device/0007") in OOD_SPLITS
+    assert policy.assign("dom/checkout-form/0001") in OOD_SPLITS
+    assert policy.holdout_reasons("rules/access-policy/0003") == ["group:rules/access-policy/0003"]
+    assert policy.holdout_reasons("dom/checkout-form/0001") == ["domain:dom"]
     # holdout이 아닌 group은 해시 분할을 그대로 따른다.
     assert policy.assign("spatial/zone-color/0000") == assign_split("spatial/zone-color/0000")
+
+
+def test_template_and_concept_holdouts_seal_by_tag_and_split_ood_into_dev_and_test():
+    """계약 v0.3: 문구 템플릿 변형·개념은 태그(`template:<id>`·`concept:<id>`)로 맞대고, OOD는 계열 해시로
+    ood_dev/ood_test로 반분한다 (docs/04 §5)."""
+    policy = SplitPolicy.from_config({"holdout_templates": ["spatial.distance.ko#1"], "holdout_concepts": ["dom:reveal"]})
+    group = "spatial/zone-color/0007"
+    assert policy.assign(group) == assign_split(group)  # 태그가 없으면 holdout이 아니다
+    assert policy.holdout_reasons(group, [TEMPLATE_TAG + "spatial.distance.ko#0"]) == []
+    assert policy.holdout_reasons(group, [TEMPLATE_TAG + "spatial.distance.ko#1"]) == ["template:spatial.distance.ko#1"]
+    assert policy.holdout_reasons(group, [CONCEPT_TAG + "dom:reveal", TEMPLATE_TAG + "spatial.distance.ko#1"]) == [
+        "concept:dom:reveal", "template:spatial.distance.ko#1"
+    ]
+    assert policy.assign(group, [CONCEPT_TAG + "dom:reveal"]) == ood_split(group)
+    assert assign_split(group, policy, tags=[CONCEPT_TAG + "dom:reveal"]) in OOD_SPLITS
+    # OOD 반분은 결정적이고 두 쪽 다 쓰인다.
+    halves = Counter(ood_split(f"g/{index}") for index in range(2000))
+    assert set(halves) == set(OOD_SPLITS) and abs(halves["ood_dev"] - halves["ood_test"]) < 200
+    assert ood_split(group) == ood_split(group)
 
 
 def test_split_weights_must_be_positive_integers():
@@ -778,7 +803,129 @@ def test_config_holdouts_move_a_domain_to_ood():
     splits = {
         record["split"] for record in records if record["provenance"]["domain"] == "spatial"
     }
-    assert splits == {"ood"}
+    assert splits <= set(OOD_SPLITS) and splits
+
+
+# --------------------------------------------------------------------------
+# 봉인 holdout — 템플릿 변형·개념 계열 (docs/04 §5, 계약 v0.3)
+# --------------------------------------------------------------------------
+
+
+def test_the_pilot_holdouts_are_in_the_vocabularies_and_seal_whole_families(batch):
+    split = DEFAULT_CONFIG["split"]
+    vocabulary = domains.phrasing_vocabulary()
+    known = {item for ids in vocabulary.values() for item in ids}
+    assert set(split["holdout_templates"]) <= known and len(split["holdout_templates"]) == 4
+    assert {item.split(".", 1)[0] for item in split["holdout_templates"]} == {"spatial", "dom", "workflow", "rules"}
+    concepts = {item for ids in domains.CONCEPT_VOCABULARY.values() for item in ids}
+    assert set(split["holdout_concepts"]) <= concepts and len(split["holdout_concepts"]) == 4
+    assert {item.split(":", 1)[0] for item in split["holdout_concepts"]} == {"spatial", "dom", "workflow", "rules"}
+
+    by_group = defaultdict(list)
+    for record in batch:
+        by_group[record["origin_group"]].append(record)
+    sealed = 0
+    for group, records in by_group.items():
+        reasons = {tuple(record["provenance"]["holdout"]) for record in records}
+        assert len(reasons) == 1  # 계열의 레코드는 같은 이유·같은 split
+        tags = {TEMPLATE_TAG + p for r in records for p in r["provenance"]["phrasing"]} | {CONCEPT_TAG + c for r in records for c in r["provenance"]["concepts"]}
+        expected = SplitPolicy.from_config(split).holdout_reasons(group, sorted(tags))
+        assert list(next(iter(reasons))) == expected
+        if expected:
+            sealed += 1
+            assert {record["split"] for record in records} == {ood_split(group)}
+    assert 0 < sealed < len(by_group)
+    # train 쪽에는 봉인 문구·개념이 하나도 없다.
+    for record in batch:
+        if record["split"] in OOD_SPLITS:
+            continue
+        assert not set(record["provenance"]["phrasing"]) & set(split["holdout_templates"])
+        assert not set(record["provenance"]["concepts"]) & set(split["holdout_concepts"])
+
+
+def test_the_pilot_sealed_share_lands_in_the_decided_band_per_domain_without_straddling():
+    """리뷰 1 I2: 봉인 종류(분야마다 문구 변형 하나·개념 하나)는 그대로 두고 생성 비중으로 OOD를 분야마다 ≈10~15 %(계열 기준,
+    2,000상태·seed 17)에 맞춘다 — 봉인 문구 변형은 표에서 `sealed_phrasing_share`(10 %)만큼만 뽑히고, 봉인 개념의 근원이 되는
+    장면(가운데 영역 목표·접힌 구역·오프라인 자원·안내 요청 조치)은 장면 생성 비중이 드물게 둔다. 한 계열이 두 split에 걸치지
+    않고, ood_dev/ood_test는 둘 다 쓰인다."""
+    records = generate_records(2000, 17)
+    by_group = defaultdict(list)
+    for record in records:
+        by_group[record["origin_group"]].append(record)
+    assert all(len({record["split"] for record in records}) == 1 for records in by_group.values())
+    for domain in DEFAULT_CONFIG["domains"]:
+        groups = {group: rows for group, rows in by_group.items() if group.startswith(domain + "/")}
+        sealed = [rows for rows in groups.values() if rows[0]["provenance"]["holdout"]]
+        share = len(sealed) / len(groups)
+        assert 0.10 <= share <= 0.15, (domain, share, len(sealed), len(groups))
+        assert any(reason.startswith("template:") for rows in sealed for reason in rows[0]["provenance"]["holdout"])
+        assert any(reason.startswith("concept:") for rows in sealed for reason in rows[0]["provenance"]["holdout"])
+        halves = Counter(rows[0]["split"] for rows in sealed)
+        assert halves["ood_dev"] > 0 and halves["ood_test"] > 0
+    assert validate_dataset(records, holdouts=DEFAULT_CONFIG["split"])["holdouts"]["leaked_groups"] == 0
+
+
+def test_sealed_phrasing_variants_are_drawn_with_the_configured_share_and_other_tables_are_untouched():
+    """`_say`는 봉인 변형이 든 표에서만 비중을 쓴다(봉인 변형에 `share` %, 나머지에 그 나머지를 고르게); 봉인 변형이 없는 표는
+    고르게 뽑고 난수 소비도 도입 전과 같다(`randrange`)."""
+    import random
+
+    table = {"_id": "spatial.distance", "ko": ("하나 {x}", "둘 {x}"), "en": ("one {x}", "two {x}")}
+    domains.begin_phrasing(sealed=["spatial.distance.ko#1"], share=10)
+    rng = random.Random(3)
+    drawn = Counter(domains._say(rng, table, "ko", x=1) for _ in range(4000))
+    assert abs(drawn["둘 1"] / 4000 - 0.10) < 0.02
+    assert domains.take_phrasing() == ["spatial.distance.ko#0", "spatial.distance.ko#1"]
+    # 봉인이 없는 언어·표는 고르게, 그리고 봉인 없이 부를 때와 같은 난수 흐름이다.
+    domains.begin_phrasing(sealed=["spatial.distance.ko#1"], share=10)
+    rng = random.Random(9)
+    with_seal = [domains._say(rng, table, "en", x=i) for i in range(50)]
+    domains.begin_phrasing()
+    rng = random.Random(9)
+    without = [domains._say(rng, table, "en", x=i) for i in range(50)]
+    assert with_seal == without and 0.3 < sum(text.startswith("two") for text in without) / 50 < 0.7
+    with pytest.raises(ValueError, match="sealed_phrasing_share"):
+        domains.begin_phrasing(sealed=[], share=100)
+    domains.begin_phrasing()
+    with pytest.raises(ValueError, match="sealed_phrasing_share"):
+        generate_records(1, 1, config={"sealed_phrasing_share": 0})
+
+
+def test_every_record_names_its_phrasing_variants_and_concepts(batch):
+    for record in batch:
+        provenance = record["provenance"]
+        assert provenance["phrasing"] and all("#" in item and "." in item for item in provenance["phrasing"])
+        assert provenance["concepts"] and all(item.startswith(provenance["domain"] + ":") for item in provenance["concepts"])
+        kinds = {item.split(":", 1)[1].split(":")[0] for item in provenance["concepts"]}
+        assert kinds <= {c.split(":", 1)[1].split(":")[0] for c in domains.CONCEPT_VOCABULARY[provenance["domain"]]}
+        assert provenance["phrasing"] == sorted(set(provenance["phrasing"]))
+
+
+def test_the_qa_report_counts_holdouts_and_flags_leaks(batch):
+    split = DEFAULT_CONFIG["split"]
+    report = validate_dataset(batch, holdouts=split)
+    holdouts = report["holdouts"]
+    assert holdouts["policy"]["holdout_templates"] == sorted(split["holdout_templates"])
+    assert set(holdouts["groups"]) <= set(OOD_SPLITS) and sum(holdouts["groups"].values()) > 0
+    assert holdouts["leaked_groups"] == 0 and report["errors"] == []
+    assert {reason.split(":", 1)[0] for reason in holdouts["by_reason"]} == {"template", "concept"}
+    for entry in holdouts["by_reason"].values():
+        assert entry["groups"] > 0 and set(entry["splits"]) <= set(OOD_SPLITS)
+    # 누출: 봉인 계열의 레코드를 train으로 옮기면 위반이다.
+    leaked = copy.deepcopy(batch)
+    victim = next(record for record in leaked if record["provenance"]["holdout"])
+    victim["split"] = "train"
+    report = validate_dataset(leaked, holdouts=split)
+    assert report["holdouts"]["leaked_groups"] == 1
+    assert any("누출" in error["message"] and victim["origin_group"] in error["message"] for error in report["errors"])
+    # 이유 없는 OOD도 위반이다.
+    orphan = copy.deepcopy(batch)
+    plain = next(record for record in orphan if not record["provenance"]["holdout"])
+    plain["split"] = "ood_test"
+    report = validate_dataset(orphan, holdouts=split)
+    assert any("holdout 이유가 없다" in error["message"] for error in report["errors"])
+    # 봉인 목록 없이 부르면 누출 검사를 하지 않는다 (옛 데이터셋).
+    assert validate_dataset(batch)["holdouts"]["policy"] is None
 
 
 def test_cli_generate_and_validate_round_trip(tmp_path):

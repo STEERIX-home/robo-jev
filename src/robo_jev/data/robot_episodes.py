@@ -6,7 +6,8 @@
 한 에피소드는 이렇게 만든다.
 
 1. **split을 먼저 정한다.** 장면 계획의 구조 서명(물체 수·형상 다중집합·영역 집합)이 장면 계열
-   (:func:`family_id`)이고, `origin_group = "robot/<profile>/family-<k>"`를
+   (:func:`family_id`)이고, `origin_group = "robot/<profile>/<계열>/goal-<목표 영역>"`(:func:`origin_group`,
+   장면 계획 모듈이 정의한다 — 문구 변형도 이 group의 해시로 고른다)를 계획의 태그(:func:`plan_tags`)와 함께
    :func:`robo_jev.data.split.assign_split`에 넣는다 — 에피소드를 돌리기 **전에**, 그리고 설정의
    holdout 목록(`configs/data/d1_robot.yaml`)으로 (docs/04 §5).
 2. 판단 틱마다 하네스가 요청을 만들고(:meth:`RobotHarness.build_request`), **정책**이 답하고
@@ -39,11 +40,11 @@ import yaml
 
 from robo_jev.contracts import QUESTION_SET_V0, validate_record
 from robo_jev.data.episode import aggregate, append_tick, finalize, new_episode
-from robo_jev.data.split import SplitPolicy, assign_split
+from robo_jev.data.split import CONCEPT_TAG, TEMPLATE_TAG, SplitPolicy, assign_split
 from robo_jev.harness.robot import RobotHarness, count_records, load_harness_config
 from robo_jev.sim.controller import resolve_config_path
 from robo_jev.sim.expert import Expert, load_expert_config
-from robo_jev.sim.scene import ScenePlan, build_plan
+from robo_jev.sim.scene import ScenePlan, build_plan, family_id, family_signature, origin_group
 
 __all__ = [
     "DEFAULT_CONFIG_PATH",
@@ -58,6 +59,8 @@ __all__ = [
     "load_generator_config",
     "main",
     "origin_group",
+    "plan_concepts",
+    "plan_tags",
     "run",
     "seed_schedule",
     "write_episode",
@@ -69,10 +72,6 @@ DEFAULT_CONFIG_PATH = "configs/data/d1_robot.yaml"
 
 #: 정책이 내야 하는 답. 이 밖의 키(`phase`·`expert_meta`)는 모델 출력에 넣지 않는다.
 QUESTIONS = tuple(QUESTION_SET_V0)
-
-#: 영역 id → 계열 이름의 글자 (`zoneL` → `L`).
-_ZONE_LETTER_PREFIX = "zone"
-
 
 def load_generator_config(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
     return yaml.safe_load(resolve_config_path(path).read_text(encoding="utf-8"))
@@ -102,37 +101,20 @@ def config_paths(config: dict[str, Any]) -> dict[str, str]:
 # --------------------------------------------------------------------------
 
 
-def family_signature(plan: ScenePlan) -> dict[str, Any]:
-    """장면 계획의 구조 서명: 물체 수, 형상 다중집합, 영역 집합.
-
-    자세·색·속성 배정·일정은 넣지 않는다 — 같은 구조의 장면이 같은 계열이어야 표현만 다른 장면이
-    train/test로 갈라지지 않는다(docs/04 §5 "holdout이 단지 물체 이름과 후보 ID를 바꾼 버전인지").
-    """
-    shapes: dict[str, int] = {}
-    for obj in plan.objects:
-        shapes[obj.shape] = shapes.get(obj.shape, 0) + 1
-    return {
-        "objects": len(plan.objects),
-        "shapes": dict(sorted(shapes.items())),
-        "zones": sorted(zone.id for zone in plan.zones),
-    }
+# `family_signature`·`family_id`·`origin_group`은 :mod:`robo_jev.sim.scene`이 정의한다(계획의 순수 함수; 문구 변형이 group 해시를
+# 쓴다) — 여기서는 같은 이름으로 다시 내보낸다.
 
 
-def family_id(plan: ScenePlan) -> str:
-    """구조 서명 → 계열 id. 읽을 수 있고 결정적이다: `family-n8-b3c5-zLRF`
-    (물체 8개, 상자 3·원통 5, 영역 L·R·F)."""
-    signature = family_signature(plan)
-    boxes = int(signature["shapes"].get("box", 0))
-    cylinders = int(signature["shapes"].get("cylinder", 0))
-    letters = "".join(
-        zone[len(_ZONE_LETTER_PREFIX):] if zone.startswith(_ZONE_LETTER_PREFIX) else zone
-        for zone in signature["zones"]
-    )
-    return f"family-n{signature['objects']}-b{boxes}c{cylinders}-z{letters}"
+def plan_concepts(plan: ScenePlan) -> list[str]:
+    """계획이 다루는 개념 id (docs/04 §5 개념 계열): 지시의 목표 영역 `robot:goal-zone:<zone>` (v1·v2 모두)."""
+    return sorted({f"robot:goal-zone:{step.zone}" for step in plan.instructions if step.zone})
 
 
-def origin_group(profile: str, plan: ScenePlan) -> str:
-    return f"robot/{profile}/{family_id(plan)}"
+def plan_tags(plan: ScenePlan) -> tuple[str, ...]:
+    """생성 **전에** 아는 holdout 태그: 지시의 문구 템플릿 변형(`template:v1#2`)과 개념(`concept:robot:goal-zone:zoneF`)."""
+    templates = sorted({TEMPLATE_TAG + str(step.template) for step in plan.instructions if step.template})
+    concepts = [CONCEPT_TAG + concept for concept in plan_concepts(plan)]
+    return tuple(templates + concepts)
 
 
 def episode_id(profile: str, seed: int, suffix: str = "") -> str:
@@ -198,13 +180,16 @@ def generate_episode(
         scene = env.reset(seed=int(seed))
         plan = env.plan
         group = origin_group(profile, plan)
+        tags = plan_tags(plan)
+        splits = split_policy(config)
         tick_ms = int(env.period_ms) * control_steps
         limit = int(max_ticks if max_ticks is not None else env.max_ms // tick_ms)
         record = new_episode(
             episode_id(profile, seed, id_suffix),
             group,
             instructions=[scene["instruction"]],
-            policy=split_policy(config),
+            policy=splits,
+            tags=tags,
         )
         harness = RobotHarness(harness_config)
         commitment = None
@@ -271,6 +256,11 @@ def generate_episode(
             "profile": profile,
             "origin_group": group,
             "family": family_signature(plan),
+            # 봉인 holdout의 근거 (docs/04 §5): 지시의 문구 템플릿 변형과 개념, 걸린 이유 (아니면 빈 목록).
+            "instruction_templates": [str(step.template) for step in plan.instructions if step.template],
+            "phrasing": [str(step.template) for step in plan.instructions if step.template],
+            "concepts": plan_concepts(plan),
+            "holdout": splits.holdout_reasons(group, tags),
             # 정책 클라이언트(`data.dagger.PolicyClient`)는 감싼 정책의 이름을 `name`으로 든다.
             "policy": {"name": str(getattr(policy, "name", type(policy).__name__)), "version": str(getattr(policy, "version", "unknown"))},
             "label_source": expert.label_source,
@@ -451,6 +441,8 @@ def build_manifest(
         "splits": counts["splits"],
         "families": dict(sorted(families.items())),
         "holdout_prefixes": list((config.get("split") or {}).get("holdout_prefixes") or ()),
+        "holdout_templates": list((config.get("split") or {}).get("holdout_templates") or ()),
+        "holdout_concepts": list((config.get("split") or {}).get("holdout_concepts") or ()),
         "versions": {name: sorted(values) for name, values in sorted(versions.items())},
         "bytes": {
             "total": sum(sizes),

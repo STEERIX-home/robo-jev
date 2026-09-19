@@ -9,21 +9,33 @@
 * ``state_first`` (L0, 단일 요청) — 공통 상태 S 뒤에 질문 T_i가 병렬 분기로 놓인다.
   ``T_i = [질문 머리][후보 1 … c_i1][후보 2 … c_i2] … [결정 위치 d_i]``. 각 질문의 position은
   ``len(S)``에서 다시 센다 (docs/03 §3 "분기별 정보 접근과 위치 규칙").
-* ``stream_l1a`` (L1-a, 에피소드 스트림) — 정적 prefix(시작 지시, 질문 세트 v0 텍스트와 정적
-  후보) 뒤에 틱이 이어진다. 틱 = ``[틱 머리·상태][commitment][실행 이력][동적 후보]`` 뒤 결정
-  위치들. 결정 위치는 틱 끝 공통 상태에서 갈라지는 **1토큰 분기**라 모두 같은 position을 갖고,
-  다음 틱은 분기 이전 position에서 이어진다 (docs/08 §3.1). prefix는 에피소드 시작 시의 것으로
-  고정이며, 지시가 바뀌면 그 버전을 처음 실은 틱의 **첫 토큰들**로 덧붙인다(리셋 없음) — 그
-  틱의 토큰이라 다른 틱 토큰과 같이 윈도우 밖으로 나가고, 현재 지시는 매 틱 `goal`이 다시
-  싣는다. 틱 머리는 ``[tick t]``뿐이며, 상태에 `t` 구간이 없는 레코드에서만 틱 겉봉투의 시각
-  값을 머리에 싣는다(하네스 상태는 `t`에 같은 값을 이미 실으므로 중복을 만들지 않는다).
+* ``stream_l1a`` (L1-a, 에피소드 스트림, **서식 v0.3** — docs/08 §3.1·§3.2) — 정적 prefix(시작 지시,
+  질문 세트 v0 텍스트와 정적 후보, 첫 틱의 영역·장면 요약) 뒤에 틱이 이어진다. 틱 =
+  ``[t 머리][goal][물체 소개·동적 줄(변화분)][영역·장면(바뀐 틱만)][robot][exec][사건][경유점]
+  [commitment][실행 이력][동적 후보]`` 뒤 결정 위치들. 결정 위치는 틱 끝 공통 상태에서 갈라지는
+  **1토큰 분기**라 모두 같은 position을 갖고, 다음 틱은 분기 이전 position에서 이어진다. prefix는
+  에피소드 시작 시의 것으로 고정이며, 지시가 바뀌면 그 버전을 처음 실은 틱의 **첫 토큰들**로
+  덧붙인다(리셋 없음) — 그 틱의 토큰이라 다른 틱 토큰과 같이 윈도우 밖으로 나가고, 현재 지시는
+  매 틱 `goal` 줄이 압축 참조(`goal v2 target=o7 zone=zoneL forbid=o3`)로 다시 싣고 텍스트는
+  `goal_text_period_ticks`마다 다시 싣는다.
 
-서식 규칙 (docs/08 §3.2): 한 줄에 한 항목, 고정 필드 순서, 위치는 mm 정수, 자세는 quaternion
-소수 2자리, 시간은 ms 정수. 스칼라 묶음(`t`·`goal`·`scene`·`robot`·`exec`)은 ``이름 k=v k=v`` 한
-줄, 항목 목록(`objects`·`zones`·`events`·`derived`)은 항목마다 한 줄, 빈 목록은 ``-``, 없음은
-``none``이다. 필드 순서는 :data:`FIELD_ORDER`(스키마 순서)이고 거기 없는 키는 그 뒤에 이름순이다.
-줄은 조각(chunk) 단위로 따로 토큰화해 이어 붙인다 — 스트림에서 틱마다 새 토큰만 붙이는 것과
-같은 계산이며, 줄 경계에서는 통째 토큰화와 같다(검사가 실제 tokenizer로 확인).
+**변화분 틱 (docs/08 §3.1, 계약 v0.3).** 물체는 두 줄로 나뉜다. **소개 줄** ``obj <id> <desc> obb= top= faces=
+attr=``(정적 필드)은 에피소드 시작·처음 관측·정적 필드 변경 시·`object_intro_period_ticks`(30, 윈도우 길이)마다,
+**동적 줄** ``<id> p= q= s= conf= vis= seen= rel= clr= corr=``은 변화(자세 변화 > max(정밀도 `s`, `object_pose_delta_mm`),
+자세 회전, 가시 비율 변화 ≥ `object_visibility_delta`, 관측 정지의 시작·끝, 재식별 사건, 들고 있는 물체) 또는
+`object_dynamic_period_ticks`(10)마다 싣는다. 바뀌지 않은 물체는 틱에서 빠진다. `seen`(마지막 관측 시각)은 관측이
+**끊긴** 물체에만 있다. 영역·장면 요약은 prefix에 있고 바뀐 틱에만 다시 싣는다. 나머지 구간(t·goal·robot·exec·
+commitment·실행 이력·후보·결정)은 매 틱이다 — 후보 블록의 변화분은 계약 밖이다(memo 1b). 변화분은 **입력의
+정의**이지 계산 근사가 아니다: 틱 k의 텍스트는 틱 0..k의 레코드만으로 정해지므로 앞 n틱만 직렬화한 결과는 전체
+직렬화의 접두이고(검사), 증분 계산과 처음부터 계산이 같다. 문턱·주기는 :data:`DELTA_RULES`이며
+`configs/harness/robot.yaml`의 `serialization:` 블록이 같은 값을 적는다(검사가 대조; 레코드의 `config_digest`에 든다).
+
+서식 규칙 (docs/08 §3.2): 한 줄에 한 항목, 고정 필드 순서, 위치는 mm 정수, 자세는 quaternion 소수 2자리, 시간은
+ms 정수. 스트림은 짧은 필드 이름과 기본값 생략(:data:`STREAM_FIELDS`)을 쓰고, 상태 선행(L0) 배치는 스키마 이름
+그대로다: 스칼라 묶음은 ``이름 k=v k=v`` 한 줄, 항목 목록은 항목마다 한 줄, 빈 목록은 ``-``, 없음은 ``none``,
+필드 순서는 :data:`FIELD_ORDER`(스키마 순서)이고 거기 없는 키는 그 뒤에 이름순이다. 줄은 조각(chunk) 단위로 따로
+토큰화해 이어 붙인다 — 스트림에서 틱마다 새 토큰만 붙이는 것과 같은 계산이며, 줄 경계에서는 통째 토큰화와
+같다(검사가 실제 tokenizer로 확인).
 
 **결정 위치의 예약 토큰.** 결정 위치는 대문자 한 글자 **한 토큰**이다(:data:`DECISION_MARKERS`).
 backbone이 모르는 특수 토큰을 만들지 않는다 — byte-level BPE 어휘에서 ASCII 한 글자는 언제나 한
@@ -55,6 +67,7 @@ backbone이 모르는 특수 토큰을 만들지 않는다 — byte-level BPE �
 
 from __future__ import annotations
 
+import math
 import string
 from typing import Any
 
@@ -69,6 +82,7 @@ from robo_jev.contracts import (
 
 __all__ = [
     "DECISION_MARKERS",
+    "DELTA_RULES",
     "STATE_FIRST_MARKER",
     "FIELD_ORDER",
     "LAYOUTS",
@@ -76,12 +90,15 @@ __all__ = [
     "QUATERNION_DECIMALS",
     "QUESTION_SETS",
     "SECTION_ORDER",
+    "STREAM_FIELDS",
+    "STREAM_FORMAT",
     "TIME_UNIT",
     "TOKEN_SERIALIZER_VERSION",
     "WINDOW_TICKS",
     "candidate_line",
     "serialize_request",
     "state_lines",
+    "stream_candidate_line",
 ]
 
 LAYOUTS = ("state_first", "stream_l1a")
@@ -94,13 +111,42 @@ LAYOUTS = ("state_first", "stream_l1a")
 #: 환경·하네스가 상태를 레코드로 적는 **레코드 직렬화**(상태 스키마·mm/ms 정수·quaternion 자릿수)의 버전이고
 #: :mod:`robo_jev.data.episode` 가 적는다. 4b가 토큰 형식을 바꿨을 때 두 형식이 `s0.2` 한 문자열을 나눠 가졌던
 #: 일을 되풀이하지 않도록 이름부터 가른다(`ts…` 대 `s…`).
-TOKEN_SERIALIZER_VERSION = "ts0.3"
+TOKEN_SERIALIZER_VERSION = "ts0.5"
+#: 스트림 서식의 계약 버전 (docs/08 §3.2 표). ts0.4 = 서식 v0.3 (짧은 이름, 물체 소개/동적 분리, 변화분 틱); ts0.5 = 리뷰 1의
+#: 변화분 줄 규칙(기본값 복귀·`gone`)과 후보 줄 생략(`path=ok`, 모델이 마지막으로 본 대상 `clr`와 같은 `clr`).
+STREAM_FORMAT = "v0.3"
 POSITION_UNIT = "mm"
 QUATERNION_DECIMALS = 2
 TIME_UNIT = "ms"
 
 #: Full-attention 윈도우: 정적 prefix + 최근 30틱 (docs/08 §3.1).
 WINDOW_TICKS = 30
+
+#: 변화분 틱의 문턱·주기 (docs/08 §3.1). `configs/harness/robot.yaml`의 `serialization:` 블록과 같아야 한다(검사).
+#: `object_pose_delta_mm`은 물체의 정밀도 추정(`s`)에 더해지는 바닥값이다 — 문턱 = max(s, 이 값).
+DELTA_RULES: dict[str, Any] = {
+    "object_intro_period_ticks": 30,
+    "object_dynamic_period_ticks": 10,
+    "goal_text_period_ticks": 10,
+    "object_pose_delta_mm": 0,
+    "object_visibility_delta": 0.25,
+}
+
+#: 스트림 서식 v0.3의 짧은 필드 이름 (docs/08 §3.2 표 — 문서의 표와 같아야 한다).
+STREAM_FIELDS: dict[str, dict[str, str]] = {
+    "t": {"tick": "t", "age_ms.geom": "g", "age_ms.proprio": "p", "seq": "seq"},
+    "goal": {"version": "v", "target_ref": "target", "target_desc": "desc", "target_zone": "zone", "forbidden_contact": "forbid", "fragile": "fragile", "priority": "prio", "text": "text"},
+    "obj": {"desc": "", "obb_mm": "obb", "top_mm": "top", "graspable_faces": "faces", "attributes": "attr"},
+    "object": {"pose_mm": "p", "yaw_deg": "yaw", "quat": "q", "precision_mm": "s", "pose_sigma_mm": "s", "surface_conf": "conf", "visible_ratio": "vis", "last_seen_ms": "seen", "clearance_mm": "clr", "nearest_clearance_mm": "clr", "corridor_mm": "corr", "reid": "reid"},
+    "zone": {"desc": "", "bounds_mm": "b"},
+    "scene": {"work_surface_mm": "surf", "free_width_mm": "free", "corridor_mm": "corr", "clearance_mm": "clr"},
+    "robot": {"ee_pose_mm": "ee", "ee_quat": "eq", "gripper_mm": "grip", "holding": "hold", "contact_n": "f", "speed_mm_s": "v"},
+    "exec": {"seq": "seq", "executor": "ex", "action_ref": "a", "phase": "ph", "path": "path", "speed_mm_s": "v", "speed_level": "lvl", "force_level": "f", "gripper": "g", "stop": "stop", "stale": "stale", "hold_after_stale": "hold_stale", "progress": "prog", "applied": "applied", "reject": "rej", "gripper_wait": "wait", "events": "ev"},
+    "ev": {"object": "o", "displacement_mm": "d"},
+    "wp": {"pos_mm": "p", "around": "around", "extra_mm": "extra"},
+    "commitment": {"action_ref": "a", "phase": "ph", "held_ticks": "held", "last_switch_tick": "sw"},
+    "hist": {"main": "main", "phase": "ph", "path": "path", "speed": "v", "force": "f", "gripper": "g", "stop": "stop", "gate": "gate", "ack": "ack", "fails": "fails"},
+}
 
 #: 결정 위치에 쓸 수 있는 예약 토큰(대문자 한 글자 = 한 토큰). 스트림의 질문 세트 map은 이 안에서 고른다.
 DECISION_MARKERS = tuple(string.ascii_uppercase)
@@ -418,7 +464,7 @@ def _serialize_state_first(
 
 
 # --------------------------------------------------------------------------
-# stream_l1a (L1-a)
+# stream_l1a (L1-a) — 서식 v0.3
 # --------------------------------------------------------------------------
 
 
@@ -446,24 +492,6 @@ def _declared_markers(question_set_id: str, question_set: dict[str, dict[str, An
 def _markers_line(markers: dict[str, str]) -> str:
     """정적 prefix의 표지 선언 한 줄: ``markers q_main=A q_done=B …``."""
     return "markers " + " ".join(f"{question_id}={marker}" for question_id, marker in markers.items()) + "\n"
-
-
-_ENVELOPE_FIELDS = ("sim_ms", "observed_at_ms", "obs_age_ms")
-
-
-def _tick_header(tick: dict) -> str:
-    """틱 머리 ``[tick t]``.
-
-    하네스가 만든 상태는 같은 시각 값을 `t` 구간에 싣는다 — 머리에 또 적으면 직렬화가 스스로
-    중복을 만드는 것이다. `t` 구간이 없는 레코드(D0 fixture처럼 손으로 만든 것)에서만 틱
-    겉봉투의 값을 머리에 실어 정보를 잃지 않는다.
-    """
-    header = f"[tick {_scalar('t', tick['t'])}]"
-    if not isinstance(tick["request"].get("state", {}).get("t"), dict):
-        envelope = {key: tick[key] for key in _ENVELOPE_FIELDS if key in tick}
-        if envelope:
-            header += " " + _pairs(envelope)
-    return header + "\n"
 
 
 def _instruction_slots(
@@ -496,7 +524,408 @@ def _instruction_slots(
     return slots, unplaced
 
 
-def _serialize_stream(projected: dict, tokenizer: Any, *, window_ticks: int) -> dict[str, Any]:
+# -- 짧은 줄 서식 (docs/08 §3.2 표) ----------------------------------------------
+
+#: 값이 이것이면 줄에서 뺀다 (기본값 생략).
+_OMIT = (None, False, 0, 0.0, "", "none", [], ())
+
+
+def _short(prefix: str, item: dict, table: dict[str, str], *, keep_zero: tuple[str, ...] = ()) -> str:
+    """짧은 이름의 ``k=v`` 묶음. 표에 없는 키는 스키마 이름 그대로 뒤에 붙고, 기본값(None·false·0·빈 목록)은 뺀다.
+
+    참 boolean은 이름만 적는다(``stop``). 표의 순서가 곧 줄의 순서다.
+    """
+    parts: list[str] = [prefix] if prefix else []
+    ordered = [key for key in table if key in item] + sorted(key for key in item if key not in table)
+    for key in ordered:
+        value = item[key]
+        if key not in keep_zero and (value in _OMIT or (isinstance(value, (list, tuple)) and not value)):
+            continue
+        name = table.get(key, key)
+        if isinstance(value, bool):
+            parts.append(name)
+        elif name == "":
+            parts.append(_scalar(key, value))
+        else:
+            parts.append(f"{name}={_value(key, value)}")
+    return " ".join(parts)
+
+
+def _tick_header_line(tick: dict) -> str:
+    """틱 머리 ``t <tick> age g<ms> p<ms> seq <n>`` (docs/08 §3.2). 모의 시각·관측 시각·후보 집합 해시는 겉봉투에만 있다.
+
+    상태에 `t` 구간이 없는 레코드(D0 fixture)는 틱 겉봉투의 나이로 채운다.
+    """
+    state = tick["request"].get("state") or {}
+    section = state.get("t") if isinstance(state.get("t"), dict) else {}
+    number = section.get("tick", tick.get("t"))
+    ages = section.get("age_ms", tick.get("obs_age_ms"))
+    parts = [f"t {_scalar('tick', number)}"]
+    if isinstance(ages, dict):
+        parts.append("age " + " ".join(f"{STREAM_FIELDS['t'].get('age_ms.' + key, key)}{_scalar(key, value)}" for key, value in ages.items()))
+    elif ages is not None:
+        parts.append(f"age {_scalar('age_ms', ages)}")
+    if section.get("seq") is not None:
+        parts.append(f"seq {_scalar('seq', section['seq'])}")
+    return " ".join(parts) + "\n"
+
+
+def _goal_line(goal: Any, *, with_text: bool) -> str:
+    """``goal v<n> target=<id> [desc=<설명>] zone=<id> forbid=<ids> fragile=<ids> [text=…]`` — 압축 참조. 문자열 goal(D0)은 그대로.
+
+    `desc`(지시가 부르는 대상의 설명)는 대상이 아직 추적되지 않아 `target=-`일 때만 싣는다 — 그때 모델이 대상을 알 유일한 단서다.
+    """
+    if not isinstance(goal, dict):
+        return f"goal {_scalar('goal', goal)}\n" if goal not in (None, "") else "goal -\n"
+    item = {key: value for key, value in goal.items() if key not in ("t_ms",)}
+    if not with_text:
+        item.pop("text", None)
+    version = item.pop("version", None)
+    target = item.pop("target_ref", None)
+    if target is not None:
+        item.pop("target_desc", None)
+    body = _short("", item, STREAM_FIELDS["goal"])
+    head = "goal" + (f" v{_scalar('version', version)}" if version is not None else "") + f" target={_value('target_ref', target)}"
+    return head + (f" {body}" if body else "") + "\n"
+
+
+_INTRO_KEYS = ("desc", "obb_mm", "top_mm", "graspable_faces", "attributes")
+#: 동적 줄의 항상 싣는 필드(자세·정밀도·여유·통로)와 바뀔 때만 싣는 필드(방향·표면 신뢰도·가시 비율·재식별).
+_DYNAMIC_ALWAYS = ("pose_mm", "precision_mm", "pose_sigma_mm")
+_DYNAMIC_OPTIONAL = ("quat", "surface_conf", "visible_ratio", "reid")
+
+
+def _intro_line(entry: dict) -> str:
+    """물체 소개 줄 ``obj <id> <desc> obb=<x,y,z> top=<mm> faces=<a,b> attr=<…>`` (정적 필드)."""
+    item = {key: entry[key] for key in _INTRO_KEYS if key in entry}
+    return _short(f"obj {_scalar('id', entry['id'])}", item, STREAM_FIELDS["obj"]) + "\n"
+
+
+def _orientation(quat: Any) -> tuple[str, Any] | None:
+    """자세 회전의 짧은 표기: 작업면 위 물체는 z축 회전뿐이므로 ``yaw=<도>``(정수, 회전 없음은 0), 기울어진 자세만
+    ``q=<quaternion>``. 돌려주는 것은 (키, 값) — 키는 `yaw_deg` 또는 `quat`; quaternion이 아니면 None."""
+    if not isinstance(quat, (list, tuple)) or len(quat) != 4:
+        return None
+    x, y, z, w = (float(value) for value in quat)
+    if abs(x) < 0.005 and abs(y) < 0.005:
+        yaw = int(round(math.degrees(2.0 * math.atan2(z, w))))
+        return ("yaw_deg", (yaw + 180) % 360 - 180)
+    return ("quat", list(quat))
+
+
+def _dynamic_line(entry: dict, derived: dict, *, stale: bool, optional: tuple[str, ...], full: bool) -> str:
+    """물체 동적 줄 ``<id> p= [yaw=|q=] s= [conf=] [vis=] [seen=] clr= corr= [reid=]``.
+
+    자세·정밀도·여유·통로는 줄마다 싣고, `optional`에 든 방향·표면 신뢰도·가시 비율·재식별은 바뀐 것(또는 소개 틱의
+    전체 줄)만 싣는다. 기본값 `yaw=0`(회전 없음)·`vis=1`(다 보임)은 **전체 줄(`full`)에서만** 뺀다 — 변화분 줄은 바뀐
+    필드를 값이 기본값이라도 적어 "기본값으로 돌아왔다"(가시 비율 1→0.5→1, 요 0→90→0)가 "그대로다"와 같은 줄이 되지
+    않게 한다. `seen`(마지막 관측 시각)은 관측이 끊긴 물체에만. 말단 기준 상대 벡터(`relative_mm`)는 싣지 않는다 —
+    `robot ee`와 `p`로 정해진다.
+    """
+    item: dict[str, Any] = {key: entry[key] for key in _DYNAMIC_ALWAYS if key in entry}
+    if "quat" in optional:
+        orientation = _orientation(entry.get("quat"))
+        if orientation is not None and not (full and orientation == ("yaw_deg", 0)):
+            item[orientation[0]] = orientation[1]
+    if "surface_conf" in optional and "surface_conf" in entry:
+        item["surface_conf"] = entry["surface_conf"]
+    if "visible_ratio" in optional and "visible_ratio" in entry and not (full and float(entry["visible_ratio"]) >= 1.0):
+        item["visible_ratio"] = entry["visible_ratio"]
+    if stale and "last_seen_ms" in entry:
+        item["last_seen_ms"] = entry["last_seen_ms"]
+    for key in ("clearance_mm", "nearest_clearance_mm", "corridor_mm"):
+        if key in derived:
+            item[key] = derived[key]
+    if "reid" in optional and entry.get("reid"):
+        item["reid"] = entry["reid"]
+    return _short(_scalar("id", entry["id"]), item, STREAM_FIELDS["object"], keep_zero=("yaw_deg", "visible_ratio", "clearance_mm", "nearest_clearance_mm", "corridor_mm", "precision_mm", "pose_sigma_mm")) + "\n"
+
+
+def _zone_line(zone: dict) -> str:
+    item = {key: value for key, value in zone.items() if key != "id"}
+    return _short(f"zone {_scalar('id', zone.get('id'))}", item, STREAM_FIELDS["zone"], keep_zero=("bounds_mm",)) + "\n"
+
+
+def _scene_line(scene: dict) -> str:
+    return _short("scene", scene, STREAM_FIELDS["scene"], keep_zero=tuple(scene)) + "\n"
+
+
+def _robot_line(robot: dict, *, with_quat: bool) -> str:
+    """``robot ee=<x,y,z> [eq=<quat>] grip=<mm> [hold=<id>] [f=<N>] [v=<mm/s>]`` — 말단 자세는 바뀔 때와 소개 틱에만."""
+    item = dict(robot)
+    if not with_quat:
+        item.pop("ee_quat", None)
+    return _short("robot", item, STREAM_FIELDS["robot"], keep_zero=("ee_pose_mm", "gripper_mm")) + "\n"
+
+
+def _exec_line(execution: dict) -> str:
+    return _short("exec", execution, STREAM_FIELDS["exec"]) + "\n"
+
+
+def _event_line(event: dict) -> str:
+    item = {key: value for key, value in event.items() if key not in ("kind", "sim_ms")}
+    return _short(f"ev {_scalar('kind', event.get('kind'))}", item, STREAM_FIELDS["ev"], keep_zero=tuple(item)) + "\n"
+
+
+def _waypoint_line(waypoint: dict) -> str:
+    item = {key: value for key, value in waypoint.items() if key not in ("waypoint", "kind")}
+    head = f"wp {_scalar('waypoint', waypoint.get('waypoint'))}"
+    if waypoint.get("kind") is not None:
+        head += f" {_scalar('kind', waypoint['kind'])}"
+    return _short(head, item, STREAM_FIELDS["wp"], keep_zero=tuple(item)) + "\n"
+
+
+def _commitment_line(commitment: Any) -> str:
+    """``commitment a=<ref> ph=<phase> held=<n> sw=<tick>`` — 키는 후보 줄이 나르므로 적지 않는다."""
+    if not isinstance(commitment, dict) or not commitment:
+        return "commitment none\n"
+    item = {key: value for key, value in commitment.items() if key != "key"}
+    return _short("commitment", item, STREAM_FIELDS["commitment"], keep_zero=("held_ticks",)) + "\n"
+
+
+def _history_line(text: Any) -> str:
+    """실행 이력 ``hist main=<ref> ph=<phase> path=<id> v=<lvl> f=<lvl> g=<open|closed> [stop] [gate=…] ack=<…> [fails=<n>]``."""
+    fields = _history_fields(text)
+    if not fields:
+        return "hist none\n"
+    item: dict[str, Any] = {}
+    for key, value in fields.items():
+        if key == "stop":
+            item[key] = value not in ("0", "false", "")
+        elif key in ("speed", "force", "fails"):
+            try:
+                item[key] = int(value)
+            except ValueError:
+                item[key] = value
+        else:
+            item[key] = value
+    return _short("hist", item, STREAM_FIELDS["hist"], keep_zero=("speed", "force")) + "\n"
+
+
+def _history_fields(text: Any) -> dict[str, str]:
+    """``main=c1 phase=approach …`` → 필드. :func:`robo_jev.harness.robot.parse_exec_history`와 같은 규칙(모델 코드가 하네스를
+    import하지 않도록 여기 다시 적는다; 검사가 두 파서를 대조한다)."""
+    if not isinstance(text, str) or text in ("", "none"):
+        return {}
+    fields: dict[str, str] = {}
+    for token in text.split():
+        if "=" in token:
+            key, value = token.split("=", 1)
+            fields[key] = value
+    return fields
+
+
+def stream_candidate_line(entry: dict, *, geom_age_ms: Any = None, object_clearance: dict[str, Any] | None = None) -> str:
+    """스트림의 후보 한 줄 (서식 v0.3): 결합 후보 ``<id>: <기능> <대상> <접근>→<목적지> d= [clr=] [path=blocked] [g=]``,
+    밀기는 ``<접근>``만(목적지 없음), 고정 후보·경로 후보는 ``<id>: <키>`` / ``<id>: <종류> [<경유점>]``. 자연어 설명은
+    없다 — 키가 설명이다. 기본값·중복은 뺀다: ``path=ok``는 적지 않고 막힌 경로만 ``path=blocked``; ``clr``(대상의 최근접
+    여유)는 **모델이 마지막으로 본** 대상 물체 동적 줄의 `clr`(`object_clearance[대상 id]` — 변화분 상태가 기억하는, 이번
+    틱까지 실은 값)와 같으면 중복이라 뺀다(하네스가 같은 값에서 채운다). 대상은 그대로인데 이웃이 움직여 여유만 바뀌면
+    동적 줄이 나가지 않으므로 후보 줄이 새 값을 나른다(리뷰 2 C1). 대상 기하의 나이 ``g``는 틱의 기하 나이(`t … age
+    g<ms>`)와 다를 때만(관측이 끊긴 대상) 적는다. 옛 서식의 항목(`desc`·`derived`)은 버리고, 그 밖의 필드는 ``k=v``로 뒤에
+    붙는다.
+    """
+    rest = dict(entry)
+    identifier = _scalar("id", rest.pop("id"))
+    rest.pop("desc", None)
+    rest.pop("description", None)
+    rest.pop("derived", None)
+    if geom_age_ms is not None and "g" in rest and int(rest["g"]) == int(geom_age_ms):
+        rest.pop("g")
+    if rest.get("path") == "ok":
+        rest.pop("path")
+    parts_of_key = joint_key_parts(rest.get("key"))
+    if object_clearance is not None and parts_of_key is not None and "clr" in rest:
+        target_clearance = object_clearance.get(parts_of_key[1])
+        if target_clearance is not None and int(rest["clr"]) == int(target_clearance):
+            rest.pop("clr")
+    if rest.get("action_ref") == entry.get("id") or "kind" in rest:
+        rest.pop("action_ref", None)
+    words: list[str] = []
+    key = rest.pop("key", None)
+    if key is not None:
+        if parts_of_key is not None:
+            function, target, approach, destination = parts_of_key
+            arrow = approach if function == "push" and destination == "none" else f"{approach}→{destination}"
+            words.append(f"{function} {target} {arrow}")
+            words.extend(str(key).split(":")[4:])
+        else:
+            words.append(str(key))
+    kind = rest.pop("kind", None)
+    if kind is not None:
+        words.append(_scalar("kind", kind))
+        ref = rest.pop("ref", None)
+        if ref is not None:
+            words.append(_scalar("ref", ref))
+    tail = " ".join(f"{key}={_value(key, value)}" for key, value in rest.items())
+    return f"{identifier}: " + " ".join(words + ([tail] if tail else [])) + "\n"
+
+
+def joint_key_parts(key: Any) -> tuple[str, str, str, str] | None:
+    """결합 키 ``기능:대상:접근:목적지``의 앞 네 조각 (:func:`robo_jev.harness.robot.joint_key_parts`와 같은 규칙 — 모델 코드가
+    하네스를 import하지 않도록 여기 다시 적는다; 검사가 둘을 대조한다). 결합 키가 아니면 None."""
+    parts = str(key or "").split(":")
+    if len(parts) < 4 or parts[0] not in ("grasp", "place", "push"):
+        return None
+    return parts[0], parts[1], parts[2], parts[3]
+
+
+# -- 변화분 상태 --------------------------------------------------------------------
+
+
+def _quat_text(value: Any) -> str | None:
+    return _value("quat", value) if isinstance(value, (list, tuple)) and value else None
+
+
+class _DeltaState:
+    """틱 사이에 마지막으로 실은 것을 기억한다 — 변화분 판정의 근거. 틱 0..k의 레코드만 읽는다."""
+
+    def __init__(self, rules: dict[str, Any]) -> None:
+        self.rules = rules
+        self.intro: dict[str, str] = {}
+        self.pose: dict[str, list[float]] = {}
+        self.quat: dict[str, str | None] = {}
+        self.conf: dict[str, Any] = {}
+        self.visible: dict[str, float] = {}
+        self.stale: dict[str, bool] = {}
+        #: 물체마다 마지막으로 실은 동적 줄의 `clr` — 후보 줄의 `clr` 생략은 이것에 댄다(그 틱의 상태 값이 아니라).
+        self.clearance: dict[str, Any] = {}
+        self.zones: str | None = None
+        self.scene: str | None = None
+        self.robot_quat: str | None = None
+
+    def object_lines(self, state: dict, index: int) -> tuple[list[str], list[str]]:
+        """(소개 줄들, 동적 줄들) — 이 틱에 실을 것만."""
+        period_intro = int(self.rules["object_intro_period_ticks"])
+        period_dynamic = int(self.rules["object_dynamic_period_ticks"])
+        floor_mm = float(self.rules["object_pose_delta_mm"])
+        vis_delta = float(self.rules["object_visibility_delta"])
+        refresh_intro = period_intro > 0 and index % period_intro == 0
+        refresh_dynamic = period_dynamic > 0 and index % period_dynamic == 0
+        derived_by_object = {
+            str(item.get("object")): item for item in state.get("derived") or () if isinstance(item, dict) and "object" in item
+        }
+        geom_age = None
+        section = state.get("t")
+        if isinstance(section, dict) and isinstance(section.get("age_ms"), dict):
+            geom_age = section["age_ms"].get("geom")
+        holding = (state.get("robot") or {}).get("holding")
+
+        intros: list[str] = []
+        dynamics: list[str] = []
+        present = {str(entry["id"]) for entry in state.get("objects") or () if isinstance(entry, dict) and "id" in entry}
+        for object_id in [known for known in self.intro if known not in present]:
+            # 추적 목록에서 빠진 물체는 한 번 ``<id> gone``으로 알리고 잊는다 — 다시 나타나면 처음 관측처럼 전체 줄이다.
+            dynamics.append(f"{_scalar('id', object_id)} gone\n")
+            for table in (self.intro, self.pose, self.quat, self.conf, self.visible, self.stale, self.clearance):
+                table.pop(object_id, None)
+        for entry in state.get("objects") or ():
+            if not isinstance(entry, dict) or "id" not in entry:
+                continue
+            object_id = str(entry["id"])
+            intro = _intro_line(entry)
+            if refresh_intro or self.intro.get(object_id) != intro:
+                intros.append(intro)
+                self.intro[object_id] = intro
+
+            pose = [float(value) for value in entry.get("pose_mm") or ()]
+            orientation = _orientation(entry.get("quat"))
+            quat = None if orientation is None else _value(orientation[0], orientation[1])
+            conf = entry.get("surface_conf")
+            visible = float(entry.get("visible_ratio", 1.0) or 0.0)
+            age = entry.get("age_ms")
+            stale = bool(geom_age is not None and age is not None and float(age) > float(geom_age))
+            sigma = float(entry.get("precision_mm", entry.get("pose_sigma_mm", 0.0)) or 0.0)
+            threshold = max(sigma, floor_mm)
+            previous = self.pose.get(object_id)
+            first = previous is None
+            moved = first or (len(previous) == len(pose) and pose and _dist(previous, pose) > threshold)
+            rotated = quat != self.quat.get(object_id)
+            conf_change = conf != self.conf.get(object_id)
+            seen_change = stale != self.stale.get(object_id, False)
+            visibility_change = abs(visible - self.visible.get(object_id, visible if first else 0.0)) >= vis_delta
+            reid = bool(entry.get("reid"))
+            held = holding is not None and str(holding) == object_id
+            if refresh_dynamic or first or moved or rotated or seen_change or visibility_change or reid or held:
+                # 소개 틱·처음에는 전체 줄, 그 밖에는 바뀐 선택 필드만 (윈도우 길이의 소개 주기가 전체 줄을 보장한다).
+                full = first or refresh_intro
+                optional = tuple(
+                    key for key, changed in (("quat", rotated), ("surface_conf", conf_change), ("visible_ratio", visibility_change), ("reid", reid))
+                    if full or changed
+                )
+                derived = derived_by_object.get(object_id, {})
+                dynamics.append(_dynamic_line(entry, derived, stale=stale, optional=optional, full=full))
+                if derived.get("clearance_mm") is not None:
+                    self.clearance[object_id] = derived["clearance_mm"]
+                else:
+                    self.clearance.pop(object_id, None)
+                self.pose[object_id] = pose
+                self.quat[object_id] = quat
+                self.conf[object_id] = conf
+                self.visible[object_id] = visible
+                self.stale[object_id] = stale
+        return intros, dynamics
+
+    def zone_lines(self, state: dict) -> list[str]:
+        zones = state.get("zones")
+        if not isinstance(zones, list):
+            return []
+        lines = [_zone_line(zone) for zone in zones if isinstance(zone, dict)]
+        text = "".join(lines)
+        if text == self.zones:
+            return []
+        self.zones = text
+        return lines
+
+    def scene_lines(self, state: dict) -> list[str]:
+        scene = state.get("scene")
+        if not isinstance(scene, dict) or not scene:
+            return []
+        line = _scene_line(scene)
+        if line == self.scene:
+            return []
+        self.scene = line
+        return [line]
+
+    def robot_line(self, state: dict, index: int) -> str | None:
+        robot = state.get("robot")
+        if not isinstance(robot, dict):
+            return None
+        quat = _quat_text(robot.get("ee_quat"))
+        period = int(self.rules["object_intro_period_ticks"])
+        with_quat = quat != self.robot_quat or (period > 0 and index % period == 0)
+        self.robot_quat = quat
+        return _robot_line(robot, with_quat=with_quat)
+
+
+def _dist(a: list[float], b: list[float]) -> float:
+    return sum((x - y) ** 2 for x, y in zip(a, b)) ** 0.5
+
+
+_STATE_ORDER = ("t", "goal", "objects", "scene", "zones", "robot", "exec", "events", "derived", "commitment", "image", "geom", "extractor")
+#: 모델 텍스트에 싣지 않는 상태 키. `image`·`geom`은 soft token 슬롯이라 비어 있어야 하고(값이 있으면 이 직렬화가 그것을 조용히
+#: 버리게 되므로 거절한다), `extractor`는 앞단 버전 문자열(겉봉투 — `versions`와 함께 검증용)이라 문자열만 받는다.
+_ENVELOPE_KEYS = ("image", "geom", "extractor")
+
+
+def _check_envelope(state: dict, index: int) -> None:
+    for key in ("image", "geom"):
+        if state.get(key):
+            raise ValueError(f"틱 {index}: state.{key}가 비어 있지 않다 — 서식 v0.3은 soft token 슬롯을 싣지 않으므로 조용히 버리지 않고 거절한다")
+    extractor = state.get("extractor")
+    if extractor not in (None, "") and not isinstance(extractor, str):
+        raise ValueError(f"틱 {index}: state.extractor는 앞단 버전 문자열(겉봉투)이어야 한다 (받은 값: {type(extractor).__name__})")
+
+
+def _extra_state_lines(state: dict) -> list[str]:
+    """스키마 밖의 상태 키(다른 도구의 틱)는 옛 서식 그대로 뒤에 붙는다 — 정보를 잃지 않는다."""
+    extra = {key: value for key, value in state.items() if key not in _STATE_ORDER}
+    return state_lines(extra) if extra else []
+
+
+def _serialize_stream(
+    projected: dict, tokenizer: Any, *, window_ticks: int, rules: dict[str, Any]
+) -> dict[str, Any]:
     prefix = projected["prefix"]
     ticks = projected["ticks"]
     question_set_id = str(prefix.get("question_set"))
@@ -509,6 +938,7 @@ def _serialize_stream(projected: dict, tokenizer: Any, *, window_ticks: int) -> 
     question_ids = list(question_set)
     markers = _declared_markers(question_set_id, question_set)
     branch_of = {question_id: branch for branch, question_id in enumerate(question_ids)}
+    delta = _DeltaState(rules)
 
     instructions = prefix["instructions"]
     chunks: list[_Chunk] = [
@@ -536,12 +966,23 @@ def _serialize_stream(projected: dict, tokenizer: Any, *, window_ticks: int) -> 
                     owner=branch,
                 )
             )
+    # 영역·장면 요약은 정적 prefix다 (첫 틱의 것; 바뀐 틱에만 다시 싣는다).
+    if ticks:
+        first_state = ticks[0]["request"].get("state") or {}
+        zone_lines = delta.zone_lines(first_state)
+        if zone_lines:
+            chunks.append(_Chunk("".join(zone_lines), "prefix", "zones"))
+        scene_lines = delta.scene_lines(first_state)
+        if scene_lines:
+            chunks.append(_Chunk("".join(scene_lines), "prefix", "scene"))
     prefix_chunks = len(chunks)
 
     slots, unplaced = _instruction_slots(instructions, ticks)
+    goal_period = int(rules["goal_text_period_ticks"])
     for index, tick in enumerate(ticks):
         # 도중 추가되는 지시는 **그 틱의 토큰**이다 — prefix가 아니라 다른 틱 토큰과 같이 윈도우
-        # 밖으로 나간다. 현재 지시는 매 틱 `goal`이 다시 실으므로 잊히지 않는다 (docs/08 §3.1).
+        # 밖으로 나간다. 현재 지시는 매 틱 `goal`이 압축 참조로 다시 싣는다 (docs/08 §3.1).
+        carries_instruction = bool(slots.get(index))
         for instruction in slots.get(index, ()):
             chunks.append(
                 _Chunk(
@@ -552,33 +993,37 @@ def _serialize_stream(projected: dict, tokenizer: Any, *, window_ticks: int) -> 
                 )
             )
         request = tick["request"]
-        chunks.append(
-            _Chunk(
-                _tick_header(tick)
-                + "\n".join(state_lines(request["state"]))
-                + "\n",
-                "state",
-                "state",
-                tick=index,
-            )
+        state = request.get("state") or {}
+        _check_envelope(state, index)
+        geom_age = None
+        if isinstance(state.get("t"), dict) and isinstance(state["t"].get("age_ms"), dict):
+            geom_age = state["t"]["age_ms"].get("geom")
+        def add(name: str, text: str, kind: str = "state") -> None:
+            if text:
+                chunks.append(_Chunk(text, kind, name, tick=index))
+
+        add("state:t", _tick_header_line(tick))
+        with_text = goal_period > 0 and index > 0 and index % goal_period == 0 and not carries_instruction
+        add("state:goal", _goal_line(state.get("goal"), with_text=with_text))
+        intros, dynamics = delta.object_lines(state, index)
+        # 후보 줄의 `clr` 생략은 이번 틱까지 모델이 본 동적 줄의 값에 댄다 — 그 틱의 상태 값에 대면 대상은 그대로인데 이웃이
+        # 움직여 여유만 바뀐 틱에서 새 값이 어디에도 실리지 않는다(리뷰 2 C1).
+        object_clearance = dict(delta.clearance)
+        add("state:objects_intro", "".join(intros))
+        add("state:objects_dynamic", "".join(dynamics))
+        add("state:zones", "".join(delta.zone_lines(state)))
+        add("state:scene", "".join(delta.scene_lines(state)))
+        add("state:robot", delta.robot_line(state, index) or "")
+        if isinstance(state.get("exec"), dict):
+            add("state:exec", _exec_line(state["exec"]))
+        add("state:events", "".join(_event_line(event) for event in state.get("events") or () if isinstance(event, dict)))
+        add(
+            "state:waypoints",
+            "".join(_waypoint_line(item) for item in state.get("derived") or () if isinstance(item, dict) and "waypoint" in item),
         )
-        commitment = request.get("commitment")
-        chunks.append(
-            _Chunk(
-                f"commitment {_pairs(commitment)}\n" if commitment else "commitment=none\n",
-                "state",
-                "commitment",
-                tick=index,
-            )
-        )
-        chunks.append(
-            _Chunk(
-                f"exec_history {_scalar('exec_history', request['exec_history'])}\n",
-                "exec",
-                "exec_history",
-                tick=index,
-            )
-        )
+        add("state:extra", "".join(line + "\n" for line in _extra_state_lines(state)))
+        add("commitment", _commitment_line(request.get("commitment")))
+        add("exec_history", _history_line(request.get("exec_history")), kind="exec")
         candidates = request["candidates"]
         for question_id in question_ids:
             if question_id not in candidates:
@@ -596,7 +1041,7 @@ def _serialize_stream(projected: dict, tokenizer: Any, *, window_ticks: int) -> 
             for position, entry in enumerate(candidates[question_id]):
                 chunks.append(
                     _Chunk(
-                        candidate_line(entry),
+                        stream_candidate_line(entry, geom_age_ms=geom_age, object_clearance=object_clearance),
                         "candidate",
                         f"candidate:{question_id}:{position}",
                         candidate=position,
@@ -675,6 +1120,8 @@ def _serialize_stream(projected: dict, tokenizer: Any, *, window_ticks: int) -> 
         {
             "layout": "stream_l1a",
             "serializer": TOKEN_SERIALIZER_VERSION,
+            "format": STREAM_FORMAT,
+            "delta_rules": dict(rules),
             "question_set": question_set_id,
             "question_ids": question_ids,
             "window_ticks": window_ticks,
@@ -704,13 +1151,15 @@ def serialize_request(
     max_state_tokens: int | None = 2048,
     max_total_tokens: int | None = 8192,
     window_ticks: int = WINDOW_TICKS,
+    delta_rules: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """레코드 → 토큰·구간·분기·position (모듈 설명 참조).
 
     `request`는 `judgment-v0`(``state_first``) 또는 `stream-v0`(``stream_l1a``) 레코드다. 계약
     검사를 먼저 돌리므로 입력 영역의 비입력 키·라벨 구조는 경로가 붙은 `ValueError`로 거절되고,
     입력 영역 밖의 라벨·근거는 투영에서 빠져 결과에 영향을 주지 않는다. `max_*`는 L0 프로파일의
-    상한(docs/06 Global Constraints)이며 넘으면 자르지 않고 오류다.
+    상한(docs/06 Global Constraints)이며 넘으면 자르지 않고 오류다. `delta_rules`는 스트림의 변화분
+    문턱·주기(:data:`DELTA_RULES`의 키를 덮어쓴다; 기본은 계약값).
     """
     if layout not in LAYOUTS:
         raise ValueError(f"layout: {list(LAYOUTS)} 중 하나여야 한다 (받은 값: {layout!r})")
@@ -728,4 +1177,9 @@ def serialize_request(
         )
     if window_ticks < 1:
         raise ValueError(f"window_ticks: 1 이상이어야 한다 (받은 값: {window_ticks})")
-    return _serialize_stream(projected, tokenizer, window_ticks=window_ticks)
+    rules = dict(DELTA_RULES)
+    for key, value in (delta_rules or {}).items():
+        if key not in DELTA_RULES:
+            raise ValueError(f"delta_rules.{key}: 모르는 규칙이다 (아는 것: {list(DELTA_RULES)})")
+        rules[key] = value
+    return _serialize_stream(projected, tokenizer, window_ticks=window_ticks, rules=rules)

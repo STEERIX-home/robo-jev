@@ -183,13 +183,17 @@ def test_cheaper_geometry_gets_more_mass():
 
     길을 막는 물체의 밀기는 네 방향이 모두 적합하다. 말단에 가까운 접촉점이 이긴다.
     """
-    request = request_for(blocked_scene())
+    # 밀기는 영역 쪽 축만 만들어지므로(계약 v0.3) 영역을 둘 둔다: zoneL(+y 쪽)과 +x 쪽 영역. 말단(0, 0)에서 +x
+    # 밀기의 접촉점(128, 0)이 +y 밀기의 접촉점(200, −72)보다 가깝다.
+    scene = blocked_scene()
+    scene["zones"].append({"id": "zoneX", "desc": "앞쪽 영역", "bounds_mm": [400, -80, 600, 80]})
+    request = request_for(scene)
     result = rule_judge(request)
     geometry = request["harness"]["candidates"]
     pushes = {
         entry["id"]: geometry[entry["id"]]["distance_mm"]
         for entry in request["request"]["candidates"]["q_main"]
-        if entry["key"].startswith("push:o5:") and entry["key"].endswith(":slow")
+        if entry["key"].startswith("push:o5:")
     }
     assert len(pushes) >= 2
     nearer = min(pushes, key=pushes.get)
@@ -332,7 +336,7 @@ def test_the_structured_goal_drives_the_main_decision():
     result = rule_judge(request)
     keys = {entry["id"]: entry["key"] for entry in request["request"]["candidates"]["q_main"]}
     best = max(result["q_main"], key=result["q_main"].get)
-    assert keys[best].startswith("grasp:o1:top:zoneL:")
+    assert keys[best].startswith("grasp:o1:top:zoneL")
 
 
 def test_the_text_fallback_still_resolves_the_d0_fixture():
@@ -419,15 +423,14 @@ def test_a_push_whose_hand_occludes_the_target_does_not_gate_to_observe():
 
     hrn = harness()
     hrn.build_request(observation(), None, None)
-    key = "push:o0:+x:none:slow"
+    key = "push:o0:-x:none"  # o0(300, 0) → zoneL 쪽은 −x; 접촉점은 (372, 0)
     commitment = {
         "action_ref": candidate_id(key), "key": key, "phase": "push", "held_ticks": 4,
         "last_switch_tick": 0, "goal_version": 1,
     }
     stale_ms = CONFIG["thresholds"]["observe_geom_age_ms"] + PERIOD_MS
-    assert stale_ms <= HARNESS["candidates"]["max_geometry_age_ms"]
     pushing = observation(tick=stale_ms // PERIOD_MS, sim_time_ms=stale_ms)
-    pushing["robot"]["ee_pos_mm"] = [240, 0, -80]  # 접촉점 40mm 안
+    pushing["robot"]["ee_pos_mm"] = [400, 0, -80]  # 접촉점 40mm 안
     pushing["objects"][0].update(visible=False, visible_ratio=0.0)
     request = hrn.build_request(pushing, None, commitment)
     assert request["request"]["commitment"]["phase"] == "push"
@@ -483,7 +486,7 @@ def test_retry_stops_after_the_configured_number_of_same_way_failures():
 
     # 다른 방식의 실패는 따로 센다.
     other = copy.deepcopy(failed)
-    other["adopted"]["main"] = candidate_id("push:o0:+x:none:slow")
+    other["adopted"]["main"] = candidate_id("push:o0:+x:none")
     request = hrn.build_request(observation(tick=11, sim_time_ms=1100), other, None)
     assert "fails=1" in request["request"]["exec_history"]
 
@@ -533,7 +536,7 @@ def test_speed_is_lowered_next_to_a_fragile_object():
 
 
 def test_force_follows_the_function():
-    push_key = "push:o0:+x:none:slow"
+    push_key = "push:o0:-x:none"
     request, _ = committed_request(push_key)
     result = rule_judge(request)
     assert max(result["q_force"], key=result["q_force"].get) == str(
@@ -588,8 +591,9 @@ def test_instruction_wording_round_trips_to_the_resolved_target():
         plan = build_plan(SIM, seed, "E1")
         text = plan.instructions[0].text
         described = {obj.describe(labels): obj.id for obj in plan.objects}
-        named = [obj for obj in plan.objects if text.startswith(obj.describe(labels))]
-        assert len(named) == 1, f"seed {seed}: 지시가 부르는 물체가 하나가 아니다: {text}"
+        # 문구 변형(계약 v0.3)에 따라 대상이 문장 앞에 오지 않을 수 있다 — 대상은 계획의 구조화된 목표가 말한다.
+        named = [obj for obj in plan.objects if obj.id == plan.instructions[0].target]
+        assert len(named) == 1 and named[0].describe(labels) in text, f"seed {seed}: 지시가 대상을 부르지 않는다: {text}"
 
         # 상한에 걸리지 않도록 지시가 부르는 물체와 속성 물체만 놓는다 — 보는 것은 어휘의 왕복이다.
         shown = [named[0]] + [o for o in plan.objects if o.attributes][:2]

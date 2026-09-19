@@ -3,13 +3,12 @@
 # 모델 자리에 들어가 **같은 요청**을 받고 **같은 형식**으로 10개 답을 낸다. 가중치와
 # 임계값은 여기에 고정해 공개하고 레코드의 `versions.rules`에 버전을 적는다. 이 기준군이
 # 어떤 조건 층에서 모델과 같은 성공률을 내면 그 층에서는 모델의 기여를 주장하지 않는다.
-version: rj0.3
+version: rj0.4
 
-# 실행기·하네스와 공유하는 값은 복사하지 않고 그 설정을 읽는다 (단일 출처).
+# 실행기와 공유하는 값은 복사하지 않고 그 설정을 읽는다 (단일 출처).
 #   controller_config → 속도·힘 수준의 개수 (`q_speed`·`q_force`의 후보 수)
-#   harness_config    → `candidates.max_geometry_age_ms` (접촉 국면·파지 중의 관측 문턱)
+# 하네스 설정은 읽지 않는다 — 접촉 국면의 목록(`CONTACT_PHASES`)은 하네스 모듈에서 import한다(설정 값이 아니다).
 controller_config: configs/controller/osc_v0.yaml
-harness_config: configs/harness/robot.yaml
 
 # 지시 완결성 (docs/08 §4 `q_instr`): 지시 자체의 문제만 본다 — 대상의 가시성과 무관하다.
 # 상태에 구조화된 목표(`target_desc`·`target_zone`·`forbidden_contact`, 3c-1)가 있으면 그 필드로
@@ -54,8 +53,9 @@ confidence:
 
 thresholds:
   # 관측 (docs/08 §4 `q_observe`): 지시의 대상이 아직 관측되지 않았거나 대상 기하가 이보다 오래되면.
-  # 가시 비율만으로는 요구하지 않는다. 파지·놓기 국면과 파지 중(팔이 대상을 가린다)에는 하네스의
-  # `candidates.max_geometry_age_ms`가 문턱이다.
+  # 가시 비율만으로는 요구하지 않는다. 접촉 국면(파지·놓기·밀기)과 파지 중(팔이 대상을 가린다)에는 기하
+  # 나이로 관측을 요구하지 않는다 — 게이트가 없고, 명령의 시점은 실행기가 자기 readiness(대상 거리·접촉·하중)로 정한다
+  # (계약 v0.3, 하네스 §5.0과 같은 면제).
   observe_geom_age_ms: 400
   stop_force_n: 25.0              # 접촉력이 이보다 크면 정지
   stop_forbidden_mm: 40           # 금지 물체가 말단에서 이보다 가까우면 정지

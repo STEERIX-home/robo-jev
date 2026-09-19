@@ -134,6 +134,28 @@ def test_unknown_candidates_receive_no_gradient():
     assert grad[0].item() < 0 and grad[1].item() > 0 and grad[2].item() > 0
 
 
+def test_hold_not_in_a_labels_leave_the_admissible_candidates_out_of_the_normalisation():
+    """hold∉A 규칙 (docs/08 §7): A = {hold}, unknown = semantic_admissible, 나머지(부적합 후보)가 I. 손실은
+    -log(p_hold / (p_hold + Σ_I p))이고 적합 후보의 logits는 gradient를 받지 않는다 — 답은 언제나 A 안이다."""
+    candidates = ["c1", "c2", "c3", "ch", "co"]
+    label = {"question_id": "q_main", "kind": "valid_set", "candidate_ids": ["ch"],
+             "semantic_admissible": ["c1", "c2"], "unknown": ["c1", "c2"], "label_confidence": "low", "weight": 0.25}
+    logits = torch.tensor([2.0, 1.0, 0.5, 0.0, -1.0], requires_grad=True)
+    loss = label_loss(logits, candidates, label)
+    p = torch.softmax(logits, dim=0)
+    expected = -torch.log(p[3] / (p[3] + p[2] + p[4]))
+    assert torch.allclose(loss, expected)
+    loss.backward()
+    assert torch.all(logits.grad[:2] == 0) and logits.grad[3] != 0 and logits.grad[2] != 0
+    assert set(label["candidate_ids"]) <= set(candidates) and not set(label["candidate_ids"]) & set(label["unknown"])
+    # 적합 후보가 없는 퇴화 틱(goal_candidate_missing): unknown 없음 → hold 밖의 전부가 I.
+    plain = {**label, "semantic_admissible": [], "unknown": []}
+    assert torch.allclose(label_loss(logits.detach(), candidates, plain), -torch.log_softmax(logits.detach(), dim=0)[3])
+    # 가중치는 question_losses가 그대로 옮긴다.
+    outputs = {"logits": [{"q_main": logits.detach()}], "candidates": [{"q_main": candidates}]}
+    assert question_losses(outputs, {"labels": [[label]]})[0]["q_main"]["weight"] == 0.25
+
+
 def test_event_results_on_a_valid_set_label_are_not_a_loss_term():
     """rollout 결과는 선택 분포와 합치지 않는다 (docs/03 §4)."""
     z = [1.0, 2.0, 3.0]

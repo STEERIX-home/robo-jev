@@ -84,8 +84,29 @@ visibility:
 instruction:
   enabled: true
   change_window_ms: [5000, 15000]      # docs/02 §1 "에피소드 도중(5~15초 사이)에 지시가 바뀌고"
-  v1_template: "{color} {shape}를 {zone}으로 옮기고 {fragile}는 건드리지 마라"
-  v2_template: "{color} {shape} 대신 {color2} {shape2}를 {zone}으로 먼저 옮겨라"
+  # 목표 영역의 비중 (v1 지시의 목표 영역, docs/04 §5). zoneF("앞쪽 보관 영역")는 봉인 개념(`robot:goal-zone:zoneF`)이라 드물게
+  # 둔다 — 그 계열 전부가 OOD로 가고 train은 zoneL/zoneR만 목표로 한다(장면에 zoneF가 **있는** 것과는 무관하다). 추첨은
+  # 주 난수 스트림의 균등 추첨을 seed 해시의 기각 표본으로 다시 가중하므로 장면·일정의 난수 소비는 그대로고, zoneL/zoneR을
+  # 뽑은 seed의 계획은 비중 도입 전과 같다. 대상이 목표 영역 안에 있어 영역을 바꿀 때도 같은 비중을 쓴다.
+  goal_zone_weights: {zoneL: 48, zoneR: 48, zoneF: 4}
+  # 문구 템플릿 변형 (docs/04 §5 템플릿 변형 계열, 계약 v0.3). 슬롯 `{color} {shape} {zone} {fragile}`(v2는 `{color2}
+  # {shape2}`)은 같고 표현만 다르다 — 구조화된 목표(대상·영역·보호 물체)는 텍스트와 무관하게 계획이 든다. 변형은 난수가 아니라
+  # **origin group(`robot/<프로파일>/<계열>/goal-<영역>`)의 해시**로 고르므로 같은 group의 에피소드는 같은 변형이다(템플릿
+  # holdout이 한 group을 두 split에 걸치게 하지 않는다) — `Instruction.template`(`v1#<번호>`)에 적힌다; 3번(번호 2)은
+  # `configs/data/d1_robot.yaml`이 봉인 holdout으로 건다. 규칙 기준군의 텍스트 근사 경로가 읽는 제약 표지("건드리지 마라")는
+  # v1의 모든 변형에 있다.
+  v1_templates:
+    - "{color} {shape}를 {zone}으로 옮기고 {fragile}는 건드리지 마라"
+    - "{fragile}는 건드리지 마라. {color} {shape}를 {zone}에 갖다 놓아라"
+    - "{zone}에 {color} {shape}를 놓아라, {fragile}는 건드리지 마라"
+  v2_templates:
+    - "{color} {shape} 대신 {color2} {shape2}를 {zone}으로 먼저 옮겨라"
+    - "잠깐, {color} {shape}는 두고 {color2} {shape2}를 {zone}에 먼저 놓아라"
+    - "{color2} {shape2}를 {zone}으로 먼저 옮겨라. {color} {shape}는 그다음이다"
+  # 변형의 비중 (v1·v2 공통). 봉인 변형(3번)을 고르게 뽑으면 에피소드의 1/3이 OOD로 가므로 드물게 둔다 — train은 1·2번을
+  # 반반 보고, 3번은 OOD에만 있다. zoneF 계열·E1 계열 하나와 합쳐 OOD가 에피소드의 ≈10~15 %가 되는 값(400편 모의 실측은
+  # docs/04 §5 표).
+  template_weights: [47.5, 47.5, 5]
 
 disturbance:
   count: [1, 3]

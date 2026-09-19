@@ -7,11 +7,11 @@
 # 실행기와 공유하는 수치(수명·속도 수준·힘 수준·그리퍼 폭·도달 범위)는 여기 **복사하지
 # 않는다**. 컨트롤러 설정이 그 단일 출처이고 하네스가 그것을 읽는다 — 두 곳에 적으면
 # 언젠가 어긋나고, 그때 하네스는 컨트롤러가 거절할 명령을 만든다.
-version: h0.3
+version: h0.4
 controller_config: configs/controller/osc_v0.yaml
 
 # 질문 세트 v0 (docs/08 §4). 세트는 하네스 버전으로 고정하고 후보만 틱마다 바뀐다.
-# `language`는 후보 설명(`desc`)과 질문 문구를 고른다. ko 문구는 계약의
+# `language`는 질문 문구를 고른다(후보 줄은 계약 v0.3부터 의미 키 기반이라 언어가 없다). ko 문구는 계약의
 # `contracts.QUESTION_SET_V0`와 같아야 한다(검사가 대조한다).
 language: ko
 question_set_id:
@@ -73,9 +73,11 @@ perception:
     cylinder: [top, side]
   max_graspable_width_mm: 78 # 그리퍼 개방 폭보다 넓은 면은 파지면이 아니다
 
-# 결합 행동 후보 (docs/08 §4 `q_main`, docs/02 §3).
+# 결합 행동 후보 (docs/08 §4 `q_main`, docs/02 §3). 계약 v0.3(08 §4·§5-3): 결합 키는
+# `기능:대상:접근:목적지`이고 프로파일은 키에 없다 — 속도는 `q_speed`가 commitment 기준으로 답하고 전환 틱의
+# 초기값은 `compose.initial_profile`이다. K ≤ 12 = 9 + 예약 3.
 candidates:
-  max: 32                    # K≤32
+  max: 12                    # K≤12 (docs/08 §4 표준 묶음)
   reserved: 3                # observe·hold·replan은 상한 안에서 자리를 예약한다
   # 실행기가 쓸 수 있는 접근 유형(실행기 역량). v0 실행기는 손목 회전이 없어(손가락은 로봇 기준
   # y축으로 열린다) 옆에서 미끄러져 들어가는 `side` 파지가 물리적으로 성립하지 않는다 — 위에서
@@ -83,11 +85,15 @@ candidates:
   # 여기 없는 면의 조합은 후보 회계의 `dropped.unsupported_face`로 센다(물체의 실행 가능성이 아니라
   # 실행기 역량이다). 실행기가 손목 요(yaw)를 얻으면 여기에 `side`를 더한다 — 코드 변경 없이 돌아온다.
   faces: [top]
+  # 밀기 방향은 **열거가 아니라 허용 축 집합**이다(계약 v0.3). 물체마다 관측된 자세와 영역 경계에서 각 영역 쪽으로
+  # 미는 축 방향(영역 중심까지의 거리를 가장 줄이는 축, 물체당 ≤ 영역 수)만 만들고, 이 집합 밖의 축은 만들지
+  # 않는다. 이 집합은 `faces`와 달리 실행기 역량이 **아니라 장면의 기하**다: v0 실행기가 아직 쓰지 못하는 ±y(원통에서
+  # 반사 정지가 잦다 — configs/sim/expert_v0.yaml `goal.push_directions`)도 영역 쪽이면 후보로 제시한다. 의미 적합성은
+  # 목표에서 오고 실행 가능성은 실행기 역량에서 온다(docs/08 §4·§7): 전문가의 `goal.push_directions`는 **선택**만 거르고,
+  # 그런 후보만 남는 틱은 `not_executable`로 hold∉A 규칙(A={hold}, unknown=적합 집합)을 받는다 — 후보를 지우면 같은 틱이
+  # `goal_candidate_missing`이 되어 모델이 "적합한 것이 없다"고 배운다. K≤12에서 ±y 후보가 9자리 중 1~2자리를 쓰는 비용은
+  # 그 구분의 값으로 받아들인다(리뷰 1 M3). 실행기가 옆면 접촉 자세를 얻으면 전문가 목록에 ±y를 더한다.
   push_directions: ["+x", "-x", "+y", "-y"]
-  profiles: [slow, fast]     # 운동 프로파일. 의미 키의 마지막 칸이다
-  profile_speed_level:
-    slow: 1
-    fast: 2
   # 실행 가능성은 **기하 나이**로만 정한다 (docs/08 §3.2). 가시 비율은 정보다. 파지·놓기·밀기
   # 국면(팔이 대상을 가린다)과 들고 있는 물체는 이 문턱을 적용하지 않는다.
   max_geometry_age_ms: 500
@@ -101,31 +107,6 @@ candidates:
   # 밀기 높이 = max(물체 중간 높이, 작업면 + 이 값). 닫힌 손가락 끝은 그립 사이트 아래 4mm이고 하강 끝의 추종
   # 오차가 10mm쯤이라 그보다 낮으면 손가락이 작업면을 친다(3c-2 실측: 32mm 상자의 중간 높이에서 230N).
   push_height_min_mm: 25
-
-# 후보 설명 문구. 언어는 `language`가 고른다 (docs/08 §4 "후보에 `action_ref`·설명").
-descriptions:
-  ko:
-    grasp: "{target}을 {approach} 면으로 잡아 {destination}로 옮긴다 [{profile}]"
-    place: "들고 있는 {target}을 {destination}에 놓는다 [{profile}]"
-    push: "{target}을 {approach} 방향으로 민다 [{profile}]"
-    observe: "관측을 더 얻는다"
-    hold: "현 상태를 유지한다"
-    replan: "재계획한다"
-    direct: "대상으로 직접 간다"
-    via: "경유점 {waypoint}를 지나 간다"
-    retreat: "물러난다"
-    path_hold: "그 자리에 머문다"
-  en:
-    grasp: "Grasp {target} by its {approach} face and move it to {destination} [{profile}]"
-    place: "Place the held {target} into {destination} [{profile}]"
-    push: "Push {target} towards {approach} [{profile}]"
-    observe: "Gather more observation"
-    hold: "Hold the current state"
-    replan: "Ask for a replan"
-    direct: "Go straight to the target"
-    via: "Go through waypoint {waypoint}"
-    retreat: "Retreat"
-    path_hold: "Stay in place"
 
 # 국소 경유점 플래너 (docs/08 §4 `q_path`).
 planner:
@@ -182,6 +163,18 @@ phases:
   # …단, 말단이 이 속도 아래로 잦아든 뒤에. 하강 속도를 안은 채 임피던스가 밀기(부드러움)로 바뀌면 z가 15mm
   # 처져 손가락이 작업면을 친다(3c-2 실측 113~144N). 파지 진입(60)보다 느슨한 것은 밀기 horizon(3초) 때문이다.
   push_entry_speed_mm_s: 120
+
+# 토큰 직렬화의 변화분 규칙 (docs/08 §3.1, 계약 v0.3). 모델 쪽 `robo_jev.model.serialize.DELTA_RULES`와 같아야 한다
+# (검사가 대조한다) — 값은 여기가 적고 레코드의 `config_digest`에 든다. 물체 소개 줄(정적 필드)은 시작·처음 관측·정적 필드
+# 변경·`object_intro_period_ticks`(윈도우 길이)마다, 동적 줄은 변화(자세 > max(정밀도 s, object_pose_delta_mm), 회전, 가시
+# 비율 변화 ≥ object_visibility_delta, 관측 정지의 시작·끝, 재식별, 들고 있는 물체) 또는 `object_dynamic_period_ticks`마다,
+# 지시 텍스트는 `goal_text_period_ticks`마다 다시 싣는다(그 밖에는 goal 줄의 압축 참조만).
+serialization:
+  object_intro_period_ticks: 30
+  object_dynamic_period_ticks: 10
+  goal_text_period_ticks: 10
+  object_pose_delta_mm: 0
+  object_visibility_delta: 0.25
 
 # 명령 생성 (docs/08 §6).
 command:

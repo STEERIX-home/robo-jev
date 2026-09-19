@@ -85,9 +85,9 @@ def ordinal_question() -> dict:
 def stream_record() -> dict:
     """에피소드 스트림 레코드 (2틱). 호출할 때마다 새 dict를 만든다."""
     q_main = [
-        {"id": "c3", "action_ref": "c3", "key": "grasp:o7:top:zoneL:slow", "desc": "o7 윗면 파지"},
-        {"id": "c5", "action_ref": "c5", "key": "grasp:o2:side:zoneL:slow", "desc": "o2 측면 파지"},
-        {"id": "c9", "action_ref": "c9", "key": "push:o4:+x:none:slow", "desc": "o4 밀기"},
+        {"id": "c3", "action_ref": "c3", "key": "grasp:o7:top:zoneL", "desc": "o7 윗면 파지"},
+        {"id": "c5", "action_ref": "c5", "key": "grasp:o2:side:zoneL", "desc": "o2 측면 파지"},
+        {"id": "c9", "action_ref": "c9", "key": "push:o4:+x:none", "desc": "o4 밀기"},
         {"id": "c0", "action_ref": "c0", "key": "hold", "desc": "현 상태 유지"},
     ]
     q_path = [
@@ -107,7 +107,7 @@ def stream_record() -> dict:
         "request": {
             "state": state,
             "exec_history": "main=c3 phase=approach path=direct speed=2 force=0 gripper=open stop=0 ack=ok",
-            "commitment": {"action_ref": "c3", "key": "grasp:o7:top:zoneL:slow", "phase": "approach", "held_ticks": 12},
+            "commitment": {"action_ref": "c3", "key": "grasp:o7:top:zoneL", "phase": "approach", "held_ticks": 12},
             "candidates": {"q_main": q_main, "q_path": q_path},
         },
         "model_output": {"q_main": {"c3": 0.71, "c5": 0.22, "c9": 0.07}, "q_stop": 0.01},

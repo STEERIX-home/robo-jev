@@ -148,7 +148,7 @@ def test_extractor_version_is_fixed_and_recorded():
 
 
 def test_commitment_and_exec_pass_through_the_robot_block():
-    commitment = {"action_ref": "c1", "key": "grasp:o0:top:zoneL:slow", "phase": "approach"}
+    commitment = {"action_ref": "c1", "key": "grasp:o0:top:zoneL", "phase": "approach"}
     state = extract(
         reconstruction(),
         robot_block(commitment=commitment, exec={"seq": 3, "action_ref": "c1"}),
