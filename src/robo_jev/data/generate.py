@@ -61,6 +61,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "languages": {"ko": 70, "en": 30},
     # 파생본 비율(%). 번역본과 후보 재배열본은 부모의 group·split을 승계한다.
     "derivations": {"paraphrase": 20, "reorder": 10},
+    # 봉인 문구 변형(`split.holdout_templates`)의 추첨 몫(%): 그 변형이 든 표에서 봉인 변형을 이 몫만큼만 뽑는다(나머지는 다른
+    # 변형이 고르게). 봉인 변형을 고르게 뽑으면 계열의 13~19 %가 템플릿 holdout에 걸려 OOD가 목표(≈10~15 %)를 넘는다 —
+    # 봉인 id(한국어)는 그대로 두고 비중으로 맞춘다 (docs/04 §5).
+    "sealed_phrasing_share": 10,
     "split": {
         "weights": {"train": 70, "dev": 10, "calibration": 10, "test": 10},
         "holdout_groups": [],
@@ -113,6 +117,9 @@ def _resolve(config: Mapping[str, Any] | None) -> dict[str, Any]:
         weights = resolved[section]
         if not weights or any(weight <= 0 for weight in weights.values()):
             raise ValueError(f"{section}: 비중은 양수여야 한다 (받은 값: {weights})")
+    share = resolved.get("sealed_phrasing_share")
+    if share is not None and not 0 < float(share) < 100:
+        raise ValueError(f"sealed_phrasing_share: 0과 100 사이의 퍼센트여야 한다 (받은 값: {share})")
     unknown = sorted(set(resolved["domains"]) - set(DOMAINS))
     if unknown:
         raise ValueError(f"domains: 없는 분야다: {unknown} (가능: {sorted(DOMAINS)})")
@@ -215,7 +222,8 @@ def _render_record(
     derivation: str | None = None,
 ) -> dict:
     wording_rng = random.Random(wording_seed)
-    begin_phrasing()
+    # 봉인 변형은 드물게 뽑는다(`sealed_phrasing_share`) — 계열이 통째로 OOD로 가는 몫을 비중으로 맞춘다 (docs/04 §5).
+    begin_phrasing(sealed=config["split"].get("holdout_templates") or (), share=config.get("sealed_phrasing_share"))
     state = domain.state(scene, wording_rng, language)
     rendered: list[Rendered] = [
         domain.render(scene, spec, wording_rng, language) for spec in specs
@@ -279,7 +287,9 @@ def _build_family(
     """장면 계열 하나 — 기본 레코드와 그 파생본들."""
     domain = DOMAINS[domain_name]
     family_rng = random.Random(f"{seed}:{domain_name}:{family_index}")
-    template = family_rng.choice(domain.templates)
+    # 장면 종류의 비중(`template_weights`)이 있는 분야는 그 비중으로 — 봉인 개념의 근원이 되는 장면을 드물게 둔다 (docs/04 §5).
+    weights = getattr(domain, "template_weights", None)
+    template = _weighted(family_rng, dict(zip(domain.templates, weights))) if weights else family_rng.choice(domain.templates)
     group = f"{domain_name}/{template}/{family_index:04d}"
     split = policy.assign(group)  # 생성 전 배정. 파생본은 이 값을 그대로 쓴다.
 

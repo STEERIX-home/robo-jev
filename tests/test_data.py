@@ -843,6 +843,54 @@ def test_the_pilot_holdouts_are_in_the_vocabularies_and_seal_whole_families(batc
         assert not set(record["provenance"]["concepts"]) & set(split["holdout_concepts"])
 
 
+def test_the_pilot_sealed_share_lands_in_the_decided_band_per_domain_without_straddling():
+    """리뷰 1 I2: 봉인 종류(분야마다 문구 변형 하나·개념 하나)는 그대로 두고 생성 비중으로 OOD를 분야마다 ≈10~15 %(계열 기준,
+    2,000상태·seed 17)에 맞춘다 — 봉인 문구 변형은 표에서 `sealed_phrasing_share`(10 %)만큼만 뽑히고, 봉인 개념의 근원이 되는
+    장면(가운데 영역 목표·접힌 구역·오프라인 자원·안내 요청 조치)은 장면 생성 비중이 드물게 둔다. 한 계열이 두 split에 걸치지
+    않고, ood_dev/ood_test는 둘 다 쓰인다."""
+    records = generate_records(2000, 17)
+    by_group = defaultdict(list)
+    for record in records:
+        by_group[record["origin_group"]].append(record)
+    assert all(len({record["split"] for record in records}) == 1 for records in by_group.values())
+    for domain in DEFAULT_CONFIG["domains"]:
+        groups = {group: rows for group, rows in by_group.items() if group.startswith(domain + "/")}
+        sealed = [rows for rows in groups.values() if rows[0]["provenance"]["holdout"]]
+        share = len(sealed) / len(groups)
+        assert 0.10 <= share <= 0.15, (domain, share, len(sealed), len(groups))
+        assert any(reason.startswith("template:") for rows in sealed for reason in rows[0]["provenance"]["holdout"])
+        assert any(reason.startswith("concept:") for rows in sealed for reason in rows[0]["provenance"]["holdout"])
+        halves = Counter(rows[0]["split"] for rows in sealed)
+        assert halves["ood_dev"] > 0 and halves["ood_test"] > 0
+    assert validate_dataset(records, holdouts=DEFAULT_CONFIG["split"])["holdouts"]["leaked_groups"] == 0
+
+
+def test_sealed_phrasing_variants_are_drawn_with_the_configured_share_and_other_tables_are_untouched():
+    """`_say`는 봉인 변형이 든 표에서만 비중을 쓴다(봉인 변형에 `share` %, 나머지에 그 나머지를 고르게); 봉인 변형이 없는 표는
+    고르게 뽑고 난수 소비도 도입 전과 같다(`randrange`)."""
+    import random
+
+    table = {"_id": "spatial.distance", "ko": ("하나 {x}", "둘 {x}"), "en": ("one {x}", "two {x}")}
+    domains.begin_phrasing(sealed=["spatial.distance.ko#1"], share=10)
+    rng = random.Random(3)
+    drawn = Counter(domains._say(rng, table, "ko", x=1) for _ in range(4000))
+    assert abs(drawn["둘 1"] / 4000 - 0.10) < 0.02
+    assert domains.take_phrasing() == ["spatial.distance.ko#0", "spatial.distance.ko#1"]
+    # 봉인이 없는 언어·표는 고르게, 그리고 봉인 없이 부를 때와 같은 난수 흐름이다.
+    domains.begin_phrasing(sealed=["spatial.distance.ko#1"], share=10)
+    rng = random.Random(9)
+    with_seal = [domains._say(rng, table, "en", x=i) for i in range(50)]
+    domains.begin_phrasing()
+    rng = random.Random(9)
+    without = [domains._say(rng, table, "en", x=i) for i in range(50)]
+    assert with_seal == without and 0.3 < sum(text.startswith("two") for text in without) / 50 < 0.7
+    with pytest.raises(ValueError, match="sealed_phrasing_share"):
+        domains.begin_phrasing(sealed=[], share=100)
+    domains.begin_phrasing()
+    with pytest.raises(ValueError, match="sealed_phrasing_share"):
+        generate_records(1, 1, config={"sealed_phrasing_share": 0})
+
+
 def test_every_record_names_its_phrasing_variants_and_concepts(batch):
     for record in batch:
         provenance = record["provenance"]

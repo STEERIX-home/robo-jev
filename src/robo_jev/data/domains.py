@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import random
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -85,6 +86,11 @@ class Rendered:
 #: 렌더링 중에 쓴 문구 템플릿 변형 id (`<표>.<언어>#<번호>`). :func:`take_phrasing`이 레코드마다 비운다 — 생성기가
 #: provenance에 적고 `split.holdout_templates`와 맞댄다 (docs/04 §5 템플릿 변형 계열).
 _PHRASING: list[str] = []
+#: 봉인된 문구 변형 id와 그 추첨 몫(%). :func:`begin_phrasing` 이 생성 설정(`split.holdout_templates`·`sealed_phrasing_share`)에서
+#: 넣는다 — 봉인 변형이 든 표에서는 그 변형을 이 몫만큼만 뽑아(나머지는 다른 변형이 고르게) 템플릿 계열이 OOD의 몫을 넘기지
+#: 않게 한다. 봉인 변형이 없는 표는 고르게 뽑고 난수 소비도 그대로다.
+_SEALED: frozenset[str] = frozenset()
+_SEALED_SHARE: float | None = None
 
 
 def _named(prefix: str, tables: dict[str, dict[str, tuple[str, ...]]]) -> dict[str, dict[str, Any]]:
@@ -94,16 +100,40 @@ def _named(prefix: str, tables: dict[str, dict[str, tuple[str, ...]]]) -> dict[s
     return tables
 
 
+def _draw_variant(rng: random.Random, table: str, count: int) -> int:
+    """표 `<id>.<언어>`의 변형 번호 하나. 봉인 변형이 든 표는 봉인 변형에 `_SEALED_SHARE` %를, 나머지 변형에 그 나머지를 고르게 준다;
+    아니면 고르게(`randrange`, 도입 전과 같은 난수 소비)."""
+    sealed = [index for index in range(count) if f"{table}#{index}" in _SEALED]
+    if not sealed or _SEALED_SHARE is None or len(sealed) == count:
+        return rng.randrange(count)
+    share = _SEALED_SHARE / 100.0
+    weights = [share / len(sealed) if index in sealed else (1.0 - share) / (count - len(sealed)) for index in range(count)]
+    point = rng.random()
+    edge = 0.0
+    for index, weight in enumerate(weights):
+        edge += weight
+        if point < edge:
+            return index
+    return count - 1
+
+
 def _say(rng: random.Random, texts: dict[str, Any], language: str, **values) -> str:
     options = texts[language]
-    index = rng.randrange(len(options))
-    _PHRASING.append(f"{texts.get('_id', 'text')}.{language}#{index}")
+    table = f"{texts.get('_id', 'text')}.{language}"
+    index = _draw_variant(rng, table, len(options))
+    _PHRASING.append(f"{table}#{index}")
     return options[index].format(**values)
 
 
-def begin_phrasing() -> None:
-    """레코드 하나의 렌더링을 시작한다 — 변형 기록을 비운다."""
+def begin_phrasing(*, sealed: Iterable[str] = (), share: float | None = None) -> None:
+    """레코드 하나의 렌더링을 시작한다 — 변형 기록을 비우고, 봉인 변형 목록(`split.holdout_templates`)과 그 추첨 몫(%,
+    `sealed_phrasing_share`; None이면 고르게)을 건다."""
+    global _SEALED, _SEALED_SHARE
     _PHRASING.clear()
+    _SEALED = frozenset(str(item) for item in sealed)
+    if share is not None and not 0.0 < float(share) < 100.0:
+        raise ValueError(f"sealed_phrasing_share는 0과 100 사이의 퍼센트여야 한다 (받은 값: {share})")
+    _SEALED_SHARE = None if share is None else float(share)
 
 
 def take_phrasing() -> list[str]:
@@ -152,7 +182,7 @@ def _label_for(question_id: str, ids: list[str], rule: str, confidence: str) -> 
 
 def _boolean_criteria(rng: random.Random, language: str) -> list[dict]:
     """예/아니오 후보. 두 설명은 짝이 맞아야 하므로 같은 자리에서 고른다."""
-    index = rng.randrange(len(_YES[language]))
+    index = _draw_variant(rng, f"yesno.{language}", len(_YES[language]))
     _PHRASING.append(f"yesno.{language}#{index}")
     return [
         {"id": "true", "description": _YES[language][index]},
@@ -342,6 +372,10 @@ _COLOR_TEXT = {
     "en": {"red": "red", "blue": "blue", "green": "green", "yellow": "yellow"},
 }
 _ZONES = (("zoneL", -600, -100), ("zoneC", -100, 100), ("zoneR", 100, 600))
+#: 지시의 목표 영역 비중 (docs/04 §5). 가운데 영역(zoneC)은 봉인 개념(`spatial:goal-zone:zoneC`)이라 드물게 둔다 — 그 계열은
+#: 전부 OOD로 가므로 개념 태그가 아니라 **생성 비중**으로 OOD의 몫을 맞춘다. 관측된 대상의 영역을 목표로 삼는 가지에서는
+#: 대상을 이 비중으로 고르고, 무작위 목표 가지에서는 영역을 이 비중으로 고른다.
+_GOAL_ZONE_WEIGHTS = {"zoneL": 45, "zoneC": 10, "zoneR": 45}
 _ZONE_TEXT = {
     "ko": {"zoneL": "왼쪽 영역", "zoneC": "가운데 영역", "zoneR": "오른쪽 영역"},
     "en": {"zoneL": "left zone", "zoneC": "centre zone", "zoneR": "right zone"},
@@ -491,10 +525,11 @@ class SpatialDomain:
         # "해당 없음"만 정답인 문제가 대부분이 되어 라벨이 한쪽으로 쏠린다.
         reachable = [obj for obj in objects if obj["visible"] and obj["age_ms"] <= 300]
         if reachable and rng.random() < 0.7:
-            target = rng.choice(reachable)
+            target = rng.choices(reachable, weights=[_GOAL_ZONE_WEIGHTS[_zone_of_x(obj["x"])] for obj in reachable], k=1)[0]
             goal = {"color": target["color"], "zone": _zone_of_x(target["x"])}
         else:
-            goal = {"color": rng.choice(_COLORS), "zone": rng.choice([zone[0] for zone in _ZONES])}
+            zone_ids = [zone[0] for zone in _ZONES]
+            goal = {"color": rng.choice(_COLORS), "zone": rng.choices(zone_ids, weights=[_GOAL_ZONE_WEIGHTS[z] for z in zone_ids], k=1)[0]}
         return {
             "domain": self.name,
             "template": template,
@@ -1092,6 +1127,9 @@ class DomDomain:
 
     name = "dom"
     templates = ("checkout-form", "checkout-collapsed", "checkout-unreadable")
+    #: 장면 종류의 비중 (docs/04 §5). 접힌 구역(`checkout-collapsed`)은 봉인 개념 `dom:reveal`의 근원이라 드물게 둔다 — 개념
+    #: 태그가 아니라 생성 비중으로 OOD의 몫(계열의 ≈8~10 %)을 맞춘다.
+    template_weights = (45, 10, 45)
 
     def make_scene(self, rng: random.Random, template: str) -> dict:
         elements = [
@@ -1664,6 +1702,9 @@ class WorkflowDomain:
 
     name = "workflow"
     templates = ("release-train", "release-train-scarce", "release-train-unreported")
+    #: 장면 종류의 비중 (docs/04 §5). 자원이 모자란 장면(`release-train-scarce`; 그 60 %에서 자원 하나가 오프라인)은 봉인 개념
+    #: `workflow:resource_offline`의 근원이라 드물게 둔다 — 개념 태그가 아니라 생성 비중으로 OOD의 몫(계열의 ≈8~10 %)을 맞춘다.
+    template_weights = (42.5, 15, 42.5)
 
     def make_scene(self, rng: random.Random, template: str) -> dict:
         done_upto = rng.randint(0, 3)
@@ -2043,6 +2084,9 @@ _RULE_ACTIONS = {
     "a_escort": {"ko": "안내 요청", "en": "Request an escort"},
     "a_proceed": {"ko": "그대로 진행", "en": "Proceed as planned"},
 }
+#: 규칙 조치의 추첨 비중 (docs/04 §5). 안내 요청(`a_escort`)뿐인 지배 조치는 봉인 개념 `rules:escort-policy`의 근원이라 드물게
+#: 둔다 — 개념 태그가 아니라 생성 비중으로 OOD의 몫(계열의 ≈8~10 %)을 맞춘다(고르게 뽑으면 seed에 따라 계열의 10~17 %).
+_RULE_ACTION_WEIGHTS = {"a_stop": 30, "a_slow": 30, "a_escort": 24, "a_proceed": 30}
 _SEVERITY_LEVELS = {
     "ko": ["기록만", "주의", "경고", "중대"],
     "en": ["log only", "caution", "warning", "critical"],
@@ -2205,7 +2249,7 @@ class RulesDomain:
                 "id": f"R{index + 1}",
                 "priority": rng.randint(1, 3),
                 "when": when,
-                "action": rng.choice(list(_RULE_ACTIONS)),
+                "action": rng.choices(list(_RULE_ACTIONS), weights=[_RULE_ACTION_WEIGHTS[a] for a in _RULE_ACTIONS], k=1)[0],
                 "severity": rng.randint(0, 3),
             }
             if index % 3 == 2:

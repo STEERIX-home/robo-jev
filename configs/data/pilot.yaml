@@ -38,6 +38,12 @@ derivations:
   paraphrase: 20 # 같은 사실을 다른 언어·문장으로 다시 그린다 (라벨 재계산)
   reorder: 10 # 문장은 그대로, 후보 순서·id만 바꾼다
 
+# 봉인 문구 변형(`split.holdout_templates`)의 추첨 몫(%): 그 변형이 든 표에서 봉인 변형을 이 몫만큼만 뽑는다(나머지는 다른 변형이
+# 고르게). 봉인 변형을 고르게 뽑으면 계열의 13~19 %가 템플릿 holdout에 걸려 OOD가 목표(분야마다 ≈10~15 %)를 넘는다 — 봉인
+# id(한국어)는 그대로 두고 비중으로 맞춘다 (docs/04 §5). 개념 계열의 몫은 장면 생성 비중(`robo_jev.data.domains`의
+# `_GOAL_ZONE_WEIGHTS`·`template_weights`)이 맞춘다.
+sealed_phrasing_share: 10
+
 split:
   # 해시 분할 비중 (docs/04 §5). ood는 여기 넣지 않는다 — holdout 목록으로만 만든다.
   weights:
