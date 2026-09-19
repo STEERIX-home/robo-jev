@@ -20,6 +20,11 @@
   주면 계열마다 provenance의 문구 템플릿 변형(`phrasing`)·개념(`concepts`)·prefix·group·분야를 holdout 목록과 맞대,
   holdout 계열이 train/dev/calibration/test에 있으면(누출) 위반이고, ood_dev/ood_test인데 holdout 이유가 없어도 위반이다.
   종류별(템플릿·개념·prefix·group·분야) 계열·레코드 수와 split별 수를 `holdouts`에 적는다.
+* 대조 쌍 (docs/04 §3·§6) — `provenance.derivation == "contrast"`인 sibling마다 부모가 같은 계열·split에 있고, 표현을 걷어낸
+  상태가 부모와 **정확히 한 자리**만 다르며(초점 사실), 뒤집혔다는 질문의 라벨이 실제로 부모와 다르고, 초점 사실을 지운
+  장면(분야의 `forget`)에서 그 질문을 다시 그리면 라벨이 마스크·"해당 없음"이 되는지(삭제 검사)를 다시 돌린다. 어느 하나라도
+  어기면 위반이다 — 생성기는 삭제 검사에 실패한 쌍을 만들지 않으므로(빠진 이유를 기본 레코드에 적는다) 여기 위반은 생성기와
+  규칙 코드가 어긋났다는 뜻이다. 쌍 수·split·분야별 수·삭제 결과·빠진 이유를 `contrast`에 적는다.
 
 집계는 요청 수·질문 수·에피소드 수·틱 수·split별 원본 group 수를 모두 낸다.
 위반 건수가 0이어야 배포할 데이터 버전으로 동결할 수 있다 (CLI는 그때만 0을 돌려준다).
@@ -53,7 +58,7 @@ from robo_jev.contracts import (
 )
 from robo_jev.data.split import CONCEPT_TAG, OOD_SPLITS, TEMPLATE_TAG, SplitPolicy
 
-__all__ = ["REPORT_VERSION", "main", "validate_dataset"]
+__all__ = ["REPORT_VERSION", "leaf_diff", "main", "validate_dataset"]
 
 REPORT_VERSION = "qa-v0"
 
@@ -124,6 +129,143 @@ def _fact_key(state: Any) -> str | None:
     return json.dumps(
         _strip_wording(state), ensure_ascii=False, sort_keys=True, separators=(",", ":")
     )
+
+
+def leaf_diff(left: Any, right: Any, path: str = "state") -> list[str]:
+    """두 (표현을 걷어낸) 상태가 다른 잎의 경로. 대조 sibling은 부모와 정확히 한 자리만 달라야 한다 (docs/04 §3)."""
+    if isinstance(left, dict) and isinstance(right, dict):
+        found: list[str] = []
+        for key in sorted(set(left) | set(right)):
+            if key not in left or key not in right:
+                found.append(f"{path}.{key}")
+            else:
+                found.extend(leaf_diff(left[key], right[key], f"{path}.{key}"))
+        return found
+    if isinstance(left, list) and isinstance(right, list):
+        if len(left) != len(right):
+            return [path]
+        found = []
+        for index, (a, b) in enumerate(zip(left, right)):
+            found.extend(leaf_diff(a, b, f"{path}[{index}]"))
+        return found
+    return [] if left == right else [path]
+
+
+def _contrast_report(records: Sequence[dict], errors: list[dict]) -> dict:
+    """대조 쌍의 검사와 집계 (모듈 설명의 "대조 쌍")."""
+    from robo_jev.data.domains import DOMAINS, QuestionSpec
+    from robo_jev.data.generate import contrast_counts, deletion_outcome, semantic_answers
+
+    by_request: dict[str, tuple[int, dict]] = {}
+    for index, record in enumerate(records):
+        request = record.get("request") if isinstance(record, dict) else None
+        if isinstance(request, dict) and isinstance(request.get("request_id"), str):
+            by_request[request["request_id"]] = (index, record)
+
+    checked = flip_failures = field_failures = deletion_failures = unpaired = 0
+    for index, record in enumerate(records):
+        if not isinstance(record, dict):
+            continue
+        provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
+        contrast = provenance.get("contrast") if isinstance(provenance.get("contrast"), dict) else None
+        if contrast is None:
+            continue
+        if contrast.get("role") == "base":
+            sibling_id = contrast.get("sibling_id")
+            if sibling_id is not None and sibling_id not in by_request:
+                unpaired += 1  # count 절단 등으로 sibling이 데이터셋에 없다 — 위반은 아니다
+            continue
+        if provenance.get("derivation") != "contrast":
+            continue
+        checked += 1
+        parent_id = provenance.get("derived_from")
+        if contrast.get("sibling_id") != parent_id:
+            errors.append(_error(index, "provenance.contrast.sibling_id", f"부모와 다르다: {contrast.get('sibling_id')!r} != {parent_id!r}"))
+        parent_entry = by_request.get(parent_id) if isinstance(parent_id, str) else None
+        if parent_entry is None:
+            errors.append(_error(index, "provenance.contrast", f"대조 쌍의 부모가 없다: {parent_id!r}"))
+            continue
+        _, parent = parent_entry
+        if parent.get("split") != record.get("split") or parent.get("origin_group") != record.get("origin_group"):
+            errors.append(_error(index, "split", "대조 sibling이 부모와 다른 계열·split에 있다"))
+
+        # 1. 정확히 한 자리만 다른가 (로봇 틱은 초점 사실과 그 파생값 — 대상의 relative_mm·같은 사실의 두 표현 — 만).
+        diff = leaf_diff(_strip_wording(parent["request"]["state"]), _strip_wording(record["request"]["state"]))
+        robot = provenance.get("domain") == "robot"
+        if robot:
+            from robo_jev.data.robot_contrast import allowed_diff_paths
+
+            allowed = allowed_diff_paths(str(provenance.get("kind")), str(contrast.get("focus_field")))
+            bad = [path for path in diff if not path.startswith(allowed)]
+            if not diff or bad:
+                field_failures += 1
+                errors.append(_error(index, "request.state", f"로봇 대조 sibling은 초점 사실({contrast.get('focus_field')})만 달라야 한다 (다른 곳: {bad[:4] or diff[:4]})"))
+        elif len(diff) != 1:
+            field_failures += 1
+            errors.append(_error(index, "request.state", f"대조 sibling은 부모와 한 자리만 달라야 한다 (다른 곳 {len(diff)}: {diff[:4]})"))
+
+        # 2. 뒤집혔다는 질문의 라벨이 실제로 다른가.
+        question_id = contrast.get("flipped_question")
+        if robot:
+            from robo_jev.data.robot_contrast import flipped_answer
+
+            before, after = flipped_answer(parent, str(question_id)), flipped_answer(record, str(question_id))
+            same = before is None or after is None or before == after
+        else:
+            base_answers = semantic_answers(parent)
+            answers = semantic_answers(record)
+            same = question_id not in base_answers or question_id not in answers or base_answers[question_id] == answers[question_id]
+        if same:
+            flip_failures += 1
+            errors.append(_error(index, "provenance.contrast.flipped_question", f"{question_id!r}의 라벨이 부모와 같거나 마스크다"))
+
+        # 3. 삭제 검사: 초점 사실을 지우면 라벨이 마스크·"해당 없음"인가 (분야 규칙 코드로 다시 돌린다).
+        evidence = record.get("evidence") if isinstance(record.get("evidence"), dict) else {}
+        recorded = (contrast.get("deletion") or {}).get("outcome")
+        if robot:
+            from robo_jev.data.robot_contrast import deletion_outcome as robot_deletion
+            from robo_jev.sim.expert import Expert
+
+            tick_request = (evidence.get("contrast") or {}).get("tick_request") if isinstance(evidence.get("contrast"), dict) else None
+            if not isinstance(tick_request, dict):
+                deletion_failures += 1
+                errors.append(_error(index, "evidence.contrast", "삭제 analogue를 다시 돌릴 근거(틱의 후보·이력·commitment)가 없다"))
+                continue
+            outcome = robot_deletion(record["request"]["state"], tick_request, str(provenance.get("kind")), Expert())
+            if outcome is None:
+                deletion_failures += 1
+                errors.append(_error(index, "provenance.contrast.deletion", f"초점 사실 {contrast.get('focus_field')!r}을 지워도 전문가가 게이트로 가지 않는다"))
+            elif outcome != recorded:
+                errors.append(_error(index, "provenance.contrast.deletion", f"기록된 삭제 결과와 다르다: {recorded!r} != {outcome!r}"))
+            continue
+        domain = DOMAINS.get(str(provenance.get("domain")))
+        spec_data = (evidence.get("contrast") or {}).get("spec") if isinstance(evidence.get("contrast"), dict) else None
+        scene = evidence.get("scene")
+        if domain is None or not isinstance(spec_data, dict) or not isinstance(scene, dict):
+            deletion_failures += 1
+            errors.append(_error(index, "evidence.contrast", "삭제 검사를 다시 돌릴 근거(분야·질문 명세·장면)가 없다"))
+            continue
+        try:
+            deleted = domain.forget(scene, str(contrast.get("focus_field")))
+            spec = QuestionSpec(str(spec_data["id"]), str(spec_data["type"]), str(spec_data["kind"]), dict(spec_data.get("params") or {}))
+            outcome = deletion_outcome(domain, deleted, spec, str(provenance.get("language", "ko")))
+        except (KeyError, ValueError, StopIteration) as error:
+            outcome = None
+            errors.append(_error(index, "evidence.contrast", f"삭제 검사를 돌릴 수 없다: {error}"))
+        if outcome is None:
+            deletion_failures += 1
+            errors.append(_error(index, "provenance.contrast.deletion", f"초점 사실 {contrast.get('focus_field')!r}을 지워도 {question_id!r}의 라벨이 남는다"))
+        elif outcome != recorded:
+            errors.append(_error(index, "provenance.contrast.deletion", f"기록된 삭제 결과와 다르다: {recorded!r} != {outcome!r}"))
+
+    return {
+        **contrast_counts([record for record in records if isinstance(record, dict) and isinstance(record.get("provenance"), dict)]),
+        "checked": checked,
+        "unpaired_bases": unpaired,
+        "one_field_failures": field_failures,
+        "flip_failures": flip_failures,
+        "deletion_failures": deletion_failures,
+    }
 
 
 def _scan_keys(node: Any, path: str, forbidden: Iterable[str], found: list[tuple[str, str]]) -> None:
@@ -505,6 +647,7 @@ def validate_dataset(records: Sequence[dict], *, holdouts: dict | None = None) -
             split_groups[split] += 1
 
     holdout_report = _holdout_report(policy, group_splits, group_tags, group_records, errors)
+    contrast_report = _contrast_report(records, errors)
 
     return {
         "version": REPORT_VERSION,
@@ -526,6 +669,7 @@ def validate_dataset(records: Sequence[dict], *, holdouts: dict | None = None) -
         "label_kinds": dict(sorted(label_kinds.items())),
         "variants": dict(sorted(variants.items())),
         "holdouts": holdout_report,
+        "contrast": contrast_report,
         "duplicate_content": {
             "cross_group": cross_group,
             "records_with_shared_facts": duplicate_records,
@@ -627,6 +771,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"  holdout 계열: {holdouts_report['groups']} · 레코드 {holdouts_report['records']} · 누출 {holdouts_report['leaked_groups']}건")
         for reason, entry in holdouts_report["by_reason"].items():
             print(f"    {reason}: 계열 {entry['groups']} · 레코드 {entry['records']} · {entry['splits']}")
+    contrast = report["contrast"]
+    print(
+        f"  대조 쌍 {contrast['pairs']} (기본 레코드 {contrast['base_records']}의 {contrast['pair_share_of_bases']:.0%}) · split {contrast['by_split']} · "
+        f"삭제 검사 실패 {contrast['deletion_failures']} · 한 자리 위반 {contrast['one_field_failures']} · 뒤집힘 위반 {contrast['flip_failures']} · 빠짐 {contrast['missing']}"
+    )
     print(f"  계약 위반 {report['invalid_records']}건 · QA 위반 {len(report['errors'])}건")
     for error in report["errors"][:10]:
         print(f"  - [{error['index']}] {error['path']}: {error['message']}")

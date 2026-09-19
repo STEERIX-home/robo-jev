@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import copy
 import random
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -34,6 +35,7 @@ __all__ = [
     "DOMAINS",
     "NONE_ID",
     "VARIANT_TAGS",
+    "Contrast",
     "QuestionSpec",
     "Rendered",
 ]
@@ -76,6 +78,22 @@ class Rendered:
     trace: dict  # evidence에 들어갈 규칙 실행 근거
     variants: tuple[str, ...] = ()
     mask_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class Contrast:
+    """대조 sibling 후보 하나 (docs/04 §3, analysis-nimble §3-2).
+
+    `focus_field`는 장면의 사실 하나(`objects.o2.x`·`elements.e4.value`·`steps.s2.done`·`situation.zone`)이고 `flipped`는
+    그 사실 **하나만** 바꾼 장면, `deleted`는 같은 사실을 지운(모르는) 장면(:meth:`forget`), `question_ids`는 그 사실을
+    읽는 질문들(겨냥 순서)이다. 생성기는 겨냥 질문 가운데 라벨이 실제로 뒤집히고 삭제 검사(사실을 지우면 라벨이
+    마스크·"해당 없음"이 된다)를 지나는 첫 질문을 `flipped_question`으로 적는다.
+    """
+
+    focus_field: str
+    question_ids: tuple[str, ...]
+    flipped: dict
+    deleted: dict
 
 
 # --------------------------------------------------------------------------
@@ -965,6 +983,65 @@ class SpatialDomain:
         return best, near_miss, unknown
 
 
+    # -- 대조 sibling (docs/04 §3) ------------------------------------------------------
+
+    def forget(self, scene: dict, focus_field: str) -> dict:
+        """초점 사실을 지운 장면: 자세(`objects.<id>.x`)는 **관측되지 않은 것**으로(visible=False, x·y=None) — 이 분야에서
+        "모른다"는 관측이 없다는 뜻이고, 가려진 물체의 표현과 같다."""
+        _, object_id, field = focus_field.split(".")
+        if field != "x":
+            raise ValueError(f"spatial의 초점 사실은 objects.<id>.x뿐이다 (받은 값: {focus_field!r})")
+        out = copy.deepcopy(scene)
+        _spatial_object(out, object_id).update(visible=False, x=None, y=None)
+        return out
+
+    def contrasts(self, scene: dict, specs: list[QuestionSpec]) -> list[Contrast]:
+        """관측된 물체 하나의 x를 영역 경계 너머 1cm로 옮긴 장면들 — 그 물체를 읽는 target·goal_met·in_zone 질문이 뒤집힌다."""
+        bounds = {zone_id: (x_min, x_max) for zone_id, x_min, x_max in _ZONES}
+        by_field: dict[tuple[str, int], Contrast] = {}
+        for spec in specs:
+            if spec.kind in ("target", "goal_met"):
+                zone = spec.params["zone"]
+                objects = [
+                    obj for obj in scene["objects"] if obj["color"] == spec.params["color"] and _spatial_observable(scene, obj)
+                ]
+            elif spec.kind == "in_zone":
+                zone = spec.params["zone"]
+                obj = _spatial_object(scene, spec.params["object"])
+                objects = [obj] if _spatial_observable(scene, obj) else []
+            else:
+                continue
+            x_min, x_max = bounds[zone]
+            for obj in objects:
+                new_x = _across_boundary(int(obj["x"]), x_min, x_max)
+                if new_x is None:
+                    continue
+                key = (obj["id"], new_x)
+                found = by_field.get(key)
+                if found is not None:
+                    by_field[key] = Contrast(found.focus_field, found.question_ids + (spec.id,), found.flipped, found.deleted)
+                    continue
+                flipped = copy.deepcopy(scene)
+                _spatial_object(flipped, obj["id"])["x"] = new_x
+                field = f"objects.{obj['id']}.x"
+                by_field[key] = Contrast(field, (spec.id,), flipped, self.forget(flipped, field))
+        return list(by_field.values())
+
+
+def _across_boundary(x: int, x_min: int, x_max: int, step: int = 10) -> int | None:
+    """영역 경계(반열린 `[x_min, x_max)`) 너머 `step`mm의 x. 안이면 가까운 경계 밖으로, 밖이면 가까운 경계 안으로.
+    테이블 범위(생성기의 x 범위) 밖으로 나가면 다른 경계를 쓰고, 그것도 안 되면 `None`."""
+    lo, hi = -580, 585
+    if x_min <= x < x_max:
+        options = sorted(((x - x_min, x_min - step), (x_max - x, x_max + step)))
+    else:
+        options = sorted(((abs(x - x_min), x_min + step), (abs(x - x_max), x_max - step)))
+    for _, new_x in options:
+        if lo <= new_x <= hi and ((x_min <= new_x < x_max) != (x_min <= x < x_max)):
+            return new_x
+    return None
+
+
 # ==========================================================================
 # dom — 합성 DOM/도구 상태
 # ==========================================================================
@@ -1551,6 +1628,37 @@ class DomDomain:
             return [hidden["id"]], False
         return [goal["id"]], False
 
+    # -- 대조 sibling (docs/04 §3) ------------------------------------------------------
+
+    def forget(self, scene: dict, focus_field: str) -> dict:
+        """초점 사실을 지운 장면: 그 요소의 상태를 읽지 못한 것으로(`unknown`)."""
+        _, element_id, _ = focus_field.split(".")
+        out = copy.deepcopy(scene)
+        _dom_set(out["elements"], element_id, unknown=True)
+        return out
+
+    def contrasts(self, scene: dict, specs: list[QuestionSpec]) -> list[Contrast]:
+        """요소 하나의 `enabled`(활성)나 `value`(입력값)를 뒤집은 장면들 — 그 요소의 actionable, 그리고 다음 조작·막는 요소·
+        도달 가능·입력 필요·진행 수준이 뒤집힐 수 있다."""
+        out: list[Contrast] = []
+        page = [spec.id for spec in specs if spec.kind in ("action", "blocker", "reachable", "needs_input", "progress")]
+        for element in scene["elements"]:
+            if element.get("unknown") or element["role"] == "section":
+                continue
+            element_id = element["id"]
+            own = [spec.id for spec in specs if spec.kind == "actionable" and spec.params["element"] == element_id]
+            flipped = copy.deepcopy(scene)
+            _dom_set(flipped["elements"], element_id, enabled=not element["enabled"])
+            field = f"elements.{element_id}.enabled"
+            out.append(Contrast(field, tuple(own + page), flipped, self.forget(flipped, field)))
+            if element["role"] in ("input", "checkbox") and "value" in element:
+                filled = "on" if element["role"] == "checkbox" else "4111-****"
+                flipped = copy.deepcopy(scene)
+                _dom_set(flipped["elements"], element_id, value="" if element["value"] else filled)
+                field = f"elements.{element_id}.value"
+                out.append(Contrast(field, tuple(page), flipped, self.forget(flipped, field)))
+        return out
+
 
 def _dom_set(elements: list[dict], element_id: str, **changes) -> None:
     for element in elements:
@@ -2058,6 +2166,34 @@ class WorkflowDomain:
         )
 
 
+    # -- 대조 sibling (docs/04 §3) ------------------------------------------------------
+
+    def forget(self, scene: dict, focus_field: str) -> dict:
+        """초점 사실을 지운 장면: 그 단계의 진행 보고가 없는 것으로(`done=None`)."""
+        _, step_id, _ = focus_field.split(".")
+        out = copy.deepcopy(scene)
+        _workflow_step(out, step_id)["done"] = None
+        return out
+
+    def contrasts(self, scene: dict, specs: list[QuestionSpec]) -> list[Contrast]:
+        """단계 하나의 `done`을 뒤집은 장면들 — 후행 단계의 선행 조건, 착수 가능 단계, 자원 차단 질문이 뒤집힐 수 있다."""
+        out: list[Contrast] = []
+        for step in scene["steps"]:
+            if step["done"] is None:
+                continue
+            successors = [
+                spec.id
+                for spec in specs
+                if spec.kind == "precondition" and step["id"] in _workflow_step(scene, spec.params["step"])["requires"]
+            ]
+            page = [spec.id for spec in specs if spec.kind in ("next", "blocked")]
+            flipped = copy.deepcopy(scene)
+            _workflow_step(flipped, step["id"])["done"] = not step["done"]
+            field = f"steps.{step['id']}.done"
+            out.append(Contrast(field, tuple(successors + page), flipped, self.forget(flipped, field)))
+        return out
+
+
 # ==========================================================================
 # rules — 명시 규칙의 우선순위와 예외
 # ==========================================================================
@@ -2223,6 +2359,15 @@ def _rules_describe(scene: dict, rule: dict, language: str, long: bool) -> str:
     return f"{head} - if {conditions} then {action}"
 
 
+#: 상황 속성과 그 두 값. 대조 sibling은 값을 다른 쪽으로 뒤집는다.
+_RULE_ATTRIBUTE_VALUES = {
+    "zone": ("restricted", "open"),
+    "window": ("night", "day"),
+    "load": ("heavy", "light"),
+    "approval": ("granted", "absent"),
+}
+
+
 class RulesDomain:
     """명시 규칙의 우선순위·예외·정보 부족. 정답은 규칙 해석기가 낸다."""
 
@@ -2230,12 +2375,7 @@ class RulesDomain:
     templates = ("access-policy", "access-policy-tie", "access-policy-partial")
 
     def make_scene(self, rng: random.Random, template: str) -> dict:
-        attributes = {
-            "zone": ("restricted", "open"),
-            "window": ("night", "day"),
-            "load": ("heavy", "light"),
-            "approval": ("granted", "absent"),
-        }
+        attributes = dict(_RULE_ATTRIBUTE_VALUES)
         situation = {key: rng.choice(values) for key, values in attributes.items()}
         keys = list(attributes)
         rules = []
@@ -2491,6 +2631,37 @@ class RulesDomain:
             boundary=False,
             mask_reason="지배 규칙을 확정할 수 없어 심각도를 낼 수 없다",
         )
+
+
+    # -- 대조 sibling (docs/04 §3) ------------------------------------------------------
+
+    def forget(self, scene: dict, focus_field: str) -> dict:
+        """초점 사실을 지운 장면: 상황에서 그 속성을 지운다(그 속성을 보는 규칙은 판단 불가)."""
+        _, attribute = focus_field.split(".")
+        out = copy.deepcopy(scene)
+        out["situation"].pop(attribute, None)
+        return out
+
+    def contrasts(self, scene: dict, specs: list[QuestionSpec]) -> list[Contrast]:
+        """상황 속성 하나의 값을 다른 쪽으로 뒤집은 장면들 — 그 속성을 보는 규칙의 적용 여부, 지배 규칙, 조치, 심각도가
+        뒤집힐 수 있다."""
+        out: list[Contrast] = []
+        page = [spec.id for spec in specs if spec.kind in ("governing", "action", "severity")]
+        for attribute, value in scene["situation"].items():
+            other = next((option for option in _RULE_ATTRIBUTE_VALUES[attribute] if option != value), None)
+            if other is None:
+                continue
+            reading = [
+                spec.id
+                for spec in specs
+                if spec.kind == "applies"
+                and attribute in (_rules_rule(scene, spec.params["rule"])["when"] | (_rules_rule(scene, spec.params["rule"]).get("unless") or {}))
+            ]
+            flipped = copy.deepcopy(scene)
+            flipped["situation"][attribute] = other
+            field = f"situation.{attribute}"
+            out.append(Contrast(field, tuple(reading + page), flipped, self.forget(flipped, field)))
+        return out
 
 
 #: 분야 이름 → 생성기.

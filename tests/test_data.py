@@ -561,7 +561,122 @@ def test_derived_records_inherit_the_parent_group_and_split(batch):
         parent = by_id[record["provenance"]["derived_from"]]
         assert record["origin_group"] == parent["origin_group"]
         assert record["split"] == parent["split"]
-        assert record["provenance"]["derivation"] in ("paraphrase", "reorder")
+        assert record["provenance"]["derivation"] in ("paraphrase", "reorder", "contrast")
+
+
+# --------------------------------------------------------------------------
+# 대조 sibling과 삭제 검사 (docs/04 §3·§6, analysis-nimble §3-2)
+# --------------------------------------------------------------------------
+
+
+def _pairs(batch):
+    by_id = {record["request"]["request_id"]: record for record in batch}
+    return [
+        (by_id[record["provenance"]["contrast"]["sibling_id"]], record)
+        for record in batch
+        if (record["provenance"].get("contrast") or {}).get("role") == "sibling"
+        and record["provenance"]["contrast"]["sibling_id"] in by_id
+    ]
+
+
+def test_every_domain_emits_contrast_siblings_that_share_group_split_wording_and_candidate_order(batch):
+    """기본 레코드마다 사실 하나만 바꾼 sibling이 있다(삭제 검사를 지난 쌍만). 같은 계열·split, 같은 문구·질문 목록(같은
+    wording seed; 후보 id는 정답 후보를 뺀 질문 뒤로는 같은 shuffle seed에서도 달라질 수 있다)이고 provenance가 쌍을 서로
+    가리킨다."""
+    pairs = _pairs(batch)
+    assert len(pairs) >= 0.7 * sum(1 for record in batch if record["provenance"].get("derived_from") is None)
+    assert {sibling["provenance"]["domain"] for _, sibling in pairs} == set(domains.DOMAINS)
+    for base, sibling in pairs:
+        assert sibling["provenance"]["derivation"] == "contrast" and sibling["provenance"]["derived_from"] == base["request"]["request_id"]
+        assert sibling["origin_group"] == base["origin_group"] and sibling["split"] == base["split"]
+        assert base["provenance"]["contrast"] == {
+            "role": "base",
+            "sibling_id": sibling["request"]["request_id"],
+            "focus_field": sibling["provenance"]["contrast"]["focus_field"],
+            "flipped_question": sibling["provenance"]["contrast"]["flipped_question"],
+        }
+        assert sibling["provenance"]["phrasing"] == base["provenance"]["phrasing"]
+        assert [q["instructions"] for q in sibling["request"]["questions"]] == [q["instructions"] for q in base["request"]["questions"]]
+        assert [q["id"] for q in sibling["request"]["questions"]] == [q["id"] for q in base["request"]["questions"]]
+
+
+def test_a_contrast_sibling_changes_exactly_one_fact_and_flips_the_named_question(batch):
+    from robo_jev.data.generate import semantic_answers
+    from robo_jev.data.validate import _strip_wording, leaf_diff
+
+    for base, sibling in _pairs(batch):
+        contrast = sibling["provenance"]["contrast"]
+        diff = leaf_diff(_strip_wording(base["request"]["state"]), _strip_wording(sibling["request"]["state"]))
+        assert len(diff) == 1, (sibling["request"]["request_id"], diff)
+        assert contrast["focus_field"].split(".")[0] in diff[0]
+        before, after = semantic_answers(base), semantic_answers(sibling)
+        question_id = contrast["flipped_question"]
+        assert question_id in before and question_id in after and before[question_id] != after[question_id]
+        assert question_id in contrast["flipped_questions"]
+        assert sibling["evidence"]["contrast"]["spec"]["id"] == question_id
+        assert contrast["deletion"]["outcome"] in ("masked", "none_candidate")
+
+
+def test_deleting_the_focus_fact_makes_the_flipped_label_unknown_in_every_domain():
+    """삭제 검사: 초점 사실을 지운 장면(분야의 `forget`)에서 뒤집힌 질문을 다시 그리면 라벨이 마스크거나 "해당 없음"이다 —
+    규칙 코드가 사실의 부재를 "모른다"로 답한다는 것을 분야마다 확인한다."""
+    from robo_jev.data.generate import deletion_outcome
+
+    for name, domain in domains.DOMAINS.items():
+        scene = domain.make_scene(random.Random(f"contrast:{name}"), domain.templates[0])
+        specs = domain.pool(scene)
+        by_id = {spec.id: spec for spec in specs}
+        outcomes = Counter()
+        for contrast in domain.contrasts(scene, specs):
+            assert contrast.focus_field.count(".") in (1, 2)
+            assert contrast.flipped != scene and contrast.deleted != contrast.flipped
+            for question_id in contrast.question_ids:
+                outcomes[deletion_outcome(domain, contrast.deleted, by_id[question_id], "ko")] += 1
+        assert outcomes["masked"] + outcomes["none_candidate"] > 0, (name, outcomes)
+
+
+def test_the_qa_reports_contrast_pairs_and_flags_a_broken_pair(batch, report):
+    """QA는 쌍 수·split별 수·삭제 결과를 적고 세 검사(한 자리, 뒤집힘, 삭제)를 다시 돌린다."""
+    contrast = report["contrast"]
+    assert contrast["pairs"] == len(_pairs(batch)) and contrast["checked"] == contrast["pairs"]
+    assert sum(contrast["by_split"].values()) == contrast["pairs"] and sum(contrast["by_domain"].values()) == contrast["pairs"]
+    assert contrast["deletion_failures"] == contrast["one_field_failures"] == contrast["flip_failures"] == 0
+    assert set(contrast["deletion_outcomes"]) <= {"masked", "none_candidate"}
+    assert set(contrast["missing"]) <= {"no_flip", "deletion_failed", "no_contrast", "sealed_concept"}
+
+    base, sibling = next(
+        (base, sibling) for base, sibling in _pairs(batch) if sibling["provenance"]["domain"] == "rules"
+    )
+    two_fields = copy.deepcopy(batch)
+    poisoned = next(record for record in two_fields if record["request"]["request_id"] == sibling["request"]["request_id"])
+    other = next(key for key in poisoned["request"]["state"]["situation"] if key != sibling["provenance"]["contrast"]["focus_field"].split(".")[1])
+    poisoned["request"]["state"]["situation"][other] = "bogus"
+    paths = {error["path"] for error in validate_dataset(two_fields)["errors"]}
+    assert "request.state" in paths
+
+    no_flip = copy.deepcopy(batch)
+    poisoned = next(record for record in no_flip if record["request"]["request_id"] == sibling["request"]["request_id"])
+    poisoned["labels"] = copy.deepcopy(base["labels"])
+    poisoned["request"]["questions"] = copy.deepcopy(base["request"]["questions"])
+    assert any(error["path"] == "provenance.contrast.flipped_question" for error in validate_dataset(no_flip)["errors"])
+
+    wrong_field = copy.deepcopy(batch)
+    poisoned = next(record for record in wrong_field if record["request"]["request_id"] == sibling["request"]["request_id"])
+    poisoned["provenance"]["contrast"]["focus_field"] = f"situation.{other}"
+    report_wrong = validate_dataset(wrong_field)
+    assert report_wrong["contrast"]["deletion_failures"] >= 1 or any(
+        error["path"] == "provenance.contrast.deletion" for error in report_wrong["errors"]
+    )
+
+
+def test_leaf_diff_names_exactly_the_changed_leaves():
+    from robo_jev.data.validate import leaf_diff
+
+    left = {"a": 1, "b": [1, {"c": 2}], "d": {"e": None}}
+    assert leaf_diff(left, copy.deepcopy(left)) == []
+    assert leaf_diff(left, {"a": 1, "b": [1, {"c": 3}], "d": {"e": None}}) == ["state.b[1].c"]
+    assert leaf_diff(left, {"a": 1, "b": [1], "d": {"e": None}}) == ["state.b"]
+    assert leaf_diff(left, {"a": 1, "b": [1, {"c": 2}], "d": {}}) == ["state.d.e"]
 
 
 def test_paraphrases_keep_the_answer_and_change_the_wording(batch):

@@ -17,6 +17,8 @@
    일어난 것), `labels`(전문가의 답, `source: expert_v0`, 게이팅 규칙 이름)를 **분리 필드**로
    적는다(docs/08 §8). 실행 이력은 어떤 경우에도 라벨로 대체하지 않는다.
 4. `done` 게이트 뒤 1초(10틱)의 꼬리까지, 아니면 30초까지 돈다.
+5. 배치가 끝나면 에피소드마다 **틱 대조 쌍**(:mod:`robo_jev.data.robot_contrast`; 설정 `contrast.per_episode`)을 만들어
+   `contrast/records.jsonl`(`judgment-v0`)에 쓰고 manifest의 `files`·`contrast`에 적는다 — 같은 origin_group·split이다.
 
 레코드는 :func:`robo_jev.contracts.validate_record`를 지나야 하고, 한 에피소드가 JSONL 한 줄
 (`episodes/<id>/streams.jsonl` — 자동 QA가 찾는 이름)이며 `manifest.json`이 편수·틱·프로파일별·
@@ -40,6 +42,7 @@ import yaml
 
 from robo_jev.contracts import QUESTION_SET_V0, validate_record
 from robo_jev.data.episode import aggregate, append_tick, finalize, new_episode
+from robo_jev.data.robot_contrast import build_pairs, contrast_summary, default_question_texts
 from robo_jev.data.split import CONCEPT_TAG, TEMPLATE_TAG, SplitPolicy, assign_split
 from robo_jev.harness.robot import RobotHarness, count_records, load_harness_config
 from robo_jev.sim.controller import resolve_config_path
@@ -47,10 +50,12 @@ from robo_jev.sim.expert import Expert, load_expert_config
 from robo_jev.sim.scene import ScenePlan, build_plan, family_id, family_signature, origin_group
 
 __all__ = [
+    "CONTRAST_PATH",
     "DEFAULT_CONFIG_PATH",
     "GENERATOR_VERSION",
     "MANIFEST_VERSION",
     "build_manifest",
+    "write_contrast",
     "config_paths",
     "episode_id",
     "family_id",
@@ -346,9 +351,43 @@ def _outcome(scene: dict[str, Any], plan: ScenePlan, env: Any, done_tick: int | 
 # --------------------------------------------------------------------------
 
 
+#: 틱 대조 쌍의 파일 (`judgment-v0` 레코드; 자동 QA는 `records.jsonl`을 찾는다).
+CONTRAST_PATH = "contrast/records.jsonl"
+
+
 def episode_path(out: Path, identifier: str) -> Path:
     """`episodes/<id>/streams.jsonl` — 자동 QA(`python -m robo_jev.data.validate`)가 찾는 이름이다."""
     return out / "episodes" / str(identifier) / "streams.jsonl"
+
+
+def write_contrast(
+    records: list[dict[str, Any]], out: Path, config: dict[str, Any], *, expert: Expert, log: Any = None
+) -> dict[str, Any]:
+    """에피소드들의 틱 대조 쌍을 `contrast/records.jsonl`에 쓰고 집계를 돌려준다 (설정 `contrast`; 없으면 종류별 1, ≤ 4).
+
+    파일은 배치를 다시 셀 때마다 통째로 다시 쓴다(`--resume` 뒤에도 전체 에피소드에서 만든다) — 쌍은 에피소드 id로
+    seed한 결정적 선택이라 같은 배치는 같은 파일이다.
+    """
+    spec = config.get("contrast") or {}
+    per_episode = int(spec.get("per_episode", 4))
+    kinds = tuple(str(kind) for kind in (spec.get("kinds") or ()))
+    texts = default_question_texts(config_paths(config)["harness_config"])
+    rows: list[dict[str, Any]] = []
+    reasons: dict[str, int] = {}
+    for record in records:
+        pairs, found = build_pairs(
+            record, expert=expert, per_episode=per_episode, question_texts=texts, log=log, **({"kinds": kinds} if kinds else {})
+        )
+        rows.extend(pairs)
+        for key, value in found.items():
+            reasons[key] = reasons.get(key, 0) + value
+    path = out / CONTRAST_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = "".join(json.dumps(row, ensure_ascii=False, sort_keys=False, separators=(",", ":")) + "\n" for row in rows)
+    path.write_bytes(payload.encode("utf-8"))
+    summary = contrast_summary(rows, reasons)
+    summary["per_episode"] = per_episode
+    return summary
 
 
 def write_episode(record: dict[str, Any], out: Path) -> Path:
@@ -482,6 +521,16 @@ def build_manifest(
             for path, record in found
         },
     }
+    contrast_file = out / CONTRAST_PATH
+    if contrast_file.is_file():
+        # 틱 대조 쌍(`judgment-v0`)도 적재기의 파일 목록에 든다 — 스트림과 같은 split·계열이며 schema로 갈린다.
+        rows = [line for line in contrast_file.read_text(encoding="utf-8").splitlines() if line.strip()]
+        manifest["files"][CONTRAST_PATH] = {
+            "kind": "contrast",
+            "records": len(rows),
+            "bytes": contrast_file.stat().st_size,
+            "sha256": hashlib.sha256(contrast_file.read_bytes()).hexdigest(),
+        }
     (out / "manifest.json").write_bytes(
         (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=False) + "\n").encode("utf-8")
     )
@@ -534,7 +583,9 @@ def run(
     finally:
         for env in envs.values():
             env.close()
+    contrast = write_contrast([record for _, record in read_episodes(out)], out, config, expert=expert, log=log)
     manifest = build_manifest(out, config, batch_wall_s=time.perf_counter() - started)
+    manifest["contrast"] = contrast
     manifest["run"] = {"requested": int(count), "produced": produced, "skipped": skipped, "resume": bool(resume)}
     (out / "manifest.json").write_bytes(
         (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=False) + "\n").encode("utf-8")
@@ -565,6 +616,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     for profile, entry in manifest["per_profile"].items():
         print(f"  {profile}: {entry['episodes']}편 done {entry['done']} ({entry['done_rate']})")
+    contrast = manifest.get("contrast") or {}
+    print(f"  대조 쌍 {contrast.get('pairs', 0)} (종류 {contrast.get('by_kind')}, split {contrast.get('by_split')}, 삭제 {contrast.get('deletion_outcomes')}) → {CONTRAST_PATH}")
     return 0
 
 
