@@ -250,6 +250,7 @@ def test_verdict_flags_flip_strictly_above_each_threshold_and_quote_their_number
     assert verdict["lower"] == {
         "profile": "lower", "condition": "stream_warm", "ticks": 35, "p95_model_ms": 80.0, "deadline_miss_rate_100ms": 0.05,
         "fails_10hz": False, "fails_5hz": False, "deadline_fail": False, "passes": True,
+        "passes_10hz_window": None,  # 윈도우 크기 읽기가 없으면 판독도 없다
         "window": module.window_reading([], prefix_tokens=None, tick_tokens_mean=None),  # 틱 기록이 없으면 전부 None, 죽지 않는다
         "text": verdict["lower"]["text"],
     }
@@ -264,6 +265,40 @@ def test_verdict_flags_flip_strictly_above_each_threshold_and_quote_their_number
     missing = module.verdicts({"lower": {}}, max_miss_rate=0.05)
     assert missing["lower"]["passes"] is None and "not measured" in missing["lower"]["text"] and missing["upper"]["passes"] is None
     assert missing["lower"]["window"]["model_ms_at_window_cache"] is None and missing["lower"]["window"]["fit_n"] == 0
+
+
+def test_passes_10hz_window_reads_the_extrapolated_fit_and_the_first_five_ticks_without_moving_the_literal_flags():
+    """리뷰 1 I6: 문자 그대로의 flag(자라는 cache의 p95)는 그대로 두고, 윈도우 크기 읽기(외삽 + 첫 5틱 평균 둘 다 ≤ 80 ms)의
+    기계 판독 `passes_10hz_window`를 따로 둔다 — G0b의 정적 윈도우 경로와 같은 잣대."""
+    module = script()
+
+    def result(slope_ms_per_token: float, intercept: float, early_bump: float = 0.0) -> dict:
+        # 실측과 같은 모양: 35틱, cache 15.7K → 30.7K(윈도우 없이 자란다), 틱당 440토큰.
+        ticks = [
+            {"tick": i, "new_tokens": 440, "cache_before": 15700 + 440 * i, "cache_after": 16140 + 440 * i, "episode": "e",
+             "model_ms": intercept + slope_ms_per_token * (15700 + 440 * i) + (early_bump if i < 5 else 0.0), "wall_ms": 0.0, "obs_apply_ms": 0.0}
+            for i in range(35)
+        ]
+        model = [t["model_ms"] for t in ticks]
+        summary = {"ticks": 35, "model_ms": {"p50": sorted(model)[17], "p95": max(model), "p99": max(model), "max": max(model), "mean": sum(model) / 35, "min": min(model)}, "deadline_miss_rate_100ms": 0.2}
+        return {"stream_warm": {"summary": summary, "ticks": ticks}}
+
+    profiles = {"lower": {"prefix_tokens": 450, "tick_tokens": {"mean": 420.0}}, "upper": {"prefix_tokens": 450, "tick_tokens": {"mean": 440.0}}}
+    # 자라는 cache(15.7K→30.7K, 2 ms/1K)에서는 p95 ≈ 101 > 80 (fails_10hz·deadline_fail)이지만 윈도우 크기(450 + 29 × 420 ≈ 12.6K)로
+    # 외삽하면 ≈ 65 ms이고 첫 5틱 평균 ≈ 73 ms — 둘 다 예산 안이라 passes_10hz_window.
+    passing = module.verdicts({"lower": result(0.002, 40.0), "upper": result(0.002, 40.0)}, max_miss_rate=0.05, profiles=profiles)["lower"]
+    assert passing["fails_10hz"] and passing["deadline_fail"] and not passing["passes"]
+    assert passing["window"]["model_ms_at_window_cache"] == pytest.approx(40.0 + 0.002 * (450 + 29 * 420), abs=0.05)
+    assert 70 < passing["window"]["early_ticks_mean_ms"] < 80 and passing["passes_10hz_window"] is True
+    assert "passes_10hz_window" in passing["text"] and "fails_10hz" in passing["text"]
+    # 첫 5틱 평균이 예산을 넘으면 외삽이 통과해도 거짓.
+    bumped = module.verdicts({"lower": result(0.002, 40.0, early_bump=30.0)}, max_miss_rate=0.05, profiles=profiles)["lower"]
+    assert bumped["window"]["early_ticks_mean_ms"] > 80 and bumped["passes_10hz_window"] is False and "fails_10hz_window" in bumped["text"]
+    # 외삽이 예산을 넘으면 거짓.
+    slow = module.verdicts({"lower": result(0.004, 60.0)}, max_miss_rate=0.05, profiles=profiles)["lower"]
+    assert slow["window"]["model_ms_at_window_cache"] > 80 and slow["passes_10hz_window"] is False
+    # 읽기가 없으면 None.
+    assert module.verdicts({"lower": {}}, max_miss_rate=0.05)["lower"]["passes_10hz_window"] is None
 
 
 def test_verdict_window_reading_fits_model_ms_on_cache_and_quotes_it_without_moving_the_flags():

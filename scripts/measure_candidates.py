@@ -96,7 +96,7 @@ SYNTHETIC = {
 }
 DTYPES = {"bf16": "bfloat16"}
 #: 이 스크립트의 버전 — `--from-report`가 다시 요약할 때 JSON에 적는다 (요약·판정의 정의가 바뀌면 올린다).
-SCRIPT_VERSION = "g0a-1.2"
+SCRIPT_VERSION = "g0a-1.3"
 #: 판정의 "윈도우 크기 cache" 읽기: 첫 측정 틱 몇 개의 평균을 함께 적는다.
 EARLY_TICKS = 5
 
@@ -602,7 +602,10 @@ def verdicts(
 ) -> dict[str, Any]:
     """docs/06 1단계 탈락 규칙 — `lower`와 `upper`에서 따로, stream_warm의 **문자 그대로의 p95**(native cache가 자란
     채로)로 flag를 정한다(보수적). 그 옆에 :func:`window_reading` 의 윈도우 크기 읽기(직선 맞춤·첫 5틱 평균·cache 범위)를
-    적고 문장에도 인용한다 — flag는 그것으로 바꾸지 않는다."""
+    적고 문장에도 인용한다 — 문자 그대로의 flag는 그것으로 바꾸지 않는다. 대신 **`passes_10hz_window`**를 따로 둔다:
+    윈도우 크기 cache로 외삽한 모델 ms(`model_ms_at_window_cache`)와 첫 5틱 평균(`early_ticks_mean_ms`)이 **둘 다** 10 Hz
+    예산 이하일 때 참 — G0b의 `stream` 경로(정적 윈도우)와 같은 잣대로 비교하기 위한 기계 판독 값이며, 외삽은 측정 cache 범위
+    (15.7K~31K)보다 짧은 쪽(12.8K~13.2K)이라 R²와 함께 읽는다. 둘 중 하나라도 없으면 None."""
     deadline_key = f"deadline_miss_rate_{budgets['deadline']:.0f}ms"
     out: dict[str, Any] = {}
     for profile in ("lower", "upper"):
@@ -611,7 +614,7 @@ def verdicts(
         if not summary or not summary.get("ticks"):
             out[profile] = {
                 "profile": profile, "condition": "stream_warm", "ticks": 0, "p95_model_ms": None, deadline_key: None,
-                "fails_10hz": None, "fails_5hz": None, "deadline_fail": None, "passes": None,
+                "fails_10hz": None, "fails_5hz": None, "deadline_fail": None, "passes": None, "passes_10hz_window": None,
                 "window": window_reading([], prefix_tokens=None, tick_tokens_mean=None),
                 "text": f"{profile}: not measured (no stream_warm ticks)",
             }
@@ -630,6 +633,7 @@ def verdicts(
         flags = [name for name, flag in (("fails_10hz", fails_10hz), ("fails_5hz", fails_5hz), ("deadline_fail", deadline_fail)) if flag]
         at_window = window["model_ms_at_window_cache"]
         early = window["early_ticks_mean_ms"]
+        passes_10hz_window = None if at_window is None or early is None else bool(at_window <= budgets["model_10hz"] and early <= budgets["model_10hz"])
         cache_range = window["cache_before_range"]
         tokens = window["window_cache_tokens"]
         sized = (
@@ -641,6 +645,10 @@ def verdicts(
             f"{profile} (stream_warm, {summary['ticks']} ticks): p95 model {p95:.1f} ms ({sized}) vs {budgets['model_10hz']:.0f} ms (10 Hz) / "
             f"{budgets['model_5hz']:.0f} ms (5 Hz); obs→apply miss rate {miss:.3f} vs max {max_miss_rate:.3f} → "
             + (", ".join(flags) if flags else "passes")
+            + (
+                "; window-sized (extrapolated fit and first-5 mean both ≤ 10 Hz budget): "
+                + ("n/a" if passes_10hz_window is None else ("passes_10hz_window" if passes_10hz_window else "fails_10hz_window"))
+            )
         )
         out[profile] = {
             "profile": profile,
@@ -652,6 +660,8 @@ def verdicts(
             "fails_5hz": fails_5hz,
             "deadline_fail": deadline_fail,
             "passes": not flags,
+            # 윈도우 크기 읽기의 기계 판독 (외삽 + 첫 5틱 평균 둘 다 ≤ 10 Hz 예산) — 문자 그대로의 flag와 별개.
+            "passes_10hz_window": passes_10hz_window,
             "window": window,
             "text": text,
         }
