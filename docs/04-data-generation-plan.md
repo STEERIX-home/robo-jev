@@ -164,23 +164,23 @@ rollout_seeds, successes, failures, censored_trials
 
 먼저 의미 계열·분야 holdout을 통째로 제외한 뒤, 나머지를 origin group 단위로 기본 split에 배정한다. holdout에는 **템플릿 변형 계열**(같은 개념의 다른 표현)과 **개념 계열**(분야마다 개념 하나를 통째로)을 둘 다 둔다; 필드 집합만 다르고 개념 어휘를 공유하는 test는 새 의미를 검증하지 못한다. OOD는 계열 해시로 `ood_dev`(개발용)와 `ood_test`(봉인)로 반분한다. D2는 D1의 계보와 분할을 승계하며, 이미 학습한 D1 에피소드·상태를 새 test로 재배치하지 않는다.
 
-**봉인 목록 (2026-09-19, 계약 v0.3 — `configs/data/pilot.yaml`·`d1_robot.yaml`의 `split` 절이 단일 출처).** 생성기가 레코드마다 provenance에 문구 템플릿 변형 id(`phrasing`; 로봇은 `instruction_templates`)와 개념 id(`concepts`)를 적고, 한 계열의 레코드 중 하나라도 아래 목록에 걸리면 계열 전체가 OOD로 간다(한 group이 두 split에 걸치지 않는다). 로봇 계열의 origin group은 `robot/<profile>/<장면 계열>/goal-<목표 영역>`이라 목표 생성 계열이 계보에 든다. 자동 QA(`python -m robo_jev.data.validate`, 데이터셋의 `manifest.json`에서 목록을 읽는다)가 종류별 계열·레코드 수를 세고, holdout 계열이 train/dev/calibration/test에 있으면(누출) 또는 OOD인데 이유가 없으면 위반이다. 봉인 id는 값의 예시가 아니라 **id**로 적는다.
+**봉인 목록 (2026-09-19, 계약 v0.3 — `configs/data/pilot.yaml`·`d1_robot.yaml`의 `split` 절이 단일 출처).** 생성기가 레코드마다 provenance에 문구 템플릿 변형 id(`phrasing`; 로봇은 `instruction_templates`)와 개념 id(`concepts`)를 적고, 한 계열의 레코드 중 하나라도 아래 목록에 걸리면 계열 전체가 OOD로 간다(한 group이 두 split에 걸치지 않는다 — 검사: pilot 2,000상태와 로봇 400편 일정 모의에서 걸친 group 0). 로봇 계열의 origin group은 `robot/<profile>/<장면 계열>/goal-<목표 영역>`이라 목표 생성 계열이 계보에 든다; 로봇 지시의 문구 변형은 난수가 아니라 **이 group의 해시**가 정하므로(v1·v2 따로) 같은 group의 에피소드는 같은 변형이고 템플릿 holdout도 group을 가르지 않는다(리뷰 1 I1). **OOD의 몫은 ≈10~15 %**(사용자 결정; 비로봇은 분야별 계열 기준, 로봇은 D1 규모의 에피소드 기준)이고, 봉인 종류·id는 그대로 두고 **생성 비중**으로 맞춘다: 봉인 문구 변형은 그 표에서 `sealed_phrasing_share`(10 %)만큼만 뽑히고, 봉인 개념의 근원이 되는 장면(가운데 영역 목표 `_GOAL_ZONE_WEIGHTS` 45/10/45, 접힌 구역 `template_weights` 45/10/45, 자원 부족 42.5/15/42.5, 안내 요청 조치 `_RULE_ACTION_WEIGHTS` 30/30/24/30; 로봇은 `goal_zone_weights` 48/48/4와 `template_weights` 47.5/47.5/5)은 드물게 둔다. 자동 QA(`python -m robo_jev.data.validate`, 데이터셋의 `manifest.json`에서 목록을 읽는다)가 종류별 계열·레코드 수를 세고, holdout 계열이 train/dev/calibration/test에 있으면(누출) 또는 OOD인데 이유가 없으면 위반이다. 봉인 id는 값의 예시가 아니라 **id**로 적는다.
 
-| 종류 | 분야 | 봉인 id | 뜻 | 계열 비율(실측) |
+| 종류 | 분야 | 봉인 id | 뜻 | 계열 비율(실측, 리뷰 1 수정 뒤) |
 | --- | --- | --- | --- | --- |
-| 템플릿 변형 | spatial | `spatial.distance.ko#1` | 거리 수준 질문의 한국어 두 번째 문구 | 19 % |
-| 템플릿 변형 | dom | `dom.needs_input.ko#1` | 입력 필요 질문의 한국어 두 번째 문구 | 15 % |
-| 템플릿 변형 | workflow | `workflow.load.ko#1` | 부하 수준 질문의 한국어 두 번째 문구 | 13 % |
-| 템플릿 변형 | rules | `rules.conflict.ko#1` | 충돌 질문의 한국어 두 번째 문구 | 19 % |
-| 템플릿 변형 | robot | `v1#2`, `v2#2` | 지시 문구 v1·v2의 세 번째 변형(`configs/sim/tidy_clutter.yaml` `instruction.*_templates`; 비중 45/45/10) | 에피소드의 ≈10~15 % |
-| 개념 | spatial | `spatial:goal-zone:zoneC` | 지시의 목표 영역이 가운데 영역인 계열(관계어 "사이/between"은 어휘에 없어 같은 성격의 목표 관계로) | 19 % |
-| 개념 | dom | `dom:reveal` | 숨김 해제 컨트롤 — 접힌 구역을 드러내는 조작이 먼저 필요한 계열 | 29 % |
-| 개념 | workflow | `workflow:resource_offline` | 자원 차단 — 담당 자원이 오프라인인 계열(용량 부족만으로는 아니다) | 22 % |
-| 개념 | rules | `rules:escort-policy` | 안내 요청 정책 — 지배 규칙의 조치가 `a_escort`뿐인 상황 | 11 % |
-| 개념 | robot | `robot:goal-zone:zoneF` | 지시의 목표 영역이 zoneF("앞쪽 보관 영역")인 계열 — train은 zoneL/zoneR만 목표로 | 에피소드의 ≈1/3 |
-| 의미 계열 | robot | prefix `robot/E1/family-n9-b4c5-zFLR` | E1 장면 계열 하나(seed 100의 계열) | 배치당 1~2편 |
+| 템플릿 변형 | spatial | `spatial.distance.ko#1` | 거리 수준 질문의 한국어 두 번째 문구 | 4.2 % (16/378) |
+| 템플릿 변형 | dom | `dom.needs_input.ko#1` | 입력 필요 질문의 한국어 두 번째 문구 | 3.2 % (12/377) |
+| 템플릿 변형 | workflow | `workflow.load.ko#1` | 부하 수준 질문의 한국어 두 번째 문구 | 2.8 % (11/393) |
+| 템플릿 변형 | rules | `rules.conflict.ko#1` | 충돌 질문의 한국어 두 번째 문구 | 5.5 % (21/384) |
+| 템플릿 변형 | robot | `v1#2`, `v2#2` | 지시 문구 v1·v2의 세 번째 변형(`configs/sim/tidy_clutter.yaml` `instruction.*_templates`; 비중 47.5/47.5/5, group 해시로 선택) | 400편 일정의 5.3 % (v1#2 15 + v2#2 6) |
+| 개념 | spatial | `spatial:goal-zone:zoneC` | 지시의 목표 영역이 가운데 영역인 계열(관계어 "사이/between"은 어휘에 없어 같은 성격의 목표 관계로) | 7.4 % (28) |
+| 개념 | dom | `dom:reveal` | 숨김 해제 컨트롤 — 접힌 구역을 드러내는 조작이 먼저 필요한 계열 | 7.4 % (28) |
+| 개념 | workflow | `workflow:resource_offline` | 자원 차단 — 담당 자원이 오프라인인 계열(용량 부족만으로는 아니다) | 9.4 % (37) |
+| 개념 | rules | `rules:escort-policy` | 안내 요청 정책 — 지배 규칙의 조치가 `a_escort`뿐인 상황 | 7.8 % (30) |
+| 개념 | robot | `robot:goal-zone:zoneF` | 지시의 목표 영역이 zoneF("앞쪽 보관 영역")인 계열 — train은 zoneL/zoneR만 목표로 | 400편 일정의 8.0 % (32; E0 14·E1 18) |
+| 의미 계열 | robot | prefix `robot/E1/family-n9-b4c5-zFLR` | E1 장면 계열 하나(seed 100의 계열) | 400편 일정의 1.8 % (7) |
 
-비율은 pilot 설정 2,000상태(seed 17)·d1_robot 40편(seed 100~)의 실측이다. 분야별 개념·문구 어휘 전체는 `robo_jev.data.domains.CONCEPT_VOCABULARY`·`phrasing_vocabulary()`에 있다(spatial: target·nearest·in_zone·goal_met·distance·crowding + goal-zone; dom: action·blocker·reachable·needs_input·actionable·progress + reveal; workflow: next·owner·precondition·blocked·priority·load + resource_offline; rules: governing·action·conflict·enough·applies·severity + escort-policy). 주 질문 문구(target·action·next·governing)의 변형은 계열의 2/3 이상이 쓰므로 봉인하지 않았다 — 그것을 봉인하면 train이 사라진다.
+분야별 합집합(계열 기준, pilot 2,000상태·seed 17): spatial 10.8 % (41/378, ood_dev 17 / ood_test 24), dom 10.6 % (40/377, 18/22), workflow 12.0 % (47/393, 26/21), rules 12.5 % (48/384, 23/25) — seed 18·19에서는 분야마다 8~17 %로 흔들린다(개념 계열은 장면의 우연에 따른다). 로봇: 400편 일정 모의에서 58/400 = 14.5 % (ood_dev 24 / ood_test 34; E0 21/200, E1 37/200), 2,000편 모의에서 11.7 %; 재생성한 batch-0(40편)은 5/40. 비율은 pilot 설정 2,000상태(seed 17)·d1_robot 일정(seed 100~)의 실측이다. 분야별 개념·문구 어휘 전체는 `robo_jev.data.domains.CONCEPT_VOCABULARY`·`phrasing_vocabulary()`에 있다(spatial: target·nearest·in_zone·goal_met·distance·crowding + goal-zone; dom: action·blocker·reachable·needs_input·actionable·progress + reveal; workflow: next·owner·precondition·blocked·priority·load + resource_offline; rules: governing·action·conflict·enough·applies·severity + escort-policy). 주 질문 문구(target·action·next·governing)의 변형은 계열의 2/3 이상이 쓰므로 봉인하지 않았다 — 그것을 봉인하면 train이 사라진다.
 
 **은퇴 규칙.** `ood_test`는 봉인이다: 그 오류를 다음 데이터 생성(계열 추가·규칙 수정·홀드아웃 재선정)에 쓰면 그 test 버전을 은퇴시키고(목록의 id를 바꾸거나 새 계열을 봉인해) 새 `ood_test`를 만든다. `ood_dev`는 개발에 쓴다. 이미 학습한 계열을 새 test로 재배치하지 않는다.
 
