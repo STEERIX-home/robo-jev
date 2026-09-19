@@ -119,5 +119,5 @@ candidates:
     conv_kernel_dim: 4
   vocab_size: 248320
   tie_word_embeddings: false
-  params_total: null
-  params_checkpoint: null
+  params_total: 26895998464
+  params_checkpoint: 27781427952
