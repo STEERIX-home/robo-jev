@@ -9,8 +9,13 @@
 #
 # 네 후보 모두 Hub 공개(ungated), `model_type: qwen3_5`(text_config는 `qwen3_5_text`, 체크포인트는 vision tower를
 # 포함한 `Qwen3_5ForConditionalGeneration`이고 native 경로는 `AutoModelForCausalLM`으로 언어 모델만 싣는다),
-# vocab 248,320(= artifacts/tokenizers의 Qwen3.8-27B tokenizer, 네 후보의 tokenizer.json이 같은 파일이다),
-# linear:full = 3:1(`full_attention_interval: 4`), linear conv kernel 4.
+# vocab 248,320, linear:full = 3:1(`full_attention_interval: 4`), linear conv kernel 4.
+#
+# tokenizer: 측정은 artifacts/tokenizers의 Qwen3.8-27B tokenizer.json(sha256 0997f410…)으로 직렬화한 토큰을 넣는다.
+# Qwen3.5-2B/4B/9B의 tokenizer.json(세 후보가 한 파일, sha256 5f9e4d49…)은 그것과 BPE 어휘·merges·pre_tokenizer·
+# normalizer·post_processor·decoder가 전부 같고, 27B 쪽에만 added token 7개(<|audio_start|> … <|audio_pad|>,
+# id 248070~248076)가 더 있다(2026-09-19 대조). 직렬화 텍스트에는 그 글자열이 없으므로 넣는 id는 두 tokenizer에서
+# 같다 — 그래도 학습 manifest는 실제로 쓴 tokenizer의 sha256을 적는다.
 #
 # `head_dim`은 full-attention 층의 K/V head 차원(256)이고 `linear_attention.*_head_dim`(128)은 gated DeltaNet 층의
 # 것이다 — 윈도우 KV 산정(docs/05 §4의 27B ≈ 1.0 GiB)은 256을 쓴다.
