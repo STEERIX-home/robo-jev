@@ -160,11 +160,31 @@ rollout_seeds, successes, failures, censored_trials
 | Dev | 10% | LR·학습 기간·구조·checkpoint 선택 |
 | Calibration | 10% | 확률 보정·실행 임계값 선택 |
 | ID Test | 10% | 최종 동결 비교 |
-| OOD | 별도 제작 | 미학습 의미 계열·후보 조합·분야 평가 |
+| OOD (`ood_dev` / `ood_test`) | holdout으로만 | 미학습 의미 계열·후보 조합·분야 평가. 계열 해시로 반분 — `ood_dev`는 개발용, `ood_test`는 봉인 |
 
-먼저 의미 계열·분야 holdout을 통째로 제외한 뒤, 나머지를 origin group 단위로 기본 split에 배정한다. holdout에는 **템플릿 변형 계열**(같은 개념의 다른 표현)과 **개념 계열**(분야마다 개념 하나를 통째로 — 예: spatial의 관계어 하나, rules의 정책 유형 하나)을 둘 다 둔다; 필드 집합만 다르고 개념 어휘를 공유하는 test는 새 의미를 검증하지 못한다. OOD 중 일부는 개발용, 나머지는 봉인된 최종용으로 분리한다. D2는 D1의 계보와 분할을 승계하며, 이미 학습한 D1 에피소드·상태를 새 test로 재배치하지 않는다.
+먼저 의미 계열·분야 holdout을 통째로 제외한 뒤, 나머지를 origin group 단위로 기본 split에 배정한다. holdout에는 **템플릿 변형 계열**(같은 개념의 다른 표현)과 **개념 계열**(분야마다 개념 하나를 통째로)을 둘 다 둔다; 필드 집합만 다르고 개념 어휘를 공유하는 test는 새 의미를 검증하지 못한다. OOD는 계열 해시로 `ood_dev`(개발용)와 `ood_test`(봉인)로 반분한다. D2는 D1의 계보와 분할을 승계하며, 이미 학습한 D1 에피소드·상태를 새 test로 재배치하지 않는다.
 
-생성기는 레코드마다 **혼동 후보**(표면 특징이 정답과 겹치는 방해 후보: 같은 색·같은 종류의 다른 물체, 이름이 비슷한 다른 항목 등)를 하나 이상 넣고 그 사실을 provenance에 기록한다. 정확한 중복 hash뿐 아니라 정규화된 사실·목표·제약·생성 template의 유사성도 검사한다. holdout이 단지 물체 이름과 후보 ID를 바꾼 버전인지 검수한다. test 오류를 다음 데이터 생성에 사용하면 그 test 버전을 은퇴시키고 새로운 봉인 test를 만든다.
+**봉인 목록 (2026-09-19, 계약 v0.3 — `configs/data/pilot.yaml`·`d1_robot.yaml`의 `split` 절이 단일 출처).** 생성기가 레코드마다 provenance에 문구 템플릿 변형 id(`phrasing`; 로봇은 `instruction_templates`)와 개념 id(`concepts`)를 적고, 한 계열의 레코드 중 하나라도 아래 목록에 걸리면 계열 전체가 OOD로 간다(한 group이 두 split에 걸치지 않는다). 로봇 계열의 origin group은 `robot/<profile>/<장면 계열>/goal-<목표 영역>`이라 목표 생성 계열이 계보에 든다. 자동 QA(`python -m robo_jev.data.validate`, 데이터셋의 `manifest.json`에서 목록을 읽는다)가 종류별 계열·레코드 수를 세고, holdout 계열이 train/dev/calibration/test에 있으면(누출) 또는 OOD인데 이유가 없으면 위반이다. 봉인 id는 값의 예시가 아니라 **id**로 적는다.
+
+| 종류 | 분야 | 봉인 id | 뜻 | 계열 비율(실측) |
+| --- | --- | --- | --- | --- |
+| 템플릿 변형 | spatial | `spatial.distance.ko#1` | 거리 수준 질문의 한국어 두 번째 문구 | 19 % |
+| 템플릿 변형 | dom | `dom.needs_input.ko#1` | 입력 필요 질문의 한국어 두 번째 문구 | 15 % |
+| 템플릿 변형 | workflow | `workflow.load.ko#1` | 부하 수준 질문의 한국어 두 번째 문구 | 13 % |
+| 템플릿 변형 | rules | `rules.conflict.ko#1` | 충돌 질문의 한국어 두 번째 문구 | 19 % |
+| 템플릿 변형 | robot | `v1#2`, `v2#2` | 지시 문구 v1·v2의 세 번째 변형(`configs/sim/tidy_clutter.yaml` `instruction.*_templates`; 비중 45/45/10) | 에피소드의 ≈10~15 % |
+| 개념 | spatial | `spatial:goal-zone:zoneC` | 지시의 목표 영역이 가운데 영역인 계열(관계어 "사이/between"은 어휘에 없어 같은 성격의 목표 관계로) | 19 % |
+| 개념 | dom | `dom:reveal` | 숨김 해제 컨트롤 — 접힌 구역을 드러내는 조작이 먼저 필요한 계열 | 29 % |
+| 개념 | workflow | `workflow:resource_offline` | 자원 차단 — 담당 자원이 오프라인인 계열(용량 부족만으로는 아니다) | 22 % |
+| 개념 | rules | `rules:escort-policy` | 안내 요청 정책 — 지배 규칙의 조치가 `a_escort`뿐인 상황 | 11 % |
+| 개념 | robot | `robot:goal-zone:zoneF` | 지시의 목표 영역이 zoneF("앞쪽 보관 영역")인 계열 — train은 zoneL/zoneR만 목표로 | 에피소드의 ≈1/3 |
+| 의미 계열 | robot | prefix `robot/E1/family-n9-b4c5-zFLR` | E1 장면 계열 하나(seed 100의 계열) | 배치당 1~2편 |
+
+비율은 pilot 설정 2,000상태(seed 17)·d1_robot 40편(seed 100~)의 실측이다. 분야별 개념·문구 어휘 전체는 `robo_jev.data.domains.CONCEPT_VOCABULARY`·`phrasing_vocabulary()`에 있다(spatial: target·nearest·in_zone·goal_met·distance·crowding + goal-zone; dom: action·blocker·reachable·needs_input·actionable·progress + reveal; workflow: next·owner·precondition·blocked·priority·load + resource_offline; rules: governing·action·conflict·enough·applies·severity + escort-policy). 주 질문 문구(target·action·next·governing)의 변형은 계열의 2/3 이상이 쓰므로 봉인하지 않았다 — 그것을 봉인하면 train이 사라진다.
+
+**은퇴 규칙.** `ood_test`는 봉인이다: 그 오류를 다음 데이터 생성(계열 추가·규칙 수정·홀드아웃 재선정)에 쓰면 그 test 버전을 은퇴시키고(목록의 id를 바꾸거나 새 계열을 봉인해) 새 `ood_test`를 만든다. `ood_dev`는 개발에 쓴다. 이미 학습한 계열을 새 test로 재배치하지 않는다.
+
+생성기는 레코드마다 **혼동 후보**(표면 특징이 정답과 겹치는 방해 후보: 같은 색·같은 종류의 다른 물체, 이름이 비슷한 다른 항목 등)를 하나 이상 넣고 그 사실을 provenance에 기록한다. 정확한 중복 hash뿐 아니라 정규화된 사실·목표·제약·생성 template의 유사성도 검사한다. holdout이 단지 물체 이름과 후보 ID를 바꾼 버전인지 검수한다. test 오류를 다음 데이터 생성에 사용하면 그 test 버전을 은퇴시키고 새로운 봉인 test를 만든다(위 은퇴 규칙).
 
 학습에서 실패·희귀 사건을 과대표집하더라도 calibration과 운영 성능 평가에는 목표 운영 분포를 반영한다. 빈도 정보를 보존하고, 자연 분포 성능과 균형 challenge 성능을 별도 보고한다. 운영 분포가 아직 없으면 가정한 분포를 명시하고 그 범위에서만 확률 보정을 주장한다.
 

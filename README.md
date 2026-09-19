@@ -53,15 +53,15 @@ What is verified and what is not, per area. Nothing below the line is claimed.
 | | Verified | Not yet |
 | --- | --- | --- |
 | Robot closed loop | E0 (static scenes) with rule judge and scripted expert; E1 (instruction change + disturbance) on 3 seeds | E1 at scale; real-robot front end (3D reconstruction) |
-| Data | first batch of 40 episodes; rollout machinery and costing | D1 (400 episodes, 128k rollouts) — withheld until the candidate-space decision below; human review of D0 |
+| Data | batch-0 regenerated under contract v0.3 (40 episodes, E0 20/20 and E1 20/20 completed, 0.69 MB/episode, 3,000 episodes/h); sealed holdouts (template variants, one concept per domain, robot zoneF goal + one E1 family; `ood_dev`/`ood_test` by family hash) with a zero-leakage QA check; rollout machinery and re-costing (0.33 s/rollout) | D1 (400 episodes, 128k rollouts); human review of D0 |
 | Model | contracts, masks, state forking, readout and losses on a random-weight fixture; native BF16 forward of Qwen3.5-2B/4B/9B (27B as reference) on GB10 with the fla and causal-conv1d kernels active | any *trained* backbone; the stream path (window, forking, pointer readout) on a real backbone |
 | Training | step, TBPTT, sampler, checkpoint, resume on the fixture | GPU training; real-backbone results; calibration |
-| Latency | token counts with the real tokenizer; native-path screen on DGX Spark (`scripts/measure_candidates.py`, 2026-09-19): p95 model time per tick 928 / 2,299 / 2,447 / 5,640 ms (2B / 4B / 9B / 27B) at the current format, 123 / 305 / 378 / 886 ms at a 500-token tick (≈83 / 197 / 278 ms extrapolated to a window-sized cache); single ≤315-token requests 33 / 70 / 122 ms | the 10 Hz / 100 ms gate on the real stream path (stage 2: static window KV, CUDA graphs, an attention kernel without a materialized mask) and the re-run after contract v0.3 |
+| Latency | token counts with the real tokenizer under contract v0.3 (10 objects, K=12: p50 392 / p95 662 / first tick 943 tokens; 43K per 10-s chunk); native-path screen on DGX Spark (`scripts/measure_candidates.py`, 2026-09-19): p95 model time per tick 928 / 2,299 / 2,447 / 5,640 ms (2B / 4B / 9B / 27B) at the old format, 123 / 305 / 378 / 886 ms at a 500-token tick (≈83 / 197 / 278 ms extrapolated to a window-sized cache), and the v0.3 re-run for 2B/4B (`artifacts/reports/backbone-screen-v03.json`): at ≈400–440 tokens per tick, 2B p50 86–88 / p95 97–103 ms with the growing native cache and ≈65–68 ms read at a window-sized cache, 4B 195–200 / 225–247 ms (≈144–149 ms window-sized) | the 10 Hz / 100 ms gate on the real stream path (stage 2: static window KV, CUDA graphs, an attention kernel without a materialized mask) |
 
-Three measurements changed the plan; the first two are still open decisions, the third is decided:
+Three measurements changed the plan; all three are now decided:
 
-1. **Token budget.** With the current serialization a tick costs 1,764–3,712 tokens (estimate was 450–700), so a 10-second training chunk is 176K–371K tokens. A compact format with delta ticks (contract v0.3) is a prerequisite for both the latency budget and cloud training.
-2. **Candidate cap.** With two speed profiles and four push directions per object, almost every scene hits K = 32, and in 44% of E1 ticks the instructed target×zone action is pruned away, leaving a degenerate `hold` label (down-weighted for now). Removing the profile from the joint key, restricting push directions, and a goal-relevance pre-filter are the proposed fix.
+1. **Token budget (decided 2026-09-19, contract v0.3).** With the old serialization a tick cost 1,764–3,712 tokens (estimate was 450–700). Contract v0.3 — short field names, an object intro/dynamic split with delta ticks (intro every 30 ticks, dynamic on change or every 10), zones and scene in the prefix, a compact goal reference and key-based candidate lines — measures p50 392 / p95 662 / first tick 943 tokens at 10 objects and K=12 (43K per 10-s chunk; the regenerated batch-0 reads p50 443 / p95 608), inside the 500 / 800 / 1,200 / 60K budget. Details: docs/08 §3.
+2. **Candidate cap (decided 2026-09-19, contract v0.3).** The speed profile left the joint key (`q_speed` answers speed), pushes are enumerated only toward the zones, the cap is K ≤ 12 (9 + 3 reserved) and the instructed target×zone combination is reserved before the round-robin spread (it reads the instruction, never the label). On the E1 sweep (seeds 1–24, 29, 43) the degenerate-`hold` rate went from 49.7% to 0% and completion from 20/26 to 23/26. Non-keyframe ticks now carry a planner-cost allowed set (τ = 0.15) and executor-caused `hold` ticks follow a hold∉A rule; sealed holdouts (docs/04 §5) went in with the same change.
 3. **Backbone (decided 2026-09-19).** The Spark screen fits per-request model time as an intercept plus a token cost — 26.5 / 51.6 / 93.6 ms + 38.6 / 107.7 / 152 ms per 1K new tokens for 2B / 4B / 9B — and ≈2.1 ms per 1K cached tokens for attention, so the 9B is 3.5–4.7× over budget at a 500-token tick and no single lever closes that. Qwen3.5-2B (primary) and Qwen3.5-4B (5 Hz fallback) go to stage 2; the 9B leaves the 10 Hz track (FP8 deferred until a profiler attribution in stage 2), the 27B is excluded. Full numbers: `artifacts/reports/backbone-screen.json`, docs/03.
 
 ## Repository
@@ -73,7 +73,7 @@ src/robo_jev/
   model/  loss.py  sampler.py  train.py  checkpoint.py   # model contracts and CPU training path
 configs/     harness, controller, simulator, expert, events, data, model fixture, training
 scripts/     generate_episodes · rollout_keyframes · dagger_cycle · measure_tokens · fetch_tokenizer · fetch_backbone · measure_candidates
-tests/       921 tests; fixtures under tests/fixtures
+tests/       950 tests; fixtures under tests/fixtures
 HANDOFF.md   how to continue on another machine; what lives outside git
 ```
 
@@ -84,7 +84,7 @@ HANDOFF.md   how to continue on another machine; what lives outside git
 ```bash
 uv sync                                   # Python 3.11; MuJoCo + robosuite 1.5, torch (CPU on macOS)
 uv run python scripts/fetch_tokenizer.py  # Qwen tokenizer.json into artifacts/ (pinned by manifest)
-uv run pytest -q                          # 898 passed, 1 xfailed
+uv run pytest -q                          # 950 passed (tokenizer present: 0 skipped, 0 xfailed)
 
 uv run python scripts/generate_episodes.py --config configs/data/d1_robot.yaml --count 4 --out artifacts/datasets/d1-robot/smoke
 uv run python scripts/rollout_keyframes.py --limit 20

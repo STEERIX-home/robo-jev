@@ -736,6 +736,21 @@ def test_serializing_a_prefix_of_the_ticks_gives_a_prefix_of_the_tokens(streams,
             assert part["prefix_end"] == whole["prefix_end"]
 
 
+def test_the_contract_doc_lists_every_short_field_name_of_format_v03():
+    """docs/08 §3.2의 서식 v0.3 표는 `STREAM_FIELDS`의 짧은 이름을 전부 적어야 한다 — 문서가 코드와 같도록."""
+    from pathlib import Path
+
+    doc = (Path(__file__).resolve().parents[1] / "docs" / "08-streaming-io-and-data-contract.md").read_text(encoding="utf-8")
+    section = doc[doc.index("### 3.2") : doc.index("### 3.3")]
+    assert "v0.3" in section and "계약 v0.3" in doc[:2000]
+    for group, table in serialize_module.STREAM_FIELDS.items():
+        for short in table.values():
+            if short:
+                assert f"{short}=" in section or f" {short}" in section or f"[{short}]" in section, (group, short)
+    for token in ("obj ", "commitment a=", "hist main=", "goal v", "t <tick> age g<ms> p<ms> seq <n>", "yaw", "seen", "prefix"):
+        assert token in section, token
+
+
 def test_legacy_candidate_entries_lose_their_prose_but_keep_the_key(tokenizer, stream):
     """다른 도구가 만든 틱(D0 fixture)의 옛 항목: 설명·산문 파생 값은 버리고 키(5조각이면 뒤 조각은 그대로)와 그 밖의 필드만."""
     from robo_jev.model.serialize import stream_candidate_line
