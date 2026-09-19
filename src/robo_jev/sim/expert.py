@@ -45,8 +45,8 @@ __all__ = [
     "load_expert_config",
 ]
 
-#: 전문가 버전. 레코드의 `versions.expert`에 들어간다. e0.3 = 계약 v0.3(비용 허용 집합, hold∉A, readiness 관측 게이트,
-#: 4조각 결합 키).
+#: 전문가 버전. 레코드의 `versions.expert`에 들어간다. e0.3 = 계약 v0.3(비용 허용 집합, hold∉A, 접촉 국면에는 관측 게이트
+#: 없음, 4조각 결합 키).
 EXPERT_VERSION = "e0.3"
 
 DEFAULT_CONFIG_PATH = "configs/sim/expert_v0.yaml"
@@ -67,8 +67,9 @@ GATE_REASONS = ("goal_done", "instruction_incomplete", "observe_target")
 #: `label_confidence: low`(설정의 weight). 재시도 차단·실행 불가·목표 후보 없음.
 DEGENERATE_REASONS = ("way_retry_blocked", "not_executable", "goal_candidate_missing")
 
-#: 관측 게이트를 기하 나이로 보지 않는 국면 (docs/08 §4 `q_observe`, §5.0): 팔이 대상을 가리는 접촉 국면(파지·놓기·
-#: 밀기)과 파지 중에는 실행기의 readiness가 시점을 정한다 — 하네스와 같은 면제이며 단일 출처는 하네스다.
+#: 관측 게이트가 없는 국면 (docs/08 §4 `q_observe`, §5.0): 팔이 대상을 가리는 접촉 국면(파지·놓기·밀기)과 파지 중에는
+#: 기하 나이로 관측을 요구하지 않는다 — 명령의 시점은 실행기가 자기 readiness로 정하고 전문가는 그 신호를 읽지 않는다.
+#: 하네스와 같은 면제이며 단일 출처는 하네스다.
 _CONTACT_PHASES = CONTACT_PHASES
 
 #: 밀기 방향 벡터 (로봇 기준 xy). 하네스의 의미 키와 같은 이름이다.
@@ -670,8 +671,8 @@ class Expert:
 
     def _needs_observation(self, state: dict[str, Any], goal: Goal, phase: str) -> tuple[bool, str]:
         """대상이 아직 추적되지 않았거나 대상 기하가 문턱보다 오래됐다. 팔이 대상을 가리는 접촉 국면(파지·놓기·
-        밀기)과 파지 중에는 기하 나이가 아니라 **실행기의 readiness**가 시점을 정하므로 관측을 요구하지 않는다 —
-        하네스(§5.0)·규칙 기준군과 같은 면제.
+        밀기)과 파지 중에는 **게이트가 없다** — 기하 나이로 관측을 요구하지 않고(이유 `contact_phase`), 명령의 시점은
+        실행기가 자기 readiness로 정한다(전문가는 그 신호를 읽지 않는다). 하네스(§5.0)·규칙 기준군과 같은 면제.
 
         손에 **다른** 물체가 있으면 관측은 지금 할 수 있는 일이 아니다: 운반 중의 관측은 제자리 hold이고
         (docs/08 §5.2) 가리는 것이 팔 자신이면 영영 풀리지 않는다. 먼저 놓는 것이 답이다(`_main`).
@@ -683,7 +684,7 @@ class Expert:
         if target is None:
             return True, "target_untracked"
         if phase in _CONTACT_PHASES or holding == target["id"]:
-            return False, "contact_readiness"
+            return False, "contact_phase"
         age = float(target.get("age_ms", 0))
         limit = float(self.thresholds["observe_geom_age_ms"])
         return (age > limit), ("geometry_stale" if age > limit else "fresh")

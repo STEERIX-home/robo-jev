@@ -583,7 +583,7 @@ def test_contact_phases_gate_observation_on_readiness_not_on_geometry_age():
     assert target["age_ms"] > HARNESS["candidates"]["max_geometry_age_ms"]
     out = expert().act(request, commitment, descending)
     assert out["q_observe"] == CONFIDENCE["low"]
-    assert out["expert_meta"]["gates"]["q_observe"]["reason"] == "contact_readiness"
+    assert out["expert_meta"]["gates"]["q_observe"]["reason"] == "contact_phase"
     from robo_jev.harness.rule_judge import rule_judge
 
     assert rule_judge(request)["q_observe"] == CONFIDENCE["low"]
@@ -673,7 +673,7 @@ def test_a_push_whose_hand_occludes_the_target_does_not_gate_to_observe():
     assert THRESHOLDS["observe_geom_age_ms"] < target["age_ms"] <= HARNESS["candidates"]["max_geometry_age_ms"]
     out = expert().act(request, commitment, pushing)
     assert out["q_observe"] == CONFIDENCE["low"]
-    assert out["expert_meta"]["gates"]["q_observe"]["reason"] == "contact_readiness"
+    assert out["expert_meta"]["gates"]["q_observe"]["reason"] == "contact_phase"
     assert out["expert_meta"]["main"]["reason"] != "observe_target"
     assert key_of(request, top(out["q_main"])) != "observe"
 

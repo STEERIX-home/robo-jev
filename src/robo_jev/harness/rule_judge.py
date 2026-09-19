@@ -34,7 +34,6 @@ from robo_jev.harness.robot import (
     CONTACT_PHASES,
     FIXED_KEYS,
     joint_key_parts,
-    load_harness_config,
     parse_exec_history,
 )
 from robo_jev.perception.pointworld import named_target
@@ -52,8 +51,8 @@ __all__ = [
     "rule_judge",
 ]
 
-#: 규칙 버전. 레코드의 `versions.rules`에 들어간다. rj0.4 = 계약 v0.3(4조각 결합 키, 짧은 후보 기하 필드, 접촉 국면의
-#: 관측 게이트는 실행기 readiness).
+#: 규칙 버전. 레코드의 `versions.rules`에 들어간다. rj0.4 = 계약 v0.3(4조각 결합 키, 짧은 후보 기하 필드, 접촉 국면에는
+#: 관측 게이트 없음).
 RULE_JUDGE_VERSION = "rj0.4"
 
 DEFAULT_CONFIG_PATH = "configs/harness/rule_judge_v0.yaml"
@@ -64,9 +63,9 @@ _DERIVED = re.compile(
     r"path (?P<path>clear|blocked)|geom (?P<geom>-?\d+)ms"
 )
 
-#: 관측 게이트를 기하 나이로 보지 않는 국면 (docs/08 §4 `q_observe`, §5.0): 팔이 대상을 가리는 접촉 국면(파지·놓기·
-#: 밀기)과 파지 중에는 **실행기의 readiness**가 시점을 정하므로 관측을 요구하지 않는다(하네스와 같은 면제). 단일
-#: 출처는 하네스다 — 여기 따로 적으면 밀기가 빠진 채 어긋난다.
+#: 관측 게이트가 없는 국면 (docs/08 §4 `q_observe`, §5.0): 팔이 대상을 가리는 접촉 국면(파지·놓기·밀기)과 파지 중에는
+#: 기하 나이로 관측을 요구하지 않는다 — 명령의 시점은 실행기가 자기 readiness로 정한다(하네스와 같은 면제; 기준군은 그 신호를
+#: 읽지 않는다). 단일 출처는 하네스다 — 여기 따로 적으면 밀기가 빠진 채 어긋난다.
 _CONTACT_PHASES = CONTACT_PHASES
 
 
@@ -193,7 +192,6 @@ class RuleJudge:
         config: dict[str, Any] | None = None,
         *,
         controller_config: dict[str, Any] | None = None,
-        harness_config: dict[str, Any] | None = None,
         vocabulary_config: dict[str, Any] | None = None,
     ) -> None:
         self.config = copy.deepcopy(config or load_rule_judge_config())
@@ -206,8 +204,6 @@ class RuleJudge:
         controller = controller_config or load_controller_config(self.config["controller_config"])
         self.speed_levels = [str(index) for index in range(len(controller["speed_levels_m_s"]))]
         self.force_levels = [str(index) for index in range(len(controller["force_levels"]))]
-        harness = harness_config or load_harness_config(self.config["harness_config"])
-        del harness  # 하네스 설정은 지금 읽는 값이 없다 — 경로는 단일 출처 규칙으로 설정에 남는다
         # 텍스트 근사 경로의 추가 어휘. 설정 파일이 `vocabulary_config`를 적었을 때만 읽는다.
         if vocabulary_config is None and self.config.get("vocabulary_config"):
             vocabulary_config = yaml.safe_load(
@@ -446,8 +442,8 @@ class RuleJudge:
         """관측을 더 얻어야 하는가 (docs/08 §4 `q_observe`).
 
         지시의 대상이 아직 관측되지 않았거나 대상 기하가 문턱보다 오래됐을 때다. 가시 비율만으로는
-        요구하지 않는다. 접촉 국면(파지·놓기·밀기)과 파지 중(팔이 대상을 가린다)에는 기하 나이가 아니라
-        **실행기의 readiness**가 시점을 정하므로 관측을 요구하지 않는다(하네스 §5.0과 같은 면제).
+        요구하지 않는다. 접촉 국면(파지·놓기·밀기)과 파지 중(팔이 대상을 가린다)에는 게이트가 없다 — 기하 나이로
+        관측을 요구하지 않고, 명령의 시점은 실행기가 자기 readiness로 정한다(하네스 §5.0과 같은 면제).
         """
         target = self._target(state, goal)
         if target is None:
