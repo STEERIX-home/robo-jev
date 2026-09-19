@@ -146,7 +146,9 @@ def test_english_variant_is_selectable_by_config():
     assert hrn.question_set_id() == CONFIG["question_set_id"]["en"]
     assert hrn.question_texts()["q_main"] == CONFIG["questions"]["q_main"]["en"]
     request = hrn.build_request(observation(), None, None)
-    assert "Grasp" in candidate_for(request, keys_of(request)[0])["desc"]
+    # 후보 줄은 의미 키 기반이라 언어가 없다 (계약 v0.3): 영어 설정도 같은 후보를 낸다.
+    assert keys_of(request) == keys_of(harness().build_request(observation(), None, None))
+    assert all("desc" not in entry for entry in request["request"]["candidates"]["q_main"])
 
 
 def test_every_language_the_harness_offers_has_a_question_set_in_the_contract():
@@ -164,19 +166,46 @@ def test_every_language_the_harness_offers_has_a_question_set_in_the_contract():
             assert texts[question_id] == spec["instructions"], (language, question_id)
 
 
-def test_candidates_combine_function_target_approach_destination_profile():
+def test_candidates_combine_function_target_approach_destination():
+    """결합 키는 `기능:대상:접근:목적지`다 (계약 v0.3 — 프로파일은 키에 없다). 밀기는 영역 쪽 축 방향만 만든다:
+    o0(300, 0)에서 zoneL 중심(30, 240)은 −x 성분이 더 크므로 `-x` 하나다."""
     request = harness().build_request(observation(), None, None)
     keys = keys_of(request)
-    assert "grasp:o0:top:zoneL:slow" in keys
-    assert "grasp:o0:top:zoneL:fast" in keys
-    assert "push:o0:+x:none:slow" in keys
+    assert "grasp:o0:top:zoneL" in keys
+    assert "push:o0:-x:none" in keys
+    assert not any(key.startswith("push:o0:") and key != "push:o0:-x:none" for key in keys)
+    assert "profiles" not in CANDIDATES and "profile_speed_level" not in CANDIDATES
     for key in keys:
         if key in ("observe", "hold", "replan"):
             continue
-        function, target, approach, destination, profile = key.split(":")
+        function, target, approach, destination = key.split(":")
         assert function in ("grasp", "place", "push")
         assert target.startswith("o")
-        assert approach and destination and profile in CANDIDATES["profiles"]
+        assert approach and destination
+        if function == "push":
+            assert approach in CANDIDATES["push_directions"]
+
+
+def test_push_directions_point_at_the_zones_and_stay_inside_the_allowed_axes():
+    """물체마다 영역당 하나(중심까지의 거리를 가장 줄이는 축; 같으면 허용 순서의 앞 축), 허용 집합 밖은 만들지 않는다."""
+    from robo_jev.harness.robot import push_directions_toward_zones
+
+    zones = [
+        {"id": "zoneL", "bounds_mm": [-120, 150, 180, 330]},
+        {"id": "zoneR", "bounds_mm": [-120, -330, 180, -150]},
+        {"id": "zoneF", "bounds_mm": [100, -80, 300, 80]},
+    ]
+    allowed = ["+x", "-x", "+y", "-y"]
+    assert push_directions_toward_zones([0, 0, 0], zones, allowed) == {"+x": ["zoneF"], "+y": ["zoneL"], "-y": ["zoneR"]}
+    assert push_directions_toward_zones([300, 0, 0], zones, allowed) == {"-x": ["zoneL", "zoneR", "zoneF"]}
+    assert push_directions_toward_zones([26, -174, 0], zones, allowed) == {"+x": ["zoneF"], "+y": ["zoneL"], "-y": ["zoneR"]}  # zoneF 174/174 → 허용 순서
+    assert push_directions_toward_zones([200, 0, 0], zones[2:], allowed) == {}  # 영역 중심 위: 밀 방향이 없다
+    assert push_directions_toward_zones([0, 0, 0], zones, ["+x", "-x"]) == {"+x": ["zoneL", "zoneR", "zoneF"]}  # ±y 불허 → 다른 축
+    scene = observation(zones=zones)
+    request = harness().build_request(scene, None, None)
+    pushes = {key.split(":")[2] for key in keys_of(request) if key.startswith("push:o0:")}
+    assert pushes == {"-x"}
+    assert len([key for key in keys_of(request) if key.startswith("push:")]) <= len(scene["objects"]) * len(zones)
 
 
 def test_observe_hold_replan_are_always_offered():
@@ -193,7 +222,7 @@ def test_candidate_ids_are_derived_from_the_key_not_from_the_position():
     first = hrn.build_request(observation(), None, None)
     fewer = observation(objects=[obj("o1", (200, 220, -80), colour="blue"), obj("o0", (300, 0, -80))])
     second = hrn.build_request(fewer, None, None)
-    key = "grasp:o0:top:zoneL:slow"
+    key = "grasp:o0:top:zoneL"
     assert candidate_for(first, key)["id"] == candidate_for(second, key)["id"]
 
 
@@ -203,9 +232,9 @@ def test_place_candidates_appear_only_while_holding():
 
     scene["robot"]["holding"] = "o0"
     keys = keys_of(harness().build_request(scene, None, None))
-    assert "place:o0:release:zoneL:slow" in keys
+    assert "place:o0:release:zoneL" in keys
     # 들고 있는 물체의 파지 후보는 **진행 중인 결합 행동**이라 남고, 다른 물체는 잡을 수 없다.
-    assert "grasp:o0:top:zoneL:slow" in keys
+    assert "grasp:o0:top:zoneL" in keys
     assert not any(key.startswith("grasp:o1") or key.startswith("push:") for key in keys)
 
 
@@ -214,7 +243,7 @@ def test_an_in_progress_joint_action_aims_at_its_destination():
     scene = observation()
     scene["robot"].update(holding="o0", ee_pos_mm=[300, 0, -40])
     request = harness().build_request(scene, None, None)
-    geometry = request["harness"]["candidates"][candidate_id("grasp:o0:top:zoneL:slow")]
+    geometry = request["harness"]["candidates"][candidate_id("grasp:o0:top:zoneL")]
     assert geometry["phase"] in ("lift", "transport", "place")
     assert geometry["action_mm"][:2] == [30, 240]  # zoneL 중심
 
@@ -255,8 +284,8 @@ def test_a_held_target_is_never_stale():
     carrying["robot"].update(holding="o0", ee_pos_mm=[300, 0, -40])
     carrying["objects"][0].update(visible=False, visible_ratio=0.0)
     request = hrn.build_request(carrying, None, None)
-    assert "grasp:o0:top:zoneL:slow" in keys_of(request)
-    assert request["harness"]["candidates"][candidate_id("grasp:o0:top:zoneL:slow")]["geometry_age_ms"] == 0
+    assert "grasp:o0:top:zoneL" in keys_of(request)
+    assert request["harness"]["candidates"][candidate_id("grasp:o0:top:zoneL")]["geometry_age_ms"] == 0
 
 
 def test_a_target_in_the_grasp_phase_is_kept_while_the_arm_hides_it():
@@ -268,7 +297,7 @@ def test_a_target_in_the_grasp_phase_is_kept_while_the_arm_hides_it():
     descending["robot"].update(ee_pos_mm=[300, 0, -20])  # 접근 지점 아래, 파지 지점 근처
     descending["objects"][0].update(visible=False, visible_ratio=0.0)
     request = hrn.build_request(descending, None, None)
-    geometry = request["harness"]["candidates"].get(candidate_id("grasp:o0:top:zoneL:slow"))
+    geometry = request["harness"]["candidates"].get(candidate_id("grasp:o0:top:zoneL"))
     assert geometry is not None and geometry["phase"] == "grasp"
     assert not any(key.startswith("push:o0:") for key in keys_of(request)), "접촉 전의 밀기는 늙은 기하로 만들지 않는다"
 
@@ -329,7 +358,8 @@ def test_the_cap_keeps_every_function_and_destination():
     feasible_functions = {"grasp", "push"}
     assert {part[0] for part in parts} == feasible_functions
     assert {part[3] for part in parts if part[0] == "grasp"} == {"z0", "z1", "z2"}
-    assert {part[2] for part in parts if part[0] == "push"} == set(CANDIDATES["push_directions"])
+    pushes = {part[2] for part in parts if part[0] == "push"}
+    assert pushes and pushes <= set(CANDIDATES["push_directions"])
     assert len({part[1] for part in parts}) == 8
     spread = accounting["spread"]
     assert spread["functions"]["kept"] == spread["functions"]["feasible"]
@@ -362,7 +392,7 @@ def test_the_accounting_counts_destinations_per_target():
 
 def test_the_cap_reserves_the_committed_candidate():
     """현재 commitment의 후보는 실행 가능하기만 하면 상한과 무관하게 남는다."""
-    key = "grasp:o7:top:z2:slow"
+    key = "grasp:o7:top:z2"
     hrn = harness()
     without = hrn.build_request(crowded_scene(), None, None)
     commitment = {
@@ -404,14 +434,21 @@ def test_candidate_generation_does_not_use_hidden_truth():
 
 
 def test_derived_values_are_attached_to_every_joint_candidate():
+    """결합 후보 항목은 키와 기하 네 값(`d`·`clr`·`path`·`g`)뿐이다 (docs/08 §3.2 서식 v0.3) — 자연어 설명·산문 파생 값·
+    프로파일 표지는 없고, 고정 후보는 키뿐이다."""
     request = harness().build_request(observation(), None, None)
-    entry = candidate_for(request, "grasp:o0:top:zoneL:slow")
-    assert "reach ok" in entry["derived"]
-    assert "clr" in entry["derived"] and "d " in entry["derived"]
+    entry = candidate_for(request, "grasp:o0:top:zoneL")
     geometry = request["harness"]["candidates"][entry["id"]]
-    assert geometry["reach_ok"] is True
-    assert geometry["distance_mm"] > 0
-    assert geometry["target_ref"] == "o0"
+    assert set(entry) == {"id", "action_ref", "key", "d", "clr", "path", "g"}
+    assert entry["d"] == geometry["distance_mm"] > 0 and entry["clr"] == geometry["clearance_mm"]
+    assert entry["path"] == "ok" and geometry["path_clear"] is True
+    assert entry["g"] == geometry["geometry_age_ms"] == 0
+    assert geometry["reach_ok"] is True and geometry["target_ref"] == "o0"
+    assert "profile" not in geometry and "speed_level" not in geometry
+    for key in ("observe", "hold", "replan"):
+        assert set(candidate_for(request, key)) == {"id", "action_ref", "key"}
+    for path in request["request"]["candidates"]["q_path"]:
+        assert "desc" not in path
 
 
 def test_path_candidates_are_direct_retreat_and_hold_when_nothing_blocks():
@@ -435,7 +472,7 @@ def blocked_scene() -> dict:
     )
 
 
-BLOCKED = "grasp:o0:top:zoneL:slow"
+BLOCKED = "grasp:o0:top:zoneL"
 
 
 def test_the_local_planner_produces_real_waypoints_around_a_blocker():
@@ -460,7 +497,7 @@ def test_blocked_direct_path_is_reported_in_the_candidate_values():
     geometry = request["harness"]["candidates"][candidate_for(request, BLOCKED)["id"]]
     assert geometry["path_clear"] is False
     assert geometry["blocker"] == "o5"
-    assert "path blocked" in candidate_for(request, BLOCKED)["derived"]
+    assert candidate_for(request, BLOCKED)["path"] == "blocked"
 
 
 def test_path_clear_describes_the_segment_of_the_candidates_phase():
@@ -484,11 +521,11 @@ def test_aux_questions_reference_the_tick_start_commitment():
     # commitment가 없는 틱은 hold 기준으로 묻는다 (docs/08 §4).
     assert {entry["action_ref"] for entry in request["request"]["candidates"]["q_path"]} == {hold}
 
-    grasp = candidate_for(request, "grasp:o0:top:zoneL:slow")["id"]
+    grasp = candidate_for(request, "grasp:o0:top:zoneL")["id"]
     committed = hrn.build_request(
         observation(),
         None,
-        {"action_ref": grasp, "key": "grasp:o0:top:zoneL:slow", "phase": "approach"},
+        {"action_ref": grasp, "key": "grasp:o0:top:zoneL", "phase": "approach"},
     )
     assert {entry["action_ref"] for entry in committed["request"]["candidates"]["q_path"]} == {grasp}
     assert committed["request"]["commitment"]["action_ref"] == grasp
@@ -498,10 +535,10 @@ def test_the_request_commitment_carries_only_model_visible_fields():
     """도전자 카운터 같은 하네스 장부는 모델 입력에 넣지 않는다."""
     hrn = harness()
     first = hrn.build_request(observation(), None, None)
-    grasp = candidate_for(first, "grasp:o0:top:zoneL:slow")["id"]
+    grasp = candidate_for(first, "grasp:o0:top:zoneL")["id"]
     commitment = {
         "action_ref": grasp,
-        "key": "grasp:o0:top:zoneL:slow",
+        "key": "grasp:o0:top:zoneL",
         "phase": "approach",
         "held_ticks": 4,
         "last_switch_tick": 1,
@@ -673,9 +710,9 @@ def committed(hrn: RobotHarness, key: str, scene: dict | None = None, **over) ->
     return commitment
 
 
-GRASP = "grasp:o0:top:zoneL:slow"
-OTHER = "grasp:o1:top:zoneL:slow"
-THIRD = "grasp:o2:top:zoneL:slow"
+GRASP = "grasp:o0:top:zoneL"
+OTHER = "grasp:o1:top:zoneL"
+THIRD = "grasp:o2:top:zoneL"
 
 
 # -- 0. 유효성 검사 ---------------------------------------------------------
@@ -1095,7 +1132,7 @@ def test_a_push_command_refers_to_no_object_with_the_gripper():
     """밀기는 주먹으로 한다: 그리퍼가 작용하는 물체(`gripper_ref`, docs/08 §6)가 없다. 그래서 실행기의 close
     readiness(대상까지의 거리)가 걸리지 않고 접촉 전에 손가락이 닫힌다. 파지는 그대로 대상을 가리킨다."""
     hrn = harness()
-    push = "push:o0:+x:none:slow"
+    push = "push:o0:-x:none"  # o0(300, 0) → zoneL 쪽은 −x
     commitment = committed(hrn, push)
     _, out = step(hrn, observation(), answers(probabilities(**{push.replace(":", "__"): 1.0}), q_gripper={"closed": 1.0}), commitment)
     assert out["command"]["phase"] == "approach"
@@ -1238,7 +1275,7 @@ def test_the_push_phase_is_exempt_from_the_geometry_age_gate():
     관측 분기에 보내면 밀기가 두 틱 만에 끊긴다(측정: -x 밀기가 21mm에서 `geometry_age`로 해제). 파지·놓기와
     같이 실행기의 접촉이 시점을 정한다."""
     hrn = harness()
-    push = "push:o0:-x:none:slow"
+    push = "push:o0:-x:none"
     scene, commitment = moved_target_scene(hrn, key=push)
     scene["robot"]["ee_pos_mm"] = [390, 0, -80]  # 접촉점(340+30+30) 안 → push 국면
     request = hrn.build_request(scene, None, commitment)
@@ -1541,8 +1578,8 @@ def test_unsupported_faces_are_counted_not_silently_dropped():
     accounting = request["harness"]["accounting"]
     faces = {face for entry in request["request"]["state"]["objects"] for face in entry["graspable_faces"]}
     assert "side" in faces and CANDIDATES["faces"] == ["top"]
-    zones, profiles = len(request["request"]["state"]["zones"]), len(CANDIDATES["profiles"])
-    assert accounting["dropped"]["unsupported_face"] == 3 * zones * profiles
+    zones = len(request["request"]["state"]["zones"])
+    assert accounting["dropped"]["unsupported_face"] == 3 * zones
     assert accounting["enumerated"] == accounting["feasible"] + sum(
         accounting["dropped"][reason] for reason in ("unsupported_face", "stale", "unreachable")
     )
@@ -1551,7 +1588,7 @@ def test_unsupported_faces_are_counted_not_silently_dropped():
     wrist["candidates"]["faces"] = ["top", "side"]
     request = RobotHarness(wrist).build_request(observation(), None, None)
     assert request["harness"]["accounting"]["dropped"]["unsupported_face"] == 0
-    assert "grasp:o0:side:zoneL:slow" in keys_of(request)
+    assert "grasp:o0:side:zoneL" in keys_of(request)
 
 
 def test_a_forbidden_blocker_is_rerouted_with_extra_margin():
@@ -1776,10 +1813,10 @@ def test_the_grasp_phase_also_needs_xy_alignment_on_a_tall_cylinder():
     assert phase == "approach"
 
     # 들어간 뒤의 가로 흔들림은 되돌리지 않는다: 실행기가 이미 이 후보의 파지 국면이면 거리 조건만 본다.
-    # 다른 후보(빠른 프로파일)의 파지 국면이었다면 이 후보에는 해당하지 않는다.
+    # 다른 후보(같은 대상의 밀기)의 국면이었다면 이 후보에는 해당하지 않는다.
     phase, target = phase_at(drifted, {"phase": "grasp", "action_ref": candidate_id(GRASP), "executor": "MOVE_EE"})
     assert phase == "grasp" and target == grasp_point
-    phase, _ = phase_at(drifted, {"phase": "grasp", "action_ref": candidate_id("grasp:o0:top:zoneL:fast"), "executor": "MOVE_EE"})
+    phase, _ = phase_at(drifted, {"phase": "grasp", "action_ref": candidate_id("push:o0:-x:none"), "executor": "MOVE_EE"})
     assert phase == "approach"
     phase, _ = phase_at(drifted, {"phase": "approach", "action_ref": candidate_id(GRASP), "executor": "MOVE_EE"})
     assert phase == "approach"
@@ -1921,7 +1958,7 @@ def test_versions_carry_a_digest_of_every_config_that_shapes_the_record(tmp_path
     versions = episode_module.default_versions()
     assert len(versions["config_digest"]) == 64
     assert versions["config_digest"] == episode_module.running_config_digest()
-    assert versions["harness"] == HARNESS_VERSION == "h0.3" and versions["controller"] == "c0.5"
+    assert versions["harness"] == HARNESS_VERSION == "h0.4" and versions["controller"] == "c0.5"
 
     hrn = harness()
     record = new_episode("ep-0005", "scene-family-031", instructions=[INSTRUCTION])

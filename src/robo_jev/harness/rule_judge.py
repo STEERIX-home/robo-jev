@@ -30,7 +30,13 @@ from typing import Any
 import yaml
 
 from robo_jev.contracts import PHASES
-from robo_jev.harness.robot import CONTACT_PHASES, FIXED_KEYS, load_harness_config, parse_exec_history
+from robo_jev.harness.robot import (
+    CONTACT_PHASES,
+    FIXED_KEYS,
+    joint_key_parts,
+    load_harness_config,
+    parse_exec_history,
+)
 from robo_jev.perception.pointworld import named_target
 from robo_jev.sim.controller import load_controller_config, resolve_config_path
 
@@ -46,19 +52,21 @@ __all__ = [
     "rule_judge",
 ]
 
-#: 규칙 버전. 레코드의 `versions.rules`에 들어간다.
-RULE_JUDGE_VERSION = "rj0.3"
+#: 규칙 버전. 레코드의 `versions.rules`에 들어간다. rj0.4 = 계약 v0.3(4조각 결합 키, 짧은 후보 기하 필드, 접촉 국면의
+#: 관측 게이트는 실행기 readiness).
+RULE_JUDGE_VERSION = "rj0.4"
 
 DEFAULT_CONFIG_PATH = "configs/harness/rule_judge_v0.yaml"
 
-#: 후보 설명의 기하 값 (`reach ok, clr 41mm, d 320mm, path clear, geom 120ms`).
+#: 옛 서식(D0 fixture)의 후보 설명 기하 값 (`reach ok, clr 41mm, d 320mm, path clear, geom 120ms`).
 _DERIVED = re.compile(
     r"reach (?P<reach>ok|no)|clr (?P<clearance>-?\d+)mm|d (?P<distance>-?\d+)mm|"
     r"path (?P<path>clear|blocked)|geom (?P<geom>-?\d+)ms"
 )
 
-#: 기하 나이 대신 하네스의 `max_geometry_age_ms`가 관측 문턱인 국면 (docs/08 §4 `q_observe`, §5.0). 팔이 대상을
-#: 가리는 접촉 국면(파지·놓기·밀기)의 단일 출처는 하네스다 — 여기 따로 적으면 밀기가 빠진 채 어긋난다.
+#: 관측 게이트를 기하 나이로 보지 않는 국면 (docs/08 §4 `q_observe`, §5.0): 팔이 대상을 가리는 접촉 국면(파지·놓기·
+#: 밀기)과 파지 중에는 **실행기의 readiness**가 시점을 정하므로 관측을 요구하지 않는다(하네스와 같은 면제). 단일
+#: 출처는 하네스다 — 여기 따로 적으면 밀기가 빠진 채 어긋난다.
 _CONTACT_PHASES = CONTACT_PHASES
 
 
@@ -117,27 +125,15 @@ def read_goal(state: dict[str, Any]) -> Goal:
 def candidate_values(entry: dict[str, Any], request: dict[str, Any] | None = None) -> dict[str, Any]:
     """후보 하나의 의미 조각과 기하 값.
 
-    하네스 블록(`request["harness"]`)이 있으면 그 값을, 없으면 모델이 보는 `derived` 문자열을
-    읽는다 — 그래서 다른 도구가 만든 틱(D0 fixture 등)에도 답할 수 있다. 전문가는 블록을
-    주지 않고 부른다(모델 입력만 본다).
+    하네스 블록(`request["harness"]`)이 있으면 그 값을, 없으면 모델이 보는 후보 항목의 짧은 기하 필드
+    (`d`·`clr`·`path`·`g`, 서식 v0.3)를, 그것도 없으면 옛 서식의 `derived` 문자열(D0 fixture)을 읽는다 — 그래서
+    다른 도구가 만든 틱에도 답할 수 있다. 전문가는 블록을 주지 않고 부른다(모델 입력만 본다).
     """
-    parts = str(entry.get("key", "")).split(":")
+    parts = joint_key_parts(entry.get("key", ""))
     semantic = (
-        {
-            "function": parts[0],
-            "target": parts[1],
-            "approach": parts[2],
-            "destination": parts[3],
-            "profile": parts[4],
-        }
-        if len(parts) == 5
-        else {
-            "function": None,
-            "target": None,
-            "approach": None,
-            "destination": None,
-            "profile": None,
-        }
+        {"function": parts[0], "target": parts[1], "approach": parts[2], "destination": parts[3]}
+        if parts is not None
+        else {"function": None, "target": None, "approach": None, "destination": None}
     )
     block = ((request or {}).get("harness") or {}).get("candidates") or {}
     geometry = block.get(entry["id"])
@@ -151,6 +147,18 @@ def candidate_values(entry: dict[str, Any], request: dict[str, Any] | None = Non
             "blocker": geometry.get("blocker"),
             "geometry_age_ms": float(geometry.get("geometry_age_ms", 0)),
             "action_mm": geometry.get("action_mm"),
+        }
+
+    if "d" in entry or "clr" in entry or "path" in entry or "g" in entry:
+        return {
+            **semantic,
+            "reach_ok": True,  # 도달 불가 후보는 목록에 실리지 않는다 (하네스의 실행 가능성 기준)
+            "clearance_mm": float(entry.get("clr", 0.0)),
+            "distance_mm": float(entry.get("d", 0.0)),
+            "path_clear": str(entry.get("path", "ok")) == "ok",
+            "blocker": None,
+            "geometry_age_ms": float(entry.get("g", 0.0)),
+            "action_mm": None,
         }
 
     text = str(entry.get("derived", ""))
@@ -199,7 +207,7 @@ class RuleJudge:
         self.speed_levels = [str(index) for index in range(len(controller["speed_levels_m_s"]))]
         self.force_levels = [str(index) for index in range(len(controller["force_levels"]))]
         harness = harness_config or load_harness_config(self.config["harness_config"])
-        self.max_geometry_age_ms = float(harness["candidates"]["max_geometry_age_ms"])
+        del harness  # 하네스 설정은 지금 읽는 값이 없다 — 경로는 단일 출처 규칙으로 설정에 남는다
         # 텍스트 근사 경로의 추가 어휘. 설정 파일이 `vocabulary_config`를 적었을 때만 읽는다.
         if vocabulary_config is None and self.config.get("vocabulary_config"):
             vocabulary_config = yaml.safe_load(
@@ -438,16 +446,15 @@ class RuleJudge:
         """관측을 더 얻어야 하는가 (docs/08 §4 `q_observe`).
 
         지시의 대상이 아직 관측되지 않았거나 대상 기하가 문턱보다 오래됐을 때다. 가시 비율만으로는
-        요구하지 않는다. 파지·놓기 국면과 파지 중(팔이 대상을 가린다)에는 하네스의 실행 가능성
-        문턱(`max_geometry_age_ms`)이 기준이다 — 들고 있는 물체의 기하 나이는 0이다.
+        요구하지 않는다. 접촉 국면(파지·놓기·밀기)과 파지 중(팔이 대상을 가린다)에는 기하 나이가 아니라
+        **실행기의 readiness**가 시점을 정하므로 관측을 요구하지 않는다(하네스 §5.0과 같은 면제).
         """
         target = self._target(state, goal)
         if target is None:
             return True
-        age = float(target.get("age_ms", 0))
-        contact = phase in _CONTACT_PHASES or state["robot"].get("holding") == target["id"]
-        limit = self.max_geometry_age_ms if contact else float(self.thresholds["observe_geom_age_ms"])
-        return age > limit
+        if phase in _CONTACT_PHASES or state["robot"].get("holding") == target["id"]:
+            return False
+        return float(target.get("age_ms", 0)) > float(self.thresholds["observe_geom_age_ms"])
 
     def _retry_ok(self, model: dict[str, Any]) -> bool:
         """직전 실패와 같은 방식의 재시도가 적절한가.

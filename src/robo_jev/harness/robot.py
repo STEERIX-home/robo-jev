@@ -4,16 +4,20 @@
 
 * :meth:`RobotHarness.build_request` — 관측 하나를 **틱 요청**으로 만든다. 상태는
   :mod:`robo_jev.perception.pointworld`의 추출 인터페이스가 채우고, 하네스는 거기에
-  결합 행동 후보(기능×대상×접근×목적지×프로파일), 관측·보류·재계획 후보, 국소
-  플래너가 만든 경유점 후보, 실행 이력을 붙인다. **정답을 알고 후보를 줄이거나
-  정렬하지 않는다** (docs/02 §2): 걸러내는 것은 "실행 가능한가"뿐이고, 상한을 넘으면
-  기하적 다양성 표본으로 줄이면서 **후보 포함률**을 함께 기록한다.
+  결합 행동 후보(기능×대상×접근×목적지), 관측·보류·재계획 후보, 국소 플래너가 만든
+  경유점 후보, 실행 이력을 붙인다. **정답을 알고 후보를 줄이거나 정렬하지 않는다**
+  (docs/02 §2): 걸러내는 것은 "실행 가능한가"뿐이고, 상한을 넘으면 지시(입력)의 대상×목표
+  영역 조합을 먼저 남긴 뒤 기하적 다양성 표본으로 줄이면서 **후보 회계**를 함께 기록한다.
 * :meth:`RobotHarness.compose` — 모델(또는 규칙 기준군)의 답에 조합 규칙 v0을 순서대로
   적용해 명령·채택 결과·commitment·전환 기록을 낸다.
 
-**id는 의미 키에서 나온다.** 후보 id는 `기능:대상:접근:목적지:프로파일`의 해시다. 그래서
-틱마다 후보 목록이 바뀌어도 같은 행동은 같은 id를 갖고, "만료된 후보를 최신 목록의 같은
-인덱스로 해석"하는 사고(docs/02 §6)가 구조적으로 불가능하다.
+**id는 의미 키에서 나온다.** 후보 id는 `기능:대상:접근:목적지`의 해시다(계약 v0.3, docs/08
+§5-3 — 프로파일은 키에 없다; 속도는 `q_speed`가 commitment 기준으로 답하고 전환 틱의 초기값은
+`compose.initial_profile`이다). 그래서 틱마다 후보 목록이 바뀌어도 같은 행동은 같은 id를 갖고,
+"만료된 후보를 최신 목록의 같은 인덱스로 해석"하는 사고(docs/02 §6)가 구조적으로 불가능하다.
+
+**후보 줄은 키가 설명이다.** 모델이 보는 후보 항목은 `id`·`key`와 기하 네 값(`d` 거리, `clr` 여유,
+`path` ok/blocked, `g` 대상 기하 나이)뿐이다(docs/08 §3.2 서식 v0.3). 자연어 설명·프로파일 표지는 없다.
 
 **commitment는 두 겹이다.** 하네스가 들고 있는 commitment에는 도전자 카운터·정지 틱 수
 같은 장부가 붙어 있고, 요청에 싣는 것은 모델이 볼 필드(`action_ref`·의미 키·국면·유지
@@ -49,17 +53,24 @@ __all__ = [
     "FIXED_KEYS",
     "GATE_QUESTIONS",
     "HARNESS_VERSION",
+    "JOINT_FUNCTIONS",
     "RobotHarness",
     "build_request",
     "candidate_id",
     "compose",
     "count_records",
+    "joint_key_parts",
     "load_harness_config",
     "parse_exec_history",
+    "push_directions_toward_zones",
 ]
 
-#: 하네스 버전. 질문 세트·후보 형식·조합 규칙의 묶음을 가리킨다 (docs/08 §3.1).
-HARNESS_VERSION = "h0.3"
+#: 하네스 버전. 질문 세트·후보 형식·조합 규칙의 묶음을 가리킨다 (docs/08 §3.1). h0.4 = 계약 v0.3(결합 키에서
+#: 프로파일 제거, 영역 방향 밀기, K≤12와 지시 조합 예약, 키 기반 후보 줄).
+HARNESS_VERSION = "h0.4"
+
+#: 결합 행동의 기능. 이 셋만 `기능:대상:접근:목적지` 키를 갖는다.
+JOINT_FUNCTIONS = ("grasp", "place", "push")
 
 DEFAULT_CONFIG_PATH = "configs/harness/robot.yaml"
 
@@ -76,7 +87,7 @@ CONTACT_PHASES = ("grasp", "place", "push")
 _PUSH_VECTORS = {"+x": (1.0, 0.0), "-x": (-1.0, 0.0), "+y": (0.0, 1.0), "-y": (0.0, -1.0)}
 
 #: 상한 안에서 돌아가며 고를 때 보는 차원과 그 순서 (docs/10 I3). 앞의 차원이 먼저 고르게 퍼진다.
-_SPREAD_DIMENSIONS = ("target_ref", "function", "approach", "destination", "profile")
+_SPREAD_DIMENSIONS = ("target_ref", "function", "approach", "destination")
 
 
 def load_harness_config(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any]:
@@ -86,6 +97,40 @@ def load_harness_config(path: str | Path = DEFAULT_CONFIG_PATH) -> dict[str, Any
 def candidate_id(key: str) -> str:
     """의미 키 → 후보 id. 같은 의미의 행동은 언제나 같은 id다."""
     return "c" + hashlib.sha1(key.encode("utf-8")).hexdigest()[:6]
+
+
+def joint_key_parts(key: Any) -> tuple[str, str, str, str] | None:
+    """결합 키 `기능:대상:접근:목적지` → (기능, 대상, 접근, 목적지). 결합 후보가 아니면 `None`.
+
+    전문가·라벨·규칙 기준군이 같은 함수로 키를 읽는다. 다른 도구가 만든 틱(D0 fixture)의 옛 5조각 키
+    `…:프로파일`은 앞 네 조각으로 읽는다 — 프로파일은 계약 v0.3부터 키의 일부가 아니다.
+    """
+    parts = str(key or "").split(":")
+    if len(parts) < 4 or parts[0] not in JOINT_FUNCTIONS:
+        return None
+    return parts[0], parts[1], parts[2], parts[3]
+
+
+def push_directions_toward_zones(
+    pose_mm, zones: list[dict[str, Any]], allowed: list[str]
+) -> dict[str, list[str]]:
+    """물체 자세에서 각 영역 쪽으로 미는 축 방향 → 그 방향이 향하는 영역 id들 (계약 v0.3, docs/08 §4).
+
+    영역마다 **영역 중심까지의 거리를 가장 줄이는 축**(성분이 큰 축; 같으면 `allowed`의 앞 축; 허용 집합 밖이면
+    다른 축) 하나를 고르고 영역들에 걸쳐 합친다 — 물체당 방향은 영역 수 이하다. 관측된 자세와 영역 경계만 쓴다.
+    """
+    x, y = float(pose_mm[0]), float(pose_mm[1])
+    found: dict[str, list[str]] = {}
+    for zone in zones:
+        cx, cy = _zone_centre(zone)
+        dx, dy = cx - x, cy - y
+        options = [(abs(dx), "+x" if dx > 0 else "-x"), (abs(dy), "+y" if dy > 0 else "-y")]
+        options.sort(key=lambda item: (-item[0], allowed.index(item[1]) if item[1] in allowed else len(allowed)))
+        for magnitude, direction in options:
+            if magnitude > 0.0 and direction in allowed:
+                found.setdefault(direction, []).append(str(zone["id"]))
+                break
+    return {direction: found[direction] for direction in allowed if direction in found}
 
 
 def parse_exec_history(text: Any) -> dict[str, str]:
@@ -126,8 +171,6 @@ class _Candidate:
     target_ref: str | None
     approach: str | None
     destination: str | None
-    profile: str | None
-    desc: str
     approach_mm: list[float] = field(default_factory=list)
     action_mm: list[float] = field(default_factory=list)
     #: 이 후보를 지금 실행하면 **실제로 명령할** 목표점 (국면별, docs/08 §5.6).
@@ -139,31 +182,31 @@ class _Candidate:
     blocker: str | None = None
     geometry_age_ms: int = 0
     moving: bool = False
-    speed_level: int = 0
     phase: str = "none"
+    #: 밀기 후보가 향하는 영역 id들 (영역 방향 열거의 근거; 지시 조합 예약이 읽는다).
+    toward_zones: tuple[str, ...] = ()
 
     @property
     def id(self) -> str:
         return candidate_id(self.key)
 
     def model_entry(self) -> dict[str, Any]:
-        """모델이 보는 후보 (docs/08 §8의 틱 예시와 같은 형식)."""
-        return {
-            "id": self.id,
-            "action_ref": self.id,
-            "key": self.key,
-            "desc": self.desc,
-            "derived": self.derived_text(),
-        }
+        """모델이 보는 후보 (docs/08 §3.2 서식 v0.3, §8의 틱 예시).
 
-    def derived_text(self) -> str:
-        if self.function is None:
-            return "-"
-        return (
-            f"reach {'ok' if self.reach_ok else 'no'}, clr {self.clearance_mm}mm, "
-            f"d {self.distance_mm}mm, path {'clear' if self.path_clear else 'blocked'}, "
-            f"geom {self.geometry_age_ms}ms"
-        )
+        결합 후보는 키와 기하 네 값(`d` 말단→국면 목표점 거리 mm, `clr` 최근접 여유 mm, `path` ok/blocked, `g` 대상
+        기하 나이 ms)이고, 고정 후보(observe·hold·replan)는 키뿐이다. `action_ref`는 id와 같다(계약의 참조 필드).
+        """
+        entry = {"id": self.id, "action_ref": self.id, "key": self.key}
+        if self.function is not None:
+            entry.update(
+                {
+                    "d": int(self.distance_mm),
+                    "clr": int(self.clearance_mm),
+                    "path": "ok" if self.path_clear else "blocked",
+                    "g": int(self.geometry_age_ms),
+                }
+            )
+        return entry
 
     def geometry(self) -> dict[str, Any]:
         return {
@@ -172,7 +215,6 @@ class _Candidate:
             "target_ref": self.target_ref,
             "approach": self.approach,
             "destination": self.destination,
-            "profile": self.profile,
             "approach_mm": [int(round(value)) for value in self.approach_mm],
             "action_mm": [int(round(value)) for value in self.action_mm],
             "target_mm": [int(round(value)) for value in self.target_mm],
@@ -183,8 +225,8 @@ class _Candidate:
             "blocker": self.blocker,
             "geometry_age_ms": self.geometry_age_ms,
             "moving": self.moving,
-            "speed_level": self.speed_level,
             "phase": self.phase,
+            "toward_zones": list(self.toward_zones),
         }
 
 
@@ -228,7 +270,6 @@ class RobotHarness:
         self.compose_config = config["compose"]
         self.phases_config = config["phases"]
         self.command_config = config["command"]
-        self.descriptions = config["descriptions"][self.language]
 
         self.adapter = adapter if adapter is not None else GroundTruthAdapter(config["perception"])
         #: 같은 방식의 연속 실패 횟수 (실행 이력의 `fails=`). 에피소드 안에서만 센다.
@@ -267,6 +308,8 @@ class RobotHarness:
         observation: dict[str, Any],
         exec_history: dict[str, Any] | None = None,
         commitment: dict[str, Any] | None = None,
+        *,
+        keep_key: str | None = None,
     ) -> dict[str, Any]:
         """관측 하나 → 틱 요청 (docs/08 §3).
 
@@ -274,14 +317,22 @@ class RobotHarness:
         하네스 블록(`harness`)을 더한 것이다. 하네스 블록은 기하·회계·경유점 좌표처럼
         **명령을 만들 때 쓰는 값**이며 레코드에는 들어가지 않는다
         (:func:`robo_jev.data.episode.append_tick`이 떼어낸다).
+
+        `keep_key`는 commitment가 없을 때 commitment처럼 예약할 결합 키다 — 키프레임 rollout이 실행할 후보를
+        첫 틱의 목록에 남기는 데 쓴다(자세 흔들기로 영역 쪽 축이 바뀌거나 상한에 밀려도 실행 가능하면 남는다).
         """
         now_ms = int(observation["sim_time_ms"])
         recon = self.adapter.reconstruct(observation)
         robot = self.adapter.robot(observation)
         state = extract(recon, robot, now_ms)
 
-        reserved = str(commitment["action_ref"]) if commitment else None
-        candidates, accounting = self._candidates(state, reserved=reserved)
+        if commitment:
+            reserved, reserved_key = str(commitment["action_ref"]), str(commitment.get("key", ""))
+        elif keep_key:
+            reserved, reserved_key = candidate_id(str(keep_key)), str(keep_key)
+        else:
+            reserved = reserved_key = None
+        candidates, accounting = self._candidates(state, reserved=reserved, reserved_key=reserved_key)
         by_id = {candidate.id: candidate for candidate in candidates}
 
         # commitment는 이 틱의 후보 목록 안에서만 모델에게 보일 수 있다. 사라진 행동을
@@ -335,7 +386,7 @@ class RobotHarness:
     # -- 결합 후보 ---------------------------------------------------------
 
     def _candidates(
-        self, state: dict[str, Any], *, reserved: str | None = None
+        self, state: dict[str, Any], *, reserved: str | None = None, reserved_key: str | None = None
     ) -> tuple[list[_Candidate], dict[str, Any]]:
         """실행 가능한 결합 후보를 만들고 상한 안으로 줄인다 (docs/02 §3).
 
@@ -345,7 +396,12 @@ class RobotHarness:
         후보가 사라진다. 의미 적합성(금지 물체, 지시가 가리키는 대상)은 여기서 쓰지 않는다 —
         적합하지 않은 실행 가능 후보도 그대로 제시한다(docs/08 §7).
 
-        `reserved`는 현재 commitment의 후보 id다. 실행 가능하면 상한과 무관하게 남긴다.
+        `reserved`는 현재 commitment의 후보 id, `reserved_key`는 그 의미 키다. 실행 가능하면 상한과 무관하게
+        남긴다 — 밀기 commitment는 대상이 밀려 영역 쪽 축이 바뀌어도 그 방향을 계속 만든다(진행 중인 행동이 목록에서
+        사라져 매 틱 무효가 되지 않게). 상한을 넘을 때는
+        **지시(입력)의 대상×목표 영역 조합**(파지→영역, 영역 쪽 밀기)도 먼저 남긴다(계약 v0.3, docs/08 §4) —
+        상태의 `goal`만 읽고 라벨은 읽지 않으므로 적합성 규칙을 후보 생성기에 넣는 것이 아니다(적합하지 않은
+        후보도 계속 제시된다). 지시가 대상을 풀지 못하면(`q_instr` 거짓인 경우) 예약은 없다.
         """
         spec = self.candidates_config
         # `unsupported_face`는 앞단이 낸 파지면 중 실행기가 못 쓰는 면(`faces` 밖)의 조합이다 —
@@ -361,13 +417,17 @@ class RobotHarness:
         ages = {entry["object"]: entry["age_ms"] for entry in state["derived"] if "object" in entry}
         margins = self._margins(state)
 
+        committed_push = joint_key_parts(reserved_key) if reserved_key else None
+        if committed_push is not None and committed_push[0] != "push":
+            committed_push = None
         for object_id, entry in objects.items():
             age = int(ages.get(object_id, 0))
-            combos, unsupported = self._combinations(entry, zones, holding)
+            keep_push = committed_push[2] if committed_push is not None and committed_push[1] == object_id else None
+            combos, unsupported = self._combinations(entry, zones, holding, keep_push=keep_push)
             enumerated += len(combos) + unsupported
             dropped["unsupported_face"] += unsupported
-            for combo in combos:
-                candidate = self._geometry_for(combo, entry, objects, state, ee, age, margins)
+            for combo, toward in combos:
+                candidate = self._geometry_for(combo, entry, objects, state, ee, age, margins, toward=toward)
                 if candidate is None:
                     dropped["unreachable"] += 1
                     continue
@@ -377,7 +437,8 @@ class RobotHarness:
                     continue
                 feasible.append(candidate)
 
-        kept = self._prune(feasible, objects, ee, reserved=reserved)
+        goal_reserved = self._goal_reserved(feasible, state)
+        kept = self._prune(feasible, objects, ee, reserved=reserved, goal_reserved=goal_reserved)
         dropped["cap"] = len(feasible) - len(kept)
         fixed = [self._fixed_candidate(key) for key in FIXED_KEYS]
         candidates = sorted(kept + fixed, key=lambda candidate: candidate.key)
@@ -391,6 +452,13 @@ class RobotHarness:
             "capped": len(kept) < len(feasible),
             "cap": int(spec["max"]),
             "reserved": int(spec["reserved"]),
+            # 지시의 대상×목표 영역 조합의 예약 (계약 v0.3). 상한에 걸리지 않은 틱에도 어느 조합이 지시의 것인지 적는다.
+            "reserved_goal": {
+                "count": len(goal_reserved),
+                "keys": sorted(candidate.key for candidate in goal_reserved),
+                "target": state["goal"].get("target_ref") if isinstance(state.get("goal"), dict) else None,
+                "zone": state["goal"].get("target_zone") if isinstance(state.get("goal"), dict) else None,
+            },
             "by_function": {
                 function: sum(1 for c in kept if c.function == function)
                 for function in ("grasp", "place", "push")
@@ -429,48 +497,89 @@ class RobotHarness:
         return candidates, accounting
 
     def _combinations(
-        self, entry: dict[str, Any], zones: list[dict[str, Any]], holding: str | None
-    ) -> tuple[list[tuple[str, str, str, str, str]], int]:
-        """한 물체가 낳는 (기능, 대상, 접근, 목적지, 프로파일) 조합과, 실행기가 못 쓰는 면의 조합 수."""
+        self,
+        entry: dict[str, Any],
+        zones: list[dict[str, Any]],
+        holding: str | None,
+        *,
+        keep_push: str | None = None,
+    ) -> tuple[list[tuple[tuple[str, str, str, str], tuple[str, ...]]], int]:
+        """한 물체가 낳는 ((기능, 대상, 접근, 목적지), 밀기가 향하는 영역들) 조합과, 실행기가 못 쓰는 면의 조합 수.
+
+        밀기는 고정 축 열거가 아니라 **영역 쪽 축 방향**만 만든다(:func:`push_directions_toward_zones`;
+        설정 `push_directions`는 허용 축 집합이다). `keep_push`는 이 물체에 대한 현재 밀기 commitment의 방향 —
+        영역 쪽이 아니게 됐어도(대상이 밀려서) 허용 축이면 계속 만든다.
+        """
         spec = self.candidates_config
         object_id = str(entry["id"])
-        combos: list[tuple[str, str, str, str, str]] = []
+        combos: list[tuple[tuple[str, str, str, str], tuple[str, ...]]] = []
         unsupported = 0
-        for profile in spec["profiles"]:
-            # 들고 있는 물체의 파지 후보는 **진행 중인 결합 행동**이다. 목적지가 의미 키에
-            # 들어 있으므로 `grasp:o7:top:zoneL:slow`는 "집어서 zoneL로 옮긴다" 하나이고,
-            # 집은 순간에 사라지면 commitment가 매번 무효가 된다.
-            if holding is None or holding == object_id:
-                for face in entry["graspable_faces"]:
-                    if face not in spec["faces"]:
-                        unsupported += len(zones)
-                        continue
-                    for zone in zones:
-                        combos.append(("grasp", object_id, face, str(zone["id"]), profile))
-            if holding == object_id:
+        # 들고 있는 물체의 파지 후보는 **진행 중인 결합 행동**이다. 목적지가 의미 키에
+        # 들어 있으므로 `grasp:o7:top:zoneL`은 "집어서 zoneL로 옮긴다" 하나이고,
+        # 집은 순간에 사라지면 commitment가 매번 무효가 된다.
+        if holding is None or holding == object_id:
+            for face in entry["graspable_faces"]:
+                if face not in spec["faces"]:
+                    unsupported += len(zones)
+                    continue
                 for zone in zones:
-                    combos.append(("place", object_id, "release", str(zone["id"]), profile))
-            elif holding is None:
-                for direction in spec["push_directions"]:
-                    combos.append(("push", object_id, direction, "none", profile))
+                    combos.append((("grasp", object_id, face, str(zone["id"])), ()))
+        if holding == object_id:
+            for zone in zones:
+                combos.append((("place", object_id, "release", str(zone["id"])), ()))
+        elif holding is None:
+            allowed = [str(direction) for direction in spec["push_directions"]]
+            directions = push_directions_toward_zones(entry["pose_mm"], zones, allowed)
+            if keep_push is not None and keep_push in allowed and keep_push not in directions:
+                directions[keep_push] = []
+            for direction, toward in directions.items():
+                combos.append((("push", object_id, direction, "none"), tuple(toward)))
         return combos, unsupported
+
+    def _goal_reserved(self, feasible: list[_Candidate], state: dict[str, Any]) -> list[_Candidate]:
+        """지시의 대상×목표 영역 조합 — 상한과 무관하게 남길 후보 (계약 v0.3, docs/08 §4).
+
+        상태의 `goal`(입력)만 읽는다: 추적 중인 대상 id(`target_ref`)와 목표 영역(`target_zone`)이 둘 다 있고
+        대상이 금지 접촉 물체가 아닐 때만(아니면 지시가 풀리지 않거나 모순이라 `q_instr`이 거짓이다) 대상→영역의
+        파지·놓기와 대상을 그 영역 쪽으로 미는 후보를 고른다.
+        """
+        goal = state.get("goal")
+        if not isinstance(goal, dict):
+            return []
+        target, zone = goal.get("target_ref"), goal.get("target_zone")
+        if target is None or zone is None:
+            return []
+        target, zone = str(target), str(zone)
+        if target in {str(item) for item in goal.get("forbidden_contact") or ()}:
+            return []
+        return [
+            candidate
+            for candidate in feasible
+            if candidate.target_ref == target
+            and (
+                (candidate.function in ("grasp", "place") and candidate.destination == zone)
+                or (candidate.function == "push" and zone in candidate.toward_zones)
+            )
+        ]
 
     def _geometry_for(
         self,
-        combo: tuple[str, str, str, str, str],
+        combo: tuple[str, str, str, str],
         entry: dict[str, Any],
         objects: dict[str, dict[str, Any]],
         state: dict[str, Any],
         ee: list[float],
         age_ms: int,
         margins: dict[str, float] | None = None,
+        *,
+        toward: tuple[str, ...] = (),
     ) -> _Candidate | None:
         """조합 하나의 기하. 도달 불가하거나 목적지가 없으면 `None` (실행 가능성 기준의 제거).
 
         국면별 목표점(docs/08 §5.6)까지 여기서 정한다. `path_clear`·`blocker`는 **그 국면에서
         실제로 명령할 구간**(말단→목표점)을 말한다 — 접근점까지의 직선이 아니다.
         """
-        function, object_id, approach, destination, profile = combo
+        function, object_id, approach, destination = combo
         spec = self.candidates_config
         pose = [float(value) for value in entry["pose_mm"]]
         obb = [float(value) for value in entry["obb_mm"]]
@@ -504,7 +613,7 @@ class RobotHarness:
         if not (self._reachable(approach_mm) and self._reachable(action_mm)):
             return None
 
-        key = f"{function}:{object_id}:{approach}:{destination}:{profile}"
+        key = f"{function}:{object_id}:{approach}:{destination}"
         phase, target_mm = self._phase_target(
             function, object_id, entry, approach_mm, action_mm, state, action_ref=candidate_id(key)
         )
@@ -532,8 +641,6 @@ class RobotHarness:
             target_ref=object_id,
             approach=approach,
             destination=destination,
-            profile=profile,
-            desc=self._describe(function, entry, approach, destination, profile, state),
             approach_mm=approach_mm,
             action_mm=action_mm,
             target_mm=target_mm,
@@ -544,37 +651,13 @@ class RobotHarness:
             blocker=blocker,
             geometry_age_ms=age_ms,
             moving=bool(self.adapter.moving(object_id)),
-            speed_level=int(self.candidates_config["profile_speed_level"][profile]),
             phase=phase,
+            toward_zones=tuple(toward),
         )
 
-    def _fixed_candidate(self, key: str) -> _Candidate:
-        return _Candidate(
-            key=key,
-            function=None,
-            target_ref=None,
-            approach=None,
-            destination=None,
-            profile=None,
-            desc=str(self.descriptions[key]),
-        )
-
-    def _describe(
-        self,
-        function: str,
-        entry: dict[str, Any],
-        approach: str,
-        destination: str,
-        profile: str,
-        state: dict[str, Any],
-    ) -> str:
-        zone = next((item for item in state["zones"] if str(item["id"]) == destination), None)
-        return str(self.descriptions[function]).format(
-            target=entry.get("desc") or entry["id"],
-            approach=approach,
-            destination=(zone or {}).get("desc", destination),
-            profile=profile,
-        )
+    @staticmethod
+    def _fixed_candidate(key: str) -> _Candidate:
+        return _Candidate(key=key, function=None, target_ref=None, approach=None, destination=None)
 
     def _reachable(self, point: list[float]) -> bool:
         """실행기의 도달·충돌 검사와 **같은 기준**이다 (docs/08 §6 "거절")."""
@@ -631,14 +714,16 @@ class RobotHarness:
         ee: list[float],
         *,
         reserved: str | None = None,
+        goal_reserved: list[_Candidate] | None = None,
     ) -> list[_Candidate]:
         """상한 안으로 줄인다. **정답을 모르는 채로** 적용할 수 있는 규칙만 쓴다.
 
-        현재 commitment의 후보(`reserved`)는 실행 가능하면 먼저 남긴다. 나머지는 대상 × 기능 ×
-        접근 × 목적지 × 프로파일을 **돌아가며** 고른다: 매번 지금까지 가장 적게 고른 값을 가진
-        후보를 (대상, 기능, 접근, 목적지, 프로파일의 순서로) 택하고, 같은 값이면 말단에서 가까운
-        대상부터 시작하는 farthest-point 순서와 의미 키로 가른다. 그래서 한 기능이나 한 목적지가
-        통째로 잘리지 않는다(docs/10 I3). 후보의 확률·비용·의미 적합성은 보지 않는다.
+        현재 commitment의 후보(`reserved`)와 지시의 대상×목표 영역 조합(`goal_reserved`, 상태의 `goal`에서 —
+        입력이지 라벨이 아니다)은 실행 가능하면 먼저 남긴다. 나머지는 대상 × 기능 × 접근 × 목적지를
+        **돌아가며** 고른다: 매번 지금까지 가장 적게 고른 값을 가진 후보를 (대상, 기능, 접근, 목적지의
+        순서로) 택하고, 같은 값이면 말단에서 가까운 대상부터 시작하는 farthest-point 순서와 의미 키로
+        가른다. 그래서 한 기능이나 한 목적지가 통째로 잘리지 않는다(docs/10 I3). 후보의 확률·비용·의미
+        적합성은 보지 않는다.
         """
         budget = int(self.candidates_config["max"]) - int(self.candidates_config["reserved"])
         if len(candidates) <= budget:
@@ -659,6 +744,12 @@ class RobotHarness:
             if held is not None:
                 kept.append(held)
                 remaining.remove(held)
+        for candidate in sorted(goal_reserved or (), key=lambda item: item.key):
+            if len(kept) >= budget:
+                break
+            if candidate in remaining:
+                kept.append(candidate)
+                remaining.remove(candidate)
 
         counts: dict[str, dict[Any, int]] = {dimension: {} for dimension in _SPREAD_DIMENSIONS}
         for candidate in kept:
@@ -772,14 +863,7 @@ class RobotHarness:
         `via`는 **국소 플래너가 실제로 만든 경유점**에만 붙는다. 좌표 없는 `via`는
         실행기가 거절하므로(Task 3a) 만들지 않는다.
         """
-        entries = [
-            {
-                "id": "p0",
-                "kind": "direct",
-                "action_ref": reference,
-                "desc": str(self.descriptions["direct"]),
-            }
-        ]
+        entries = [{"id": "p0", "kind": "direct", "action_ref": reference}]
         waypoints: dict[str, dict[str, Any]] = {}
         if candidate is not None and candidate.function is not None:
             ee = [float(value) for value in state["robot"]["ee_pose_mm"]]
@@ -789,31 +873,9 @@ class RobotHarness:
             ):
                 name = f"w{index}"
                 waypoints[name] = waypoint
-                entries.append(
-                    {
-                        "id": f"p{index}",
-                        "kind": "via",
-                        "ref": name,
-                        "action_ref": reference,
-                        "desc": str(self.descriptions["via"]).format(waypoint=name),
-                    }
-                )
-        entries.append(
-            {
-                "id": "pr",
-                "kind": "retreat",
-                "action_ref": reference,
-                "desc": str(self.descriptions["retreat"]),
-            }
-        )
-        entries.append(
-            {
-                "id": "ph",
-                "kind": "hold",
-                "action_ref": reference,
-                "desc": str(self.descriptions["path_hold"]),
-            }
-        )
+                entries.append({"id": f"p{index}", "kind": "via", "ref": name, "action_ref": reference})
+        entries.append({"id": "pr", "kind": "retreat", "action_ref": reference})
+        entries.append({"id": "ph", "kind": "hold", "action_ref": reference})
         return entries, waypoints
 
     def _plan_waypoints(
@@ -938,7 +1000,7 @@ class RobotHarness:
             fails = 0
         else:
             entry = (candidates or {}).get(main)
-            way = tuple(entry.key.split(":")[:3]) if entry is not None and entry.function else (main,)
+            way = (joint_key_parts(entry.key) or (main,))[:3] if entry is not None else (main,)
             streak = self._failure_streak
             count = int(streak["count"]) + 1 if streak and streak["way"] == way else 1
             self._failure_streak = {"way": way, "count": count}
@@ -1160,8 +1222,8 @@ class RobotHarness:
 
     @staticmethod
     def _geometry_missing_reason(key: str, state: dict[str, Any]) -> str:
-        parts = key.split(":")
-        if len(parts) == 5 and parts[3] != "none":
+        parts = joint_key_parts(key)
+        if parts is not None and parts[3] != "none":
             if not any(str(zone.get("id")) == parts[3] for zone in state.get("zones") or ()):
                 return "destination_missing"
         return "geometry_unavailable"
@@ -1393,8 +1455,8 @@ class RobotHarness:
         self, commitment: dict[str, Any], state: dict[str, Any], info: dict[str, Any] | None
     ) -> dict[str, Any] | None:
         """연속 파라미터를 허용 오차로 비교한다. 들고 있는 대상과 밀기는 움직이는 것이 행동이다."""
-        parts = str(commitment.get("key", "")).split(":")
-        if len(parts) != 5 or parts[0] == "push" or state["robot"].get("holding") == parts[1]:
+        parts = joint_key_parts(commitment.get("key", ""))
+        if parts is None or parts[0] == "push" or state["robot"].get("holding") == parts[1]:
             return None
         tolerance = self.compose_config["tolerance"]
         entry = next((item for item in state["objects"] if str(item["id"]) == parts[1]), None)
@@ -1412,13 +1474,14 @@ class RobotHarness:
 
     def _completed(self, commitment: dict[str, Any], state: dict[str, Any]) -> bool:
         """행동이 끝났는가. 관측으로만 판정한다."""
-        parts = str(commitment.get("key", "")).split(":")
+        key = str(commitment.get("key", ""))
         held = int(commitment.get("held_ticks", 0))
-        if len(parts) == 1:
-            limit = self.compose_config["observe_ticks" if parts[0] == "observe" else "hold_ticks"]
-            return parts[0] in FIXED_KEYS and held >= int(limit)
+        parts = joint_key_parts(key)
+        if parts is None:
+            limit = self.compose_config["observe_ticks" if key == "observe" else "hold_ticks"]
+            return key in FIXED_KEYS and held >= int(limit)
 
-        function, target, _approach, destination, _profile = parts
+        function, target, _approach, destination = parts
         entry = next((item for item in state["objects"] if str(item["id"]) == target), None)
         if entry is None:
             return False
@@ -1455,14 +1518,14 @@ class RobotHarness:
         if not history or result in (None, "ok", "none"):
             return set()
         failed = candidates.get(str(history.get("main")))
-        parts = str((failed or {}).get("key", "")).split(":")
-        if len(parts) != 5:
+        parts = joint_key_parts((failed or {}).get("key", ""))
+        if parts is None:
             return set()
         same = parts[:3]
         blocked = {
             candidate
             for candidate, entry in candidates.items()
-            if str(entry.get("key", "")).split(":")[:3] == same
+            if (joint_key_parts(entry.get("key", "")) or ())[:3] == same
         }
         if blocked:
             records.append(
@@ -1573,9 +1636,9 @@ class RobotHarness:
             records.append({"kind": "switch", "from": None, "action_ref": action_ref})
         entry = candidates.get(action_ref) or {}
         key = str(entry.get("key", ""))
-        parts = key.split(":")
+        parts = joint_key_parts(key)
         start = None
-        if len(parts) == 5:
+        if parts is not None:
             target = next(
                 (item for item in state["objects"] if str(item["id"]) == parts[1]), None
             )
@@ -1980,8 +2043,8 @@ class RobotHarness:
         """하네스 블록 없이 들어온 요청(다른 도구가 만든 틱)의 기하를 다시 계산한다."""
         if not entry:
             return None
-        parts = str(entry.get("key", "")).split(":")
-        if len(parts) != 5:
+        parts = joint_key_parts(entry.get("key", ""))
+        if parts is None:
             return None
         objects = {item["id"]: item for item in state["objects"]}
         target = objects.get(parts[1])
@@ -1989,10 +2052,10 @@ class RobotHarness:
             return None
         ee = [float(value) for value in state["robot"]["ee_pose_mm"]]
         ages = {
-            item["object"]: item.get("age_ms", 0) for item in state["derived"] if "object" in item
+            item["object"]: item.get("age_ms", 0) for item in state.get("derived") or () if "object" in item
         }
         candidate = self._geometry_for(
-            tuple(parts), target, objects, state, ee, int(ages.get(parts[1], 0)), self._margins(state)
+            parts, target, objects, state, ee, int(ages.get(parts[1], 0)), self._margins(state)
         )
         return candidate.geometry() if candidate else None
 
