@@ -11,14 +11,14 @@ dependencies = [
     "mujoco>=3.3,<3.10",
     "pyyaml>=6.0.3",
     "robosuite>=1.5.2,<1.6",
-    # 모델 계약의 CPU 검증(Task 4a): 기준 mask·손실은 torch, 토큰 실측은 backbone의
-    # 실제 tokenizer(`tokenizers` + `huggingface_hub`로 `tokenizer.json`만 받는다,
+    # 모델 계약의 CPU 검증(Task 4a): 기준 mask·손실은 torch, 토큰 실측은 backbone의 실제
+    # tokenizer(`tokenizers` + `huggingface_hub`로 `tokenizer.json`만 받는다).
     # `transformers`는 기본 의존성이 아니다 — Spark/클라우드의 backbone 실측(Task 2b)에서만
-    # 아래 `backbone` 그룹을 `uv sync --group backbone`으로 넣는다). torch는 lock이 고른 정확한
-    # 버전으로 고정한다 — 수치
-    # 검사의 기준이 되는 버전을 조용히 바꾸지 않기 위해서다. 인덱스는 PyPI 기본 그대로다:
-    # macOS(arm64)에서는 CPU/MPS wheel이, Linux에서는 같은 버전의 CUDA wheel 묶음이
-    # 풀린다(클라우드 학습 단계용, docs/05). 특정 CUDA 버전을 고정하려면 그때 index를 더한다.
+    # 아래 `backbone` 그룹을 `uv sync --group backbone`으로 넣는다.
+    # torch는 lock이 고른 정확한 버전으로 고정한다 — 수치 검사의 기준이 되는 버전을 조용히
+    # 바꾸지 않기 위해서다. 인덱스는 PyPI 기본 그대로다: macOS(arm64)에서는 CPU/MPS wheel이,
+    # Linux에서는 같은 버전의 CUDA wheel 묶음이 풀린다(클라우드 학습 단계용, docs/05).
+    # 특정 CUDA 버전을 고정하려면 그때 index를 더한다.
     "torch==2.14.0",
     "tokenizers>=0.23.2",
     "huggingface-hub>=1.32.0",
