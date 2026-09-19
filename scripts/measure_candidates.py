@@ -27,8 +27,8 @@ full-attention의 KV는 에피소드 길이만큼 자라고 틱 지연도 그만
 
 * ``stream_warm`` — prefix + `--history`(30)틱을 cache에 넣은 뒤(한 번의 prefill), `--warmup`(5)틱을 예열로 흘리고,
   그다음 틱부터 끝까지 틱마다 새 토큰만 넣어 잰다.
-* ``stream_cold`` — cache 없이 틱마다 prefix + **최근 `--cold-window-ticks`(30)틱** + 현재 틱을 통째로 다시 계산한다
-  (무상태 L0식 하한; 0이면 이력 전부). warm과 같은 틱에서 시작하고 `--cold-ticks`개만 잰다 — 한 번이 수십 초라 수를 제한한다.
+* ``stream_cold`` — cache 없이 틱마다 prefix + **최근 `--cold-window-ticks`(30)틱(현재 틱을 포함해서)**을 통째로 다시
+  계산한다 — docs/08 §3.1의 윈도우 그대로다 (무상태 L0식 하한; 0이면 이력 전부). warm과 같은 틱에서 시작하고 `--cold-ticks`개만 잰다 — 한 번이 수십 초라 수를 제한한다.
 * ``state_first`` — 요청마다 통째로 forward, cache 없음(`--warmup`건 예열 뒤 64건 전부).
 
 틱마다 적는 것: 새 토큰 수, 직전 cache 길이, **모델 시간**(forward 앞뒤 `torch.cuda.Event`), forward의 벽시계 시간,
@@ -96,6 +96,10 @@ SYNTHETIC = {
     "instruction_change": (10, 32, True),
 }
 DTYPES = {"bf16": "bfloat16"}
+#: 이 스크립트의 버전 — `--from-report`가 다시 요약할 때 JSON에 적는다 (요약·판정의 정의가 바뀌면 올린다).
+SCRIPT_VERSION = "g0a-1.1"
+#: 판정의 "윈도우 크기 cache" 읽기: 첫 측정 틱 몇 개의 평균을 함께 적는다.
+EARLY_TICKS = 5
 
 
 def _script(name: str):
@@ -191,7 +195,9 @@ def _serialized(request: dict[str, Any], layout: str, tokenizer: Any) -> dict[st
         return request
     if tokenizer is None:
         tokenizer = load_tokenizer(_tokenizer_id())
-    return serialize_request(request, tokenizer, layout=layout)
+    out = serialize_request(request, tokenizer, layout=layout)
+    out["episode_id"] = request.get("episode_id")  # 직렬화 결과에는 없다 — 레코드에서 옮긴다
+    return out
 
 
 def _tokenizer_id() -> str:
@@ -213,7 +219,7 @@ def _timed_forward(runner: Runner, handle: Any, ids: list[int], cache: Any) -> t
     runner.sync()
     wall = time.perf_counter() - started
     token = int(logits.argmax(-1).item())  # 장치에서 argmax, D2H는 `.item()`
-    return {"wall_ms": wall * 1e3, "model_ms": float(runner.event_ms()), "token": token, "_started": started}, cache
+    return {"wall_ms": wall * 1e3, "model_ms": float(runner.event_ms()), "token": token}, cache
 
 
 def run_stream_warm(
@@ -528,26 +534,118 @@ def memory_estimates(entry: dict[str, Any], *, prefix_tokens: int, tick_tokens_m
 # --------------------------------------------------------------------------
 
 
-def verdicts(conditions: dict[str, Any], *, max_miss_rate: float, budgets: dict[str, float] = BUDGET_MS) -> dict[str, Any]:
+def _ols(xs: list[float], ys: list[float]) -> dict[str, float] | None:
+    """최소제곱 직선 ``y = intercept + slope·x``와 R². 점이 둘 미만이거나 x가 한 값이면 None (판정이 죽지 않는다)."""
+    if len(xs) < 2:
+        return None
+    mean_x, mean_y = statistics.fmean(xs), statistics.fmean(ys)
+    sxx = sum((x - mean_x) ** 2 for x in xs)
+    if sxx == 0:
+        return None
+    slope = sum((x - mean_x) * (y - mean_y) for x, y in zip(xs, ys)) / sxx
+    intercept = mean_y - slope * mean_x
+    syy = sum((y - mean_y) ** 2 for y in ys)
+    residual = sum((y - (intercept + slope * x)) ** 2 for x, y in zip(xs, ys))
+    r2 = 1.0 - residual / syy if syy > 0 else 1.0
+    return {"intercept": intercept, "slope": slope, "r2": r2, "n": len(xs)}
+
+
+def window_reading(
+    ticks: list[dict[str, Any]],
+    *,
+    prefix_tokens: float | None,
+    tick_tokens_mean: float | None,
+    window_ticks: int = WINDOW_TICKS,
+    early_ticks: int = EARLY_TICKS,
+) -> dict[str, Any]:
+    """native cache가 자라는 warm 측정에서 **윈도우 크기 cache**의 읽기 — 판정 문장에 문자 그대로의 p95 옆에 적는다.
+
+    * ``cache_before_range`` — 측정 틱의 직전 cache 길이 최소…최대.
+    * ``early_ticks_mean_ms`` — 에피소드마다 첫 ``early_ticks``개 측정 틱의 모델 ms 평균 (cache ≈ prefix + 35틱).
+    * ``model_ms_at_window_cache`` — ``model_ms ~ cache_before``의 최소제곱 직선을 ``prefix + (window_ticks − 1) × 평균 틱
+      토큰``(= docs/08 윈도우가 찼을 때의 cache)에서 읽은 값. 기울기(ms / 1K cached tokens)·절편·R²를 같이 적는다.
+      점이 둘 미만이거나 cache 길이가 한 값이면 None이다.
+    """
+    if not ticks:
+        return {
+            "cache_before_range": None, "early_ticks": early_ticks, "early_ticks_mean_ms": None,
+            "window_cache_tokens": None, "window_cache_basis": None, "model_ms_at_window_cache": None,
+            "fit": "ols model_ms ~ cache_before", "fit_slope_ms_per_1k_cache": None, "fit_intercept_ms": None, "fit_r2": None, "fit_n": 0,
+        }
+    groups: dict[Any, list[dict[str, Any]]] = {}
+    for tick in ticks:
+        groups.setdefault(tick.get("episode"), []).append(tick)
+    early = [float(tick["model_ms"]) for group in groups.values() for tick in group[:early_ticks]]
+    caches = [float(tick["cache_before"]) for tick in ticks]
+    if prefix_tokens is None or tick_tokens_mean is None:
+        prefix_tokens = min(caches)  # 프로파일 정보가 없으면 측정 틱에서 되만든다 — basis에 적는다
+        tick_tokens_mean = statistics.fmean(int(tick["new_tokens"]) for tick in ticks)
+        basis = "min(cache_before) + (WINDOW_TICKS − 1) × mean new_tokens of the timed ticks"
+    else:
+        basis = "profile prefix_tokens + (WINDOW_TICKS − 1) × profile mean tick tokens"
+    window_cache = int(round(float(prefix_tokens) + (window_ticks - 1) * float(tick_tokens_mean)))
+    fit = _ols(caches, [float(tick["model_ms"]) for tick in ticks])
+    return {
+        "cache_before_range": [int(min(caches)), int(max(caches))],
+        "early_ticks": early_ticks,
+        "early_ticks_mean_ms": round(statistics.fmean(early), 2),
+        "window_cache_tokens": window_cache,
+        "window_cache_basis": basis,
+        "model_ms_at_window_cache": None if fit is None else round(fit["intercept"] + fit["slope"] * window_cache, 2),
+        "fit": "ols model_ms ~ cache_before",
+        "fit_slope_ms_per_1k_cache": None if fit is None else round(fit["slope"] * 1000, 4),
+        "fit_intercept_ms": None if fit is None else round(fit["intercept"], 2),
+        "fit_r2": None if fit is None else round(fit["r2"], 4),
+        "fit_n": 0 if fit is None else fit["n"],
+    }
+
+
+def verdicts(
+    conditions: dict[str, Any],
+    *,
+    max_miss_rate: float,
+    budgets: dict[str, float] = BUDGET_MS,
+    profiles: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """docs/06 1단계 탈락 규칙 — `lower`와 `v03_target`에서 따로, stream_warm의 **문자 그대로의 p95**(native cache가 자란
+    채로)로 flag를 정한다(보수적). 그 옆에 :func:`window_reading` 의 윈도우 크기 읽기(직선 맞춤·첫 5틱 평균·cache 범위)를
+    적고 문장에도 인용한다 — flag는 그것으로 바꾸지 않는다."""
     deadline_key = f"deadline_miss_rate_{budgets['deadline']:.0f}ms"
     out: dict[str, Any] = {}
     for profile in ("lower", "v03_target"):
-        summary = ((conditions.get(profile) or {}).get("stream_warm") or {}).get("summary")
+        result = (conditions.get(profile) or {}).get("stream_warm") or {}
+        summary = result.get("summary")
         if not summary or not summary.get("ticks"):
             out[profile] = {
                 "profile": profile, "condition": "stream_warm", "ticks": 0, "p95_model_ms": None, deadline_key: None,
                 "fails_10hz": None, "fails_5hz": None, "deadline_fail": None, "passes": None,
+                "window": window_reading([], prefix_tokens=None, tick_tokens_mean=None),
                 "text": f"{profile}: not measured (no stream_warm ticks)",
             }
             continue
+        info = (profiles or {}).get(profile) or {}
+        window = window_reading(
+            result.get("ticks") or [],
+            prefix_tokens=info.get("prefix_tokens"),
+            tick_tokens_mean=(info.get("tick_tokens") or {}).get("mean"),
+        )
         p95 = float(summary["model_ms"]["p95"])
         miss = float(summary[deadline_key])
         fails_10hz = p95 > budgets["model_10hz"]
         fails_5hz = p95 > budgets["model_5hz"]
         deadline_fail = miss > max_miss_rate
         flags = [name for name, flag in (("fails_10hz", fails_10hz), ("fails_5hz", fails_5hz), ("deadline_fail", deadline_fail)) if flag]
+        at_window = window["model_ms_at_window_cache"]
+        early = window["early_ticks_mean_ms"]
+        cache_range = window["cache_before_range"]
+        tokens = window["window_cache_tokens"]
+        sized = (
+            f"window-sized: fit {'n/a' if at_window is None else f'{at_window:.1f} ms'} at {'n/a' if tokens is None else f'{tokens:,}'} tokens, "
+            f"first-{window['early_ticks']} mean {'n/a' if early is None else f'{early:.1f} ms'}; "
+            f"cache {'n/a' if cache_range is None else f'{cache_range[0]:,}…{cache_range[1]:,}'}"
+        )
         text = (
-            f"{profile} (stream_warm, {summary['ticks']} ticks): p95 model {p95:.1f} ms vs {budgets['model_10hz']:.0f} ms (10 Hz) / "
+            f"{profile} (stream_warm, {summary['ticks']} ticks): p95 model {p95:.1f} ms ({sized}) vs {budgets['model_10hz']:.0f} ms (10 Hz) / "
             f"{budgets['model_5hz']:.0f} ms (5 Hz); obs→apply miss rate {miss:.3f} vs max {max_miss_rate:.3f} → "
             + (", ".join(flags) if flags else "passes")
         )
@@ -561,6 +659,7 @@ def verdicts(conditions: dict[str, Any], *, max_miss_rate: float, budgets: dict[
             "fails_5hz": fails_5hz,
             "deadline_fail": deadline_fail,
             "passes": not flags,
+            "window": window,
             "text": text,
         }
     return out
@@ -638,7 +737,11 @@ def build_profiles(
     profiles: dict[str, dict[str, Any]] = {}
 
     def stream_profile(name: str, records: list[dict[str, Any]], description: str, truncate: int | None = None, **extra: Any) -> dict[str, Any]:
-        outs = [serialize_request(record, tokenizer, layout="stream_l1a") for record in records]
+        outs = []
+        for record in records:
+            out = serialize_request(record, tokenizer, layout="stream_l1a")
+            out["episode_id"] = record.get("episode_id")  # 직렬화 결과에는 없다 — 레코드에서 옮긴다
+            outs.append(out)
         return {
             "layout": "stream_l1a",
             "description": description,
@@ -716,7 +819,7 @@ class Settings:
 
 NOTES = [
     "native path = official transformers AutoModelForCausalLM forward (BF16, use_cache=True); the model's own hybrid cache grows without the 30-tick window (a stage-2 property), so every latency carries the cache length before that tick.",
-    "stream_cold recomputes prefix + the last `cold_window_ticks` ticks + the current tick with an empty cache (stateless bound; 0 = full history) and times only `cold_ticks` ticks.",
+    "stream_cold recomputes prefix + the most recent `cold_window_ticks` ticks, the current one included (the docs/08 window), with an empty cache (stateless bound; 0 = full history) and times only `cold_ticks` ticks.",
     "v03_target is the `upper` stream with each tick's token list truncated to 500 tokens — a length-only stand-in for contract v0.3, not v0.3 formatting.",
     "memory.estimates are computed from config.json (formulas in the entries), not measured; memory.peak_allocated_bytes and cache_bytes_measured are measured.",
     "verdicts follow the docs/06 stage-1 drop rule on stream_warm p95 model ms (80 ms = 10 Hz, 150 ms = 5 Hz) and the obs→apply 100 ms miss rate against --max-miss-rate; quality (bullet 4) is out of scope.",
@@ -812,7 +915,7 @@ def screen(
                 "cache_bytes_measured": cache_bytes,
                 "estimates": estimates,
             },
-            "verdict": verdicts(conditions, max_miss_rate=settings.max_miss_rate, budgets=settings.budgets),
+            "verdict": verdicts(conditions, max_miss_rate=settings.max_miss_rate, budgets=settings.budgets, profiles=profiles),
         }
         if checkpoint is not None:
             checkpoint.parent.mkdir(parents=True, exist_ok=True)
@@ -831,6 +934,50 @@ def _print_progress(model_id: str, profile: str, condition: str, summary: dict[s
         file=sys.stderr,
         flush=True,
     )
+
+
+# --------------------------------------------------------------------------
+# 다시 요약 — 틱 기록만으로 (GPU 없이)
+# --------------------------------------------------------------------------
+
+_RESUMMARISED_NOTE = "summaries and verdicts were rebuilt from the per-tick records by --from-report"
+_FINISHED_AT_NOTE = "finished_at is null: this run predates the field and the end time cannot be recovered from the data; generated_at is the start of screen()"
+
+
+def _git_commit() -> str | None:
+    import subprocess
+
+    try:
+        return subprocess.run(["git", "rev-parse", "--short", "HEAD"], capture_output=True, text=True, timeout=10, cwd=REPO).stdout.strip() or None
+    except Exception:  # noqa: BLE001 — 없으면 None
+        return None
+
+
+def resummarise(report: dict[str, Any]) -> dict[str, Any]:
+    """보고서 JSON의 틱 기록에서 조건 요약과 판정을 다시 만든다 — 다시 재지 않는다.
+
+    `environment`·`settings`·`profiles`·`memory`·틱 기록은 그대로 두고 `conditions[*][*].summary`와 `verdict`만 바꾼다.
+    `generated_at` 옆에 `resummarised_at`과 이 스크립트의 버전·commit을 적는다. `finished_at`은 없으면 null로 남긴다 —
+    끝난 시각은 데이터에서 되찾을 수 없으므로 지어내지 않는다(notes에 적는다).
+    """
+    budgets = {key: float(value) for key, value in (report.get("budgets_ms") or BUDGET_MS).items()}
+    max_miss_rate = float(report["settings"]["max_miss_rate"])
+    profiles = report.get("profiles") or {}
+    for candidate in report["candidates"].values():
+        for conditions in candidate["conditions"].values():
+            for result in conditions.values():
+                result["summary"] = summarize_ticks(result.get("ticks") or [], budgets=budgets)
+        candidate["verdict"] = verdicts(candidate["conditions"], max_miss_rate=max_miss_rate, budgets=budgets, profiles=profiles)
+    stamp = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+    report["resummarised_at"] = stamp
+    report["resummarised_by"] = {"script_version": SCRIPT_VERSION, "commit": _git_commit()}
+    report.setdefault("finished_at", None)
+    notes = [note for note in report.get("notes") or [] if not note.startswith(_RESUMMARISED_NOTE) and note != _FINISHED_AT_NOTE]
+    notes.append(f"{_RESUMMARISED_NOTE} on {stamp} (script {SCRIPT_VERSION}); environment, settings, profiles, memory and tick records untouched")
+    if report["finished_at"] is None:
+        notes.append(_FINISHED_AT_NOTE)
+    report["notes"] = notes
+    return report
 
 
 # --------------------------------------------------------------------------
@@ -1045,10 +1192,14 @@ class TransformersRunner:
     def memory(self) -> dict[str, Any]:
         import torch
 
+        stats = torch.cuda.memory_stats()
         return {
             "peak_allocated_bytes": int(torch.cuda.max_memory_allocated()),
             "peak_reserved_bytes": int(torch.cuda.max_memory_reserved()),
             "allocated_bytes": int(torch.cuda.memory_allocated()),
+            # 작은 장치에서 allocator가 free-and-retry를 했는지 보이도록 (docs/05 §4의 메모리 통과 기준의 재료)
+            "num_alloc_retries": int(stats.get("num_alloc_retries", 0)),
+            "num_ooms": int(stats.get("num_ooms", 0)),
         }
 
     def describe(self, handle: Any) -> dict[str, Any]:
@@ -1130,7 +1281,18 @@ def main(argv: list[str] | None = None, *, runner: Runner | None = None) -> int:
     parser.add_argument("--dtype", default="bf16", choices=sorted(DTYPES))
     parser.add_argument("--root", default=None, help="가중치 보관 디렉터리 (기본: artifacts/models)")
     parser.add_argument("--verify-full", dest="verify_full", action="store_true", help="safetensors 전부의 sha256을 manifest와 대조한다")
+    parser.add_argument("--from-report", dest="from_report", help="이 보고서 JSON의 틱 기록으로 요약·판정만 다시 만든다 (GPU·가중치 없이; --report가 없으면 같은 파일에 쓴다)")
     args = parser.parse_args(argv)
+
+    if args.from_report:
+        source = Path(args.from_report)
+        report = resummarise(json.loads(source.read_text(encoding="utf-8")))
+        out = Path(args.report) if args.report != str(DEFAULT_REPORT) else source
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        print_table(report)
+        print(f"→ {out} (resummarised from {source})")
+        return 0
 
     if args.path == "stream":
         parser.error("--path stream은 2단계(G0b, Task 4의 실제 스트림 경로)다 — 이 스크립트는 native만 잰다")

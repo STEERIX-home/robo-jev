@@ -11,6 +11,7 @@ import functools
 import importlib.util
 import json
 import re
+import statistics
 import sys
 
 import pytest
@@ -156,6 +157,12 @@ def test_warm_condition_feeds_prefix_plus_history_in_the_cache_before_the_first_
     assert result["condition"] == "stream_warm" and result["summary"]["ticks"] == 6
     assert result["summary"]["cache_length"] == {"min": ticks[0]["cache_before"], "max": ticks[-1]["cache_after"]}
     assert result["episodes"][0]["cache_bytes_end"] == 2 * ticks[-1]["cache_after"]
+    assert result["episodes"][0]["name"] == "stream-0"  # 직렬화 결과만 주면 에피소드 이름이 없다
+    named = module.measure_latency(
+        "fake/model", [stream_record(12)], "stream_l1a", True, "native", runner=FakeRunner(), handle=None or runner.load({}),
+        tokenizer=WhitespaceTokenizer(), history_ticks=4, warmup=2,
+    )
+    assert named["episodes"][0]["name"] == "ep-d0-001" and {tick["episode"] for tick in named["ticks"]} == {"ep-d0-001"}
 
 
 def test_cold_condition_recomputes_prefix_plus_the_window_with_an_empty_cache_every_tick():
@@ -205,12 +212,15 @@ def test_state_first_requests_are_forwarded_whole_without_a_cache():
     assert [tick["request_id"] for tick in result["ticks"]] == [record["request"]["request_id"] for record in records]
 
 
-def test_path_stream_is_rejected_as_stage_two():
+def test_path_stream_is_rejected_as_stage_two(capsys):
     module = script()
     with pytest.raises(ValueError, match="2단계"):
         module.measure_latency("fake/model", [], "stream_l1a", True, "stream", runner=FakeRunner())
     with pytest.raises(ValueError, match="native"):
         module.measure_latency("fake/model", [], "stream_l1a", True, "fast", runner=FakeRunner())
+    with pytest.raises(SystemExit) as excinfo:  # CLI도 같은 자리에서 거절한다 — 가중치·tokenizer를 읽기 전에
+        module.main(["--path", "stream"])
+    assert excinfo.value.code == 2 and "2단계" in capsys.readouterr().err
 
 
 def test_summary_percentiles_miss_rate_and_over_budget_rates_on_a_known_vector():
@@ -244,9 +254,11 @@ def test_verdict_flags_flip_strictly_above_each_threshold_and_quote_their_number
     assert verdict["lower"] == {
         "profile": "lower", "condition": "stream_warm", "ticks": 35, "p95_model_ms": 80.0, "deadline_miss_rate_100ms": 0.05,
         "fails_10hz": False, "fails_5hz": False, "deadline_fail": False, "passes": True,
+        "window": module.window_reading([], prefix_tokens=None, tick_tokens_mean=None),  # 틱 기록이 없으면 전부 None, 죽지 않는다
         "text": verdict["lower"]["text"],
     }
     assert "80.0" in verdict["lower"]["text"] and "0.05" in verdict["lower"]["text"] and "passes" in verdict["lower"]["text"]
+    assert "window-sized: fit n/a at n/a tokens, first-5 mean n/a; cache n/a" in verdict["lower"]["text"]
     tight = module.verdicts(conditions(80.1, 0.051), max_miss_rate=0.05)
     assert tight["lower"]["fails_10hz"] and not tight["lower"]["fails_5hz"] and tight["lower"]["deadline_fail"] and not tight["lower"]["passes"]
     assert tight["v03_target"]["fails_10hz"] and not tight["v03_target"]["deadline_fail"]
@@ -255,6 +267,46 @@ def test_verdict_flags_flip_strictly_above_each_threshold_and_quote_their_number
     assert slow["lower"]["fails_10hz"] and slow["lower"]["fails_5hz"]
     missing = module.verdicts({"lower": {}}, max_miss_rate=0.05)
     assert missing["lower"]["passes"] is None and "not measured" in missing["lower"]["text"] and missing["v03_target"]["passes"] is None
+    assert missing["lower"]["window"]["model_ms_at_window_cache"] is None and missing["lower"]["window"]["fit_n"] == 0
+
+
+def test_verdict_window_reading_fits_model_ms_on_cache_and_quotes_it_without_moving_the_flags():
+    """윈도우 크기 cache의 읽기(직선 맞춤·첫 5틱 평균·cache 범위)는 문장에 인용되지만 flag는 문자 그대로의 p95가 정한다."""
+    module = script()
+
+    def tick(index: int, cache: int, ms: float, episode: str = "ep") -> dict:
+        return {"tick": 35 + index, "episode": episode, "new_tokens": 50, "cache_before": cache, "cache_after": cache + 50, "model_ms": ms, "wall_ms": ms + 0.2, "obs_apply_ms": ms + 0.5}
+
+    ticks = [tick(i, 1000 + 100 * i, 10.0 + 0.02 * (1000 + 100 * i)) for i in range(10)]  # 정확히 직선: 10 + 0.02 × cache
+    result = {"ticks": ticks, "summary": module.summarize_ticks(ticks)}
+    profiles = {"lower": {"prefix_tokens": 100, "tick_tokens": {"mean": 50.0}}}
+    verdict = module.verdicts({"lower": {"stream_warm": result}}, max_miss_rate=0.05, profiles=profiles)["lower"]
+    window = verdict["window"]
+    assert window["cache_before_range"] == [1000, 1900] and window["fit_n"] == 10 and window["fit"] == "ols model_ms ~ cache_before"
+    assert window["early_ticks"] == 5 and window["early_ticks_mean_ms"] == pytest.approx(34.0)  # 첫 5틱: cache 1000…1400
+    assert window["window_cache_tokens"] == 100 + 29 * 50 and "profile" in window["window_cache_basis"]
+    assert window["model_ms_at_window_cache"] == pytest.approx(10.0 + 0.02 * 1550) and window["fit_slope_ms_per_1k_cache"] == pytest.approx(20.0)
+    assert window["fit_intercept_ms"] == pytest.approx(10.0) and window["fit_r2"] == pytest.approx(1.0)
+    assert "p95 model 48.0 ms (window-sized: fit 41.0 ms at 1,550 tokens, first-5 mean 34.0 ms; cache 1,000…1,900) vs 80 ms" in verdict["text"]
+    assert verdict["passes"] is True and verdict["p95_model_ms"] == 48.0  # flag는 p95(문자 그대로: 10개 중 round(0.95·9) = 최대)로
+
+    # 프로파일 정보가 없으면 측정 틱에서 되만든다 (min cache + 29 × 평균 새 토큰) — basis에 적힌다
+    bare = module.verdicts({"lower": {"stream_warm": result}}, max_miss_rate=0.05)["lower"]["window"]
+    assert bare["window_cache_tokens"] == 1000 + 29 * 50 and "min(cache_before)" in bare["window_cache_basis"]
+    assert bare["model_ms_at_window_cache"] == pytest.approx(10.0 + 0.02 * 2450)
+
+    # 에피소드가 여럿이면 첫 5틱은 에피소드마다 센다; 잡음이 있으면 R² < 1
+    two = [tick(i, 1000 + 100 * i, 30.0 + 0.02 * (1000 + 100 * i) + (1.0 if i % 2 else -1.0), "a") for i in range(6)] + [tick(i, 1000 + 100 * i, 30.0, "b") for i in range(6)]
+    both = module.window_reading(two, prefix_tokens=100, tick_tokens_mean=50.0)
+    assert both["early_ticks_mean_ms"] == pytest.approx(statistics.fmean([t["model_ms"] for t in two[:5]] + [30.0] * 5)) and 0.0 < both["fit_r2"] < 1.0
+
+    # 퇴화: 틱 하나 → 맞춤 없음(None), 첫 틱 평균은 그 값; cache가 한 값이어도 None; 죽지 않는다
+    single = module.verdicts({"lower": {"stream_warm": {"ticks": ticks[:1], "summary": module.summarize_ticks(ticks[:1])}}}, max_miss_rate=0.05, profiles=profiles)["lower"]
+    assert single["window"]["model_ms_at_window_cache"] is None and single["window"]["fit_n"] == 0 and single["window"]["fit_r2"] is None
+    assert single["window"]["early_ticks_mean_ms"] == pytest.approx(30.0) and single["window"]["cache_before_range"] == [1000, 1000]
+    assert "fit n/a at 1,550 tokens, first-5 mean 30.0 ms; cache 1,000…1,000" in single["text"] and single["passes"] is True
+    flat = module.window_reading([tick(0, 1000, 30.0), tick(1, 1000, 32.0)], prefix_tokens=100, tick_tokens_mean=50.0)
+    assert flat["model_ms_at_window_cache"] is None and flat["early_ticks_mean_ms"] == pytest.approx(31.0)
 
 
 def test_memory_estimates_follow_the_stated_formula_and_match_docs05_for_the_27b_window():
@@ -305,6 +357,7 @@ def test_profiles_are_built_from_the_serializer_and_v03_is_the_upper_stream_trun
     profiles = module.build_profiles(tokenizer, ticks=6, names=("d0_streams", "lower", "v03_target"), d0_streams=[stream_record(6)], d0_singles=read_jsonl(D0)[:3], change_tick=3)
     assert set(profiles) == {"d0_streams", "lower", "v03_target", "state_first"}
     assert profiles["d0_streams"]["layout"] == "stream_l1a" and len(profiles["d0_streams"]["requests"]) == 1
+    assert profiles["d0_streams"]["episodes"] == ["ep-d0-001"] and profiles["lower"]["episodes"] == ["ep-synth-6-12-same"]  # 레코드의 이름
     assert profiles["lower"]["objects"] == 6 and profiles["lower"]["k_cap"] == 12 and profiles["lower"]["instruction_change"] is False
     assert profiles["v03_target"]["truncate_tick_tokens"] == 500 and profiles["v03_target"]["derived_from"] == "upper"
     assert profiles["v03_target"]["requests"][0]["tokens"] == profiles["v03_target"]["source_requests"][0]["tokens"]  # 길이만 자른다
@@ -344,10 +397,53 @@ def test_screen_report_is_json_serialisable_and_carries_the_documented_keys(caps
     assert memory["cache_bytes_measured"]["lower"]["stream_warm"] > 0
     assert memory["estimates"]["window_state"]["tokens"] == memory["estimates"]["window_state"]["prefix_tokens"] + 30 * memory["estimates"]["window_state"]["tick_tokens_mean"]
     assert set(candidate["verdict"]) == {"lower", "v03_target"} and candidate["verdict"]["lower"]["passes"] in (True, False)
+    window = candidate["verdict"]["lower"]["window"]
+    assert window["fit_n"] == len(candidate["conditions"]["lower"]["stream_warm"]["ticks"]) and window["cache_before_range"][0] > 0
+    assert window["window_cache_tokens"] == round(profiles["lower"]["prefix_tokens"] + 29 * profiles["lower"]["tick_tokens"]["mean"])
+    assert {tick["episode"] for tick in candidate["conditions"]["lower"]["stream_warm"]["ticks"]} == {"ep-synth-6-12-same"}
     assert runner.loaded[0]["path"] == "/nowhere" and runner.unloaded == 1
     module.print_table(report)
     out = capsys.readouterr().out
     assert "Qwen/Qwen3.5-2B" in out and "v03_target" in out and "stream_cold" in out and "verdict" in out
+
+
+def test_from_report_rebuilds_summaries_and_verdicts_and_leaves_everything_else_untouched(tmp_path, capsys):
+    """`--from-report`: GPU 없이 틱 기록에서 요약·판정만 다시 만든다. 나머지 블록과 틱 기록은 그대로, finished_at은 지어내지 않는다."""
+    module = script()
+    profiles = module.build_profiles(WhitespaceTokenizer(), ticks=8, names=("lower", "v03_target"), d0_singles=read_jsonl(D0)[:3], change_tick=3)
+    entry = dict(entries()["Qwen/Qwen3.5-2B"], path="/nowhere", manifest={"revision": "abc", "digest": "def", "verified": "sizes+small-files"})
+    settings = module.Settings(ticks=8, warmup=1, history_ticks=3, cold_window_ticks=2, cold_ticks=2, max_miss_rate=0.05, dtype="bf16")
+    report = module.screen([entry], profiles, FakeRunner(), settings=settings, tokenizer_info={"id": "fake", "revision": None, "sha256": "0" * 64})
+    del report["finished_at"]  # 첫 실측 JSON처럼 (그 필드가 생기기 전의 것)
+    candidate = "Qwen/Qwen3.5-2B"
+    report["candidates"][candidate]["conditions"]["lower"]["stream_warm"]["ticks"][0]["model_ms"] = 999.0  # 틱 하나를 바꾸면 요약이 따라와야 한다
+    source = tmp_path / "screen.json"
+    source.write_text(json.dumps(report, ensure_ascii=False), encoding="utf-8")
+    out = tmp_path / "screen-resummarised.json"
+    assert module.main(["--from-report", str(source), "--report", str(out)]) == 0
+    rebuilt = json.loads(out.read_text(encoding="utf-8"))
+    assert rebuilt["finished_at"] is None and rebuilt["resummarised_at"] >= rebuilt["generated_at"]
+    assert rebuilt["resummarised_by"]["script_version"] == module.SCRIPT_VERSION and "commit" in rebuilt["resummarised_by"]
+    for key in ("environment", "settings", "profiles", "tokenizer", "serializer", "generated_at", "command", "budgets_ms", "path", "task"):
+        assert rebuilt[key] == report[key], key
+    before, after = report["candidates"][candidate], rebuilt["candidates"][candidate]
+    for key in ("config", "manifest", "path", "loaded", "memory"):
+        assert after[key] == before[key], key
+    for profile, conditions in before["conditions"].items():
+        for condition, result in conditions.items():
+            assert after["conditions"][profile][condition]["ticks"] == result["ticks"]
+    assert after["conditions"]["lower"]["stream_warm"]["summary"]["model_ms"]["max"] == 999.0
+    assert after["verdict"]["lower"]["window"]["fit_n"] == len(before["conditions"]["lower"]["stream_warm"]["ticks"])
+    assert after["verdict"]["lower"]["window"]["window_cache_tokens"] == round(report["profiles"]["lower"]["prefix_tokens"] + 29 * report["profiles"]["lower"]["tick_tokens"]["mean"])
+    assert "window-sized: fit" in after["verdict"]["lower"]["text"]
+    assert any(note.startswith("finished_at is null") for note in rebuilt["notes"]) and any("--from-report" in note for note in rebuilt["notes"])
+    assert rebuilt["notes"][: len(report["notes"])] == report["notes"]
+    assert "v03_target" in capsys.readouterr().out
+    # --report 없이 부르면 같은 파일에 쓰고, 두 번 돌려도 notes가 늘지 않는다
+    assert module.main(["--from-report", str(out)]) == 0
+    again = json.loads(out.read_text(encoding="utf-8"))
+    assert len(again["notes"]) == len(rebuilt["notes"]) and again["candidates"][candidate]["verdict"] == after["verdict"]
+    assert source.read_text(encoding="utf-8").find("resummarised_at") < 0  # 원본은 건드리지 않았다
 
 
 def test_candidates_yaml_pins_four_candidates_with_required_keys_and_resolved_revisions():
