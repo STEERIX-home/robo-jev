@@ -34,6 +34,7 @@
 | 2026-09-18 OM-1 검토 → 08 | robojev를 L2 "의미에 대한 System 1"으로 정의, 10Hz 스트리밍 typed 출력 계약(질문 세트 v0·조합 규칙·컨트롤러 계약·라벨·레코드), 앞단을 공통 구조화 스키마를 채우는 교체 가능 모듈(주 앞단 3D 재구성)로 | [08](08-streaming-io-and-data-contract.md), 리뷰 [09](09-streaming-contract-review.md) |
 | 2026-09-18 리뷰 10 | 전환 틱 초기 경로·실제 명령 구간 대조·국면별 목표점·적용 시각 기준 기하 나이·기하 나이 기준 실행 가능성·관측된 변위 기준 사건·q_instr/q_observe 귀속·관측 자세 이동 | [10](10-current-implementation-review.md): I1~I6 재현, E0 폐루프 원인(시점 배치·자기 가림) |
 | 2026-09-19 구현 실측 | 결정 표지 토큰 규칙(03 §3), 도중 지시 조각은 틱 토큰(08 §3.1), 로봇/비로봇 60%는 step 유효 loss 비중(04), 밀기 국면의 기하 나이 예외(08), 전문가 에피소드의 네 출력 필드(08 §8), 버전·지문·DAgger id 규칙 | 4a/4b/5-CPU/3c 리뷰 |
+| 2026-09-19 Spark 실측(Task 2b-G0a) | 배포 장비(DGX Spark GB10)에서 backbone 후보의 native BF16 지연 선별: 현재 서식은 전 후보가 80 ms의 ≥7×, 500토큰 틱에서 2B만 사정권(≈83~123 ms) → G0b 후보 2B(주)·4B(5 Hz 대비), 9B·27B 제외(HANDOFF 결정 3 확정); 03·05·06·08·11·README·HANDOFF 갱신 | `artifacts/reports/backbone-screen.json`, `.superpowers/sdd/task-2b-g0a-{report,review-1}.md` |
 | 2026-09-19 리뷰 11·cua-s1 검토 | 토큰 실측(틱당 1,764~3,712)과 엣지 배포 전제로 지연·학습 구간 예산 정정(03·05·08); 소형 scorer 기준군(Task 2c)·문맥 섞기 대조군·개념 수준 holdout·혼동 후보 규칙 | [11](11-dgx-spark-handoff-review.md) |
 
 가설·잠정 목표·측정 결과를 구분한다. 하네스가 구성할 내용과 모델이 학습할 내용을 분리하고 각각의 버전을 기록한다.

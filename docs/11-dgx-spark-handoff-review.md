@@ -14,8 +14,8 @@
 | 예상 실패 | E1 seed 29의 후보 상한 문제. 알려진 실패를 숨기지 않고 유지한 상태 |
 | CPU 학습 | 기존 검사에 가중치 업데이트, 스트림 분기, 혼합 손실, 동일 데이터에서 중단 후 재개 검사가 포함됨 |
 | 실 tokenizer | 받아 둔 Qwen tokenizer로 B2 재측정 완료. prefix 382~385, 합성 하네스 최초 틱 1,764~3,469, 후속 지시 변경 틱 최대 **3,712** |
-| Spark 인수 | 미실행. `uv sync` 성공, GPU 인식, CUDA 연산, 실모델 forward, 실제 스트림 지연은 별도 확인 필요 |
-| 실모델 경로 | 아직 fixture만 구현. `measure_candidates.py`, 사전학습 backbone adapter, GPU/BF16 학습 경로는 다음 구현 작업 |
+| Spark 인수 | 2026-09-19 완료: `uv sync` 성공(aarch64, torch 2.14.0+cu130), GPU 인식, CUDA 연산·실모델 load/forward 확인, 921 passed. 실제 스트림 경로의 지연은 G0b |
+| 실모델 경로 | `scripts/fetch_backbone.py`·`scripts/measure_candidates.py`는 2026-09-19 구현·Spark 실측 완료(Qwen3.5-2B/4B/9B·27B의 native BF16 forward, 결과는 03 §"지연 예산" 표). 사전학습 backbone의 `stream` 경로(adapter)와 GPU/BF16 학습 경로는 다음 구현 작업 |
 
 ## 2. 수정이 필요한 항목
 
@@ -79,9 +79,9 @@ fetch는 매번 Hub의 현재 revision을 조회하며 `--revision`이나 기존
 ## 4. Spark에서 이어갈 순서
 
 1. 기준 SHA와 인계 묶음·tokenizer 파일 해시를 확인하고, `uv sync --locked` 후 실제 tokenizer를 포함한 CPU 검사를 재현한다. 재개 시 내용 변경 거절과 미지원 모델 ID 거절도 먼저 보강한다.
-2. ARM64·GB10에서 쓸 PyTorch/CUDA/driver 또는 container digest를 고정하고 CUDA tensor 연산·동기화·실모델 load/forward를 확인한다. CPU 테스트 통과와 별도 결과로 기록한다. NVIDIA는 Spark용 NGC 환경과 버전 고정을 안내한다. [NVIDIA NGC 안내](https://docs.nvidia.com/dgx/dgx-spark/ngc.html)
+2. ARM64·GB10에서 쓸 PyTorch/CUDA/driver 또는 container digest를 고정하고 CUDA tensor 연산·동기화·실모델 load/forward를 확인한다. CPU 테스트 통과와 별도 결과로 기록한다. NVIDIA는 Spark용 NGC 환경과 버전 고정을 안내한다. [NVIDIA NGC 안내](https://docs.nvidia.com/dgx/dgx-spark/ngc.html) **기록(2026-09-19, container 대신 버전 고정)**: driver 580.159.03, CUDA 13.0, torch 2.14.0+cu130(PyPI aarch64 wheel), triton 3.8.0, transformers 5.17.0, flash-linear-attention 0.5.2(Triton 커널이 sm_121에서 컴파일·실행됨을 torch 참조와 대조로 확인), causal-conv1d 1.7.0(sdist 소스 빌드 ≈6분) — `uv sync --group backbone` + `uv pip install --no-build-isolation causal-conv1d==1.7.0`.
 3. 후보 공간과 서식/변화분 계약을 확정하고 실제 tokenizer로 토큰 분포를 다시 잰다. 압축 목표값과 현재 측정값을 섞지 않는다.
-4. Spark에서 native 예비 측정 후, pointer·상태 분기·윈도우를 포함한 실제 경로로 지연을 잰다. 같은 후보의 의미 판단 품질을 함께 확인해 backbone과 배포 정밀도를 정한다. `scripts/measure_candidates.py`는 현재 파일이 없으므로 이 단계의 구현 산출물로 명시한다.
+4. Spark에서 native 예비 측정 후, pointer·상태 분기·윈도우를 포함한 실제 경로로 지연을 잰다. 같은 후보의 의미 판단 품질을 함께 확인해 backbone과 배포 정밀도를 정한다. `scripts/measure_candidates.py`는 2026-09-19 구현했고 native 예비 측정을 마쳤다(결과·결정은 03 §"지연 예산" 표와 HANDOFF 결정 3: G0b 후보 2B·4B); 실제 경로 측정과 의미 판단 품질은 G0b다.
 5. 클라우드에서 실제 backbone의 T0와 작은 T1을 먼저 수행하고, Spark 평가 결과와 연결한 뒤 D1·rollout·본 학습을 확대한다.
 
 Spark를 통과한 결과를 다른 Jetson 구성의 지연 보장으로 일반화하지 않는다. 실제 최종 배포 장비가 별도라면 그 장비에서 같은 판정을 한 번 더 수행한다.

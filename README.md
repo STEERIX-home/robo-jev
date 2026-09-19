@@ -4,7 +4,7 @@ robojev is a research project by Steerix Robotics: a **learned judgment model th
 
 It is a *System One* model in the sense that TypeSafe introduced with Jev: the input is a typed state plus a set of questions with candidate answers, and the output is one probability distribution per question, read out in a single forward pass. What is new here is the setting. The state is a physical scene that changes every 100 ms, the questions repeat on every tick, and the answers drive a real controller.
 
-> Status (2026-09-19): the whole pipeline that can be verified without a GPU is implemented, reviewed and tested — contracts, data generators, simulator and controller, streaming harness, scripted expert, rollout labels, serialization, a tiny reference model, and a training loop with exact resume. **No real backbone has been trained yet, and no latency claim has been measured on target hardware.** See [Status](#status) for what is and is not verified.
+> Status (2026-09-19): the whole pipeline that can be verified without a GPU is implemented, reviewed and tested — contracts, data generators, simulator and controller, streaming harness, scripted expert, rollout labels, serialization, a tiny reference model, and a training loop with exact resume. **No real backbone has been trained yet. Latency has now been measured on the deployment-class GPU (DGX Spark GB10) with the official BF16 forward of Qwen3.5-2B/4B/9B: at the current serialization every candidate is ≥7× over the 10 Hz budget, and at the planned ≈500-token tick only the 2B is within reach (≈83–123 ms vs 80 ms).** See [Status](#status) for what is and is not verified.
 
 ## Why
 
@@ -54,14 +54,15 @@ What is verified and what is not, per area. Nothing below the line is claimed.
 | --- | --- | --- |
 | Robot closed loop | E0 (static scenes) with rule judge and scripted expert; E1 (instruction change + disturbance) on 3 seeds | E1 at scale; real-robot front end (3D reconstruction) |
 | Data | first batch of 40 episodes; rollout machinery and costing | D1 (400 episodes, 128k rollouts) — withheld until the candidate-space decision below; human review of D0 |
-| Model | contracts, masks, state forking, readout and losses on a random-weight fixture | any pretrained backbone; hybrid kernels; BF16 |
+| Model | contracts, masks, state forking, readout and losses on a random-weight fixture; native BF16 forward of Qwen3.5-2B/4B/9B (27B as reference) on GB10 with the fla and causal-conv1d kernels active | any *trained* backbone; the stream path (window, forking, pointer readout) on a real backbone |
 | Training | step, TBPTT, sampler, checkpoint, resume on the fixture | GPU training; real-backbone results; calibration |
-| Latency | token counts with the real tokenizer | the 10 Hz / 100 ms gate, which must be measured on deployment-class hardware (DGX Spark / Jetson) |
+| Latency | token counts with the real tokenizer; native-path screen on DGX Spark (`scripts/measure_candidates.py`, 2026-09-19): p95 model time per tick 928 / 2,299 / 2,447 / 5,640 ms (2B / 4B / 9B / 27B) at the current format, 123 / 305 / 378 / 886 ms at a 500-token tick (≈83 / 197 / 278 ms extrapolated to a window-sized cache); single ≤315-token requests 33 / 70 / 122 ms | the 10 Hz / 100 ms gate on the real stream path (stage 2: static window KV, CUDA graphs, an attention kernel without a materialized mask) and the re-run after contract v0.3 |
 
-Two measurements changed the plan and are still open decisions:
+Three measurements changed the plan; the first two are still open decisions, the third is decided:
 
 1. **Token budget.** With the current serialization a tick costs 1,764–3,712 tokens (estimate was 450–700), so a 10-second training chunk is 176K–371K tokens. A compact format with delta ticks (contract v0.3) is a prerequisite for both the latency budget and cloud training.
 2. **Candidate cap.** With two speed profiles and four push directions per object, almost every scene hits K = 32, and in 44% of E1 ticks the instructed target×zone action is pruned away, leaving a degenerate `hold` label (down-weighted for now). Removing the profile from the joint key, restricting push directions, and a goal-relevance pre-filter are the proposed fix.
+3. **Backbone (decided 2026-09-19).** The Spark screen fits per-request model time as an intercept plus a token cost — 26.5 / 51.6 / 93.6 ms + 38.6 / 107.7 / 152 ms per 1K new tokens for 2B / 4B / 9B — and ≈2.1 ms per 1K cached tokens for attention, so the 9B is 3.5–4.7× over budget at a 500-token tick and no single lever closes that. Qwen3.5-2B (primary) and Qwen3.5-4B (5 Hz fallback) go to stage 2; the 9B leaves the 10 Hz track (FP8 deferred until a profiler attribution in stage 2), the 27B is excluded. Full numbers: `artifacts/reports/backbone-screen.json`, docs/03.
 
 ## Repository
 
@@ -71,8 +72,8 @@ src/robo_jev/
   contracts.py  data/  sim/  harness/  perception/      # world, harness, expert, data pipeline
   model/  loss.py  sampler.py  train.py  checkpoint.py   # model contracts and CPU training path
 configs/     harness, controller, simulator, expert, events, data, model fixture, training
-scripts/     generate_episodes · rollout_keyframes · dagger_cycle · measure_tokens · fetch_tokenizer
-tests/       898 tests; fixtures under tests/fixtures
+scripts/     generate_episodes · rollout_keyframes · dagger_cycle · measure_tokens · fetch_tokenizer · fetch_backbone · measure_candidates
+tests/       921 tests; fixtures under tests/fixtures
 HANDOFF.md   how to continue on another machine; what lives outside git
 ```
 
@@ -93,7 +94,7 @@ uv run python -m robo_jev.train --config configs/train/tiny_cpu.yaml
 ## Roadmap
 
 1. Decide contract v0.3 (compact serialization, delta ticks, candidate space, allowed-set labels), seal semantic holdouts, regenerate the first batch, re-measure tokens.
-2. Measure candidate backbones (2–4B, 9B) on deployment-class hardware with representative inputs; select by speed *and* zero-shot judgment quality.
+2. ~~Measure candidate backbones (2–4B, 9B) on deployment-class hardware with representative inputs~~ — done for speed (native path, 2026-09-19; see Status). Still open: zero-shot judgment quality, and stage 2 on the real stream path with the 2B/4B.
 3. First trained model in the cloud: readout-only, then backbone + readout, on non-robot data plus robot episodes; evaluate on held-out question semantics and calibration.
 4. Full D1 rollouts, DAgger cycles, closed-loop comparison against the rule baseline with decision-stability metrics.
 

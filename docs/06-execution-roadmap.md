@@ -151,12 +151,14 @@ python -m robo_jev.data.validate --dataset artifacts/datasets/d1 --report artifa
 
 **1단계 · 예비 선별(G0a, 1×GPU).** native forward와 무학습 측정으로 명백히 맞지 않는 후보를 거른다. 통과 후보는 최대 2개다.
 
-- [ ] [모델 설계](03-model-and-training-design.md)의 후보 표를 측정 직전에 공식 공개로 다시 확인하고 `candidates.yaml`에 revision·라이선스·층 구성을 고정한다.
-- [ ] 실제 tokenizer로 틱당 토큰 분포(물체 6/10개, K=12/32, 지시 변경, 3D 요약 필드 포함)를 측정한다.
-- [ ] 로봇 10질문 스트림과 대표 셀을 D0 스트림·D1 smoke에서 뽑아 후보마다 native forward의 10Hz 연속 틱 지연을 잰다. 스트림 상태 warm과 cold, L1-a 스트림과 무상태 L0 요청을 모두 잰다.
+- [x] [모델 설계](03-model-and-training-design.md)의 후보 표를 측정 직전에 공식 공개로 다시 확인하고 `candidates.yaml`에 revision·라이선스·층 구성을 고정한다. (2026-09-19: Qwen3.5-2B/4B/9B + 참고 Qwen3.8-27B, 40-hex revision·Apache-2.0·층 구성·센 파라미터 수; `scripts/fetch_backbone.py`가 `artifacts/models/manifest.json`에 파일별 해시를 적고 적재 전에 대조)
+- [x] 실제 tokenizer로 틱당 토큰 분포(물체 6/10개, K=12/32, 지시 변경, 3D 요약 필드 포함)를 측정한다. (`scripts/measure_tokens.py`, 08 §3.4)
+- [x] 로봇 10질문 스트림과 대표 셀을 D0 스트림·D1 smoke에서 뽑아 후보마다 native forward의 10Hz 연속 틱 지연을 잰다. 스트림 상태 warm과 cold, L1-a 스트림과 무상태 L0 요청을 모두 잰다. (2026-09-19 DGX Spark, D1 대신 합성 하한/상한/지시 변경 + 500토큰 길이 대용; 아래 결과)
 - [ ] 같은 후보에 대해 D0와 D1 dev의 무학습 라벨 점수 읽기 품질을 잰다.
-- [ ] 후보별로 10초 학습 구간(약 55K token)의 활성 메모리와 윈도우 KV(prefix + 30틱)를 산정해 학습 가능 노드와 비용을 기록한다.
-- [ ] 탈락 기준: 토큰 하한에서도 native 지연이 예산을 넘음, 학습 메모리가 예산 노드에 맞지 않음, 무학습 품질이 D1 dev에서 다른 후보보다 뚜렷이 낮음. 결과와 근거를 `backbone-screen.json`에 남긴다.
+- [x] 후보별로 10초 학습 구간(약 55K token)의 활성 메모리와 윈도우 KV(prefix + 30틱)를 산정해 학습 가능 노드와 비용을 기록한다. (config 기반 추정 + 실측 캐시 바이트, 05 §4; 노드·비용은 확정 후보 기준으로 05에서 재산정)
+- [x] 탈락 기준: 토큰 하한에서도 native 지연이 예산을 넘음, 학습 메모리가 예산 노드에 맞지 않음, 무학습 품질이 D1 dev에서 다른 후보보다 뚜렷이 낮음. 결과와 근거를 `backbone-screen.json`에 남긴다. (지연·메모리로 판정; 무학습 품질은 미측정)
+
+**1단계 결과(2026-09-19, DGX Spark GB10, native BF16, transformers 5.17 + fla·causal-conv1d 커널 활성, sdpa; `artifacts/reports/backbone-screen.json`).** stream warm(prefix + 30틱 캐시 뒤 연속 틱, native 캐시는 윈도우 없이 자람)의 p95 모델 시간: 현재 서식(틱당 ≈1.85K 토큰) 2B 928 / 4B 2,299 / 9B 2,447 / 27B 5,640 ms — 모두 80 ms의 ≥7×, 100 ms 초과율 1.0. 500토큰 길이 대용 틱: p95 123 / 305 / 378 / 886 ms, 윈도우 크기 캐시(prefix + 29틱)로 외삽하면 83 / 197 / 278 ms. 단일 요청(≤315토큰, 캐시 없음) p50 33 / 70 / 122 ms = 절편 26.5 / 51.6 / 93.6 ms + 1K 토큰당 38.6 / 107.7 / 152 ms. cold(무상태 재계산)는 warm의 7~25×. 문자 그대로는 **통과 후보가 없다** → "예산 안의 후보가 없으면" 조항대로 토큰 예산(계약 v0.3)이 먼저이고, 2단계 후보(≤2)는 v0.3 길이에서 예산에 가장 가까운 **Qwen3.5-2B(주, 10~15% 개선이면 10 Hz)와 Qwen3.5-4B(5 Hz 대비)**로 한다. 9B는 10 Hz 트랙 제외(거리 3.5~4.7×; FP8은 2단계의 profiler·CUDA graph 귀속 측정 뒤), 27B 제외. 2단계의 지렛대 순서: 마스크 없는 윈도우 attention 커널(sdpa+마스크가 윈도우 틱의 ≈40%, FLOP 시간의 ≈8×) → 정적 윈도우 KV 선할당(틱마다 `torch.cat`이 새 segment를 만들어 reserved가 allocated의 2~4×) → CUDA graph/`torch.compile`(절편).
 
 **2단계 · 최종 선정(G0b, 실제 경로).** 1단계를 통과한 후보(≤2)에 대해 Task 4의 최소 실제 경로(P0 pointer readout + `StreamState` 분기·상태 전달 + 짧은 TBPTT 구간)를 구현하고 readout-only 적응을 거친 뒤 잰다. native 측정은 실제 kernel·cache 복제·메모리 이동·readout 비용을 포함하지 않으므로 최종 속도나 학습 후 품질의 근거로 쓰지 않는다.
 
@@ -165,7 +167,7 @@ python -m robo_jev.data.validate --dataset artifacts/datasets/d1 --report artifa
 - [ ] 10초 구간 학습의 실제 peak 메모리를 재고, 후보별 D1·D2 학습 시간을 [GPU 계획](05-experiment-and-cloud-plan.md)의 시간 풀과 대조한다.
 - [ ] 지연·품질·학습 비용을 함께 놓고 본 실험 backbone을 확정한다. 탈락 후보의 측정값과 근거를 `backbone-selection.json`에 남기고, 확정 후보 기준으로 용량·비용 표를 다시 계산한다.
 
-실행: `python scripts/measure_candidates.py --config configs/model/candidates.yaml --dataset artifacts/datasets/d1 --path native --report artifacts/reports/backbone-screen.json`, 이어서 통과 후보에 `--path stream`과 `python scripts/adapt_readout.py ...`. 예산 안의 후보가 없으면 토큰 예산·변화분 틱·서빙 GPU 수·판단 주기를 조정한 뒤 다시 잰다. **2단계를 통과하기 전에는 8 GPU 학습 예산(G1 이후)을 집행하지 않는다.** 1단계는 1주차, 2단계는 Task 4의 최소 경로가 나오는 2~3주차에 수행한다.
+실행: `uv run python scripts/measure_candidates.py --config configs/model/candidates.yaml --path native --ticks 70 --report artifacts/reports/backbone-screen.json`(입력은 D0 스트림·`measure_tokens`의 합성 장면·D0 단일 요청; 계약 v0.3 뒤 `--profiles lower,v03_target`로 재실행), 이어서 통과 후보에 `--path stream`과 `python scripts/adapt_readout.py ...`. 예산 안의 후보가 없으면 토큰 예산·변화분 틱·서빙 GPU 수·판단 주기를 조정한 뒤 다시 잰다. **2단계를 통과하기 전에는 8 GPU 학습 예산(G1 이후)을 집행하지 않는다.** 1단계는 1주차, 2단계는 Task 4의 최소 경로가 나오는 2~3주차에 수행한다.
 
 ### Task 2c: 소형 scorer 기준군과 대조 지표 (CPU, 하루)
 
