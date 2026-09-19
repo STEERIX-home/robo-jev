@@ -120,7 +120,7 @@ def test_the_token_serializer_has_its_own_version_apart_from_the_record_serializ
     from robo_jev.model import serialize as serialize_module
 
     config = yaml.safe_load(SIM_CONFIG.read_text(encoding="utf-8"))
-    assert TOKEN_SERIALIZER_VERSION == "ts0.4"
+    assert TOKEN_SERIALIZER_VERSION == "ts0.5"
     assert TOKEN_SERIALIZER_VERSION.startswith("ts") and str(config["version"]).startswith("s")
     assert TOKEN_SERIALIZER_VERSION != config["version"]
     assert not hasattr(serialize_module, "SERIALIZER_VERSION")  # 옛 이름은 뜻이 둘이라 없앴다
@@ -766,6 +766,34 @@ def test_legacy_candidate_entries_lose_their_prose_but_keep_the_key(tokenizer, s
     assert stream_candidate_line({"id": "cx", "action_ref": "c3", "key": "hold"}) == "cx: hold action_ref=c3\n"  # 다른 후보를 가리키면 남는다
     out = serialize_request(stream, tokenizer, layout="stream_l1a")
     assert "c1: grasp o7 top→zoneL slow" in out["text"] and "빨간 컵을 top 면으로" not in out["text"]
+
+
+def test_a_candidate_line_carries_the_clearance_when_a_neighbour_moved_but_the_target_did_not(tokenizer):
+    """리뷰 2 C1: 후보 줄의 `clr` 생략은 **모델이 마지막으로 본** 대상 동적 줄의 값에 댄다. 이웃 o1이 정지한 대상 o0 쪽으로
+    움직이면 o0의 여유가 40 → 12로 바뀌지만 o0의 동적 줄은 나가지 않는다(여유 변화는 촉발 조건이 아니다) — 그 틱에 후보 줄이
+    새 값을 나르고, 다음 갱신 틱에 o0 줄이 12를 실은 뒤에야 다시 뺀다."""
+
+    def mutate(index, state):
+        if index >= 1:
+            state["objects"][1]["pose_mm"] = [200, 120, -80]  # o1이 o0 쪽으로 100mm
+            for item in state["derived"]:
+                item["clearance_mm"] = 12
+
+    record = synthetic_stream(12, mutate=mutate)
+    for tick in record["ticks"][1:]:
+        for entry in tick["request"]["candidates"]["q_main"]:
+            if "clr" in entry:
+                entry["clr"] = 12
+    out = serialize_request(record, tokenizer, layout="stream_l1a")
+    assert section_text(out, tokenizer, 1, "state:objects_dynamic") == "o1 p=200,120,-80 s=3 clr=12 corr=100\n"  # o0 줄은 없다
+    assert "c1: grasp o0 top→zoneL d=381 clr=12" in tick_text(out, tokenizer, 1).splitlines()
+    assert "c2: push o0 -x d=417 clr=12 path=blocked" in tick_text(out, tokenizer, 1).splitlines()
+    for index in range(2, 10):  # 갱신 틱 전까지 틱마다 후보 줄이 새 값을 나른다
+        assert "clr=12" in tick_text(out, tokenizer, index) and section_text(out, tokenizer, index, "state:objects_dynamic") == ""
+    assert "o0 p=300,0,-80 s=3 clr=12 corr=100" in section_text(out, tokenizer, 10, "state:objects_dynamic")  # 갱신 틱: o0 줄이 12를 싣는다
+    assert "c1: grasp o0 top→zoneL d=381" in tick_text(out, tokenizer, 10).splitlines() and "clr=12" not in tick_text(out, tokenizer, 11)
+    # 대상 자신이 움직여 동적 줄이 나간 틱은 전처럼 뺀다.
+    assert "c1: grasp o0 top→zoneL d=381" in tick_text(out, tokenizer, 0).splitlines()
 
 
 def test_a_partial_dynamic_line_says_when_a_field_returned_to_its_default(tokenizer):

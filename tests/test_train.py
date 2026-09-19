@@ -527,7 +527,7 @@ def test_cli_runs_the_shipped_config_for_three_steps_and_writes_checkpoint_and_m
     assert [m["step"] for m in metrics["steps"]] == [1, 2, 3] and metrics["status"] == "completed"
     assert [u["kind"] for u in metrics["steps"][0]["units"]] == ["stream", "single"] and metrics["steps"][0]["chunks"] == 3
     assert all(abs(m["loss_share"]["domain"]["robot"] - 0.6) < 1e-6 for m in metrics["steps"])
-    assert metrics["manifest"]["serializer_version"] == "ts0.4" and metrics["manifest"]["question_set"]["id"] == "qs-v0"
+    assert metrics["manifest"]["serializer_version"] == "ts0.5" and metrics["manifest"]["question_set"]["id"] == "qs-v0"
     assert len(metrics["manifest"]["dataset_manifests"]) == 1 and metrics["manifest"]["dataset_manifests"][0]["sha256"]
     assert metrics["manifest"]["git"]["sha"]
     assert metrics["config"]["max_steps"] == 3 and metrics["config"]["checkpoint_every"] == 3

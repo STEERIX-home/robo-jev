@@ -111,8 +111,9 @@ LAYOUTS = ("state_first", "stream_l1a")
 #: 환경·하네스가 상태를 레코드로 적는 **레코드 직렬화**(상태 스키마·mm/ms 정수·quaternion 자릿수)의 버전이고
 #: :mod:`robo_jev.data.episode` 가 적는다. 4b가 토큰 형식을 바꿨을 때 두 형식이 `s0.2` 한 문자열을 나눠 가졌던
 #: 일을 되풀이하지 않도록 이름부터 가른다(`ts…` 대 `s…`).
-TOKEN_SERIALIZER_VERSION = "ts0.4"
-#: 스트림 서식의 계약 버전 (docs/08 §3.2 표). ts0.4 = 서식 v0.3 (짧은 이름, 물체 소개/동적 분리, 변화분 틱).
+TOKEN_SERIALIZER_VERSION = "ts0.5"
+#: 스트림 서식의 계약 버전 (docs/08 §3.2 표). ts0.4 = 서식 v0.3 (짧은 이름, 물체 소개/동적 분리, 변화분 틱); ts0.5 = 리뷰 1의
+#: 변화분 줄 규칙(기본값 복귀·`gone`)과 후보 줄 생략(`path=ok`, 모델이 마지막으로 본 대상 `clr`와 같은 `clr`).
 STREAM_FORMAT = "v0.3"
 POSITION_UNIT = "mm"
 QUATERNION_DECIMALS = 2
@@ -718,9 +719,11 @@ def stream_candidate_line(entry: dict, *, geom_age_ms: Any = None, object_cleara
     """스트림의 후보 한 줄 (서식 v0.3): 결합 후보 ``<id>: <기능> <대상> <접근>→<목적지> d= [clr=] [path=blocked] [g=]``,
     밀기는 ``<접근>``만(목적지 없음), 고정 후보·경로 후보는 ``<id>: <키>`` / ``<id>: <종류> [<경유점>]``. 자연어 설명은
     없다 — 키가 설명이다. 기본값·중복은 뺀다: ``path=ok``는 적지 않고 막힌 경로만 ``path=blocked``; ``clr``(대상의 최근접
-    여유)는 그 틱의 대상 물체 동적 줄 `clr`(`object_clearance[대상 id]`)와 같으면 중복이라 뺀다(하네스가 같은 값에서
-    채운다); 대상 기하의 나이 ``g``는 틱의 기하 나이(`t … age g<ms>`)와 다를 때만(관측이 끊긴 대상) 적는다. 옛 서식의
-    항목(`desc`·`derived`)은 버리고, 그 밖의 필드는 ``k=v``로 뒤에 붙는다.
+    여유)는 **모델이 마지막으로 본** 대상 물체 동적 줄의 `clr`(`object_clearance[대상 id]` — 변화분 상태가 기억하는, 이번
+    틱까지 실은 값)와 같으면 중복이라 뺀다(하네스가 같은 값에서 채운다). 대상은 그대로인데 이웃이 움직여 여유만 바뀌면
+    동적 줄이 나가지 않으므로 후보 줄이 새 값을 나른다(리뷰 2 C1). 대상 기하의 나이 ``g``는 틱의 기하 나이(`t … age
+    g<ms>`)와 다를 때만(관측이 끊긴 대상) 적는다. 옛 서식의 항목(`desc`·`derived`)은 버리고, 그 밖의 필드는 ``k=v``로 뒤에
+    붙는다.
     """
     rest = dict(entry)
     identifier = _scalar("id", rest.pop("id"))
@@ -785,6 +788,8 @@ class _DeltaState:
         self.conf: dict[str, Any] = {}
         self.visible: dict[str, float] = {}
         self.stale: dict[str, bool] = {}
+        #: 물체마다 마지막으로 실은 동적 줄의 `clr` — 후보 줄의 `clr` 생략은 이것에 댄다(그 틱의 상태 값이 아니라).
+        self.clearance: dict[str, Any] = {}
         self.zones: str | None = None
         self.scene: str | None = None
         self.robot_quat: str | None = None
@@ -812,7 +817,7 @@ class _DeltaState:
         for object_id in [known for known in self.intro if known not in present]:
             # 추적 목록에서 빠진 물체는 한 번 ``<id> gone``으로 알리고 잊는다 — 다시 나타나면 처음 관측처럼 전체 줄이다.
             dynamics.append(f"{_scalar('id', object_id)} gone\n")
-            for table in (self.intro, self.pose, self.quat, self.conf, self.visible, self.stale):
+            for table in (self.intro, self.pose, self.quat, self.conf, self.visible, self.stale, self.clearance):
                 table.pop(object_id, None)
         for entry in state.get("objects") or ():
             if not isinstance(entry, dict) or "id" not in entry:
@@ -848,7 +853,12 @@ class _DeltaState:
                     key for key, changed in (("quat", rotated), ("surface_conf", conf_change), ("visible_ratio", visibility_change), ("reid", reid))
                     if full or changed
                 )
-                dynamics.append(_dynamic_line(entry, derived_by_object.get(object_id, {}), stale=stale, optional=optional, full=full))
+                derived = derived_by_object.get(object_id, {})
+                dynamics.append(_dynamic_line(entry, derived, stale=stale, optional=optional, full=full))
+                if derived.get("clearance_mm") is not None:
+                    self.clearance[object_id] = derived["clearance_mm"]
+                else:
+                    self.clearance.pop(object_id, None)
                 self.pose[object_id] = pose
                 self.quat[object_id] = quat
                 self.conf[object_id] = conf
@@ -988,12 +998,6 @@ def _serialize_stream(
         geom_age = None
         if isinstance(state.get("t"), dict) and isinstance(state["t"].get("age_ms"), dict):
             geom_age = state["t"]["age_ms"].get("geom")
-        object_clearance = {
-            str(item["object"]): item.get("clearance_mm")
-            for item in state.get("derived") or ()
-            if isinstance(item, dict) and "object" in item and item.get("clearance_mm") is not None
-        }
-
         def add(name: str, text: str, kind: str = "state") -> None:
             if text:
                 chunks.append(_Chunk(text, kind, name, tick=index))
@@ -1002,6 +1006,9 @@ def _serialize_stream(
         with_text = goal_period > 0 and index > 0 and index % goal_period == 0 and not carries_instruction
         add("state:goal", _goal_line(state.get("goal"), with_text=with_text))
         intros, dynamics = delta.object_lines(state, index)
+        # 후보 줄의 `clr` 생략은 이번 틱까지 모델이 본 동적 줄의 값에 댄다 — 그 틱의 상태 값에 대면 대상은 그대로인데 이웃이
+        # 움직여 여유만 바뀐 틱에서 새 값이 어디에도 실리지 않는다(리뷰 2 C1).
+        object_clearance = dict(delta.clearance)
         add("state:objects_intro", "".join(intros))
         add("state:objects_dynamic", "".join(dynamics))
         add("state:zones", "".join(delta.zone_lines(state)))
