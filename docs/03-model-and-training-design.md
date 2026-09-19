@@ -35,13 +35,13 @@ N_active 상한 ≈ 실효 FLOPs/s × 모델 시간 예산 / (2 × 틱당 새 �
 | 150ms (5Hz 주기 안) | 약 30B | 약 15B | 약 10B |
 | 80ms (10Hz 주기 안) | 약 16B | 약 8B | 약 5B |
 
-이 가정에서 27B dense는 틱당 새 토큰을 약 1.1K 이하로 유지해야 5Hz에, 약 550 이하로 유지해야 10Hz에 들어온다. 로봇 스트림(L1-a)의 틱당 새 토큰은 400~600으로 추정되므로 27B는 10Hz 경계(약 74ms + 윈도우 attention·부대비용)이고 9B(약 25ms)는 여유가 있다. 틱당 토큰이 더 크면 active 약 10B 이하의 모델이나 여러 GPU에 나눈 서빙이 필요하다. 공개 분석이 관측한 Jev의 지연(360 tokens 57.5ms, 약 30K tokens 218ms)은 **서버 응답 헤더 시간**이며 GPU 시간도 클라이언트 전체 지연도 아니다(같은 원자료의 클라이언트 wall time은 서버 시간의 2~3.5배). 그 기울기 약 5µs/token은 서버 처리의 상한으로만 해석하며, 같은 가정의 27B dense·단일 GPU 계산값(약 135µs/token)과 범주가 달라 정확한 배속 차이로 쓰지 않는다. 후보 수 실험도 2~200개 범위이고 입력 길이 효과와 분리되지 않았다. 이 수치는 목표 설정의 참고이고 우리 모델의 성능으로 사용하지 않는다. [Jev 구조 분석 글](https://archerhume.com/posts/jevs-architecture-unmasked/?v=3)
+이 가정에서 27B dense는 틱당 새 토큰을 약 1.1K 이하로 유지해야 5Hz에, 약 550 이하로 유지해야 10Hz에 들어온다. 로봇 스트림(L1-a)의 틱당 새 토큰은 설계 시 400~600으로 추정했으나, **실측(2026-09-19, 실제 tokenizer, 현재 서식 h0.3/ts0.3)은 최초 틱 1,764~3,469, 실행 이력·지시 변경이 있는 후속 틱 최대 3,712**다(08 §3.4). 이 값이면 위 표의 어느 규모도 H100에서조차 10Hz에 들지 않으며, 서식 축약·변화분 틱(계약 v0.3, 목표 ≈500/틱)이 전제다. 또한 배포·실행 장비는 H100이 아니라 DGX Spark/Jetson급 엣지(≈273GB/s, H100의 1/4~1/8 연산)이므로 이 표는 참고이고 **지연 판정은 배포급 장비에서 대표 입력(현재 서식 하한·상한, K=32, 지시 변경 틱, warm history 30틱)으로 실측**한다. BF16이 주 비교 조건이고 FP8은 kernel 지원·양자화 대상·품질 차이를 명시한 별도 조건이다. 본선(2~4B 또는 9B)은 속도와 무학습 판단 품질을 함께 잰 결과로 정한다. 틱당 토큰이 더 크면 active 약 10B 이하의 모델이나 여러 GPU에 나눈 서빙이 필요하다. 공개 분석이 관측한 Jev의 지연(360 tokens 57.5ms, 약 30K tokens 218ms)은 **서버 응답 헤더 시간**이며 GPU 시간도 클라이언트 전체 지연도 아니다(같은 원자료의 클라이언트 wall time은 서버 시간의 2~3.5배). 그 기울기 약 5µs/token은 서버 처리의 상한으로만 해석하며, 같은 가정의 27B dense·단일 GPU 계산값(약 135µs/token)과 범주가 달라 정확한 배속 차이로 쓰지 않는다. 후보 수 실험도 2~200개 범위이고 입력 길이 효과와 분리되지 않았다. 이 수치는 목표 설정의 참고이고 우리 모델의 성능으로 사용하지 않는다. [Jev 구조 분석 글](https://archerhume.com/posts/jevs-architecture-unmasked/?v=3)
 
 **규모 고정의 원칙은 비교군 사이에 적용한다.** 구조 효과를 주장하는 모든 비교는 같은 backbone·초기 가중치를 사용한다. backbone 자체는 지연 예산이 허용하는 N_active 상한 안에서 고른다. 이는 학습된 큰 모델을 작은 학생으로 증류하는 일과 다르다. 처음부터 예산에 맞는 공개 사전학습 모델을 고르고 모든 비교군이 그 모델을 공유한다. 실시간 가능성에 대한 주장은 `backbone × 계산 구조 × 서빙 하드웨어`의 조합 단위로 보고한다.
 
 | 후보 축 | 확인한 예 (2026-09-18 공식 config) | 선정 시 확인할 것 |
 | --- | --- | --- |
-| Dense hybrid, 큰 규모 | `Qwen/Qwen3.8-27B` (linear 48층 + full 16층) | 10Hz 스트림의 틱당 토큰 예산과 deadline 초과율, 55K token 구간의 학습 메모리, 분기 학습의 kernel 지원 |
+| Dense hybrid, 큰 규모 | `Qwen/Qwen3.8-27B` (linear 48층 + full 16층) | 10Hz 스트림의 틱당 토큰 예산과 deadline 초과율, 학습 구간(실측 서식 176K~371K token, v0.3 목표 ≈50K)의 메모리, 분기 학습의 kernel 지원. 엣지 배포 전제에서는 본선 후보가 아님 |
 | Dense hybrid, 작은 규모 | `Qwen/Qwen3.5-9B` (같은 `qwen3_5` 구현, linear 24층 + full 8층) | 무학습 판단 품질의 하락 폭. 27B와 코드 경로를 공유하므로 1 GPU 디버깅에도 사용 |
 | MoE hybrid | `Qwen/Qwen3.5-35B-A3B` (256 experts 중 8개 활성, linear 32층 + full 8층) | 추론 연산은 active에 비례하지만 **학습 메모리는 총 파라미터에 비례**한다. router 안정성과 FSDP 분할도 확인 |
 | Full attention | `Qwen/Qwen3-14B` 등 (전 층 일반 attention) | 분기 격리를 mask만으로 구현할 수 있다. 세대가 이전이므로 판단 품질을 함께 비교 |
@@ -188,7 +188,7 @@ T0는 완료 모델이 아니다. 메모리가 모자라면 LoRA·부분 학습�
 
 목표 effective batch는 32개 상태다. 기본 8 GPU에서 rank당 1개 상태와 누적 4회로 시작한다. P0의 질문별 경로를 내부 microbatch로 나누더라도 상태별 loss 정규화를 유지한다. 참고군의 후보별 경로는 한 질문의 전체 logits를 모은 뒤 softmax한다. 최대 3 epoch 안에서 dev loss·분야별 정확도를 보고 checkpoint를 선택한다. test는 선택에 사용하지 않는다.
 
-**스트림 데이터의 학습 시퀀스.** 에피소드를 순서대로 10초 구간(약 100틱, prefix 별도 약 55K token)으로 나누고, 같은 optimizer step 안에서 구간을 차례로 forward·backward하며 DeltaNet·conv 상태와 윈도우 KV를 detach해 다음 구간에 전달한다(truncated BPTT). 한 에피소드가 하나의 gradient accumulation 단위이고, 구간 경계에서 gradient는 끊긴다. 추론과 같은 가중치·같은 이력의 상태를 얻으므로 warm-up이 필요 없고 모든 틱에 loss를 준다. 결정 분기의 gradient는 공통 상태로 합쳐 전달한다. effective batch 32개 상태는 스트림에서는 에피소드 32개로 읽는다. 구간당 활성 메모리는 backbone 선정 기준에 넣는다.
+**스트림 데이터의 학습 시퀀스.** 에피소드를 순서대로 10초 구간(약 100틱; 구간 토큰은 실측 서식으로 176K~371K, 계약 v0.3 목표로 ≈50K — 설계 시의 55K 가정은 v0.3 이후에만 성립)으로 나누고, 같은 optimizer step 안에서 구간을 차례로 forward·backward하며 DeltaNet·conv 상태와 윈도우 KV를 detach해 다음 구간에 전달한다(truncated BPTT). 한 에피소드가 하나의 gradient accumulation 단위이고, 구간 경계에서 gradient는 끊긴다. 추론과 같은 가중치·같은 이력의 상태를 얻으므로 warm-up이 필요 없고 모든 틱에 loss를 준다. 결정 분기의 gradient는 공통 상태로 합쳐 전달한다. effective batch 32개 상태는 스트림에서는 에피소드 32개로 읽는다. 구간당 활성 메모리는 backbone 선정 기준에 넣는다.
 
 한 번의 저장 단위에는 backbone, readout, tokenizer/revision, mask·직렬화 버전, optimizer/scheduler, RNG, sampler 위치, 데이터 manifest, 학습 설정을 포함한다. 배포용 가중치와 학습 재개용 checkpoint를 구분한다.
 

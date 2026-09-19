@@ -5,6 +5,7 @@ CPU의 소형 hybrid fixture(4b)로 학습 step의 논리만 검증한다. 실�
 """
 
 import copy
+import hashlib
 import json
 import math
 import subprocess
@@ -464,6 +465,35 @@ def test_config_rejects_what_the_cpu_path_does_not_implement(tmp_path):
             resolve_config({**base, key: value})
     with pytest.raises(ValueError, match="dataset_manifest"):
         resolve_config({k: v for k, v in base.items() if k != "dataset_manifest"})
+
+
+def test_model_id_other_than_the_fixture_is_rejected_and_the_manifest_records_what_was_built(tmp_path):
+    """리뷰 11 S2: fixture 전용 경로는 `tiny_hybrid` 이외의 model_id를 설정 단계에서 거절한다(실모델 adapter는 아직
+    없다 — 잘못된 설정이 성공처럼 보이면 안 된다). manifest의 `model` 블록은 요청한 id가 아니라 **실제로 만든 것**
+    (종류·설정 파일 해시·파라미터 수·dtype·장치)을 적는다."""
+    with pytest.raises(ValueError, match="model_id") as excinfo:
+        resolve_config(tiny_config(tmp_path, model_id="Qwen/Qwen3.5-9B"))
+    assert "adapter" in str(excinfo.value) and "tiny_hybrid" in str(excinfo.value)
+    shipped = yaml.safe_load((REPO / "configs" / "train" / "tiny_cpu.yaml").read_text(encoding="utf-8"))
+    assert shipped["model_id"] == "tiny_hybrid"
+    with pytest.raises(ValueError, match="model_id"):  # 리뷰의 재현 그대로: 배포 설정에서 model_id만 바꾼다
+        resolve_config({**shipped, "model_id": "Qwen/Qwen3.5-9B"})
+
+    with Trainer(tiny_config(tmp_path, max_steps=1)) as trainer:
+        model = trainer.manifest["model"]
+        assert model["kind"] == "tiny_hybrid" and model["id"] == "tiny_hybrid" and model["class"] == "TinyHybrid"
+        assert model["parameters"] == sum(p.numel() for p in trainer.model.parameters()) == 376_745
+        assert model["trainable_parameters"] == sum(p.numel() for p in trainer.model.parameters() if p.requires_grad)
+        assert model["dtype"] == "float32" and model["device"] == "cpu"
+        assert model["config"] == str(REPO / "configs" / "model" / "tiny_hybrid.yaml")
+        assert model["config_sha256"] == hashlib.sha256((REPO / "configs" / "model" / "tiny_hybrid.yaml").read_bytes()).hexdigest()
+        assert model["name"] == "tiny-hybrid-v0" and model["vocab_size"] == SMALL_VOCAB and model["readout"] == "pointer"
+        assert trainer.manifest["identity"]["model"]["parameters"] == 376_745
+    with Trainer(tiny_config(tmp_path, max_steps=1, trainable="readout_only")) as frozen:
+        assert frozen.manifest["model"]["parameters"] == 376_745
+        assert frozen.manifest["model"]["trainable_parameters"] == sum(
+            p.numel() for name, p in frozen.model.named_parameters() if not name.startswith("backbone.")
+        )
 
 
 # --------------------------------------------------------------------------

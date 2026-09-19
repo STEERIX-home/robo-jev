@@ -302,3 +302,43 @@ def test_every_item_of_a_bucket_is_drawn_once_per_epoch(items):
         drawn.extend(many.draw("non_robot").items)
     assert sorted(drawn[:32]) == sorted(item.index for item in items if item.kind == "single")
     assert sorted(drawn[32:64]) == sorted(drawn[:32]) and drawn[32:64] != drawn[:32]  # 다음 epoch는 다시 섞인다
+
+
+def test_sampler_position_names_the_record_files_and_refuses_a_position_over_different_records(tmp_path, items):
+    """저장 위치는 뽑은 순서·cursor뿐 아니라 **그 index가 가리키는 레코드의 출처**(파일별 sha256, 적재 순서, 레코드 수)를
+    적는다. 같은 index가 다른 레코드를 가리키게 된 데이터(정답 하나를 바꾸고 manifest 해시를 맞춘 사본)에는 그 위치를
+    싣지 않는다 (리뷰 11 S1)."""
+    import hashlib
+
+    manifest = json.loads(D0_MANIFEST.read_text(encoding="utf-8"))
+    sampler = MixedSampler(items, seed=17, nonrobot_tokens_per_unit=400)
+    sampler.draw_step(2)
+    position = sampler.state_dict()
+    assert position["sources"] == [
+        {"file": "d0.jsonl", "sha256": manifest["files"]["d0.jsonl"]["sha256"], "first_index": 0, "items": 32},
+        {"file": "d0_streams.jsonl", "sha256": manifest["files"]["d0_streams.jsonl"]["sha256"], "first_index": 32, "items": 2},
+    ]
+    assert all(item.file_sha256 == manifest["files"][item.file]["sha256"] for item in items)
+
+    for name in ("d0.jsonl", "d0_streams.jsonl"):
+        (tmp_path / name).write_bytes(D0_MANIFEST.with_name(name).read_bytes())
+    rows = [json.loads(line) for line in (tmp_path / "d0.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert rows[0]["labels"][0]["candidate_ids"] == ["c0"]
+    rows[0]["labels"][0]["candidate_ids"] = ["c1"]
+    (tmp_path / "d0.jsonl").write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+    changed = hashlib.sha256((tmp_path / "d0.jsonl").read_bytes()).hexdigest()
+    manifest["files"]["d0.jsonl"]["sha256"] = changed
+    (tmp_path / "d0_manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    tampered = load_items(tmp_path / "d0_manifest.json", tokenizer=WhitespaceTokenizer(), splits=("train",), stream_max_ticks=20)
+    assert [i.index for i in tampered] == [i.index for i in items]  # 같은 index·같은 묶음 — 내용만 다르다
+    with pytest.raises(ValueError, match="sources") as excinfo:
+        MixedSampler(tampered, seed=17, nonrobot_tokens_per_unit=400).load_state_dict(position)
+    message = str(excinfo.value)
+    assert "d0.jsonl" in message and changed[:12] in message and "d0_streams.jsonl" not in message
+    # 같은 파일(다른 경로의 사본)이면 싣는다
+    (tmp_path / "d0.jsonl").write_bytes(D0_MANIFEST.with_name("d0.jsonl").read_bytes())
+    (tmp_path / "d0_manifest.json").write_bytes(D0_MANIFEST.read_bytes())
+    same = load_items(tmp_path / "d0_manifest.json", tokenizer=WhitespaceTokenizer(), splits=("train",), stream_max_ticks=20)
+    resumed = MixedSampler(same, seed=17, nonrobot_tokens_per_unit=400)
+    resumed.load_state_dict(position)
+    assert resumed.state_dict() == position

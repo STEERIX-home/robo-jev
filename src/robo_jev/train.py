@@ -37,6 +37,15 @@ step 도중(구간 경계)에서는 여기에 진행 위치(단위·구간 index
 이어가며, 같은 seed의 연속 실행과 FP32·CPU에서 비트 단위로 같아야 한다(tests/test_resume.py). 중단은
 ``stop_after``(결정적 검사용)나 ``max_wall_hours``(예산)로 구간 경계에서 일어난다.
 
+**run의 정체 (리뷰 11 S1).** 재개는 두 가지를 대조한다. (1) 설정 — 중단·예산·경로·이름(:data:`RESUME_FREE_KEYS`)과
+내용으로 대조하는 경로 키(:data:`RESUME_PATH_KEYS`: 모델 설정 파일, tokenizer; `dataset_manifests`의 경로)를 뺀
+나머지는 문자 그대로 같아야 한다. (2) manifest의 **identity 블록**(:func:`manifest_identity`) — 데이터 manifest의
+sha256과 파일별 sha256·분야 태그·레코드 수, tokenizer의 종류·파일 sha256·id·revision, 토큰 직렬화 버전, 질문
+세트와 표지, layout, 실제로 만든 모델(종류·설정 파일 sha256·이름·어휘·seed·readout·rank·파라미터 수). 경로는
+정체가 아니고 내용이 정체다: 같은 데이터의 사본을 다른 경로에 두고 재개해도 되지만, 레코드 하나가 바뀐 데이터
+(manifest 해시를 맞춰도)에는 옛 run을 이어 붙이지 않는다 — 달라진 키를 모두 이름으로 적고 거절한다. sampler
+위치도 자기 index가 가리키는 레코드의 출처(파일별 sha256)를 함께 대조한다(:mod:`robo_jev.sampler`).
+
 이 모듈은 generator·simulator·하네스를 import하지 않는다 (docs/06 §1).
 """
 
@@ -76,7 +85,7 @@ from robo_jev.model.hybrid import DEFAULT_CONFIG
 from robo_jev.model.judge import Judge
 from robo_jev.model.serialize import TOKEN_SERIALIZER_VERSION
 from robo_jev.model.stream import StreamState
-from robo_jev.model.tokenizer import WhitespaceTokenizer, load_tokenizer
+from robo_jev.model.tokenizer import WhitespaceTokenizer, describe_tokenizer, load_tokenizer
 from robo_jev.sampler import (
     DEFAULT_LAYOUTS,
     DEFAULT_MATERIAL_SHARES,
@@ -97,20 +106,27 @@ from robo_jev.sampler import (
 __all__ = [
     "ChunkResult",
     "EpisodePlan",
+    "MODEL_IDS",
     "RESUME_FREE_KEYS",
+    "RESUME_PATH_KEYS",
     "Trainer",
     "build_model",
     "clip_gradients",
     "detach_stream_state",
     "episode_chunks",
+    "identity_differences",
     "layout_prefix",
     "lr_factor",
     "main",
+    "manifest_identity",
+    "model_block",
     "parameter_groups",
     "plan_episode",
     "resolve_config",
+    "resume_config",
     "run_single_unit",
     "run_stream_chunk",
+    "tokenizer_block",
     "train",
 ]
 
@@ -123,6 +139,9 @@ DTYPES = {"float32": torch.float32, "float64": torch.float64}
 TRAINABLE = ("readout_only", "text_backbone_and_readout")
 EXECUTION_BACKENDS = ("independent_paths",)  # P0. `shared_hybrid`(P1)는 state_first에 아직 없다 (4b 보고 §5)
 OPTIMIZERS = ("adamw",)
+#: 만들 수 있는 모델. 지금은 4b의 소형 계산 fixture뿐이다 — 실제 backbone(Qwen 계열)의 adapter는 docs/06 Task 4의
+#: GPU 부분이라 아직 없다. 다른 id는 설정 단계에서 거절한다(리뷰 11 S2: 잘못된 설정이 성공처럼 보이면 안 된다).
+MODEL_IDS = ("tiny_hybrid",)
 DEFAULT_TICK_WEIGHTS = {"steady": 0.25, "event": 2.0, "goal_change": 2.0, "other": 1.0}
 DEFAULT_SAMPLER = {
     "material_shares": dict(DEFAULT_MATERIAL_SHARES),
@@ -135,6 +154,14 @@ DEFAULT_SAMPLER = {
 #: 재개할 때 checkpoint의 설정과 달라도 되는 키 — 중단·예산·경로·이름뿐이다(run id는 checkpoint의 것을
 #: 쓴다). 나머지는 run의 정체라 같아야 한다.
 RESUME_FREE_KEYS = ("resume", "stop_after", "max_wall_hours", "checkpoint_every", "artifacts_dir", "run_id", "run_name")
+#: 값이 경로·이름인 키 — 문자 그대로가 아니라 **가리키는 내용**(manifest의 identity 블록: 설정 파일 sha256, tokenizer
+#: 파일 sha256·id·revision)으로 대조한다. `dataset_manifests`도 경로는 내용(manifest·파일 sha256)으로, 태그는 그대로.
+RESUME_PATH_KEYS = ("model_config", "tokenizer")
+#: 실제로 만든 backbone 클래스 → 그 model_id (manifest의 `model.kind`). :func:`build_model`이 새 종류를 만들면 여기도 더한다.
+_BACKBONE_KINDS = {"TinyHybrid": "tiny_hybrid"}
+#: identity 블록에 들어가는 tokenizer·모델 블록의 키 (:func:`manifest_identity`).
+_TOKENIZER_IDENTITY = ("kind", "sha256", "id", "revision")
+_MODEL_IDENTITY = ("kind", "class", "config_sha256", "name", "vocab_size", "seed", "readout", "rank", "parameters")
 
 DEFAULTS: dict[str, Any] = {
     "run_name": "run",
@@ -241,6 +268,12 @@ def resolve_config(config: dict) -> dict:
     out["dataset_manifests"] = _dataset_manifests(out.pop("dataset_manifest"), out["dataset_manifests"])
     out["dataset_manifest"] = None  # 정규화한 목록이 run의 정체다 — `dataset_manifest: x`와 `dataset_manifests: [x]`는 같은 run
     _need(_is_int(out["max_steps"]) and out["max_steps"] >= 1, f"max_steps: 1 이상의 정수여야 한다 (받은 값: {out['max_steps']!r})")
+    _need(
+        out["model_id"] in MODEL_IDS,
+        f"model_id: {list(MODEL_IDS)}만 만들 수 있다 — 실제 backbone(Qwen 계열)의 adapter는 아직 구현하지 않았다"
+        f"(docs/06 Task 4의 GPU 부분). 이 경로는 소형 계산 fixture 전용이라 다른 id를 조용히 fixture로 바꾸지 않는다 "
+        f"(받은 값: {out['model_id']!r})",
+    )
     _need(out["execution_backend"] in EXECUTION_BACKENDS, f"execution_backend: {list(EXECUTION_BACKENDS)}만 구현했다 — shared_hybrid(P1)는 state_first에 아직 없다 (받은 값: {out['execution_backend']!r})")
     _need(out["readout"] in READOUTS, f"readout: {list(READOUTS)} 중 하나여야 한다 (받은 값: {out['readout']!r})")
     _need(out["dtype"] in DTYPES, f"dtype: {list(DTYPES)}만 CPU 검증 범위다 — BF16 허용 오차는 클라우드 단계 (받은 값: {out['dtype']!r})")
@@ -592,9 +625,101 @@ def git_revision() -> dict[str, Any] | None:
     return {"sha": sha, "dirty": bool(dirty)}
 
 
+def tokenizer_block(name: str) -> dict[str, Any]:
+    """manifest의 tokenizer 블록 — 설정의 이름과 실제 파일의 정체(:func:`robo_jev.model.tokenizer.describe_tokenizer`)."""
+    if name == "whitespace":
+        return {"name": "whitespace", "kind": "whitespace"}
+    return {"name": name, **describe_tokenizer(name)}
+
+
+def model_block(config: dict, model: Judge) -> dict[str, Any]:
+    """manifest의 model 블록 — 요청한 id가 아니라 **실제로 만든 것**: 종류·클래스·설정 파일과 그 sha256·이름·어휘·seed·
+    readout·rank·파라미터 수(전체·학습 대상)·dtype·장치 (리뷰 11 S2)."""
+    parameters = list(model.parameters())
+    config_path = Path(config["model_config"])
+    backbone = type(model.backbone).__name__
+    return {
+        "kind": _BACKBONE_KINDS.get(backbone, backbone),
+        "id": config["model_id"],
+        "class": backbone,
+        "config": str(config_path),
+        "config_sha256": sha256_of(config_path),
+        "name": model.backbone.config.name,
+        "vocab_size": model.backbone.config.vocab_size,
+        "seed": model.backbone.config.seed if config["model_seed"] is None else config["model_seed"],
+        "readout": model.readout,
+        "rank": model.rank,
+        "parameters": sum(p.numel() for p in parameters),
+        "trainable_parameters": sum(p.numel() for p in parameters if p.requires_grad),
+        "dtype": str(parameters[0].dtype).removeprefix("torch."),
+        "device": str(parameters[0].device),
+        "revision_manifest": config["model_revision_manifest"],
+    }
+
+
+def manifest_identity(manifest: dict) -> dict[str, Any]:
+    """manifest의 **identity 블록** — 재개 때 같아야 하는 내용(모듈 설명 "run의 정체"). 경로·git·torch·시각은 뺀다."""
+    return {
+        "datasets": [
+            {key: copy.deepcopy(entry[key]) for key in ("sha256", "files", "domain", "material", "records")}
+            for entry in manifest["dataset_manifests"]
+        ],
+        "splits": list(manifest["splits"]),
+        "serializer_version": manifest["serializer_version"],
+        "question_set": copy.deepcopy(manifest["question_set"]),
+        "layouts": dict(manifest["layouts"]),
+        "tokenizer": {key: manifest["tokenizer"][key] for key in _TOKENIZER_IDENTITY if key in manifest["tokenizer"]},
+        "model": {key: manifest["model"].get(key) for key in _MODEL_IDENTITY},
+    }
+
+
+def _flatten(value: Any, prefix: str = "") -> dict[str, Any]:
+    if isinstance(value, dict) and value:
+        out: dict[str, Any] = {}
+        for key, inner in value.items():
+            out.update(_flatten(inner, f"{prefix}.{key}" if prefix else str(key)))
+        return out
+    if isinstance(value, list) and value:
+        out = {}
+        for position, inner in enumerate(value):
+            out.update(_flatten(inner, f"{prefix}[{position}]"))
+        return out
+    return {prefix: value}
+
+
+def _short(value: Any) -> str:
+    if isinstance(value, str) and len(value) > 16:
+        return value[:12] + "…"
+    return repr(value)
+
+
+def identity_differences(saved: dict, current: dict) -> list[str]:
+    """두 identity 블록에서 다른 키를 모두 ``키 (저장 값, 지금 값)`` 꼴로 — 지금 블록의 순서, 저장에만 있는 키는 뒤에."""
+    before, after = _flatten(saved), _flatten(current)
+    out: list[str] = []
+    for key in [*after, *(key for key in before if key not in after)]:
+        if key in before and key in after and before[key] == after[key]:
+            continue
+        was = _short(before[key]) if key in before else "없음"
+        now = _short(after[key]) if key in after else "없음"
+        out.append(f"{key} (저장 {was}, 지금 {now})")
+    return out
+
+
+def resume_config(config: dict) -> dict[str, Any]:
+    """재개 때 문자 그대로 같아야 하는 설정 — :data:`RESUME_FREE_KEYS` 와 내용으로 대조하는 :data:`RESUME_PATH_KEYS` 를
+    뺀 것. `dataset_manifests`는 경로를 빼고 태그(domain·material)만 남긴다."""
+    out = {key: value for key, value in config.items() if key not in RESUME_FREE_KEYS and key not in RESUME_PATH_KEYS}
+    out["dataset_manifests"] = [
+        {"domain": entry.get("domain"), "material": entry.get("material")} for entry in config.get("dataset_manifests") or []
+    ]
+    return out
+
+
 def build_manifest(config: dict, items: list[Item], model: Judge) -> dict[str, Any]:
     """checkpoint에 함께 적는 것: 데이터 manifest 참조(manifest마다 경로·sha256·파일 해시·분야 태그·레코드 수), 토큰
-    직렬화·질문 세트 버전, git SHA, 모델 fixture."""
+    직렬화·질문 세트 버전, tokenizer의 정체, 실제로 만든 모델, git SHA — 그리고 이것들 가운데 재개 때 같아야 하는
+    내용만 모은 ``identity`` 블록(:func:`manifest_identity`)."""
     datasets = []
     for entry in config["dataset_manifests"]:
         manifest_path = Path(entry["path"])
@@ -611,26 +736,19 @@ def build_manifest(config: dict, items: list[Item], model: Judge) -> dict[str, A
                 "records": {"single": sum(i.kind == "single" for i in own), "stream": sum(i.kind == "stream" for i in own)},
             }
         )
-    return {
+    manifest = {
         "dataset_manifests": datasets,
         "splits": list(config["splits"]),
         "serializer_version": TOKEN_SERIALIZER_VERSION,  # 토큰 직렬화의 버전 (레코드의 versions.serializer와 다른 것)
         "question_set": {"id": "qs-v0", "markers": {qid: spec["marker"] for qid, spec in QUESTION_SET_V0.items()}},
         "layouts": dict(config["layout"]),
-        "tokenizer": config["tokenizer"],
-        "model": {
-            "id": config["model_id"],
-            "config": str(config["model_config"]),
-            "name": model.backbone.config.name,
-            "vocab_size": model.backbone.config.vocab_size,
-            "seed": model.backbone.config.seed if config["model_seed"] is None else config["model_seed"],
-            "readout": model.readout,
-            "rank": model.rank,
-            "revision_manifest": config["model_revision_manifest"],
-        },
+        "tokenizer": tokenizer_block(config["tokenizer"]),
+        "model": model_block(config, model),
         "git": git_revision(),
         "torch": str(torch.__version__),  # TorchVersion 객체가 아니라 문자열 — weights_only 로 읽힌다
     }
+    manifest["identity"] = manifest_identity(manifest)
+    return manifest
 
 
 # --------------------------------------------------------------------------
@@ -1051,20 +1169,29 @@ class Trainer:
         return target
 
     def load(self, path: str | Path) -> None:
-        """checkpoint에서 이어간다. run의 정체(설정)가 다르면 거절한다."""
+        """checkpoint에서 이어간다. run의 정체(설정, manifest의 identity 블록, sampler 위치의 레코드 출처)가 다르면 거절한다."""
         with self._threads():
             self._load(path)
 
     def _load(self, path: str | Path) -> None:
         state = load_checkpoint(path)
-        saved = state["config"]
-        differences = [
-            key for key in self.config
-            if key not in RESUME_FREE_KEYS and saved.get(key) != self.config[key]
-        ]  # fmt: skip
+        saved, current = resume_config(state["config"]), resume_config(self.config)
+        differences = [key for key in current if saved.get(key) != current[key]]
         if differences:
             raise ValueError(
-                f"resume: checkpoint의 설정과 다르다: {differences} — 중단·예산·경로({list(RESUME_FREE_KEYS)}) 말고는 같아야 한다"
+                f"resume: checkpoint의 설정과 다르다: {differences} — 중단·예산·경로·이름({list(RESUME_FREE_KEYS)})과 "
+                f"내용으로 대조하는 경로({list(RESUME_PATH_KEYS)}, dataset_manifests[].path) 말고는 같아야 한다"
+            )
+        saved_identity = state["manifest"].get("identity") if isinstance(state["manifest"], dict) else None
+        if saved_identity is None:
+            raise ValueError(
+                f"resume: {path}: checkpoint의 manifest에 identity 블록이 없다(run 정체 대조 이전 형식) — 이어갈 수 없다, 새 run으로 시작한다"
+            )
+        mismatches = identity_differences(saved_identity, self.manifest["identity"])
+        if mismatches:
+            raise ValueError(
+                f"resume: checkpoint의 run 정체(데이터·tokenizer·직렬화·질문 세트·모델의 내용)와 다르다: {'; '.join(mismatches)} — "
+                "경로가 아니라 내용이 같아야 한다. 데이터를 바꾸는 후속 학습은 새 run으로 시작한다"
             )
         self.run_id = str(state["run_id"])
         self.config["run_id"] = self.run_id  # 이어가는 run의 정체는 checkpoint의 것
