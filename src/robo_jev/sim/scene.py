@@ -75,6 +75,8 @@ class Instruction:
     target: str | None = None
     zone: str | None = None
     protected: tuple[str, ...] = ()
+    #: 문구 템플릿 변형 id (`v1#<n>`·`v2#<n>`, 설정 `instruction.v1_templates`의 번호) — provenance와 템플릿 holdout의 근거.
+    template: str | None = None
 
 
 @dataclass(frozen=True)
@@ -189,6 +191,8 @@ def build_plan(config: dict[str, Any], seed: int, profile: str) -> ScenePlan:
     zones = _sample_zones(settings, rng)
     instructions = _sample_instructions(settings, rng, objects, zones, grid_ms)
     disturbances = _sample_disturbances(settings, rng, objects, grid_ms)
+    # 문구 템플릿 변형은 **맨 뒤에** 뽑는다 — 앞의 난수 소비(장면·일정)가 변형 도입 전과 같다 (계약 v0.3, docs/04 §5).
+    instructions = _phrase_instructions(settings, rng, instructions, objects, zones)
     return ScenePlan(
         seed=int(seed),
         profile=profile,
@@ -401,15 +405,11 @@ def _sample_instructions(
             f"지시의 대상 {first.id}가 모든 영역 안에 있고 영역 {zone.id} 밖의 평범한 물체도 없다 — 장면 설정을 확인하라"
         )
     first, zone = fixed
-    text = spec["v1_template"].format(
-        color=first.colour_ko,
-        shape=labels[first.shape],
-        zone=zone.desc,
-        fragile=fragile.describe(labels) if fragile else "취약한 물체",
-    )
+    # 텍스트는 변형 0으로 먼저 채우고 :func:`_phrase_instructions`가 맨 뒤에 변형을 고른다.
+    text = _instruction_text(spec, "v1", 0, first, zone, labels, fragile=fragile)
     protected = (fragile.id,) if fragile else ()
     steps = [
-        Instruction(version=1, sim_ms=0, text=text, target=first.id, zone=zone.id, protected=protected)
+        Instruction(version=1, sim_ms=0, text=text, target=first.id, zone=zone.id, protected=protected, template="v1#0")
     ]
 
     if not spec.get("enabled", False):
@@ -432,20 +432,93 @@ def _sample_instructions(
         Instruction(
             version=2,
             sim_ms=at_ms,
-            text=spec["v2_template"].format(
-                color=first.colour_ko,
-                shape=labels[first.shape],
-                color2=second.colour_ko,
-                shape2=labels[second.shape],
-                zone=zone.desc,
-            ),
+            text=_instruction_text(spec, "v2", 0, first, zone, labels, second=second),
             target=second.id,
             zone=zone.id,
             # v2는 제약을 다시 말하지 않지만 v1의 보호 물체는 그대로다 — 지시는 덧붙는다 (docs/08 §3.1).
             protected=protected,
+            template="v2#0",
         )
     )
     return tuple(steps)
+
+
+def _instruction_text(
+    spec: dict[str, Any],
+    version: str,
+    variant: int,
+    first: SceneObject,
+    zone: Zone,
+    labels: dict[str, str],
+    *,
+    fragile: SceneObject | None = None,
+    second: SceneObject | None = None,
+) -> str:
+    """지시 텍스트 — 설정 `instruction.<version>_templates[variant]`에 슬롯(`{color} {shape} {zone} {fragile}`, v2는
+    `{color2} {shape2}`)을 채운다. 변형은 표현만 다르고 구조화된 목표(대상·영역·보호 물체)는 같다."""
+    templates = spec[f"{version}_templates"]
+    template = str(templates[variant])
+    if version == "v1":
+        return template.format(
+            color=first.colour_ko,
+            shape=labels[first.shape],
+            zone=zone.desc,
+            fragile=fragile.describe(labels) if fragile else "취약한 물체",
+        )
+    assert second is not None
+    return template.format(
+        color=first.colour_ko,
+        shape=labels[first.shape],
+        color2=second.colour_ko,
+        shape2=labels[second.shape],
+        zone=zone.desc,
+    )
+
+
+def _phrase_instructions(
+    settings: dict[str, Any],
+    rng: np.random.Generator,
+    instructions: tuple[Instruction, ...],
+    objects: tuple[SceneObject, ...],
+    zones: tuple[Zone, ...],
+) -> tuple[Instruction, ...]:
+    """지시마다 문구 템플릿 변형을 고른다 (v1·v2 각각 `<version>_templates`에서 하나). 구조화된 목표는 그대로다."""
+    spec = settings["instruction"]
+    labels = dict(settings["objects"]["shape_labels"])
+    by_id = {obj.id: obj for obj in objects}
+    zone_by_id = {zone.id: zone for zone in zones}
+    fragile = next((obj for obj in objects if "fragile" in obj.attributes), None)
+    phrased: list[Instruction] = []
+    first_target = by_id[instructions[0].target] if instructions and instructions[0].target else None
+    for step in instructions:
+        version = f"v{step.version}"
+        templates = spec.get(f"{version}_templates")
+        if not templates or step.target is None or step.zone is None:
+            phrased.append(step)
+            continue
+        weights = spec.get("template_weights")
+        if weights:
+            if len(weights) != len(templates):
+                raise ValueError(f"instruction.template_weights는 {version}_templates와 길이가 같아야 한다")
+            total = float(sum(weights))
+            point = float(rng.uniform(0.0, total))
+            variant = len(templates) - 1
+            edge = 0.0
+            for index, weight in enumerate(weights):
+                edge += float(weight)
+                if point < edge:
+                    variant = index
+                    break
+        else:
+            variant = int(rng.integers(len(templates)))
+        target = by_id[step.target]
+        zone = zone_by_id[step.zone]
+        if step.version == 1:
+            text = _instruction_text(spec, "v1", variant, target, zone, labels, fragile=fragile)
+        else:
+            text = _instruction_text(spec, "v2", variant, first_target or target, zone, labels, second=target)
+        phrased.append(Instruction(**{**asdict(step), "text": text, "template": f"{version}#{variant}"}))
+    return tuple(phrased)
 
 
 def _inside_zone(obj: SceneObject, zone: Zone) -> bool:

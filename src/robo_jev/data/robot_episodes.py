@@ -39,7 +39,7 @@ import yaml
 
 from robo_jev.contracts import QUESTION_SET_V0, validate_record
 from robo_jev.data.episode import aggregate, append_tick, finalize, new_episode
-from robo_jev.data.split import SplitPolicy, assign_split
+from robo_jev.data.split import CONCEPT_TAG, TEMPLATE_TAG, SplitPolicy, assign_split
 from robo_jev.harness.robot import RobotHarness, count_records, load_harness_config
 from robo_jev.sim.controller import resolve_config_path
 from robo_jev.sim.expert import Expert, load_expert_config
@@ -58,6 +58,8 @@ __all__ = [
     "load_generator_config",
     "main",
     "origin_group",
+    "plan_concepts",
+    "plan_tags",
     "run",
     "seed_schedule",
     "write_episode",
@@ -132,7 +134,22 @@ def family_id(plan: ScenePlan) -> str:
 
 
 def origin_group(profile: str, plan: ScenePlan) -> str:
-    return f"robot/{profile}/{family_id(plan)}"
+    """`robot/<profile>/<계열>/goal-<목표 영역>` — 장면 계열에 목표 생성 계열(지시의 목표 영역)을 붙인다 (docs/04 §5
+    "목표 생성 계열의 계보"). 영역별 holdout(`robot:goal-zone:<zone>`)이 한 group을 두 split에 걸치게 하지 않는다."""
+    zone = plan.instructions[0].zone if plan.instructions and plan.instructions[0].zone else "none"
+    return f"robot/{profile}/{family_id(plan)}/goal-{zone}"
+
+
+def plan_concepts(plan: ScenePlan) -> list[str]:
+    """계획이 다루는 개념 id (docs/04 §5 개념 계열): 지시의 목표 영역 `robot:goal-zone:<zone>` (v1·v2 모두)."""
+    return sorted({f"robot:goal-zone:{step.zone}" for step in plan.instructions if step.zone})
+
+
+def plan_tags(plan: ScenePlan) -> tuple[str, ...]:
+    """생성 **전에** 아는 holdout 태그: 지시의 문구 템플릿 변형(`template:v1#2`)과 개념(`concept:robot:goal-zone:zoneF`)."""
+    templates = sorted({TEMPLATE_TAG + str(step.template) for step in plan.instructions if step.template})
+    concepts = [CONCEPT_TAG + concept for concept in plan_concepts(plan)]
+    return tuple(templates + concepts)
 
 
 def episode_id(profile: str, seed: int, suffix: str = "") -> str:
@@ -198,13 +215,16 @@ def generate_episode(
         scene = env.reset(seed=int(seed))
         plan = env.plan
         group = origin_group(profile, plan)
+        tags = plan_tags(plan)
+        splits = split_policy(config)
         tick_ms = int(env.period_ms) * control_steps
         limit = int(max_ticks if max_ticks is not None else env.max_ms // tick_ms)
         record = new_episode(
             episode_id(profile, seed, id_suffix),
             group,
             instructions=[scene["instruction"]],
-            policy=split_policy(config),
+            policy=splits,
+            tags=tags,
         )
         harness = RobotHarness(harness_config)
         commitment = None
@@ -271,6 +291,11 @@ def generate_episode(
             "profile": profile,
             "origin_group": group,
             "family": family_signature(plan),
+            # 봉인 holdout의 근거 (docs/04 §5): 지시의 문구 템플릿 변형과 개념, 걸린 이유 (아니면 빈 목록).
+            "instruction_templates": [str(step.template) for step in plan.instructions if step.template],
+            "phrasing": [str(step.template) for step in plan.instructions if step.template],
+            "concepts": plan_concepts(plan),
+            "holdout": splits.holdout_reasons(group, tags),
             # 정책 클라이언트(`data.dagger.PolicyClient`)는 감싼 정책의 이름을 `name`으로 든다.
             "policy": {"name": str(getattr(policy, "name", type(policy).__name__)), "version": str(getattr(policy, "version", "unknown"))},
             "label_source": expert.label_source,
@@ -451,6 +476,8 @@ def build_manifest(
         "splits": counts["splits"],
         "families": dict(sorted(families.items())),
         "holdout_prefixes": list((config.get("split") or {}).get("holdout_prefixes") or ()),
+        "holdout_templates": list((config.get("split") or {}).get("holdout_templates") or ()),
+        "holdout_concepts": list((config.get("split") or {}).get("holdout_concepts") or ()),
         "versions": {name: sorted(values) for name, values in sorted(versions.items())},
         "bytes": {
             "total": sum(sizes),

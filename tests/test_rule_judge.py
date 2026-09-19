@@ -591,8 +591,9 @@ def test_instruction_wording_round_trips_to_the_resolved_target():
         plan = build_plan(SIM, seed, "E1")
         text = plan.instructions[0].text
         described = {obj.describe(labels): obj.id for obj in plan.objects}
-        named = [obj for obj in plan.objects if text.startswith(obj.describe(labels))]
-        assert len(named) == 1, f"seed {seed}: 지시가 부르는 물체가 하나가 아니다: {text}"
+        # 문구 변형(계약 v0.3)에 따라 대상이 문장 앞에 오지 않을 수 있다 — 대상은 계획의 구조화된 목표가 말한다.
+        named = [obj for obj in plan.objects if obj.id == plan.instructions[0].target]
+        assert len(named) == 1 and named[0].describe(labels) in text, f"seed {seed}: 지시가 대상을 부르지 않는다: {text}"
 
         # 상한에 걸리지 않도록 지시가 부르는 물체와 속성 물체만 놓는다 — 보는 것은 어휘의 왕복이다.
         shown = [named[0]] + [o for o in plan.objects if o.attributes][:2]

@@ -84,8 +84,21 @@ visibility:
 instruction:
   enabled: true
   change_window_ms: [5000, 15000]      # docs/02 §1 "에피소드 도중(5~15초 사이)에 지시가 바뀌고"
-  v1_template: "{color} {shape}를 {zone}으로 옮기고 {fragile}는 건드리지 마라"
-  v2_template: "{color} {shape} 대신 {color2} {shape2}를 {zone}으로 먼저 옮겨라"
+  # 문구 템플릿 변형 (docs/04 §5 템플릿 변형 계열, 계약 v0.3). 슬롯 `{color} {shape} {zone} {fragile}`(v2는 `{color2}
+  # {shape2}`)은 같고 표현만 다르다 — 구조화된 목표(대상·영역·보호 물체)는 텍스트와 무관하게 계획이 든다. 변형은 계획의
+  # 난수 소비 맨 뒤에서 고르고 `Instruction.template`(`v1#<번호>`)에 적힌다; 3번(번호 2)은 `configs/data/d1_robot.yaml`이
+  # 봉인 holdout으로 건다. 규칙 기준군의 텍스트 근사 경로가 읽는 제약 표지("건드리지 마라")는 v1의 모든 변형에 있다.
+  v1_templates:
+    - "{color} {shape}를 {zone}으로 옮기고 {fragile}는 건드리지 마라"
+    - "{fragile}는 건드리지 마라. {color} {shape}를 {zone}에 갖다 놓아라"
+    - "{zone}에 {color} {shape}를 놓아라, {fragile}는 건드리지 마라"
+  v2_templates:
+    - "{color} {shape} 대신 {color2} {shape2}를 {zone}으로 먼저 옮겨라"
+    - "잠깐, {color} {shape}는 두고 {color2} {shape2}를 {zone}에 먼저 놓아라"
+    - "{color2} {shape2}를 {zone}으로 먼저 옮겨라. {color} {shape}는 그다음이다"
+  # 변형의 비중 (v1·v2 공통). 봉인 변형(3번)을 고르게 뽑으면 에피소드의 1/3이 OOD로 가므로 드물게 둔다 — train은 1·2번을
+  # 반반 보고, 3번은 OOD에만 있다.
+  template_weights: [45, 45, 10]
 
 disturbance:
   count: [1, 3]

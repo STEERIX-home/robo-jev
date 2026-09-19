@@ -26,11 +26,13 @@ from robo_jev.data.robot_episodes import (
     generate_episode,
     load_generator_config,
     origin_group,
+    plan_concepts,
+    plan_tags,
     run,
     seed_schedule,
     write_episode,
 )
-from robo_jev.data.split import SplitPolicy, assign_split
+from robo_jev.data.split import OOD_SPLITS, SplitPolicy, assign_split, ood_split
 from robo_jev.data.validate import validate_dataset
 from robo_jev.harness.robot import parse_exec_history
 from robo_jev.sim.expert import Expert
@@ -56,7 +58,8 @@ def test_the_family_is_the_structural_signature_of_the_scene_plan():
     cylinders = signature["shapes"].get("cylinder", 0)
     letters = "".join(zone[len("zone"):] for zone in signature["zones"])
     assert family_id(plan) == f"family-n{len(plan.objects)}-b{boxes}c{cylinders}-z{letters}"
-    assert origin_group("E1", plan) == f"robot/E1/{family_id(plan)}"
+    # origin group = 장면 계열 + 목표 생성 계열(지시의 목표 영역) — 영역별 holdout이 한 group을 두 split에 걸치지 않는다.
+    assert origin_group("E1", plan) == f"robot/E1/{family_id(plan)}/goal-{plan.instructions[0].zone}"
 
     # 자세·색·일정이 달라도 구조가 같으면 같은 계열이다.
     same = [seed for seed in range(100, 140) if family_id(build_plan(SIM, seed, "E1")) == family_id(plan)]
@@ -68,10 +71,66 @@ def test_the_family_is_the_structural_signature_of_the_scene_plan():
 def test_split_is_assigned_from_the_family_before_generation_and_the_holdout_is_ood():
     policy = SplitPolicy.from_config(CONFIG["split"])
     holdout = CONFIG["split"]["holdout_prefixes"]
-    assert holdout == [origin_group("E1", build_plan(SIM, CONFIG["seeds"]["base"], "E1"))]
-    assert assign_split(holdout[0], policy) == "ood"
+    first_e1 = origin_group("E1", build_plan(SIM, CONFIG["seeds"]["base"], "E1"))
+    assert first_e1.startswith(holdout[0] + "/goal-")
+    assert assign_split(first_e1, policy) == ood_split(first_e1) and assign_split(first_e1, policy) in OOD_SPLITS
     splits = {assign_split(origin_group(profile, build_plan(SIM, seed, profile)), policy) for profile, seed in seed_schedule(CONFIG, 40)}
-    assert "ood" in splits and "train" in splits
+    assert splits & set(OOD_SPLITS) and "train" in splits
+
+
+def test_the_zone_f_goal_family_and_the_third_instruction_variant_are_sealed_before_generation():
+    """docs/04 §5 봉인 표(로봇): 지시의 목표 영역이 zoneF인 계열과 지시 문구 변형 3번(v1#2·v2#2)은 생성 전에 OOD로 간다 —
+    태그는 계획에서 나오므로 에피소드를 돌리기 전에 안다. train은 zoneL·zoneR만 목표로 하고 변형 1·2번만 본다."""
+    policy = SplitPolicy.from_config(CONFIG["split"])
+    assert CONFIG["split"]["holdout_concepts"] == ["robot:goal-zone:zoneF"] and CONFIG["split"]["holdout_templates"] == ["v1#2", "v2#2"]
+    seen = {"ood": 0, "zoneF": 0, "variant3": 0, "train_like": 0}
+    for profile, seed in seed_schedule(CONFIG, 60):
+        plan = build_plan(SIM, seed, profile)
+        group, tags = origin_group(profile, plan), plan_tags(plan)
+        assert plan_concepts(plan) == sorted({f"robot:goal-zone:{step.zone}" for step in plan.instructions})
+        assert all(step.template in ("v1#0", "v1#1", "v1#2", "v2#0", "v2#1", "v2#2") for step in plan.instructions)
+        split = assign_split(group, policy, tags)
+        reasons = policy.holdout_reasons(group, tags)
+        zone_f = any(step.zone == "zoneF" for step in plan.instructions)
+        variant3 = any(step.template.endswith("#2") for step in plan.instructions)
+        if zone_f:
+            seen["zoneF"] += 1
+            assert "concept:robot:goal-zone:zoneF" in reasons and split in OOD_SPLITS
+        if variant3:
+            seen["variant3"] += 1
+            assert any(reason.startswith("template:v") for reason in reasons) and split in OOD_SPLITS
+        if split in OOD_SPLITS:
+            seen["ood"] += 1
+            assert reasons
+        else:
+            seen["train_like"] += 1
+            assert not reasons and not zone_f and not variant3
+    assert seen["zoneF"] and seen["variant3"] and seen["train_like"] and seen["ood"] < 60
+
+
+def test_instruction_variants_keep_the_structured_goal_and_the_constraint_marker():
+    """세 변형은 표현만 다르다: 대상·영역·보호 물체는 같고, v1의 모든 변형에 규칙 기준군의 제약 표지가 있다. 변형은 계획의
+    난수 소비 맨 뒤에서 고르므로 장면·일정은 변형 도입 전과 같다."""
+    spec = SIM["instruction"]
+    assert len(spec["v1_templates"]) == 3 and len(spec["v2_templates"]) == 3 and spec["template_weights"] == [45, 45, 10]
+    assert all("{color}" in t and "{shape}" in t and "{zone}" in t and "{fragile}" in t for t in spec["v1_templates"])
+    assert all("{color2}" in t and "{shape2}" in t and "{zone}" in t for t in spec["v2_templates"])
+    assert all("건드리지 마라" in t for t in spec["v1_templates"])
+    variants = set()
+    for seed in range(100, 160):
+        plan = build_plan(SIM, seed, "E1")
+        for step in plan.instructions:
+            variants.add(step.template)
+            assert step.text and step.target and step.zone
+        assert plan.instructions[0].template.startswith("v1#")
+        # 같은 seed에서 변형 비중을 바꿔도(맨 뒤의 추첨) 장면·일정은 같다.
+        other = copy.deepcopy(SIM)
+        other["instruction"]["template_weights"] = [10, 45, 45]
+        again = build_plan(other, seed, "E1")
+        assert [o.pos_mm for o in again.objects] == [o.pos_mm for o in plan.objects]
+        assert again.disturbances == plan.disturbances
+        assert [(s.target, s.zone, s.protected, s.sim_ms) for s in again.instructions] == [(s.target, s.zone, s.protected, s.sim_ms) for s in plan.instructions]
+    assert variants >= {"v1#0", "v1#1", "v1#2"}
 
 
 def test_the_generator_config_names_every_config_it_digests_and_the_generator_requires_them():
@@ -150,9 +209,12 @@ def test_smoke_records_are_split_by_family_and_carry_provenance_and_versions(smo
     policy = SplitPolicy.from_config(CONFIG["split"])
     for (profile, seed), record in smoke["records"].items():
         assert record["episode_id"] == episode_id(profile, seed)
-        assert record["origin_group"].startswith(f"robot/{profile}/family-")
-        assert record["split"] == assign_split(record["origin_group"], policy)
+        assert record["origin_group"].startswith(f"robot/{profile}/family-") and "/goal-zone" in record["origin_group"]
         provenance = record["provenance"]
+        tags = [f"template:{item}" for item in provenance["phrasing"]] + [f"concept:{item}" for item in provenance["concepts"]]
+        assert record["split"] == assign_split(record["origin_group"], policy, tags)
+        assert provenance["holdout"] == policy.holdout_reasons(record["origin_group"], tags)
+        assert provenance["instruction_templates"] == provenance["phrasing"] and provenance["concepts"]
         assert provenance["seed"] == seed and provenance["profile"] == profile
         assert provenance["generator"] == GENERATOR_VERSION and provenance["label_source"] == "expert_v0"
         assert provenance["policy"]["name"] == "Expert"
@@ -321,6 +383,7 @@ def test_the_manifest_has_the_documented_schema(smoke):
         assert set(entry) == {"episodes", "done", "done_rate", "ticks_mean", "ticks_p95", "wall_s_mean"}
     assert sum(manifest["splits"].values()) == 2
     assert manifest["holdout_prefixes"] == CONFIG["split"]["holdout_prefixes"]
+    assert manifest["holdout_templates"] == CONFIG["split"]["holdout_templates"] and manifest["holdout_concepts"] == CONFIG["split"]["holdout_concepts"]
     assert manifest["versions"]["expert"] == [smoke["expert"].version]
     assert set(manifest["bytes"]) == {"total", "per_episode_mean_mb", "per_tick_mean_kb"}
     assert set(manifest["timing"]) >= {"wall_s_per_episode_mean", "episodes_per_hour", "projected_hours_for_target", "target_episodes"}

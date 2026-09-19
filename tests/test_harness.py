@@ -2174,9 +2174,9 @@ def run_e0_episode(seed: int, *, max_ticks: int = 300) -> dict:
         scene = env.reset(seed=seed)
         hrn = harness()
         judge = RuleJudge()
-        text = scene["instruction"]["text"]
-        target = next(entry for entry in scene["objects"] if text.startswith(entry["desc"]))
-        zone = next(entry for entry in scene["zones"] if entry["desc"] in text)
+        # 지시의 대상·영역은 구조화된 목표에서 읽는다 — 문구 변형(계약 v0.3)에 따라 대상이 문장 앞에 오지 않을 수 있다.
+        target = next(entry for entry in scene["objects"] if entry["id"] == scene["goal"]["target_ref"])
+        zone = next(entry for entry in scene["zones"] if entry["id"] == scene["goal"]["zone_ref"])
 
         commitment = None
         history = None

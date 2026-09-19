@@ -45,7 +45,7 @@ def test_merge_profile_overlays_deeply():
     # 덮어쓰지 않은 형제 키는 그대로 남는다.
     assert merged["objects"]["palette"] == CONFIG["objects"]["palette"]
     assert merged["instruction"]["enabled"] is False
-    assert merged["instruction"]["v1_template"] == CONFIG["instruction"]["v1_template"]
+    assert merged["instruction"]["v1_templates"] == CONFIG["instruction"]["v1_templates"]
     assert "profiles" not in merged
     assert CONFIG["objects"]["count_min"] != merged["objects"]["count_min"], "원본이 바뀌었다"
 
@@ -240,7 +240,9 @@ def test_instructions_carry_the_structured_goal_next_to_the_text():
             assert step.target in objects and step.zone in zones
             assert objects[step.target].attributes == ()  # 지시의 대상은 평범한 물체다
             assert zones[step.zone].desc in step.text
-        assert first.text.startswith(objects[first.target].describe(labels))
+        assert objects[first.target].describe(labels) in first.text
+        if first.template == "v1#0":
+            assert first.text.startswith(objects[first.target].describe(labels))
         assert second.target != first.target
         assert objects[second.target].describe(labels) in second.text
         assert second.zone == first.zone
