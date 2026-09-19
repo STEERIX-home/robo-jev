@@ -1,8 +1,8 @@
 [project]
 name = "robo-jev"
 version = "0.0.1"
-description = "robojev: 로봇용 typed judgment 모델 — 입력·라벨 계약과 fixture"
-readme = "docs/README.md"
+description = "robojev: a real-time System One judgment model for decisions in the physical world"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     # 시뮬레이터는 MuJoCo + robosuite 1.5 계열 (docs/05 §2). `sim/`은 1.5의 API

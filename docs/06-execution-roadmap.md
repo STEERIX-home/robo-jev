@@ -10,7 +10,7 @@
 
 **Spec:** [모델 설계](03-model-and-training-design.md), [데이터 설계](04-data-generation-plan.md), [실험·GPU 계획](05-experiment-and-cloud-plan.md), [스트리밍 입출력·데이터 계약](08-streaming-io-and-data-contract.md)(로봇 스트림의 정본).
 
-작성일: 2026-09-18. 같은 날 근본 검토를 반영해 Task 2b(backbone 선정 게이트), 결합 행동 후보 하네스, 규칙 기반 기준군, 결정 유지 규칙, pointer readout과 L0/L1 배치를 추가했고, 이어 [스트리밍 계약](08-streaming-io-and-data-contract.md)에 따라 컨트롤러·스크립트 전문가·스트림 하네스·스트림 상태·TBPTT·DAgger 사이클과 D1 규모를 반영했다. 아래 경로·명령은 구현할 계약이다. 어느 Task가 어느 단계(구현·단위 검증·폐루프 인수·학습 실측)까지 통과했는지는 [README의 구현 상태 표](README.md#구현-상태-2026-09-18)가 정본이며, 이 문서의 Task 목록은 완료 표시를 대신하지 않는다.
+작성일: 2026-09-18. 같은 날 근본 검토를 반영해 Task 2b(backbone 선정 게이트), 결합 행동 후보 하네스, 규칙 기반 기준군, 결정 유지 규칙, pointer readout과 L0/L1 배치를 추가했고, 이어 [스트리밍 계약](08-streaming-io-and-data-contract.md)에 따라 컨트롤러·스크립트 전문가·스트림 하네스·스트림 상태·TBPTT·DAgger 사이클과 D1 규모를 반영했다. 아래 경로·명령은 구현할 계약이다. 어느 Task가 어느 단계(구현·단위 검증·폐루프 인수·학습 실측)까지 통과했는지는 [뿌리 README의 Status 표](../README.md#status)가 정본이며, 이 문서의 Task 목록은 완료 표시를 대신하지 않는다.
 
 ## Global Constraints
 
