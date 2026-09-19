@@ -601,34 +601,34 @@ def _intro_line(entry: dict) -> str:
 
 
 def _orientation(quat: Any) -> tuple[str, Any] | None:
-    """자세 회전의 짧은 표기: 작업면 위 물체는 z축 회전뿐이므로 ``yaw=<도>``(정수), 기울어진 자세만 ``q=<quaternion>``.
-
-    ``yaw=0``(회전 없음)은 기본값이라 뺀다. 돌려주는 것은 (키, 값) — 키는 `yaw_deg` 또는 `quat`."""
+    """자세 회전의 짧은 표기: 작업면 위 물체는 z축 회전뿐이므로 ``yaw=<도>``(정수, 회전 없음은 0), 기울어진 자세만
+    ``q=<quaternion>``. 돌려주는 것은 (키, 값) — 키는 `yaw_deg` 또는 `quat`; quaternion이 아니면 None."""
     if not isinstance(quat, (list, tuple)) or len(quat) != 4:
         return None
     x, y, z, w = (float(value) for value in quat)
     if abs(x) < 0.005 and abs(y) < 0.005:
         yaw = int(round(math.degrees(2.0 * math.atan2(z, w))))
-        yaw = (yaw + 180) % 360 - 180
-        return ("yaw_deg", yaw) if yaw else None
+        return ("yaw_deg", (yaw + 180) % 360 - 180)
     return ("quat", list(quat))
 
 
-def _dynamic_line(entry: dict, derived: dict, *, stale: bool, optional: tuple[str, ...]) -> str:
+def _dynamic_line(entry: dict, derived: dict, *, stale: bool, optional: tuple[str, ...], full: bool) -> str:
     """물체 동적 줄 ``<id> p= [yaw=|q=] s= [conf=] [vis=] [seen=] clr= corr= [reid=]``.
 
     자세·정밀도·여유·통로는 줄마다 싣고, `optional`에 든 방향·표면 신뢰도·가시 비율·재식별은 바뀐 것(또는 소개 틱의
-    전체 줄)만 싣는다. `vis=1`(다 보임)·`yaw=0`은 기본값이라 뺀다. `seen`(마지막 관측 시각)은 관측이 끊긴 물체에만.
-    말단 기준 상대 벡터(`relative_mm`)는 싣지 않는다 — `robot ee`와 `p`로 정해진다.
+    전체 줄)만 싣는다. 기본값 `yaw=0`(회전 없음)·`vis=1`(다 보임)은 **전체 줄(`full`)에서만** 뺀다 — 변화분 줄은 바뀐
+    필드를 값이 기본값이라도 적어 "기본값으로 돌아왔다"(가시 비율 1→0.5→1, 요 0→90→0)가 "그대로다"와 같은 줄이 되지
+    않게 한다. `seen`(마지막 관측 시각)은 관측이 끊긴 물체에만. 말단 기준 상대 벡터(`relative_mm`)는 싣지 않는다 —
+    `robot ee`와 `p`로 정해진다.
     """
     item: dict[str, Any] = {key: entry[key] for key in _DYNAMIC_ALWAYS if key in entry}
     if "quat" in optional:
         orientation = _orientation(entry.get("quat"))
-        if orientation is not None:
+        if orientation is not None and not (full and orientation == ("yaw_deg", 0)):
             item[orientation[0]] = orientation[1]
     if "surface_conf" in optional and "surface_conf" in entry:
         item["surface_conf"] = entry["surface_conf"]
-    if "visible_ratio" in optional and "visible_ratio" in entry and float(entry["visible_ratio"]) < 1.0:
+    if "visible_ratio" in optional and "visible_ratio" in entry and not (full and float(entry["visible_ratio"]) >= 1.0):
         item["visible_ratio"] = entry["visible_ratio"]
     if stale and "last_seen_ms" in entry:
         item["last_seen_ms"] = entry["last_seen_ms"]
@@ -637,7 +637,7 @@ def _dynamic_line(entry: dict, derived: dict, *, stale: bool, optional: tuple[st
             item[key] = derived[key]
     if "reid" in optional and entry.get("reid"):
         item["reid"] = entry["reid"]
-    return _short(_scalar("id", entry["id"]), item, STREAM_FIELDS["object"], keep_zero=("visible_ratio", "clearance_mm", "nearest_clearance_mm", "corridor_mm", "precision_mm", "pose_sigma_mm")) + "\n"
+    return _short(_scalar("id", entry["id"]), item, STREAM_FIELDS["object"], keep_zero=("yaw_deg", "visible_ratio", "clearance_mm", "nearest_clearance_mm", "corridor_mm", "precision_mm", "pose_sigma_mm")) + "\n"
 
 
 def _zone_line(zone: dict) -> str:
@@ -714,11 +714,13 @@ def _history_fields(text: Any) -> dict[str, str]:
     return fields
 
 
-def stream_candidate_line(entry: dict, *, geom_age_ms: Any = None) -> str:
-    """스트림의 후보 한 줄 (서식 v0.3): 결합 후보 ``<id>: <기능> <대상> <접근>→<목적지> d= clr= path= [g=]``, 밀기는
-    ``<접근>``만(목적지 없음), 고정 후보·경로 후보는 ``<id>: <키>`` / ``<id>: <종류> [<경유점>]``. 자연어 설명은 없다 —
-    키가 설명이다. 대상 기하의 나이 ``g``는 틱의 기하 나이(`t … age g<ms>`)와 다를 때만(관측이 끊긴 대상) 적는다.
-    옛 서식의 항목(`desc`·`derived`)은 버리고, 그 밖의 필드는 ``k=v``로 뒤에 붙는다.
+def stream_candidate_line(entry: dict, *, geom_age_ms: Any = None, object_clearance: dict[str, Any] | None = None) -> str:
+    """스트림의 후보 한 줄 (서식 v0.3): 결합 후보 ``<id>: <기능> <대상> <접근>→<목적지> d= [clr=] [path=blocked] [g=]``,
+    밀기는 ``<접근>``만(목적지 없음), 고정 후보·경로 후보는 ``<id>: <키>`` / ``<id>: <종류> [<경유점>]``. 자연어 설명은
+    없다 — 키가 설명이다. 기본값·중복은 뺀다: ``path=ok``는 적지 않고 막힌 경로만 ``path=blocked``; ``clr``(대상의 최근접
+    여유)는 그 틱의 대상 물체 동적 줄 `clr`(`object_clearance[대상 id]`)와 같으면 중복이라 뺀다(하네스가 같은 값에서
+    채운다); 대상 기하의 나이 ``g``는 틱의 기하 나이(`t … age g<ms>`)와 다를 때만(관측이 끊긴 대상) 적는다. 옛 서식의
+    항목(`desc`·`derived`)은 버리고, 그 밖의 필드는 ``k=v``로 뒤에 붙는다.
     """
     rest = dict(entry)
     identifier = _scalar("id", rest.pop("id"))
@@ -727,17 +729,23 @@ def stream_candidate_line(entry: dict, *, geom_age_ms: Any = None) -> str:
     rest.pop("derived", None)
     if geom_age_ms is not None and "g" in rest and int(rest["g"]) == int(geom_age_ms):
         rest.pop("g")
+    if rest.get("path") == "ok":
+        rest.pop("path")
+    parts_of_key = joint_key_parts(rest.get("key"))
+    if object_clearance is not None and parts_of_key is not None and "clr" in rest:
+        target_clearance = object_clearance.get(parts_of_key[1])
+        if target_clearance is not None and int(rest["clr"]) == int(target_clearance):
+            rest.pop("clr")
     if rest.get("action_ref") == entry.get("id") or "kind" in rest:
         rest.pop("action_ref", None)
     words: list[str] = []
     key = rest.pop("key", None)
     if key is not None:
-        parts = str(key).split(":")
-        if len(parts) >= 4 and parts[0] in ("grasp", "place", "push"):
-            function, target, approach, destination = parts[:4]
+        if parts_of_key is not None:
+            function, target, approach, destination = parts_of_key
             arrow = approach if function == "push" and destination == "none" else f"{approach}→{destination}"
             words.append(f"{function} {target} {arrow}")
-            words.extend(parts[4:])
+            words.extend(str(key).split(":")[4:])
         else:
             words.append(str(key))
     kind = rest.pop("kind", None)
@@ -748,6 +756,15 @@ def stream_candidate_line(entry: dict, *, geom_age_ms: Any = None) -> str:
             words.append(_scalar("ref", ref))
     tail = " ".join(f"{key}={_value(key, value)}" for key, value in rest.items())
     return f"{identifier}: " + " ".join(words + ([tail] if tail else [])) + "\n"
+
+
+def joint_key_parts(key: Any) -> tuple[str, str, str, str] | None:
+    """결합 키 ``기능:대상:접근:목적지``의 앞 네 조각 (:func:`robo_jev.harness.robot.joint_key_parts`와 같은 규칙 — 모델 코드가
+    하네스를 import하지 않도록 여기 다시 적는다; 검사가 둘을 대조한다). 결합 키가 아니면 None."""
+    parts = str(key or "").split(":")
+    if len(parts) < 4 or parts[0] not in ("grasp", "place", "push"):
+        return None
+    return parts[0], parts[1], parts[2], parts[3]
 
 
 # -- 변화분 상태 --------------------------------------------------------------------
@@ -791,6 +808,12 @@ class _DeltaState:
 
         intros: list[str] = []
         dynamics: list[str] = []
+        present = {str(entry["id"]) for entry in state.get("objects") or () if isinstance(entry, dict) and "id" in entry}
+        for object_id in [known for known in self.intro if known not in present]:
+            # 추적 목록에서 빠진 물체는 한 번 ``<id> gone``으로 알리고 잊는다 — 다시 나타나면 처음 관측처럼 전체 줄이다.
+            dynamics.append(f"{_scalar('id', object_id)} gone\n")
+            for table in (self.intro, self.pose, self.quat, self.conf, self.visible, self.stale):
+                table.pop(object_id, None)
         for entry in state.get("objects") or ():
             if not isinstance(entry, dict) or "id" not in entry:
                 continue
@@ -825,7 +848,7 @@ class _DeltaState:
                     key for key, changed in (("quat", rotated), ("surface_conf", conf_change), ("visible_ratio", visibility_change), ("reid", reid))
                     if full or changed
                 )
-                dynamics.append(_dynamic_line(entry, derived_by_object.get(object_id, {}), stale=stale, optional=optional))
+                dynamics.append(_dynamic_line(entry, derived_by_object.get(object_id, {}), stale=stale, optional=optional, full=full))
                 self.pose[object_id] = pose
                 self.quat[object_id] = quat
                 self.conf[object_id] = conf
@@ -870,6 +893,18 @@ def _dist(a: list[float], b: list[float]) -> float:
 
 
 _STATE_ORDER = ("t", "goal", "objects", "scene", "zones", "robot", "exec", "events", "derived", "commitment", "image", "geom", "extractor")
+#: 모델 텍스트에 싣지 않는 상태 키. `image`·`geom`은 soft token 슬롯이라 비어 있어야 하고(값이 있으면 이 직렬화가 그것을 조용히
+#: 버리게 되므로 거절한다), `extractor`는 앞단 버전 문자열(겉봉투 — `versions`와 함께 검증용)이라 문자열만 받는다.
+_ENVELOPE_KEYS = ("image", "geom", "extractor")
+
+
+def _check_envelope(state: dict, index: int) -> None:
+    for key in ("image", "geom"):
+        if state.get(key):
+            raise ValueError(f"틱 {index}: state.{key}가 비어 있지 않다 — 서식 v0.3은 soft token 슬롯을 싣지 않으므로 조용히 버리지 않고 거절한다")
+    extractor = state.get("extractor")
+    if extractor not in (None, "") and not isinstance(extractor, str):
+        raise ValueError(f"틱 {index}: state.extractor는 앞단 버전 문자열(겉봉투)이어야 한다 (받은 값: {type(extractor).__name__})")
 
 
 def _extra_state_lines(state: dict) -> list[str]:
@@ -949,9 +984,15 @@ def _serialize_stream(
             )
         request = tick["request"]
         state = request.get("state") or {}
+        _check_envelope(state, index)
         geom_age = None
         if isinstance(state.get("t"), dict) and isinstance(state["t"].get("age_ms"), dict):
             geom_age = state["t"]["age_ms"].get("geom")
+        object_clearance = {
+            str(item["object"]): item.get("clearance_mm")
+            for item in state.get("derived") or ()
+            if isinstance(item, dict) and "object" in item and item.get("clearance_mm") is not None
+        }
 
         def add(name: str, text: str, kind: str = "state") -> None:
             if text:
@@ -993,7 +1034,7 @@ def _serialize_stream(
             for position, entry in enumerate(candidates[question_id]):
                 chunks.append(
                     _Chunk(
-                        stream_candidate_line(entry, geom_age_ms=geom_age),
+                        stream_candidate_line(entry, geom_age_ms=geom_age, object_clearance=object_clearance),
                         "candidate",
                         f"candidate:{question_id}:{position}",
                         candidate=position,
