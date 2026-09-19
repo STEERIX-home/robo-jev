@@ -50,6 +50,8 @@ from robo_jev.model.backbone import (
     count_params,
     fileset_digest,
     hash_files,
+    matches_patterns,
+    matching_files,
     read_manifest,
 )
 
@@ -65,7 +67,13 @@ class StructureMismatch(ValueError):
 
 
 class HubClient:
-    """`huggingface_hub`의 세 호출만 감싼다 — 검사는 같은 세 메서드를 가진 가짜를 넣는다."""
+    """`huggingface_hub`의 네 호출만 감싼다 — 검사는 같은 네 메서드를 가진 가짜를 넣는다."""
+
+    def files(self, identifier: str, revision: str) -> list[str]:
+        """그 revision의 저장소 파일 목록 — 받을 묶음(패턴에 맞는 것)을 미리 안다."""
+        from huggingface_hub import HfApi
+
+        return [str(name) for name in HfApi().list_repo_files(identifier, revision=revision)]
 
     def revision(self, identifier: str, revision: str | None) -> str:
         """`revision`(commit SHA·tag·branch; None이면 현재 main)이 가리키는 commit SHA."""
@@ -104,12 +112,21 @@ def fetch(
     """
     hub = HubClient() if hub is None else hub
     resolved = hub.revision(identifier, revision)
+    expected = sorted(name for name in hub.files(identifier, resolved) if matches_patterns(name))
+    if "config.json" not in expected or not any(name.endswith(".safetensors") for name in expected):
+        raise FileNotFoundError(f"{identifier}@{resolved}: Hub의 그 revision에 config.json과 safetensors가 있어야 한다 (있는 것: {expected})")
     target = root / identifier
     target.mkdir(parents=True, exist_ok=True)
     hub.download(identifier, list(FILE_PATTERNS), resolved, target)
+    # 같은 디렉터리에 남아 있던 다른 revision의 조각(패턴에는 맞지만 이 묶음에 없는 파일)은 지문에 들어가면 안 된다.
+    for name in matching_files(target):
+        if name not in expected:
+            (target / name).unlink()
+            print(f"[fetch_backbone] {identifier}: 이 revision의 묶음에 없는 파일을 지웠다: {name}", file=sys.stderr)
     files = hash_files(target)
-    if "config.json" not in files or not any(name.endswith(".safetensors") for name in files):
-        raise FileNotFoundError(f"{identifier}@{resolved}: config.json과 safetensors가 있어야 한다 (받은 것: {sorted(files)})")
+    missing = [name for name in expected if name not in files]
+    if missing:
+        raise FileNotFoundError(f"{identifier}@{resolved}: 받지 못한 파일이 있다: {missing}")
     digest = fileset_digest(files)
 
     problems: list[str] = []

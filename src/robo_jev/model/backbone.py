@@ -42,6 +42,8 @@ __all__ = [
     "describe_backbone",
     "fileset_digest",
     "hash_files",
+    "matches_patterns",
+    "matching_files",
     "read_manifest",
     "safetensors_header",
 ]
@@ -105,11 +107,16 @@ def read_manifest(root: str | Path | None = None) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
+def matching_files(target: str | Path) -> list[str]:
+    """`target/` 바로 아래에서 :data:`FILE_PATTERNS`에 맞는 파일 이름 (이름순, 해시 없이)."""
+    base = Path(target)
+    return sorted({path.name for pattern in FILE_PATTERNS for path in base.glob(pattern) if path.is_file()})
+
+
 def hash_files(target: str | Path) -> dict[str, dict[str, Any]]:
     """`target/` 바로 아래에서 :data:`FILE_PATTERNS`에 맞는 파일의 ``{이름: {sha256, bytes}}`` (이름순)."""
     base = Path(target)
-    names = sorted({path.name for pattern in FILE_PATTERNS for path in base.glob(pattern) if path.is_file()})
-    return {name: {"sha256": sha256_of_file(base / name), "bytes": (base / name).stat().st_size} for name in names}
+    return {name: {"sha256": sha256_of_file(base / name), "bytes": (base / name).stat().st_size} for name in matching_files(base)}
 
 
 def fileset_digest(files: dict[str, dict[str, Any]]) -> str:

@@ -118,6 +118,10 @@ class FakeHub:
         self.calls.append(("license", identifier, revision))
         return self.licenses.get(identifier)
 
+    def files(self, identifier: str, revision: str) -> list[str]:
+        self.calls.append(("files", identifier, revision))
+        return list(self.repos[identifier][revision])
+
     def download(self, identifier: str, patterns: list[str], revision: str, target: Path) -> Path:
         self.calls.append(("download", identifier, tuple(patterns), revision))
         target.mkdir(parents=True, exist_ok=True)
@@ -313,6 +317,22 @@ def test_yaml_edited_while_the_weights_download_is_not_clobbered_by_the_write_ba
     assert text.startswith("# 받는 동안 고친 머리말\n# 검사용 사본\n")
     updated = yaml.safe_load(text)["candidates"][0]
     assert updated["role"] == "separate" and updated["params_total"] == 48 and updated["revision"] == SHA_A
+
+
+def test_stale_files_matching_the_patterns_are_removed_before_hashing(workspace, tmp_path):
+    """같은 디렉터리에 남은 다른 revision의 조각은 지문에 들어가면 안 된다 — 받은 묶음에 없는 패턴 파일은 지운다."""
+    assert run(workspace, "--id", TWO_B) == 0
+    clean = manifest_of(workspace)["models"][TWO_B]
+    other = dict(workspace, root=tmp_path / "models-stale")
+    target = other["root"] / TWO_B
+    target.mkdir(parents=True)
+    (target / "model-00009-of-00009.safetensors").write_bytes(tiny_safetensors({"model.language_model.stale": [3]}))
+    (target / "notes.txt").write_text("패턴 밖의 파일은 건드리지 않는다", encoding="utf-8")
+    assert run(other, "--id", TWO_B) == 0
+    assert not (target / "model-00009-of-00009.safetensors").exists() and (target / "notes.txt").exists()
+    entry = manifest_of(other)["models"][TWO_B]
+    assert set(entry["files"]) == set(clean["files"]) and entry["digest"] == clean["digest"]
+    assert ("files", TWO_B, SHA_A) in other["hub"].calls
 
 
 def test_small_files_are_the_ones_always_hashed():
