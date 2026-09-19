@@ -58,6 +58,15 @@ def test_synthetic_scenes_are_valid_streams_with_the_requested_k():
     ten = module.synthetic_record(10, 12, instruction_change=False)
     assert len(ten["ticks"][0]["request"]["state"]["objects"]) == 10
     assert len(ten["prefix"]["instructions"]) == 1
+    # 100틱 에피소드: 지시 변경은 요청한 틱부터, commitment는 지시의 대상×영역 파지에 틱마다 이어진다.
+    long = module.synthetic_episode(6, 12, instruction_change=True, ticks=40, change_tick=17)
+    validate_record(long)
+    assert [tick["request"]["state"]["goal"]["version"] for tick in long["ticks"]] == [1] * 17 + [2] * 23
+    assert [tick["request"]["commitment"]["held_ticks"] for tick in long["ticks"][1:]] == list(range(1, 40))
+    # 외란은 기하 갱신 주기(200ms = 2틱) 뒤에 상태에 나타난다.
+    assert long["ticks"][module.DISTURBANCE_TICK + 2]["request"]["state"]["objects"][3]["pose_mm"][0] == long["ticks"][0]["request"]["state"]["objects"][3]["pose_mm"][0] + 30
+    occluded = long["ticks"][module.OCCLUSION_TICKS[0]]["request"]["state"]["objects"][1]
+    assert occluded["visible_ratio"] == 0.2 and occluded["age_ms"] > 0
 
 
 def test_measurements_have_the_documented_shape():
@@ -67,6 +76,7 @@ def test_measurements_have_the_documented_shape():
     assert streams["episodes"][0]["ticks"] == 100
     assert set(streams["all_ticks"]["new_tokens"]) == {"n", "mean", "p50", "p95", "max", "min"}
     assert streams["q_main_block_by_k"]
+    assert set(streams["episodes"][0]["sections_mean"]) <= set(module.SECTIONS)
 
     singles = module.measure_singles(tokenizer, read_jsonl(D0))
     assert singles["requests"] == 64
@@ -76,10 +86,49 @@ def test_measurements_have_the_documented_shape():
     assert module.percentile([1, 2, 3, 4, 5], 0.95) == 5
 
 
-def test_point_estimates_are_judged_with_a_symmetric_band():
+def test_synthetic_cells_profile_first_typical_refresh_intro_and_change_ticks_and_judge_the_budget():
+    """합성 셀은 100틱 에피소드의 틱 종류별 토큰(첫·통상·갱신·소개·지시 변경)과 구간별 평균을 내고, 10물체·K=12 셀을
+    계약 v0.3 예산(p50 ≤ 500, p95 ≤ 800, 첫 틱 ≤ 1,200, 100틱 ≤ 60K)과 대조한다. 토큰 수 자체는 실제 tokenizer의 몫이다."""
     module = script()
-    assert module.near(40 * 1.15, 40) and module.near(40 * 0.85, 40)
-    assert not module.near(40 * 1.16, 40) and not module.near(40 * 0.84, 40)
+    tokenizer = WhitespaceTokenizer()
+    cells = module.measure_synthetic(tokenizer, ticks=31)
+    assert [(c["objects"], c["k_cap"], c["instruction_change"]) for c in cells] == [
+        (6, 12, False), (6, 12, True), (10, 12, False), (10, 12, True), (10, "none", False), (10, "none", True),
+    ]
+    cell = next(c for c in cells if (c["objects"], c["k_cap"], c["instruction_change"]) == (10, 12, True))
+    assert cell["ticks"] == 31 and cell["change_tick"] == 15 and cell["k_actual"] == 12
+    kinds = cell["by_kind"]
+    assert kinds["first"]["ticks"] == 1 and kinds["intro"]["ticks"] == 1 and kinds["instruction_change"]["ticks"] == 1
+    assert kinds["refresh"]["ticks"] == 2 and kinds["typical"]["ticks"] == 31 - 5  # 10·20 갱신, 30 소개, 15 지시 변경
+    assert "objects_intro" in kinds["first"]["sections"] and "objects_intro" in kinds["intro"]["sections"]
+    assert "objects_intro" not in kinds["typical"]["sections"]
+    assert kinds["instruction_change"]["sections"]["instruction_change"] > 0
+    assert cell["chunk_100_ticks"] is None  # 100틱이 안 된다
+    assert kinds["typical"]["new_tokens"]["p50"] < kinds["refresh"]["new_tokens"]["mean"] < kinds["intro"]["new_tokens"]["mean"]
+    report = {"synthetic": cells}
+    verdict = module.verdicts(report)
+    assert set(verdict["checks"]) == {"same_instruction", "instruction_change"}
+    assert set(verdict["checks"]["same_instruction"]) == {"tick_p50", "tick_p95", "first_tick", "chunk_100_ticks", "typical_tick_p50"}
+    assert verdict["checks"]["same_instruction"]["chunk_100_ticks"]["holds"] is False  # 100틱 구간이 없으면 성립하지 않는다
+    assert verdict["budget"] == module.BUDGET == {"tick_p50": 500, "tick_p95": 800, "first_tick": 1200, "chunk_100_ticks": 60_000}
+    assert verdict["holds"] is False
+    hundred = module.measure_synthetic(tokenizer, ticks=100)
+    assert all(c["chunk_100_ticks"] == sum(t for t in [c["all_ticks"]["mean"] * 100]) or c["chunk_100_ticks"] > 0 for c in hundred)
+    assert module.verdicts({"synthetic": hundred})["checks"]["same_instruction"]["chunk_100_ticks"]["measured"] == hundred[2]["chunk_100_ticks"]
+
+
+def test_real_episode_measurement_reports_distribution_chunks_and_sections():
+    module = script()
+    tokenizer = WhitespaceTokenizer()
+    record = module.synthetic_episode(6, 12, instruction_change=True, ticks=120, change_tick=40)
+    record["provenance"] = {"profile": "E1"}
+    out = module.measure_episodes(tokenizer, [record])
+    assert out["episodes"] == 1 and out["ticks"] == 120 and out["chunk_100_ticks"]["n"] == 1
+    assert out["per_episode"][0]["profile"] == "E1" and out["per_episode"][0]["instruction_changes"] == 1
+    assert out["first_tick"]["max"] == out["per_episode"][0]["first_tick"] > 0
+    assert set(out["sections_mean"]) <= set(module.SECTIONS)
+    verdict = module.verdicts({"synthetic": module.measure_synthetic(tokenizer, ticks=5), "episodes": out})
+    assert set(verdict["checks"]["real_episodes"]) == {"tick_p50", "tick_p95", "first_tick_max", "chunk_100_ticks_max"}
 
 
 def test_instruction_change_tokens_are_part_of_the_ticks_new_tokens():

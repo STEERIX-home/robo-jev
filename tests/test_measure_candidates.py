@@ -20,7 +20,7 @@ import yaml
 from helpers import D0, D0_STREAMS, REPO, read_jsonl
 
 from robo_jev.contracts import validate_record
-from robo_jev.model.serialize import TOKEN_SERIALIZER_VERSION, serialize_request
+from robo_jev.model.serialize import STREAM_FORMAT, TOKEN_SERIALIZER_VERSION, serialize_request
 from robo_jev.model.tokenizer import WhitespaceTokenizer
 
 SCRIPT = REPO / "scripts" / "measure_candidates.py"
@@ -109,7 +109,7 @@ def stream_record(ticks: int) -> dict:
 # --------------------------------------------------------------------------
 
 
-def test_tick_slices_follow_the_serializer_boundaries_and_truncation_is_length_only():
+def test_tick_slices_follow_the_serializer_boundaries():
     module = script()
     out = serialize_request(stream_record(12), WhitespaceTokenizer(), layout="stream_l1a")
     stream = module.stream_input(out, name="ep")
@@ -124,10 +124,6 @@ def test_tick_slices_follow_the_serializer_boundaries_and_truncation_is_length_o
         joined.extend(stream.tick_ids(index))
     assert joined == out["tokens"]  # prefix와 틱이 빈틈없이 이어진다 (결정 토큰까지 그 틱의 것)
 
-    short = module.stream_input(out, name="ep", truncate_tick_tokens=5)
-    assert short.prefix == stream.prefix
-    assert all(short.tick_ids(index) == stream.tick_ids(index)[:5] for index in range(12))
-    assert short.truncated_to == 5 and short.full_tick_tokens == [len(stream.tick_ids(i)) for i in range(12)]
 
 
 def test_warm_condition_feeds_prefix_plus_history_in_the_cache_before_the_first_timed_tick():
@@ -248,7 +244,7 @@ def test_verdict_flags_flip_strictly_above_each_threshold_and_quote_their_number
 
     def conditions(p95: float, miss: float) -> dict:
         summary = {"ticks": 35, "model_ms": {"p50": p95 / 2, "p95": p95, "p99": p95, "max": p95, "mean": p95, "min": 0.0}, "deadline_miss_rate_100ms": miss}
-        return {"lower": {"stream_warm": {"summary": summary}}, "v03_target": {"stream_warm": {"summary": dict(summary, deadline_miss_rate_100ms=0.0)}}}
+        return {"lower": {"stream_warm": {"summary": summary}}, "upper": {"stream_warm": {"summary": dict(summary, deadline_miss_rate_100ms=0.0)}}}
 
     verdict = module.verdicts(conditions(80.0, 0.05), max_miss_rate=0.05)
     assert verdict["lower"] == {
@@ -261,12 +257,12 @@ def test_verdict_flags_flip_strictly_above_each_threshold_and_quote_their_number
     assert "window-sized: fit n/a at n/a tokens, first-5 mean n/a; cache n/a" in verdict["lower"]["text"]
     tight = module.verdicts(conditions(80.1, 0.051), max_miss_rate=0.05)
     assert tight["lower"]["fails_10hz"] and not tight["lower"]["fails_5hz"] and tight["lower"]["deadline_fail"] and not tight["lower"]["passes"]
-    assert tight["v03_target"]["fails_10hz"] and not tight["v03_target"]["deadline_fail"]
+    assert tight["upper"]["fails_10hz"] and not tight["upper"]["deadline_fail"]
     assert "80.1" in tight["lower"]["text"] and "0.051" in tight["lower"]["text"] and "fails_10hz" in tight["lower"]["text"]
     slow = module.verdicts(conditions(150.1, 0.0), max_miss_rate=0.05)
     assert slow["lower"]["fails_10hz"] and slow["lower"]["fails_5hz"]
     missing = module.verdicts({"lower": {}}, max_miss_rate=0.05)
-    assert missing["lower"]["passes"] is None and "not measured" in missing["lower"]["text"] and missing["v03_target"]["passes"] is None
+    assert missing["lower"]["passes"] is None and "not measured" in missing["lower"]["text"] and missing["upper"]["passes"] is None
     assert missing["lower"]["window"]["model_ms_at_window_cache"] is None and missing["lower"]["window"]["fit_n"] == 0
 
 
@@ -330,7 +326,7 @@ def test_memory_estimates_follow_the_stated_formula_and_match_docs05_for_the_27b
     estimates = module.memory_estimates(two, prefix_tokens=385, tick_tokens_mean=1800.0, history_ticks=30)
     assert estimates["window_state"]["tokens"] == 385 + 30 * 1800
     assert estimates["training_chunk_activation"]["measured_profile"]["tokens"] == 385 + 100 * 1800
-    assert estimates["training_chunk_activation"]["v03_target_50k"]["tokens"] == 50_000
+    assert estimates["training_chunk_activation"]["v03_50k"]["tokens"] == 50_000
     assert estimates["estimate"] is True
 
 
@@ -348,29 +344,31 @@ def test_synthetic_episodes_extend_to_n_ticks_with_the_instruction_change_on_the
     assert [tick["request"]["commitment"]["held_ticks"] for tick in record["ticks"][1:]] == [1, 2, 3, 4, 5, 6]
     plain = module.synthetic_episode(6, 12, instruction_change=False, ticks=3)
     assert len(plain["prefix"]["instructions"]) == 1 and len(plain["ticks"]) == 3
+    assert module.SYNTHETIC == {"lower": (6, 12, False), "upper": (10, 12, False), "instruction_change": (10, 12, True)}
+    assert "v03_target" not in module.PROFILES  # 계약 v0.3 서식이 있으므로 길이 대역은 은퇴했다
 
 
-def test_profiles_are_built_from_the_serializer_and_v03_is_the_upper_stream_truncated_to_500():
+def test_profiles_are_built_from_the_serializer_in_the_v03_format():
     module = script()
     tokenizer = WhitespaceTokenizer()
-    profiles = module.build_profiles(tokenizer, ticks=6, names=("d0_streams", "lower", "v03_target"), d0_streams=[stream_record(6)], d0_singles=read_jsonl(D0)[:3], change_tick=3)
-    assert set(profiles) == {"d0_streams", "lower", "v03_target", "state_first"}
+    profiles = module.build_profiles(tokenizer, ticks=6, names=("d0_streams", "lower", "upper"), d0_streams=[stream_record(6)], d0_singles=read_jsonl(D0)[:3], change_tick=3)
+    assert set(profiles) == {"d0_streams", "lower", "upper", "state_first"}
     assert profiles["d0_streams"]["layout"] == "stream_l1a" and len(profiles["d0_streams"]["requests"]) == 1
     assert profiles["d0_streams"]["episodes"] == ["ep-d0-001"] and profiles["lower"]["episodes"] == ["ep-synth-6-12-same"]  # 레코드의 이름
     assert profiles["lower"]["objects"] == 6 and profiles["lower"]["k_cap"] == 12 and profiles["lower"]["instruction_change"] is False
-    assert profiles["v03_target"]["truncate_tick_tokens"] == 500 and profiles["v03_target"]["derived_from"] == "upper"
-    assert profiles["v03_target"]["requests"][0]["tokens"] == profiles["v03_target"]["source_requests"][0]["tokens"]  # 길이만 자른다
+    assert profiles["upper"]["objects"] == 10 and profiles["upper"]["k_cap"] == 12 and profiles["upper"]["episodes"] == ["ep-synth-10-12-same"]
     assert profiles["state_first"]["layout"] == "state_first" and len(profiles["state_first"]["requests"]) == 3
     for name, profile in profiles.items():
         if profile["layout"] == "stream_l1a":
-            assert all(request["serializer"] == TOKEN_SERIALIZER_VERSION for request in profile["requests"])
+            assert profile["format"] == STREAM_FORMAT == "v0.3" and "truncate_tick_tokens" not in profile
+            assert all(request["serializer"] == TOKEN_SERIALIZER_VERSION and request["format"] == STREAM_FORMAT for request in profile["requests"])
             assert profile["tick_tokens"]["n"] == 6 * len(profile["requests"]) and profile["prefix_tokens"] > 0
 
 
 def test_screen_report_is_json_serialisable_and_carries_the_documented_keys(capsys, tmp_path):
     module = script()
     tokenizer = WhitespaceTokenizer()
-    profiles = module.build_profiles(tokenizer, ticks=8, names=("lower", "v03_target"), d0_singles=read_jsonl(D0)[:3], change_tick=3)
+    profiles = module.build_profiles(tokenizer, ticks=8, names=("lower", "upper"), d0_singles=read_jsonl(D0)[:3], change_tick=3)
     runner = FakeRunner()
     entry = dict(entries()["Qwen/Qwen3.5-2B"], path="/nowhere", manifest={"revision": "abc", "digest": "def", "verified": "sizes+small-files"})
     settings = module.Settings(ticks=8, warmup=1, history_ticks=3, cold_window_ticks=2, cold_ticks=2, max_miss_rate=0.05, dtype="bf16")
@@ -384,7 +382,7 @@ def test_screen_report_is_json_serialisable_and_carries_the_documented_keys(caps
     assert report["path"] == "native" and report["environment"]["gpu"] == "fake" and report["settings"]["max_miss_rate"] == 0.05
     candidate = report["candidates"]["Qwen/Qwen3.5-2B"]
     assert {"config", "manifest", "loaded", "conditions", "memory", "verdict"} <= set(candidate)
-    assert set(candidate["conditions"]) == {"lower", "v03_target", "state_first"}
+    assert set(candidate["conditions"]) == {"lower", "upper", "state_first"}
     assert set(candidate["conditions"]["lower"]) == {"stream_warm", "stream_cold"} and set(candidate["conditions"]["state_first"]) == {"state_first"}
     for profile, conditions in candidate["conditions"].items():
         for condition, result in conditions.items():
@@ -395,7 +393,7 @@ def test_screen_report_is_json_serialisable_and_carries_the_documented_keys(caps
     assert memory["weight_bytes"] == 84 and memory["peak_allocated_bytes"] == 123 and memory["estimates"]["estimate"] is True
     assert memory["cache_bytes_measured"]["lower"]["stream_warm"] > 0
     assert memory["estimates"]["window_state"]["tokens"] == memory["estimates"]["window_state"]["prefix_tokens"] + 30 * memory["estimates"]["window_state"]["tick_tokens_mean"]
-    assert set(candidate["verdict"]) == {"lower", "v03_target"} and candidate["verdict"]["lower"]["passes"] in (True, False)
+    assert set(candidate["verdict"]) == {"lower", "upper"} and candidate["verdict"]["lower"]["passes"] in (True, False)
     window = candidate["verdict"]["lower"]["window"]
     assert window["fit_n"] == len(candidate["conditions"]["lower"]["stream_warm"]["ticks"]) and window["cache_before_range"][0] > 0
     assert window["window_cache_tokens"] == round(profiles["lower"]["prefix_tokens"] + 29 * profiles["lower"]["tick_tokens"]["mean"])
@@ -403,13 +401,13 @@ def test_screen_report_is_json_serialisable_and_carries_the_documented_keys(caps
     assert runner.loaded[0]["path"] == "/nowhere" and runner.unloaded == 1
     module.print_table(report)
     out = capsys.readouterr().out
-    assert "Qwen/Qwen3.5-2B" in out and "v03_target" in out and "stream_cold" in out and "verdict" in out
+    assert "Qwen/Qwen3.5-2B" in out and "upper" in out and "stream_cold" in out and "verdict" in out
 
 
 def test_from_report_rebuilds_summaries_and_verdicts_and_leaves_everything_else_untouched(tmp_path, capsys):
     """`--from-report`: GPU 없이 틱 기록에서 요약·판정만 다시 만든다. 나머지 블록과 틱 기록은 그대로, finished_at은 지어내지 않는다."""
     module = script()
-    profiles = module.build_profiles(WhitespaceTokenizer(), ticks=8, names=("lower", "v03_target"), d0_singles=read_jsonl(D0)[:3], change_tick=3)
+    profiles = module.build_profiles(WhitespaceTokenizer(), ticks=8, names=("lower", "upper"), d0_singles=read_jsonl(D0)[:3], change_tick=3)
     entry = dict(entries()["Qwen/Qwen3.5-2B"], path="/nowhere", manifest={"revision": "abc", "digest": "def", "verified": "sizes+small-files"})
     settings = module.Settings(ticks=8, warmup=1, history_ticks=3, cold_window_ticks=2, cold_ticks=2, max_miss_rate=0.05, dtype="bf16")
     report = module.screen([entry], profiles, FakeRunner(), settings=settings, tokenizer_info={"id": "fake", "revision": None, "sha256": "0" * 64})
@@ -437,7 +435,7 @@ def test_from_report_rebuilds_summaries_and_verdicts_and_leaves_everything_else_
     assert "window-sized: fit" in after["verdict"]["lower"]["text"]
     assert any(note.startswith("finished_at is null") for note in rebuilt["notes"]) and any("--from-report" in note for note in rebuilt["notes"])
     assert rebuilt["notes"][: len(report["notes"])] == report["notes"]
-    assert "v03_target" in capsys.readouterr().out
+    assert "upper" in capsys.readouterr().out
     # --report 없이 부르면 같은 파일에 쓰고, 두 번 돌려도 notes가 늘지 않는다
     assert module.main(["--from-report", str(out)]) == 0
     again = json.loads(out.read_text(encoding="utf-8"))

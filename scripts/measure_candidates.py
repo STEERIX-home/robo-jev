@@ -17,10 +17,9 @@ full-attention의 KV는 에피소드 길이만큼 자라고 틱 지연도 그만
 
 * ``d0_streams`` — `tests/fixtures/d0_streams.jsonl`의 4 에피소드(각 `--ticks` 틱으로 자른다), 틱당 ≈800 토큰.
 * ``lower`` / ``upper`` / ``instruction_change`` — `scripts/measure_tokens.py`의 장면 빌더로 만든 합성 에피소드
-  (물체 6·K=12 ≈1.8K / 물체 10·K=32 ≈3.5K / 10·K=32 + 지시 변경 틱 ≈3.7K), `--ticks` 틱까지 `append_tick`으로 늘린다.
-  지시 변경 틱은 이력·예열 뒤 첫 측정 틱(`--history + --warmup`)이라 측정 안에 든다.
-* ``v03_target`` — ``upper`` 스트림의 **틱마다 토큰 목록을 500개로 자른 것**. 계약 v0.3(HANDOFF 결정 1, ≈500 토큰/틱)의
-  **길이만의 대역**이다 — 내용은 v0.3 서식이 아니다. "≈500 토큰/틱이면 이 후보가 들어오는가"에만 답한다.
+  (물체 6·K=12 / 물체 10·K=12 / 10·K=12 + 지시 변경 틱; 계약 v0.3 서식 `ts0.4`), `--ticks` 틱까지 `append_tick`으로
+  늘린다. 지시 변경 틱은 이력·예열 뒤 첫 측정 틱(`--history + --warmup`)이라 측정 안에 든다. 계약 v0.3 이전에 있던
+  ``v03_target``(옛 ``upper``를 틱마다 500토큰으로 자른 길이 대역)은 은퇴했다 — 이제 ``upper`` 자체가 v0.3 서식이다.
 * ``state_first`` — `tests/fixtures/d0.jsonl` 64건의 단일 요청(L0, cache 없음). 프로파일이 아니라 조건이지만 같은 표에 둔다.
 
 조건(docs/06 bullet 3):
@@ -41,7 +40,7 @@ full-attention의 KV는 에피소드 길이만큼 자라고 틱 지연도 그만
 **계산한** 추정 둘(측정이 아니다 — JSON도 그렇게 적는다): (1) 윈도우 상태(prefix + 30틱, 측정한 토큰 수) — full 층
 KV ``2 × L_full × kv_heads × head_dim × tokens × 2B`` + linear 층 recurrent ``L_lin × v_heads × k_dim × v_dim × 2B`` +
 conv ``L_lin × (2·k_heads·k_dim + v_heads·v_dim) × kernel × 2B``(길이와 무관); (2) 10초 학습 구간의 활성 자릿수
-``tokens × hidden × layers × 2B``(측정 프로파일의 100틱과 v0.3 목표 50K). 판정(후보, `lower`와 `v03_target` 따로,
+``tokens × hidden × layers × 2B``(측정 프로파일의 100틱과 v0.3 목표 50K). 판정(후보, `lower`와 `upper` 따로,
 stream_warm 기준): `fails_10hz` = p95 모델 ms > 80, `fails_5hz` = > 150, `deadline_fail` = 초과율 > `--max-miss-rate`
 (기본 0.05 — docs/03 §7-6이 수치를 파일럿에 맡겨 CLI 인자다). 품질(bullet 4)로는 떨어뜨리지 않는다.
 
@@ -73,7 +72,7 @@ import yaml
 from robo_jev.data.episode import append_tick, new_episode
 from robo_jev.harness.robot import candidate_id
 from robo_jev.model.backbone import CANDIDATES_CONFIG, FETCH_SCRIPT, backbone_root, describe_backbone
-from robo_jev.model.serialize import TOKEN_SERIALIZER_VERSION, WINDOW_TICKS, serialize_request
+from robo_jev.model.serialize import STREAM_FORMAT, TOKEN_SERIALIZER_VERSION, WINDOW_TICKS, serialize_request
 from robo_jev.model.tokenizer import available_tokenizer, describe_tokenizer, load_tokenizer
 
 REPO = Path(__file__).resolve().parents[1]
@@ -82,22 +81,22 @@ D0_STREAMS = REPO / "tests" / "fixtures" / "d0_streams.jsonl"
 DEFAULT_REPORT = REPO / "artifacts" / "reports" / "backbone-screen.json"
 
 PATHS = ("native",)
-PROFILES = ("d0_streams", "lower", "upper", "instruction_change", "v03_target")
+PROFILES = ("d0_streams", "lower", "upper", "instruction_change")
 STREAM_CONDITIONS = ("stream_warm", "stream_cold")
 #: docs/03 §"지연 예산에서 역산하는 backbone 선정": 모델 시간 80ms(10Hz)·150ms(5Hz), obs→apply deadline 100ms.
 BUDGET_MS = {"model_10hz": 80.0, "model_5hz": 150.0, "deadline": 100.0}
 DEFAULT_MAX_MISS_RATE = 0.05
-#: 계약 v0.3의 틱당 토큰 목표(HANDOFF 결정 1) — `v03_target`이 자르는 길이.
+#: 계약 v0.3의 틱당 토큰 목표(HANDOFF 결정 1, p50) — 10초 학습 구간 50K 추정의 근거.
 V03_TICK_TOKENS = 500
-#: 합성 프로파일 (물체 수, K 상한, 지시 변경).
+#: 합성 프로파일 (물체 수, K 상한, 지시 변경). K 상한은 계약 v0.3의 12 — `upper`는 물체 10개다.
 SYNTHETIC = {
     "lower": (6, 12, False),
-    "upper": (10, 32, False),
-    "instruction_change": (10, 32, True),
+    "upper": (10, 12, False),
+    "instruction_change": (10, 12, True),
 }
 DTYPES = {"bf16": "bfloat16"}
 #: 이 스크립트의 버전 — `--from-report`가 다시 요약할 때 JSON에 적는다 (요약·판정의 정의가 바뀌면 올린다).
-SCRIPT_VERSION = "g0a-1.1"
+SCRIPT_VERSION = "g0a-1.2"
 #: 판정의 "윈도우 크기 cache" 읽기: 첫 측정 틱 몇 개의 평균을 함께 적는다.
 EARLY_TICKS = 5
 
@@ -154,7 +153,6 @@ class StreamInput:
     tokens: list[int]
     prefix_end: int
     bounds: list[tuple[int, int]]
-    truncated_to: int | None = None
 
     @property
     def prefix(self) -> list[int]:
@@ -170,12 +168,10 @@ class StreamInput:
 
     def tick_ids(self, index: int) -> list[int]:
         start, end = self.bounds[index]
-        if self.truncated_to is not None:
-            end = min(end, start + self.truncated_to)
         return self.tokens[start:end]
 
 
-def stream_input(out: dict[str, Any], *, name: str, truncate_tick_tokens: int | None = None) -> StreamInput:
+def stream_input(out: dict[str, Any], *, name: str) -> StreamInput:
     if out.get("layout") != "stream_l1a":
         raise ValueError(f"stream_l1a 직렬화 결과가 필요하다 (받은 layout: {out.get('layout')!r})")
     return StreamInput(
@@ -183,7 +179,6 @@ def stream_input(out: dict[str, Any], *, name: str, truncate_tick_tokens: int | 
         tokens=list(out["tokens"]),
         prefix_end=int(out["prefix_end"]),
         bounds=[(int(tick["start"]), int(tick["end"])) for tick in out["ticks"]],
-        truncated_to=truncate_tick_tokens,
     )
 
 
@@ -386,7 +381,6 @@ def measure_latency(
     cold_window_ticks: int = WINDOW_TICKS,
     cold_ticks: int | None = None,
     cold_warmup: int = 1,
-    truncate_tick_tokens: int | None = None,
     budgets: dict[str, float] = BUDGET_MS,
 ) -> dict[str, Any]:
     """docs/06 Task 2b의 인터페이스: 후보 `model_id`에 `requests`를 `layout`으로 넣어 틱당 지연을 잰다.
@@ -416,7 +410,7 @@ def measure_latency(
         else:
             condition = "stream_warm" if warm_prefix else "stream_cold"
             for number, out in enumerate(outs):
-                stream = stream_input(out, name=str(out.get("episode_id") or f"stream-{number}"), truncate_tick_tokens=truncate_tick_tokens)
+                stream = stream_input(out, name=str(out.get("episode_id") or f"stream-{number}"))
                 if warm_prefix:
                     records, cache = run_stream_warm(runner, handle, stream, history_ticks=history_ticks, warmup=warmup)
                 else:
@@ -449,7 +443,6 @@ def measure_latency(
                 "cold_window_ticks": cold_window_ticks if condition == "stream_cold" else None,
                 "cold_ticks": cold_ticks if condition == "stream_cold" else None,
                 "cold_warmup": cold_warmup if condition == "stream_cold" else None,
-                "truncate_tick_tokens": truncate_tick_tokens,
             },
             "ticks": ticks,
             "summary": summarize_ticks(ticks, budgets=budgets),
@@ -524,13 +517,13 @@ def memory_estimates(entry: dict[str, Any], *, prefix_tokens: int, tick_tokens_m
         },
         "training_chunk_activation": {
             "measured_profile": activation_bytes(entry, tokens=chunk_tokens),
-            "v03_target_50k": activation_bytes(entry, tokens=50_000),
+            "v03_50k": activation_bytes(entry, tokens=50_000),
         },
     }
 
 
 # --------------------------------------------------------------------------
-# 판정 (docs/06 1단계 탈락 규칙 — lower와 v03_target 따로)
+# 판정 (docs/06 1단계 탈락 규칙 — lower와 upper 따로)
 # --------------------------------------------------------------------------
 
 
@@ -607,12 +600,12 @@ def verdicts(
     budgets: dict[str, float] = BUDGET_MS,
     profiles: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """docs/06 1단계 탈락 규칙 — `lower`와 `v03_target`에서 따로, stream_warm의 **문자 그대로의 p95**(native cache가 자란
+    """docs/06 1단계 탈락 규칙 — `lower`와 `upper`에서 따로, stream_warm의 **문자 그대로의 p95**(native cache가 자란
     채로)로 flag를 정한다(보수적). 그 옆에 :func:`window_reading` 의 윈도우 크기 읽기(직선 맞춤·첫 5틱 평균·cache 범위)를
     적고 문장에도 인용한다 — flag는 그것으로 바꾸지 않는다."""
     deadline_key = f"deadline_miss_rate_{budgets['deadline']:.0f}ms"
     out: dict[str, Any] = {}
-    for profile in ("lower", "v03_target"):
+    for profile in ("lower", "upper"):
         result = (conditions.get(profile) or {}).get("stream_warm") or {}
         summary = result.get("summary")
         if not summary or not summary.get("ticks"):
@@ -670,53 +663,15 @@ def verdicts(
 # --------------------------------------------------------------------------
 
 
-def synthetic_episode(n_objects: int, k_cap: int, *, instruction_change: bool, ticks: int, change_tick: int | None = None) -> dict[str, Any]:
-    """`measure_tokens.synthetic_record`의 2틱을 `ticks`틱으로 늘린 합성 에피소드 — 같은 장면 빌더, commitment는 틱마다 이어진다.
-
-    `instruction_change`면 `change_tick`(기본: 마지막 틱 앞)부터 지시 v2가 실리고 그 틱의 첫 토큰이 지시 조각이 된다.
-    """
-    if ticks < 1:
-        raise ValueError("ticks는 1 이상")
-    if change_tick is None:
-        change_tick = max(1, ticks - 1)
-    if not 1 <= change_tick < ticks:
-        raise ValueError(f"change_tick은 1 이상 ticks({ticks}) 미만이어야 한다 (받은 값: {change_tick})")
-    hrn = measure_tokens.harness_with_cap(k_cap)
-    first = hrn.build_request(measure_tokens.observation(measure_tokens.scene(n_objects)), None, None)
-    grasp_key = "grasp:o0:top:zoneL"
-    grasp = next((c for c in first["request"]["candidates"]["q_main"] if c["key"] == grasp_key), None)
-    exec_history = {
-        "adopted": {"main": candidate_id("hold"), "phase": "none", "path": "p0", "speed": 0, "force": 0, "gripper": "open", "stop": False},
-        "ack": {"applied": True},
-    }
-    record = new_episode(
-        f"ep-synth-{n_objects}-{k_cap}-{'chg' if instruction_change else 'same'}",
-        "scene-family-b2",
-        instructions=[dict(measure_tokens.observation(measure_tokens.scene(n_objects))["instruction"])],
-        question_set=hrn.question_set_id(),
-    )
-    append_tick(record, first)
-    for index in range(1, ticks):
-        observation = measure_tokens.observation(measure_tokens.scene(n_objects), tick=index, sim_time_ms=100 * index)
-        if instruction_change and index >= change_tick:
-            observation["instruction"] = {
-                "version": 2,
-                "t_ms": 100 * change_tick,
-                "text": "blue 상자를 오른쪽 정리 영역으로 옮기고 green 상자는 건드리지 마라",
-            }
-        commitment = (
-            {"action_ref": grasp["id"], "key": grasp_key, "phase": "approach", "held_ticks": index, "last_switch_tick": 0}
-            if grasp
-            else None
-        )
-        append_tick(record, hrn.build_request(observation, exec_history, commitment))
-    return record
+def synthetic_episode(n_objects: int, k_cap: int | None, *, instruction_change: bool, ticks: int, change_tick: int | None = None) -> dict[str, Any]:
+    """`measure_tokens.synthetic_episode` 그대로 — 같은 장면·변화 일정 빌더, commitment는 틱마다 이어진다."""
+    return measure_tokens.synthetic_episode(n_objects, k_cap, instruction_change=instruction_change, ticks=ticks, change_tick=change_tick)
 
 
-def _tick_tokens_summary(outs: list[dict[str, Any]], truncate: int | None) -> dict[str, Any]:
+def _tick_tokens_summary(outs: list[dict[str, Any]]) -> dict[str, Any]:
     values: list[int] = []
     for out in outs:
-        stream = stream_input(out, name="", truncate_tick_tokens=truncate)
+        stream = stream_input(out, name="")
         values.extend(len(stream.tick_ids(index)) for index in range(stream.ticks))
     return {"n": len(values), "mean": round(statistics.fmean(values), 1), "p50": percentile(values, 0.5), "p95": percentile(values, 0.95), "max": max(values), "min": min(values)}
 
@@ -736,7 +691,7 @@ def build_profiles(
         raise ValueError(f"모르는 프로파일: {unknown} (아는 것: {list(PROFILES)})")
     profiles: dict[str, dict[str, Any]] = {}
 
-    def stream_profile(name: str, records: list[dict[str, Any]], description: str, truncate: int | None = None, **extra: Any) -> dict[str, Any]:
+    def stream_profile(name: str, records: list[dict[str, Any]], description: str, **extra: Any) -> dict[str, Any]:
         outs = []
         for record in records:
             out = serialize_request(record, tokenizer, layout="stream_l1a")
@@ -749,8 +704,8 @@ def build_profiles(
             "episodes": [out.get("episode_id") for out in outs],
             "ticks_per_episode": ticks,
             "prefix_tokens": int(outs[0]["prefix_end"]) if outs else 0,
-            "tick_tokens": _tick_tokens_summary(outs, truncate),
-            "truncate_tick_tokens": truncate,
+            "tick_tokens": _tick_tokens_summary(outs),
+            "format": STREAM_FORMAT,
             **extra,
         }
 
@@ -764,8 +719,7 @@ def build_profiles(
         profiles["d0_streams"] = stream_profile("d0_streams", cut, f"tests/fixtures/d0_streams.jsonl {len(cut)} episodes, first {ticks} ticks each")
 
     synthetic_outs: dict[str, dict[str, Any]] = {}
-    needed = [name for name in SYNTHETIC if name in names] + (["upper"] if "v03_target" in names and "upper" not in names else [])
-    for name in needed:
+    for name in [name for name in SYNTHETIC if name in names]:
         n_objects, k_cap, change = SYNTHETIC[name]
         record = synthetic_episode(n_objects, k_cap, instruction_change=change, ticks=ticks, change_tick=change_tick if change else None)
         synthetic_outs[name] = stream_profile(
@@ -773,18 +727,7 @@ def build_profiles(
             f"synthetic {n_objects} objects, K={k_cap}, instruction change={'tick ' + str(change_tick if change_tick is not None else max(1, ticks - 1)) if change else 'no'}, {ticks} ticks",
             objects=n_objects, k_cap=k_cap, instruction_change=change,
         )
-        if name in names:
-            profiles[name] = synthetic_outs[name]
-    if "v03_target" in names:
-        upper = synthetic_outs["upper"]
-        profiles["v03_target"] = {
-            **upper,
-            "description": f"`upper` stream with every tick truncated to {V03_TICK_TOKENS} tokens — LENGTH-ONLY stand-in for contract v0.3 (not v0.3 formatting)",
-            "truncate_tick_tokens": V03_TICK_TOKENS,
-            "derived_from": "upper",
-            "source_requests": upper["requests"],
-            "tick_tokens": _tick_tokens_summary(upper["requests"], V03_TICK_TOKENS),
-        }
+        profiles[name] = synthetic_outs[name]
 
     singles = d0_singles if d0_singles is not None else read_jsonl(D0)
     outs = [serialize_request(record, tokenizer) for record in singles]
@@ -820,7 +763,7 @@ class Settings:
 NOTES = [
     "native path = official transformers AutoModelForCausalLM forward (BF16, use_cache=True); the model's own hybrid cache grows without the 30-tick window (a stage-2 property), so every latency carries the cache length before that tick.",
     "stream_cold recomputes prefix + the most recent `cold_window_ticks` ticks, the current one included (the docs/08 window), with an empty cache (stateless bound; 0 = full history) and times only `cold_ticks` ticks.",
-    "v03_target is the `upper` stream with each tick's token list truncated to 500 tokens — a length-only stand-in for contract v0.3, not v0.3 formatting.",
+    "stream profiles are serialized with the contract v0.3 format (serializer ts0.4: short names, object intro/dynamic split, delta ticks); the pre-v0.3 `v03_target` length-only stand-in is retired.",
     "memory.estimates are computed from config.json (formulas in the entries), not measured; memory.peak_allocated_bytes and cache_bytes_measured are measured.",
     "verdicts follow the docs/06 stage-1 drop rule on stream_warm p95 model ms (80 ms = 10 Hz, 150 ms = 5 Hz) and the obs→apply 100 ms miss rate against --max-miss-rate; quality (bullet 4) is out of scope.",
 ]
@@ -879,7 +822,7 @@ def screen(
                         model_id, profile["requests"], "stream_l1a", condition == "stream_warm", "native",
                         runner=runner, handle=handle, history_ticks=settings.history_ticks, warmup=settings.warmup,
                         cold_window_ticks=settings.cold_window_ticks, cold_ticks=settings.cold_ticks, cold_warmup=settings.cold_warmup,
-                        truncate_tick_tokens=profile.get("truncate_tick_tokens"), budgets=settings.budgets,
+                        budgets=settings.budgets,
                     )
                     conditions[name][condition] = result
                     cache_bytes[name][condition] = max((episode["cache_bytes_end"] for episode in result["episodes"]), default=0)
@@ -1040,7 +983,7 @@ def print_table(report: dict[str, Any]) -> None:
                 f"{'':<18}estimate ({est.get('reference_profile')}, prefix + {window.get('history_ticks')} ticks = {window.get('tokens')} tokens): "
                 f"KV {_mib(window.get('kv_bytes'))} + recurrent {_mib(window.get('recurrent_bytes'))} + conv {_mib(window.get('conv_bytes'))} = {_mib(window.get('total_bytes'))}; "
                 f"10 s chunk activation {_gib(chunk.get('measured_profile', {}).get('bytes'))} at {chunk.get('measured_profile', {}).get('tokens')} tokens, "
-                f"{_gib(chunk.get('v03_target_50k', {}).get('bytes'))} at 50K (estimates, not measurements)"
+                f"{_gib(chunk.get('v03_50k', {}).get('bytes'))} at 50K (estimates, not measurements)"
             )
         measured = {p: {c: _mib(v) for c, v in conds.items()} for p, conds in (memory.get("cache_bytes_measured") or {}).items()}
         if measured:
