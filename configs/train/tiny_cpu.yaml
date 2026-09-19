@@ -7,7 +7,7 @@
 run_name: tiny-cpu
 run_id: null                              # null이면 <run_name>-<시각>. 산출물은 artifacts/runs/<run_id>/
 
-model_id: tiny_hybrid                      # 계획서: Qwen/Qwen3.8-27B. 여기서는 4b의 계산 fixture (연구 모델이 아니다)
+model_id: tiny_hybrid                      # 계획서: Qwen/Qwen3.8-27B. 지금은 4b의 계산 fixture만 만들 수 있고 다른 id는 거절한다 (실모델 adapter 미구현)
 model_config: configs/model/tiny_hybrid.yaml
 model_vocab_size: 4096                     # 공백 tokenizer의 id < 4096. 설정 fixture를 앞 4096행으로 제한한 것과 비트 단위로 같다
                                            # (4b 검사). 실제 tokenizer(어휘 248,077)로 학습하면 null(설정값)이어야 한다.

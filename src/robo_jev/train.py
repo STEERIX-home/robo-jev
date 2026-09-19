@@ -97,6 +97,7 @@ from robo_jev.sampler import (
 __all__ = [
     "ChunkResult",
     "EpisodePlan",
+    "MODEL_IDS",
     "RESUME_FREE_KEYS",
     "Trainer",
     "build_model",
@@ -106,6 +107,7 @@ __all__ = [
     "layout_prefix",
     "lr_factor",
     "main",
+    "model_block",
     "parameter_groups",
     "plan_episode",
     "resolve_config",
@@ -123,6 +125,9 @@ DTYPES = {"float32": torch.float32, "float64": torch.float64}
 TRAINABLE = ("readout_only", "text_backbone_and_readout")
 EXECUTION_BACKENDS = ("independent_paths",)  # P0. `shared_hybrid`(P1)는 state_first에 아직 없다 (4b 보고 §5)
 OPTIMIZERS = ("adamw",)
+#: 만들 수 있는 모델. 지금은 4b의 소형 계산 fixture뿐이다 — 실제 backbone(Qwen 계열)의 adapter는 docs/06 Task 4의
+#: GPU 부분이라 아직 없다. 다른 id는 설정 단계에서 거절한다(리뷰 11 S2: 잘못된 설정이 성공처럼 보이면 안 된다).
+MODEL_IDS = ("tiny_hybrid",)
 DEFAULT_TICK_WEIGHTS = {"steady": 0.25, "event": 2.0, "goal_change": 2.0, "other": 1.0}
 DEFAULT_SAMPLER = {
     "material_shares": dict(DEFAULT_MATERIAL_SHARES),
@@ -135,6 +140,8 @@ DEFAULT_SAMPLER = {
 #: 재개할 때 checkpoint의 설정과 달라도 되는 키 — 중단·예산·경로·이름뿐이다(run id는 checkpoint의 것을
 #: 쓴다). 나머지는 run의 정체라 같아야 한다.
 RESUME_FREE_KEYS = ("resume", "stop_after", "max_wall_hours", "checkpoint_every", "artifacts_dir", "run_id", "run_name")
+#: 실제로 만든 backbone 클래스 → 그 model_id (manifest의 `model.kind`). :func:`build_model`이 새 종류를 만들면 여기도 더한다.
+_BACKBONE_KINDS = {"TinyHybrid": "tiny_hybrid"}
 
 DEFAULTS: dict[str, Any] = {
     "run_name": "run",
@@ -241,6 +248,12 @@ def resolve_config(config: dict) -> dict:
     out["dataset_manifests"] = _dataset_manifests(out.pop("dataset_manifest"), out["dataset_manifests"])
     out["dataset_manifest"] = None  # 정규화한 목록이 run의 정체다 — `dataset_manifest: x`와 `dataset_manifests: [x]`는 같은 run
     _need(_is_int(out["max_steps"]) and out["max_steps"] >= 1, f"max_steps: 1 이상의 정수여야 한다 (받은 값: {out['max_steps']!r})")
+    _need(
+        out["model_id"] in MODEL_IDS,
+        f"model_id: {list(MODEL_IDS)}만 만들 수 있다 — 실제 backbone(Qwen 계열)의 adapter는 아직 구현하지 않았다"
+        f"(docs/06 Task 4의 GPU 부분). 이 경로는 소형 계산 fixture 전용이라 다른 id를 조용히 fixture로 바꾸지 않는다 "
+        f"(받은 값: {out['model_id']!r})",
+    )
     _need(out["execution_backend"] in EXECUTION_BACKENDS, f"execution_backend: {list(EXECUTION_BACKENDS)}만 구현했다 — shared_hybrid(P1)는 state_first에 아직 없다 (받은 값: {out['execution_backend']!r})")
     _need(out["readout"] in READOUTS, f"readout: {list(READOUTS)} 중 하나여야 한다 (받은 값: {out['readout']!r})")
     _need(out["dtype"] in DTYPES, f"dtype: {list(DTYPES)}만 CPU 검증 범위다 — BF16 허용 오차는 클라우드 단계 (받은 값: {out['dtype']!r})")
@@ -592,9 +605,34 @@ def git_revision() -> dict[str, Any] | None:
     return {"sha": sha, "dirty": bool(dirty)}
 
 
+def model_block(config: dict, model: Judge) -> dict[str, Any]:
+    """manifest의 model 블록 — 요청한 id가 아니라 **실제로 만든 것**: 종류·클래스·설정 파일과 그 sha256·이름·어휘·seed·
+    readout·rank·파라미터 수(전체·학습 대상)·dtype·장치 (리뷰 11 S2)."""
+    parameters = list(model.parameters())
+    config_path = Path(config["model_config"])
+    backbone = type(model.backbone).__name__
+    return {
+        "kind": _BACKBONE_KINDS.get(backbone, backbone),
+        "id": config["model_id"],
+        "class": backbone,
+        "config": str(config_path),
+        "config_sha256": sha256_of(config_path),
+        "name": model.backbone.config.name,
+        "vocab_size": model.backbone.config.vocab_size,
+        "seed": model.backbone.config.seed if config["model_seed"] is None else config["model_seed"],
+        "readout": model.readout,
+        "rank": model.rank,
+        "parameters": sum(p.numel() for p in parameters),
+        "trainable_parameters": sum(p.numel() for p in parameters if p.requires_grad),
+        "dtype": str(parameters[0].dtype).removeprefix("torch."),
+        "device": str(parameters[0].device),
+        "revision_manifest": config["model_revision_manifest"],
+    }
+
+
 def build_manifest(config: dict, items: list[Item], model: Judge) -> dict[str, Any]:
     """checkpoint에 함께 적는 것: 데이터 manifest 참조(manifest마다 경로·sha256·파일 해시·분야 태그·레코드 수), 토큰
-    직렬화·질문 세트 버전, git SHA, 모델 fixture."""
+    직렬화·질문 세트 버전, git SHA, 실제로 만든 모델(:func:`model_block`)."""
     datasets = []
     for entry in config["dataset_manifests"]:
         manifest_path = Path(entry["path"])
@@ -618,16 +656,7 @@ def build_manifest(config: dict, items: list[Item], model: Judge) -> dict[str, A
         "question_set": {"id": "qs-v0", "markers": {qid: spec["marker"] for qid, spec in QUESTION_SET_V0.items()}},
         "layouts": dict(config["layout"]),
         "tokenizer": config["tokenizer"],
-        "model": {
-            "id": config["model_id"],
-            "config": str(config["model_config"]),
-            "name": model.backbone.config.name,
-            "vocab_size": model.backbone.config.vocab_size,
-            "seed": model.backbone.config.seed if config["model_seed"] is None else config["model_seed"],
-            "readout": model.readout,
-            "rank": model.rank,
-            "revision_manifest": config["model_revision_manifest"],
-        },
+        "model": model_block(config, model),
         "git": git_revision(),
         "torch": str(torch.__version__),  # TorchVersion 객체가 아니라 문자열 — weights_only 로 읽힌다
     }
