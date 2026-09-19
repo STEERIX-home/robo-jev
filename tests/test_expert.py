@@ -799,6 +799,30 @@ def test_the_gripper_closes_only_at_the_grasp_point_and_stays_closed_until_place
     assert top(expert().act(request, commitment, placing)["q_gripper"]) == "open"
 
 
+def test_the_gripper_stays_closed_on_a_place_tick_whose_path_answer_is_hold_or_retreat():
+    """리뷰 2 C2: 막힌 하강(경유점 없음)의 놓기 틱에 `open`을 답하면 하네스의 hold 경로 + 운반 높이 open이 라벨이 된다.
+    전문가의 경로 답이 내려가는 경로(direct·via)가 아니면 그리퍼 답은 `closed`(이유 `place_blocked`)다 — 모델 입력만 본다."""
+    hrn = harness()
+    placing = scene(tick=4, sim_time_ms=4 * PERIOD_MS)
+    placing["robot"].update(ee_pos_mm=[30, 240, -40], holding="o0")
+    request, commitment = committed_request(GRASP, obs=placing, hrn=hrn)
+    assert request["request"]["commitment"]["phase"] == "place"
+    assert top(expert().act(request, commitment, placing)["q_gripper"]) == "open"
+
+    blocked = copy.deepcopy(request)
+    entry = next(item for item in blocked["request"]["candidates"]["q_main"] if item["id"] == candidate_id(GRASP))
+    entry["path"] = "blocked"
+    blocked["request"]["candidates"]["q_path"] = [item for item in blocked["request"]["candidates"]["q_path"] if item["kind"] != "via"]
+    out = expert().act(blocked, commitment, placing)
+    kinds = {item["id"]: item["kind"] for item in blocked["request"]["candidates"]["q_path"]}
+    assert kinds[top(out["q_path"])] == "hold"
+    assert top(out["q_gripper"]) == "closed"
+    assert out["expert_meta"]["aux"]["gripper"]["reason"] == "place_blocked"
+    labels = {label["question_id"]: label for label in expert().labels(out, blocked)}
+    assert labels["q_gripper"]["candidate_ids"] == ["closed"]
+    assert labels["q_gripper"]["rule"].endswith("/place_blocked")
+
+
 def test_the_gripper_is_open_when_idle_and_closed_when_holding_without_a_commitment():
     idle = scene()
     assert top(expert().act(request_for(idle), None, idle)["q_gripper"]) == "open"

@@ -46,8 +46,8 @@ __all__ = [
 ]
 
 #: 전문가 버전. 레코드의 `versions.expert`에 들어간다. e0.3 = 계약 v0.3(비용 허용 집합, hold∉A, 접촉 국면에는 관측 게이트
-#: 없음, 4조각 결합 키).
-EXPERT_VERSION = "e0.3"
+#: 없음, 4조각 결합 키). e0.4 = 놓기 국면의 그리퍼 답은 내려가는 경로에만 `open`(리뷰 2 C2).
+EXPERT_VERSION = "e0.4"
 
 DEFAULT_CONFIG_PATH = "configs/sim/expert_v0.yaml"
 
@@ -739,19 +739,29 @@ class Expert:
         paths: list[dict[str, Any]],
     ) -> dict[str, Any]:
         value = values.get(str(committed["action_ref"]))
+        path = self._path(paths, value, state)
         return {
             "phase": phase,
-            "gripper": self._gripper(state, phase, value),
-            "path": self._path(paths, value, state),
+            "gripper": self._gripper(state, phase, value, path_kind=path["kind"]),
+            "path": path,
             "speed": self._speed(state, goal, phase, value),
             "force": {"level": str(min(int(self.profiles["force_by_phase"][phase]), len(self.force_levels) - 1))},
         }
 
-    def _gripper(self, state: dict[str, Any], phase: str, value: dict[str, Any] | None) -> dict[str, Any]:
-        """국면 프로파일. 파지 국면에서는 말단이 파지점에 와야 닫는다 (내려가는 중에 닫으면 윗면을 누른다)."""
+    def _gripper(
+        self, state: dict[str, Any], phase: str, value: dict[str, Any] | None, *, path_kind: str | None = "direct"
+    ) -> dict[str, Any]:
+        """국면 프로파일. 파지 국면에서는 말단이 파지점에 와야 닫는다 (내려가는 중에 닫으면 윗면을 누른다).
+
+        놓기 국면의 `open`은 **내려가는 경로**(direct·via)에만 답한다 (e0.4, 리뷰 2 C2): 경로 답이 hold·retreat(막힌 하강,
+        경유점 없음)이면 실행기가 운반 높이에서 열게 되므로 `closed`(이유 `place_blocked`)다 — 하네스도 같은 틱에 open을
+        적용하지 않는다. 모델 입력(후보의 `path`, 경로 후보)만 본다.
+        """
         holding = state["robot"].get("holding")
         desired = str(self.profiles["gripper_by_phase"][phase])
         reason = f"phase:{phase}"
+        if phase == "place" and desired == "open" and path_kind not in ("direct", "via"):
+            desired, reason = "closed", "place_blocked"
         if value and value.get("function") == "push" and phase in ("approach", "push") and not holding:
             # 밀기는 주먹으로: 접촉점으로 가는 접근부터 닫는다 (설정 `gripper_for_push`).
             desired = str(self.profiles.get("gripper_for_push", desired))

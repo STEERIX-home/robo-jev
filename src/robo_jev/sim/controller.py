@@ -368,6 +368,8 @@ class Controller:
             "target_ref": target_ref,
             "action_ref": command.get("action_ref"),
             "phase": command.get("phase"),
+            # 놓기점 (docs/08 §6, c0.6): 놓기 국면의 open readiness가 경로 종류와 무관하게 대는 자리. 없으면 옛 형식이다.
+            "place_mm": command.get("place_mm"),
         }
 
         if normalised["force_level"] not in self.force_levels:
@@ -541,7 +543,9 @@ class Controller:
         self._refresh_lease(normalised)
 
         # 7. 그리퍼. 상태가 바뀔 때만 readiness를 보고 이벤트를 한 번 낸다.
-        event_id, wait = self._set_gripper(normalised["gripper"], normalised["phase"], target)
+        event_id, wait = self._set_gripper(
+            normalised["gripper"], normalised["phase"], target, place_mm=normalised["place_mm"]
+        )
         return self._ack(
             seq,
             executor,
@@ -629,13 +633,18 @@ class Controller:
         return reason
 
     def _set_gripper(
-        self, desired: str | None, phase: str | None = None, target: dict[str, Any] | None = None
+        self,
+        desired: str | None,
+        phase: str | None = None,
+        target: dict[str, Any] | None = None,
+        *,
+        place_mm: list[float] | None = None,
     ) -> tuple[str | None, str | None]:
         """원하는 상태가 바뀔 때만 이벤트 하나. 같은 상태가 반복돼도 다시 나지 않는다."""
         if desired is None or desired == self.gripper_desired:
             return None, None
 
-        reason = self._gripper_readiness(desired, phase, target)
+        reason = self._gripper_readiness(desired, phase, target, place_mm=place_mm)
         if reason is not None:
             self._record("gripper_wait", desired=desired, reason=reason)
             return None, reason
@@ -648,12 +657,19 @@ class Controller:
         return event_id, None
 
     def _gripper_readiness(
-        self, desired: str, phase: str | None = None, target: dict[str, Any] | None = None
+        self,
+        desired: str,
+        phase: str | None = None,
+        target: dict[str, Any] | None = None,
+        *,
+        place_mm: list[float] | None = None,
     ) -> str | None:
         """close는 대상 접촉·도달, open은 해제 readiness를 본다 (docs/08 §4).
 
-        놓기 국면의 open은 말단이 명령의 놓기점에 `open_readiness_distance_mm` 안으로 와야 한다 —
-        운반 높이에서 놓으면 떨어뜨리는 일이다(docs/10 I2).
+        놓기 국면의 open은 말단이 **명령의 놓기점**에 `open_readiness_distance_mm` 안으로 와야 한다 —
+        운반 높이에서 놓으면 떨어뜨리는 일이다(docs/10 I2). 놓기점은 명령이 `place_mm`으로 따로 나른다
+        (c0.6, 리뷰 2 C2): hold 경로의 놓기 명령은 목표점이 말단 자신이라 거리 조건이 그 자리에서 통과했다.
+        `place_mm`이 없는 옛 형식은 종전대로 경로의 목표점이다.
         """
         if desired == "closed":
             if phase == "grasp" and target is not None:
@@ -671,10 +687,12 @@ class Controller:
         load = float(self.sensors.get("gripper_load_n") or 0.0)
         if load > self.open_readiness_force_n:
             return "readiness"
-        if phase == "place" and target is not None:
-            here = [float(value) for value in self.sensors["ee_pos_mm"]]
-            if math.dist(here, [float(value) for value in target["pos_mm"]]) > self.open_readiness_distance_mm:
-                return "readiness"
+        if phase == "place":
+            anchor = place_mm if place_mm is not None else (target["pos_mm"] if target is not None else None)
+            if anchor is not None:
+                here = [float(value) for value in self.sensors["ee_pos_mm"]]
+                if math.dist(here, [float(value) for value in anchor]) > self.open_readiness_distance_mm:
+                    return "readiness"
         return None
 
     # ------------------------------------------------------------------
