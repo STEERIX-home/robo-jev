@@ -246,6 +246,12 @@ def main(argv: list[str] | None = None, *, hub: Any | None = None) -> int:
         root.mkdir(parents=True, exist_ok=True)
         (root / MANIFEST_NAME).write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
+        # 받는 데 수십 분이 걸리므로 yaml은 쓰기 직전에 다시 읽는다 — 그 사이의 편집(머리말 등)을 덮어쓰지 않는다.
+        header, data = read_candidates(config_path)
+        entry = candidate_entry(data, identifier)
+        if entry is None:
+            print(f"[fetch_backbone] {identifier}: 받는 동안 {config_path}에서 항목이 사라졌다 — yaml을 갱신하지 않는다", file=sys.stderr)
+            return 1
         entry["revision"] = result["revision"]
         entry["license"] = result["license"]
         entry["params_total"] = result["params"]["text"]

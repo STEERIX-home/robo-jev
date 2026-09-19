@@ -295,6 +295,26 @@ def test_expected_digest_pins_the_file_set_and_a_structure_change_is_refused(wor
         run(workspace)
 
 
+def test_yaml_edited_while_the_weights_download_is_not_clobbered_by_the_write_back(workspace):
+    """받는 데 수십 분이 걸린다 — 그 사이에 고친 yaml(머리말·다른 항목)이 쓰기 직전에 다시 읽혀 남아야 한다."""
+    hub = workspace["hub"]
+    config_path = workspace["config"]
+    original_download = hub.download
+
+    def download_and_edit(identifier, patterns, revision, target):
+        path = original_download(identifier, patterns, revision, target)
+        text = config_path.read_text(encoding="utf-8")
+        config_path.write_text("# 받는 동안 고친 머리말\n" + text.replace("role: main", "role: separate"), encoding="utf-8")
+        return path
+
+    hub.download = download_and_edit
+    assert run(workspace, "--id", TWO_B) == 0
+    text = config_path.read_text(encoding="utf-8")
+    assert text.startswith("# 받는 동안 고친 머리말\n# 검사용 사본\n")
+    updated = yaml.safe_load(text)["candidates"][0]
+    assert updated["role"] == "separate" and updated["params_total"] == 48 and updated["revision"] == SHA_A
+
+
 def test_small_files_are_the_ones_always_hashed():
     assert set(SMALL_FILES) <= {"config.json", "model.safetensors.index.json", "generation_config.json"}
     assert all(any(fnmatch(name, pattern) for pattern in FILE_PATTERNS) for name in SMALL_FILES)
