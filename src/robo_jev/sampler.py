@@ -23,8 +23,10 @@ manifest 순서·줄 순서로 읽고(sha256 대조), `split`으로 거른 뒤 �
 한 단위는 에피소드 하나(스트림 = accumulation 단위, docs/03 §5) 또는 토큰 예산까지 묶은 단일 요청들이다
 (예산을 넘기는 레코드는 되돌려 다음 단위에 넣으므로 epoch 안에서 잃는 레코드가 없다). 묶음 안에서는
 epoch마다 섞어 한 번씩 뽑는다. 모든 무작위성은 seed로 만든 `random.Random` 하나에서
-나오고, :meth:`MixedSampler.state_dict` 가 위치(뽑은 수·묶음별 순서·cursor·epoch·실현 토큰·RNG)를
-기본 자료형으로 돌려주어 재개할 수 있다.
+나오고, :meth:`MixedSampler.state_dict` 가 위치(뽑은 수·묶음별 순서·cursor·epoch·실현 토큰·RNG)와 그 위치의
+index가 가리키는 **레코드의 출처**(파일별 sha256·적재 순서·수, :func:`record_sources`)를 기본 자료형으로
+돌려주어 재개할 수 있다 — :meth:`MixedSampler.load_state_dict` 는 출처가 다른 데이터(내용이 바뀐 사본)에
+옛 위치를 싣지 않는다.
 
 **틱 종류와 가중치 (docs/04 §2 "정상 유지 틱 하향, 이벤트·목표 변경 틱 상향").** 틱의 종류는 그 틱의
 레코드·라벨과 **직전** 틱(목표 버전 비교)에서만 정한다 — 미래 틱을 보지 않는다.
@@ -42,7 +44,6 @@ epoch마다 섞어 한 번씩 뽑는다. 모든 무작위성은 seed로 만든 `
 
 from __future__ import annotations
 
-import hashlib
 import json
 import random
 from dataclasses import dataclass, field
@@ -51,6 +52,7 @@ from typing import Any
 
 from robo_jev.contracts import QUESTION_SET_V0, SCHEMA_SINGLE_REQUEST, SCHEMA_STREAM, SPLITS
 from robo_jev.model.serialize import WINDOW_TICKS, serialize_request
+from robo_jev.model.tokenizer import sha256_of_file
 
 __all__ = [
     "DOMAINS",
@@ -62,6 +64,7 @@ __all__ = [
     "load_items",
     "load_manifests",
     "manifest_files",
+    "record_sources",
     "sha256_of",
     "tick_class",
     "tick_weights",
@@ -103,6 +106,8 @@ class Item:
     question_types: dict[str, str] = field(default_factory=dict, repr=False)
     source: str = ""
     manifest: str = ""  # 이 레코드를 가리킨 manifest 경로 (여러 manifest를 합쳐 학습할 때의 출처)
+    file: str = ""  # manifest의 `files` 키 — 레코드가 든 JSONL 파일 (manifest 기준 상대 경로)
+    file_sha256: str = ""  # 그 파일의 sha256 (manifest의 값 = 적재 때 대조한 실제 값) — sampler 위치의 레코드 정체
 
 
 def _tag(record: dict, path: str) -> Any:
@@ -131,12 +136,8 @@ def manifest_files(manifest: dict, where: str | Path = "manifest") -> dict[str, 
 
 
 def sha256_of(path: Path) -> str:
-    """파일의 sha256 (manifest 대조와 checkpoint의 manifest 참조가 같은 함수를 쓴다)."""
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for block in iter(lambda: handle.read(1 << 20), b""):
-            digest.update(block)
-    return digest.hexdigest()
+    """파일의 sha256 (manifest 대조, checkpoint의 manifest 참조, tokenizer 파일 대조가 같은 함수를 쓴다)."""
+    return sha256_of_file(path)
 
 
 def load_items(
@@ -240,7 +241,7 @@ def load_items(
                     index=int(index_offset) + len(items), kind=kind, record_id=record_id, split=split,
                     domain=record_domain, material=record_material, record=record, layout=layout,
                     tokens=len(layout["tokens"]), question_types=question_types, source=where,
-                    manifest=str(manifest_path),
+                    manifest=str(manifest_path), file=name, file_sha256=actual,
                 )  # fmt: skip
             )
     return items
@@ -355,6 +356,38 @@ def _bucket(domain: str, material: str) -> str:
     return f"{domain}/{material}"
 
 
+def record_sources(items: list[Item]) -> list[dict[str, Any]]:
+    """sampler 위치가 가리키는 레코드들의 출처 — index 순서로 같은 파일(이름·sha256)의 연속 구간마다
+    ``{file, sha256, first_index, items}``. 같은 출처 목록이면 같은 index가 같은 레코드를 가리킨다(적재는 manifest
+    순서·줄 순서로 결정적이고 파일 내용은 sha256으로 고정된다)."""
+    sources: list[dict[str, Any]] = []
+    for item in sorted(items, key=lambda entry: entry.index):
+        last = sources[-1] if sources else None
+        if last is not None and (last["file"], last["sha256"]) == (item.file, item.file_sha256):
+            last["items"] += 1
+        else:
+            sources.append({"file": item.file, "sha256": item.file_sha256, "first_index": item.index, "items": 1})
+    return sources
+
+
+def _describe_source_differences(saved: list[dict[str, Any]], current: list[dict[str, Any]]) -> list[str]:
+    out: list[str] = []
+    for position in range(max(len(saved), len(current))):
+        before = saved[position] if position < len(saved) else None
+        after = current[position] if position < len(current) else None
+        if before == after:
+            continue
+        if before is None:
+            out.append(f"[{position}] {after['file']}: 저장 위치에 없던 파일 ({after['items']}개)")
+        elif after is None:
+            out.append(f"[{position}] {before['file']}: 지금 없는 파일 ({before['items']}개)")
+        elif before["sha256"] != after["sha256"] and before["file"] == after["file"]:
+            out.append(f"[{position}] {before['file']}: sha256 {str(before['sha256'])[:12]}… → {str(after['sha256'])[:12]}…")
+        else:
+            out.append(f"[{position}] {before['file']} ({before['items']}개, index {before['first_index']}부터) → {after['file']} ({after['items']}개, index {after['first_index']}부터)")
+    return out
+
+
 class MixedSampler:
     """두 축으로 단위를 뽑는 결정적·재개 가능한 sampler (모듈 설명 참조).
 
@@ -404,6 +437,7 @@ class MixedSampler:
                 )
         self._kind_of_domain = {domain: next(iter(seen)) for domain, seen in kinds.items()}
         self.domains: tuple[str, ...] = tuple(domain for domain in DOMAINS if domain in self._kind_of_domain)
+        self.sources = record_sources(items)
 
         self.rng = random.Random(self.seed)
         self._drawn = 0
@@ -511,7 +545,7 @@ class MixedSampler:
         }
 
     def state_dict(self) -> dict[str, Any]:
-        """재개용 위치 — 기본 자료형만."""
+        """재개용 위치 — 기본 자료형만. ``sources``는 위치의 index가 가리키는 레코드의 출처(:func:`record_sources`)다."""
         version, internal, gauss_next = self.rng.getstate()
         return {
             "drawn": self._drawn,
@@ -522,12 +556,22 @@ class MixedSampler:
                 for bucket, cursor in self._cursors.items()
             },
             "rng": [int(version), [int(v) for v in internal], gauss_next],
+            "sources": [dict(source) for source in self.sources],
         }
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
-        for key in ("drawn", "tokens", "counts", "cursors", "rng"):
+        """저장 위치를 싣는다. 위치의 index가 가리키는 레코드가 지금의 것과 다르면(파일별 sha256·적재 순서·수) 거절한다 —
+        묶음·index가 같아도 내용이 바뀐 데이터(정답 하나를 고친 사본 등)에 옛 위치를 이어 붙이지 않는다."""
+        for key in ("drawn", "tokens", "counts", "cursors", "rng", "sources"):
             if key not in state:
                 raise ValueError(f"sampler.{key}: 없다")
+        saved_sources = [dict(source) for source in state["sources"]]
+        if saved_sources != self.sources:
+            differences = _describe_source_differences(saved_sources, self.sources)
+            raise ValueError(
+                f"sampler.sources: 저장 위치의 레코드 파일과 지금 적재한 파일이 다르다: {'; '.join(differences)} — "
+                "같은 내용의 데이터로 재개해야 한다 (데이터를 바꾸는 학습은 새 run으로 시작한다)"
+            )
         if set(state["cursors"]) != set(self._cursors):
             raise ValueError(
                 f"sampler.cursors: 묶음이 다르다 (저장: {sorted(state['cursors'])}, 지금: {sorted(self._cursors)}) — "

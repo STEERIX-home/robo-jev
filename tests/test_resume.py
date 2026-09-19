@@ -12,16 +12,20 @@ step마다 로봇 스트림 단위(에피소드)와 비로봇 단위(토큰 예�
 """
 
 import copy
+import hashlib
 import json
+import shutil
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import torch
 import yaml
-from helpers import D0_MANIFEST, REPO, SMALL_VOCAB
+from helpers import D0_MANIFEST, REPO, SMALL_VOCAB, read_jsonl
 
-from robo_jev.checkpoint import load_checkpoint
+from robo_jev.checkpoint import load_checkpoint, save_checkpoint
+from robo_jev.train import Trainer
 
 #: 비교할 parameter tensor (readout, embedding, DeltaNet·attention 층, 최종 norm).
 WATCHED = (
@@ -188,3 +192,124 @@ def test_resume_refuses_a_checkpoint_from_a_different_run_identity(root, continu
         capture_output=True, text=True, cwd=REPO,
     )
     assert result.returncode != 0 and "seed" in result.stderr and "resume" in result.stderr
+
+
+# --------------------------------------------------------------------------
+# run의 정체 — 데이터·tokenizer·직렬화·모델의 내용 (리뷰 11 S1)
+# --------------------------------------------------------------------------
+
+
+def copy_d0(target: Path) -> Path:
+    """D0 fixture 세 파일의 사본 — 원본은 건드리지 않는다. 사본 manifest의 경로를 돌려준다."""
+    target.mkdir(parents=True, exist_ok=True)
+    for name in ("d0.jsonl", "d0_streams.jsonl", "d0_manifest.json"):
+        shutil.copy2(D0_MANIFEST.with_name(name), target / name)
+    return target / "d0_manifest.json"
+
+
+def small_config(root, manifest: Path, **overrides) -> dict:
+    return {**base_config(root), "dataset_manifest": str(manifest), "max_steps": 2, **overrides}
+
+
+def flip_first_train_answer(manifest: Path) -> tuple[str, str]:
+    """첫 train 단일 요청의 정답을 c0→c1로 바꾸고 manifest의 파일 해시·크기도 맞춘다 (리뷰 11의 재현). (이전 해시, 새 해시)."""
+    rows_path = manifest.with_name("d0.jsonl")
+    rows = read_jsonl(rows_path)
+    assert rows[0]["split"] == "train" and rows[0]["labels"][0]["candidate_ids"] == ["c0"]
+    rows[0]["labels"][0]["candidate_ids"] = ["c1"]
+    rows_path.write_text("".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+    record = json.loads(manifest.read_text(encoding="utf-8"))
+    before = record["files"]["d0.jsonl"]["sha256"]
+    after = hashlib.sha256(rows_path.read_bytes()).hexdigest()
+    assert after != before
+    record["files"]["d0.jsonl"]["sha256"] = after
+    record["files"]["d0.jsonl"]["bytes"] = rows_path.stat().st_size
+    manifest.write_text(json.dumps(record, ensure_ascii=False), encoding="utf-8")
+    return before, after
+
+
+def parameters_of(trainer: Trainer) -> dict[str, torch.Tensor]:
+    return {name: p.detach().clone() for name, p in trainer.model.named_parameters()}
+
+
+def test_resume_refuses_the_run_when_the_data_content_changed_even_with_updated_manifest_hashes(tmp_path):
+    """리뷰 11 S1의 재현: D0 사본으로 1 step 후 저장 → 첫 train 레코드의 정답을 바꾸고 사본 manifest의 파일 해시도
+    갱신 → 같은 설정·같은 경로로 재개. 설정은 같지만 run의 정체(데이터 내용)가 다르므로 거절해야 하고, 오류는
+    달라진 키(파일 해시·manifest 해시)를 모두 이름으로 적는다."""
+    manifest = copy_d0(tmp_path / "data")
+    config = small_config(tmp_path, manifest, run_id="identity")
+    with Trainer(config) as first:
+        first.run_step()
+        checkpoint = first.save()
+        saved_manifest_sha = first.manifest["dataset_manifests"][0]["sha256"]
+    before, after = flip_first_train_answer(manifest)
+    with pytest.raises(ValueError, match="resume") as excinfo:
+        Trainer(config, resume=checkpoint)
+    message = str(excinfo.value)
+    assert "d0.jsonl" in message and before[:12] in message and after[:12] in message
+    assert saved_manifest_sha[:12] in message  # manifest 자체의 해시도 달라졌다
+    assert "d0_streams.jsonl" not in message  # 바뀌지 않은 파일은 이름에 오르지 않는다
+    # 같은 데이터로는 여전히 재개된다 (거절이 checkpoint를 망가뜨리지 않았다)
+    copy_d0(tmp_path / "data")
+    with Trainer(config, resume=checkpoint) as resumed:
+        assert resumed.step == 1
+
+
+def test_resume_accepts_the_same_data_and_model_config_at_different_paths_and_stays_bit_exact(tmp_path):
+    """경로는 재개 자유 항목이고 정체는 내용이다: 같은 D0 사본을 다른 디렉터리에 두고 재개해도 되며(모델 설정 파일도
+    다른 경로의 같은 내용), 결과는 같은 경로의 연속 실행과 비트 단위로 같다."""
+    a, b = copy_d0(tmp_path / "a"), copy_d0(tmp_path / "b")
+    model_copy = tmp_path / "model" / "tiny_hybrid_copy.yaml"
+    model_copy.parent.mkdir()
+    shutil.copy2(REPO / "configs" / "model" / "tiny_hybrid.yaml", model_copy)
+
+    with Trainer(small_config(tmp_path, a, run_id="continuous-2")) as continuous:
+        continuous_metrics = [continuous.run_step() for _ in range(2)]
+        continuous_parameters = parameters_of(continuous)
+        continuous_sampler = continuous.sampler.state_dict()
+    with Trainer(small_config(tmp_path, a, run_id="split-2")) as first:
+        first.run_step()
+        checkpoint = first.save()
+    moved = small_config(tmp_path, b, run_id="ignored-run-id", model_config=str(model_copy))
+    with Trainer(moved, resume=checkpoint) as resumed:
+        assert resumed.run_id == "split-2" and resumed.step == 1
+        assert resumed.manifest["dataset_manifests"][0]["path"] == str(b)
+        assert resumed.manifest["model"]["config"] == str(model_copy)
+        resumed_metrics = [*resumed.history, resumed.run_step()]
+        assert strip_timing(resumed_metrics) == strip_timing(continuous_metrics)
+        assert resumed.sampler.state_dict() == continuous_sampler
+        for name, tensor in parameters_of(resumed).items():
+            assert torch.equal(tensor, continuous_parameters[name]), name
+
+
+def test_resume_names_every_differing_identity_key(tmp_path):
+    """정체 블록의 어느 항목이 달라도 거절하고, 달라진 키를 **모두** 이름으로 적는다 (설정 불일치와 같은 형식)."""
+    manifest = copy_d0(tmp_path / "data")
+    config = small_config(tmp_path, manifest, run_id="identity-keys")
+    with Trainer(config) as first:
+        first.run_step()
+        checkpoint = first.save()
+        identity = first.manifest["identity"]
+    assert set(identity) >= {"datasets", "splits", "serializer_version", "question_set", "layouts", "tokenizer", "model"}
+    assert identity["datasets"][0]["files"]["d0.jsonl"] == json.loads(manifest.read_text(encoding="utf-8"))["files"]["d0.jsonl"]["sha256"]
+    assert identity["tokenizer"] == {"kind": "whitespace"}
+    assert identity["model"]["kind"] == "tiny_hybrid" and identity["model"]["parameters"] > 0
+    assert "path" not in identity["datasets"][0] and "config" not in identity["model"]  # 경로는 정체가 아니다
+
+    state = load_checkpoint(checkpoint)
+    tampered = copy.deepcopy(state["manifest"])
+    tampered["identity"]["serializer_version"] = "ts9.9"
+    tampered["identity"]["question_set"]["markers"]["q_main"] = "<other>"
+    tampered["identity"]["model"]["parameters"] += 1
+    tampered["identity"]["tokenizer"] = {"kind": "tokenizers", "sha256": "0" * 64, "id": "Some/Model", "revision": "abc"}
+    tampered["identity"]["datasets"][0]["files"]["d0_streams.jsonl"] = "f" * 64
+    save_checkpoint(checkpoint, {**state, "manifest": tampered})
+    with pytest.raises(ValueError, match="resume") as excinfo:
+        Trainer(config, resume=checkpoint)
+    message = str(excinfo.value)
+    for key in (
+        "serializer_version", "question_set.markers.q_main", "model.parameters", "tokenizer.kind", "tokenizer.sha256",
+        "datasets[0].files.d0_streams.jsonl",
+    ):
+        assert key in message, key
+    assert "datasets[0].files.d0.jsonl" not in message and "ts9.9" in message

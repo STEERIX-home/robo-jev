@@ -488,6 +488,7 @@ def test_model_id_other_than_the_fixture_is_rejected_and_the_manifest_records_wh
         assert model["config"] == str(REPO / "configs" / "model" / "tiny_hybrid.yaml")
         assert model["config_sha256"] == hashlib.sha256((REPO / "configs" / "model" / "tiny_hybrid.yaml").read_bytes()).hexdigest()
         assert model["name"] == "tiny-hybrid-v0" and model["vocab_size"] == SMALL_VOCAB and model["readout"] == "pointer"
+        assert trainer.manifest["identity"]["model"]["parameters"] == 376_745
     with Trainer(tiny_config(tmp_path, max_steps=1, trainable="readout_only")) as frozen:
         assert frozen.manifest["model"]["parameters"] == 376_745
         assert frozen.manifest["model"]["trainable_parameters"] == sum(
