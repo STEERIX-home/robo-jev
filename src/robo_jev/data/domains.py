@@ -82,9 +82,48 @@ class Rendered:
 # --------------------------------------------------------------------------
 
 
-def _say(rng: random.Random, texts: dict[str, tuple[str, ...]], language: str, **values) -> str:
+#: 렌더링 중에 쓴 문구 템플릿 변형 id (`<표>.<언어>#<번호>`). :func:`take_phrasing`이 레코드마다 비운다 — 생성기가
+#: provenance에 적고 `split.holdout_templates`와 맞댄다 (docs/04 §5 템플릿 변형 계열).
+_PHRASING: list[str] = []
+
+
+def _named(prefix: str, tables: dict[str, dict[str, tuple[str, ...]]]) -> dict[str, dict[str, Any]]:
+    """문구 표에 id(`<분야>.<종류>`)를 붙인다 — `_say`가 어느 표의 몇 번째 변형을 썼는지 적을 수 있게."""
+    for key, table in tables.items():
+        table["_id"] = f"{prefix}.{key}"
+    return tables
+
+
+def _say(rng: random.Random, texts: dict[str, Any], language: str, **values) -> str:
     options = texts[language]
-    return options[rng.randrange(len(options))].format(**values)
+    index = rng.randrange(len(options))
+    _PHRASING.append(f"{texts.get('_id', 'text')}.{language}#{index}")
+    return options[index].format(**values)
+
+
+def begin_phrasing() -> None:
+    """레코드 하나의 렌더링을 시작한다 — 변형 기록을 비운다."""
+    _PHRASING.clear()
+
+
+def take_phrasing() -> list[str]:
+    """지금까지 쓴 문구 템플릿 변형 id(정렬·중복 제거)를 돌려주고 비운다."""
+    found = sorted(set(_PHRASING))
+    _PHRASING.clear()
+    return found
+
+
+def phrasing_vocabulary() -> dict[str, list[str]]:
+    """분야별 문구 템플릿 변형 id 전부 (holdout 목록을 고를 때와 보고서에 쓴다)."""
+    out: dict[str, list[str]] = {}
+    for table in (_NONE_TEXT, *_SPATIAL_TEXT.values(), *_DOM_TEXT.values(), *_WORKFLOW_TEXT.values(), *_RULES_TEXT.values()):
+        identifier = str(table["_id"])
+        domain = identifier.split(".", 1)[0]
+        for language in ("ko", "en"):
+            out.setdefault(domain, []).extend(f"{identifier}.{language}#{index}" for index in range(len(table[language])))
+    for language in ("ko", "en"):
+        out.setdefault("yesno", []).extend(f"yesno.{language}#{index}" for index in range(len(_YES[language])))
+    return {domain: sorted(ids) for domain, ids in out.items()}
 
 
 def _cid(entity_id: str) -> str:
@@ -114,6 +153,7 @@ def _label_for(question_id: str, ids: list[str], rule: str, confidence: str) -> 
 def _boolean_criteria(rng: random.Random, language: str) -> list[dict]:
     """예/아니오 후보. 두 설명은 짝이 맞아야 하므로 같은 자리에서 고른다."""
     index = rng.randrange(len(_YES[language]))
+    _PHRASING.append(f"yesno.{language}#{index}")
     return [
         {"id": "true", "description": _YES[language][index]},
         {"id": "false", "description": _NO[language][index]},
@@ -124,6 +164,7 @@ _YES = {"ko": ("그렇다", "예", "맞다"), "en": ("Yes", "It does", "True")}
 _NO = {"ko": ("아니다", "아니오", "그렇지 않다"), "en": ("No", "It does not", "False")}
 
 _NONE_TEXT = {
+    "_id": "none",
     "ko": (
         "해당하는 후보가 없거나 주어진 정보로 결정할 수 없음",
         "후보 중에 답이 없거나 정보가 부족함",
@@ -316,7 +357,7 @@ _CROWDING_LEVELS = {
 #: 혼잡 수준의 경계 (관측된 이웃 수). 정확히 세는 값이라 허용 오차가 없다.
 _CROWDING_EDGES = (1.0, 2.0, 3.0)
 
-_SPATIAL_TEXT = {
+_SPATIAL_TEXT = _named("spatial", {
     "target": {
         "ko": (
             "{color} 물체 중 {zone} 안에 있는 것을 고르라.",
@@ -380,7 +421,7 @@ _SPATIAL_TEXT = {
             "Pick the congestion level around {entity} from the observed objects alone.",
         ),
     },
-}
+})
 
 
 def _zone_of_x(x: int | None) -> str | None:
@@ -933,7 +974,7 @@ _DOM_PROGRESS = {
 #: 진행 수준 = (만족한 조건 수 ÷ 전체 조건 수) × scale을 내림한 값. 정확히 세므로 오차 없음.
 _DOM_PROGRESS_SCALE = 3
 _DOM_PROGRESS_EDGES = (1.0, 2.0, 3.0)
-_DOM_TEXT = {
+_DOM_TEXT = _named("dom", {
     "action": {
         "ko": (
             "목표를 진행하려면 지금 어떤 요소를 조작해야 하는가.",
@@ -975,7 +1016,7 @@ _DOM_TEXT = {
         "ko": ("목표 진행 수준을 고르라.", "지금까지의 진행 수준을 고르라."),
         "en": ("Choose the progress level towards the goal.", "Pick how far the goal has come."),
     },
-}
+})
 
 
 def _dom_element(scene: dict, element_id: str) -> dict:
@@ -1511,7 +1552,7 @@ _LOAD_LEVELS = {
 _URGENCY_EDGES_H = (24, 8, 0)
 #: 부하의 경계 (남은 시간 ÷ 남은 용량).
 _LOAD_EDGES = (0.5, 1.0, 1.5)
-_WORKFLOW_TEXT = {
+_WORKFLOW_TEXT = _named("workflow", {
     "next": {
         "ko": ("지금 착수할 수 있는 단계를 고르라.", "선행 조건과 자원을 모두 만족하는 단계를 고르라."),
         "en": (
@@ -1551,7 +1592,7 @@ _WORKFLOW_TEXT = {
             "How much work is left on {entity} relative to its capacity?",
         ),
     },
-}
+})
 
 _WORKFLOW_CHAIN = (
     ("s1", "spec", [], "r1"),
@@ -2006,7 +2047,7 @@ _SEVERITY_LEVELS = {
     "ko": ["기록만", "주의", "경고", "중대"],
     "en": ["log only", "caution", "warning", "critical"],
 }
-_RULES_TEXT = {
+_RULES_TEXT = _named("rules", {
     "governing": {
         "ko": (
             "이 상황을 지배하는 규칙을 고르라. 우선순위 숫자가 작을수록 앞선다.",
@@ -2055,7 +2096,7 @@ _RULES_TEXT = {
             "Pick the severity level of this situation.",
         ),
     },
-}
+})
 
 
 def _rules_rule(scene: dict, rule_id: str) -> dict:
@@ -2409,6 +2450,53 @@ class RulesDomain:
 
 
 #: 분야 이름 → 생성기.
+#: 분야별 개념 어휘 (docs/04 §5 개념 계열). 질문의 규칙 종류(`<분야>:<종류>`)와 분야별 특수 개념. `split.holdout_concepts`는
+#: 이 어휘에서 고른다 — 그 개념을 다루는 질문이 하나라도 있는 계열은 통째로 OOD다.
+CONCEPT_VOCABULARY: dict[str, list[str]] = {
+    "spatial": [
+        "spatial:target", "spatial:nearest", "spatial:in_zone", "spatial:goal_met", "spatial:distance", "spatial:crowding",
+        # 지시의 목표 영역이 이 영역인 계열 (target·goal_met·in_zone 질문 중 목표 영역을 다루는 것)
+        "spatial:goal-zone:zoneL", "spatial:goal-zone:zoneC", "spatial:goal-zone:zoneR",
+    ],
+    "dom": [
+        "dom:action", "dom:blocker", "dom:reachable", "dom:needs_input", "dom:actionable", "dom:progress",
+        # 숨김 해제 컨트롤: 목표 요소가 접힌 구역 안에 있어 드러내는 조작(`reveals`)이 먼저 필요한 계열
+        "dom:reveal",
+    ],
+    "workflow": [
+        "workflow:next", "workflow:owner", "workflow:precondition", "workflow:blocked", "workflow:priority", "workflow:load",
+        # 자원 차단: 담당 자원이 오프라인인 계열의 착수·선행·담당·차단 질문 (용량 부족만으로는 아니다 — 흔해서 계열의 반이 걸린다)
+        "workflow:resource_offline",
+    ],
+    "rules": [
+        "rules:governing", "rules:action", "rules:conflict", "rules:enough", "rules:applies", "rules:severity",
+        # 안내 요청 정책: 지배 규칙의 조치가 "안내 요청"(a_escort)뿐인 상황의 지배·조치·심각도 질문 (정책 유형 하나)
+        "rules:escort-policy",
+    ],
+}
+
+
+def concepts_for(domain: str, scene: dict, spec: QuestionSpec) -> tuple[str, ...]:
+    """질문 하나가 다루는 개념 id (:data:`CONCEPT_VOCABULARY`). 규칙 종류는 언제나, 특수 개념은 그 장면·질문이 실제로 다룰 때."""
+    found = [f"{domain}:{spec.kind}"]
+    if domain == "spatial":
+        zone = spec.params.get("zone")
+        if zone is not None and zone == scene["goal"]["zone"] and spec.kind in ("target", "goal_met", "in_zone"):
+            found.append(f"spatial:goal-zone:{zone}")
+    elif domain == "dom" and spec.kind in ("action", "reachable", "blocker"):
+        goal = _dom_element(scene, scene["goal"]["element"])
+        reveal = _dom_reveal_control(scene, goal["parent"]) if goal.get("parent") else None
+        if reveal is not None and _dom_visible(scene, goal) is False:
+            found.append("dom:reveal")
+    elif domain == "workflow" and spec.kind in ("blocked", "next", "precondition", "owner"):
+        if any(resource["status"] != "available" for resource in scene["resources"]):
+            found.append("workflow:resource_offline")
+    elif domain == "rules" and spec.kind in ("governing", "action", "severity"):
+        if _rules_outcome(scene)["actions"] == ["a_escort"]:
+            found.append("rules:escort-policy")
+    return tuple(dict.fromkeys(found))
+
+
 DOMAINS: dict[str, Any] = {
     domain.name: domain
     for domain in (SpatialDomain(), DomDomain(), WorkflowDomain(), RulesDomain())

@@ -16,6 +16,10 @@
   표현·순서만 바꿨다는 파생본의 사실이 부모와 다른가.
 * 중복 계보 — 표현을 걷어낸 **정규화된 사실**이 다른 group과 같은가.
 * 정답 위치 편향, 분포 라벨의 합.
+* holdout 봉인 (docs/04 §5, 계약 v0.3) — `holdouts`(설정의 `split` 절; CLI는 데이터셋의 `manifest.json`에서 읽는다)를
+  주면 계열마다 provenance의 문구 템플릿 변형(`phrasing`)·개념(`concepts`)·prefix·group·분야를 holdout 목록과 맞대,
+  holdout 계열이 train/dev/calibration/test에 있으면(누출) 위반이고, ood_dev/ood_test인데 holdout 이유가 없어도 위반이다.
+  종류별(템플릿·개념·prefix·group·분야) 계열·레코드 수와 split별 수를 `holdouts`에 적는다.
 
 집계는 요청 수·질문 수·에피소드 수·틱 수·split별 원본 group 수를 모두 낸다.
 위반 건수가 0이어야 배포할 데이터 버전으로 동결할 수 있다 (CLI는 그때만 0을 돌려준다).
@@ -47,6 +51,7 @@ from robo_jev.contracts import (
     model_input,
     validate_record,
 )
+from robo_jev.data.split import CONCEPT_TAG, OOD_SPLITS, TEMPLATE_TAG, SplitPolicy
 
 __all__ = ["REPORT_VERSION", "main", "validate_dataset"]
 
@@ -151,9 +156,77 @@ def _posed_questions(tick: Any) -> int:
     )
 
 
-def validate_dataset(records: Sequence[dict]) -> dict:
-    """데이터셋 QA 보고서. 위반은 모두 모으고 집계를 함께 낸다."""
+def _record_tags(provenance: dict) -> set[str]:
+    """레코드의 holdout 태그: 문구 템플릿 변형(`phrasing`)과 개념(`concepts`) — 생성기가 provenance에 적은 것."""
+    tags: set[str] = set()
+    for item in provenance.get("phrasing") or ():
+        if isinstance(item, str):
+            tags.add(TEMPLATE_TAG + item)
+    for item in provenance.get("concepts") or ():
+        if isinstance(item, str):
+            tags.add(CONCEPT_TAG + item)
+    return tags
+
+
+def _holdout_report(
+    policy: SplitPolicy | None,
+    group_splits: dict[str, set[str]],
+    group_tags: dict[str, set[str]],
+    group_records: Counter,
+    errors: list[dict],
+) -> dict:
+    """계열마다 holdout 이유를 계산해 누출(train/dev/calibration/test에 있는 holdout 계열)과 이유 없는 OOD를 위반으로 적고,
+    종류별 계열·레코드 수를 센다."""
+    by_reason: dict[str, dict] = {}
+    groups: Counter = Counter()
+    records: Counter = Counter()
+    leaked = 0
+    for group in sorted(group_splits):
+        splits = group_splits[group]
+        reasons = policy.holdout_reasons(group, sorted(group_tags.get(group, ()))) if policy is not None else []
+        in_ood = {split for split in splits if split in OOD_SPLITS}
+        outside = {split for split in splits if split not in OOD_SPLITS}
+        if reasons:
+            for split in splits:
+                groups[split] += 1
+                records[split] += group_records[(group, split)]
+            for reason in reasons:
+                entry = by_reason.setdefault(reason, {"groups": 0, "records": 0, "splits": Counter()})
+                entry["groups"] += 1
+                for split in splits:
+                    entry["records"] += group_records[(group, split)]
+                    entry["splits"][split] += 1
+            if outside:
+                leaked += 1
+                errors.append(
+                    _error(-1, "split", f"holdout 계열이 학습 쪽 split에 있다(누출): {group!r} → {sorted(outside)} (이유: {reasons})")
+                )
+        elif policy is not None and in_ood:
+            errors.append(_error(-1, "split", f"ood인데 holdout 이유가 없다: {group!r} → {sorted(in_ood)}"))
+    return {
+        "policy": None if policy is None else {
+            "holdout_groups": sorted(policy.holdout_groups),
+            "holdout_prefixes": list(policy.holdout_prefixes),
+            "holdout_domains": sorted(policy.holdout_domains),
+            "holdout_templates": sorted(policy.holdout_templates),
+            "holdout_concepts": sorted(policy.holdout_concepts),
+        },
+        "groups": dict(sorted(groups.items())),
+        "records": dict(sorted(records.items())),
+        "leaked_groups": leaked,
+        "by_reason": {
+            reason: {"groups": entry["groups"], "records": entry["records"], "splits": dict(sorted(entry["splits"].items()))}
+            for reason, entry in sorted(by_reason.items())
+        },
+    }
+
+
+def validate_dataset(records: Sequence[dict], *, holdouts: dict | None = None) -> dict:
+    """데이터셋 QA 보고서. 위반은 모두 모으고 집계를 함께 낸다. `holdouts`는 설정의 `split` 절(봉인 목록)이다."""
     errors: list[dict] = []
+    policy = SplitPolicy.from_config(holdouts) if holdouts is not None else None
+    group_tags: dict[str, set[str]] = defaultdict(set)
+    group_records: Counter = Counter()
     invalid = 0
     states = episodes = ticks = questions = labels = 0
     masked_questions = 0
@@ -200,12 +273,15 @@ def validate_dataset(records: Sequence[dict]) -> dict:
         split = record.get("split")
         if isinstance(group, str) and isinstance(split, str):
             group_splits[group].add(split)
+            group_records[(group, split)] += 1
         if isinstance(split, str):
             split_records[split] += 1
 
         provenance = record.get("provenance") if isinstance(record.get("provenance"), dict) else {}
         for tag in provenance.get("variants") or ():
             variants[tag] += 1
+        if isinstance(group, str):
+            group_tags[group] |= _record_tags(provenance)
 
         if schema_version == SCHEMA_STREAM:
             episodes += 1
@@ -428,6 +504,8 @@ def validate_dataset(records: Sequence[dict]) -> dict:
         for split in splits:
             split_groups[split] += 1
 
+    holdout_report = _holdout_report(policy, group_splits, group_tags, group_records, errors)
+
     return {
         "version": REPORT_VERSION,
         "invalid_records": invalid,
@@ -447,6 +525,7 @@ def validate_dataset(records: Sequence[dict]) -> dict:
         "question_types": dict(sorted(question_types.items())),
         "label_kinds": dict(sorted(label_kinds.items())),
         "variants": dict(sorted(variants.items())),
+        "holdouts": holdout_report,
         "duplicate_content": {
             "cross_group": cross_group,
             "records_with_shared_facts": duplicate_records,
@@ -474,6 +553,27 @@ def _read_jsonl(path: Path) -> list[dict]:
     ]
 
 
+def load_holdouts(path: Path | None) -> dict | None:
+    """봉인 목록: manifest.json(`config.split`)이나 설정 YAML/JSON(`split` 절 또는 절 자체). 파일이 없으면 None."""
+    if path is None or not path.is_file():
+        return None
+    if path.suffix in (".yaml", ".yml"):
+        import yaml
+
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    else:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return None
+    if isinstance(data.get("config"), dict) and isinstance(data["config"].get("split"), dict):
+        return dict(data["config"]["split"])
+    if isinstance(data.get("split"), dict):
+        return dict(data["split"])
+    if any(key.startswith("holdout_") for key in data):
+        return dict(data)
+    return None
+
+
 def load_dataset(dataset: Path) -> tuple[list[dict], list[Path]]:
     """`records.jsonl`·`streams.jsonl`을 아래 단계까지 찾아 모은다."""
     paths = sorted(dataset.rglob("records.jsonl")) + sorted(dataset.rglob("streams.jsonl"))
@@ -490,6 +590,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     parser.add_argument("--dataset", type=Path, required=True, help="records.jsonl이 있는 디렉터리")
     parser.add_argument("--report", type=Path, required=True, help="보고서 JSON을 쓸 경로")
+    parser.add_argument(
+        "--holdouts", type=Path, default=None,
+        help="봉인 목록(설정 YAML/JSON의 split 절 또는 manifest.json). 없으면 데이터셋의 manifest.json에서 읽는다",
+    )
     args = parser.parse_args(argv)
 
     if not args.dataset.is_dir():
@@ -500,7 +604,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"{args.dataset} 아래에 records.jsonl·streams.jsonl이 없다", file=sys.stderr)
         return 2
 
-    report = validate_dataset(records)
+    holdouts = load_holdouts(args.holdouts or args.dataset / "manifest.json")
+    report = validate_dataset(records, holdouts=holdouts)
     report["dataset"] = str(args.dataset)
     report["files"] = [str(path.relative_to(args.dataset)) for path in paths]
 
@@ -515,6 +620,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         f"{report['questions']}질문 · {report['origin_groups']}계열"
     )
     print(f"  split별 계열 수: {report['split_groups']}")
+    holdouts_report = report["holdouts"]
+    if holdouts_report["policy"] is None:
+        print("  holdout: 봉인 목록 없음 (manifest.json이 없거나 split 절이 없다) — 누출 검사를 하지 않았다")
+    else:
+        print(f"  holdout 계열: {holdouts_report['groups']} · 레코드 {holdouts_report['records']} · 누출 {holdouts_report['leaked_groups']}건")
+        for reason, entry in holdouts_report["by_reason"].items():
+            print(f"    {reason}: 계열 {entry['groups']} · 레코드 {entry['records']} · {entry['splits']}")
     print(f"  계약 위반 {report['invalid_records']}건 · QA 위반 {len(report['errors'])}건")
     for error in report["errors"][:10]:
         print(f"  - [{error['index']}] {error['path']}: {error['message']}")

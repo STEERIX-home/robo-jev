@@ -31,8 +31,8 @@ from pathlib import Path
 from typing import Any
 
 from robo_jev.contracts import SCHEMA_SINGLE_REQUEST
-from robo_jev.data.domains import DOMAINS, QuestionSpec, Rendered
-from robo_jev.data.split import SplitPolicy
+from robo_jev.data.domains import DOMAINS, QuestionSpec, Rendered, begin_phrasing, concepts_for, take_phrasing
+from robo_jev.data.split import CONCEPT_TAG, TEMPLATE_TAG, SplitPolicy, ood_split
 
 __all__ = [
     "DEFAULT_CONFIG",
@@ -52,7 +52,7 @@ PILOT_CONFIG = Path(__file__).resolve().parents[3] / "configs" / "data" / "pilot
 
 #: 시작값은 docs/04 §2에서 온다. 설정 파일로 덮어쓸 수 있다.
 DEFAULT_CONFIG: dict[str, Any] = {
-    "version": "pilot-v0",
+    "version": "pilot-v0.3",
     # 비로봇 상태의 분야 비중. docs/04 §2는 dom/workflow/rules를 15/15/10으로 두고
     # 나머지를 색·위치·영역 문제가 채운다 — pilot에서는 넷을 고르게 둔다.
     "domains": {"spatial": 25, "dom": 25, "workflow": 25, "rules": 25},
@@ -66,6 +66,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "holdout_groups": [],
         "holdout_prefixes": [],
         "holdout_domains": [],
+        # 봉인 holdout (docs/04 §5 표, 계약 v0.3): 문구 템플릿 변형 계열과 분야마다 개념 하나. 레코드의 provenance
+        # (`phrasing`·`concepts`)와 맞대며, 한 계열의 레코드 중 하나라도 걸리면 계열 전체가 OOD(ood_dev/ood_test)다.
+        "holdout_templates": ["spatial.distance.ko#1", "dom.needs_input.ko#1", "workflow.load.ko#1", "rules.conflict.ko#1"],
+        "holdout_concepts": ["spatial:goal-zone:zoneC", "dom:reveal", "workflow:resource_offline", "rules:escort-policy"],
     },
 }
 
@@ -211,10 +215,13 @@ def _render_record(
     derivation: str | None = None,
 ) -> dict:
     wording_rng = random.Random(wording_seed)
+    begin_phrasing()
     state = domain.state(scene, wording_rng, language)
     rendered: list[Rendered] = [
         domain.render(scene, spec, wording_rng, language) for spec in specs
     ]
+    phrasing = take_phrasing()
+    concepts = sorted({concept for spec in specs for concept in concepts_for(domain.name, scene, spec)})
 
     questions = [item.question for item in rendered]
     labels = [item.label for item in rendered if item.label is not None]
@@ -241,6 +248,11 @@ def _render_record(
             "seed": seed,
             "language": language,
             "variants": variants,
+            # 봉인 holdout의 근거 (docs/04 §5): 이 레코드가 쓴 문구 템플릿 변형과 다루는 개념. 생성기가 계열 단위로
+            # `split.holdout_templates`·`holdout_concepts`와 맞대고, 걸린 이유는 `holdout`에 적는다 (아니면 빈 목록).
+            "phrasing": phrasing,
+            "concepts": concepts,
+            "holdout": [],
             "rules": sorted({label["source"] for label in labels}),
             **({"derived_from": derived_from, "derivation": derivation} if derived_from else {}),
         },
@@ -324,6 +336,17 @@ def _build_family(
                 **shared,
             )
         )
+    # 템플릿 변형·개념 holdout은 렌더링 뒤에야 안다. 계열의 레코드 중 하나라도 걸리면 계열 전체가 OOD다 — 한 group이
+    # 두 split에 걸치지 않는다(docs/04 §5). group·prefix·domain holdout은 이미 `split`에 반영돼 있다.
+    tags = sorted(
+        {TEMPLATE_TAG + item for record in records for item in record["provenance"]["phrasing"]}
+        | {CONCEPT_TAG + item for record in records for item in record["provenance"]["concepts"]}
+    )
+    reasons = policy.holdout_reasons(group, tags)
+    if reasons:
+        for record in records:
+            record["split"] = ood_split(group)
+            record["provenance"]["holdout"] = list(reasons)
     return records
 
 

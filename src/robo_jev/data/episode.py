@@ -181,8 +181,9 @@ def new_episode(
     instructions: list[dict[str, Any]],
     question_set: str | None = None,
     policy: SplitPolicy | None = None,
+    tags: tuple[str, ...] = (),
 ) -> dict[str, Any]:
-    """빈 스트림 레코드. split은 장면 계열에서 나온다 (docs/08 §8)."""
+    """빈 스트림 레코드. split은 장면 계열(과 생성 전에 아는 템플릿·개념 태그)에서 나온다 (docs/08 §8, docs/04 §5)."""
     if not instructions:
         raise ValueError("prefix에는 시작 지시가 하나 이상 있어야 한다")
     if question_set is None:
@@ -191,7 +192,7 @@ def new_episode(
         "schema_version": SCHEMA_STREAM,
         "episode_id": str(episode_id),
         "origin_group": str(scene_family),
-        "split": assign_split(str(scene_family), policy),
+        "split": assign_split(str(scene_family), policy, tags),
         "prefix": {
             "instructions": [_instruction(item) for item in instructions],
             "question_set": str(question_set),
