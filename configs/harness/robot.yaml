@@ -159,6 +159,18 @@ phases:
   # 처져 손가락이 작업면을 친다(3c-2 실측 113~144N). 파지 진입(60)보다 느슨한 것은 밀기 horizon(3초) 때문이다.
   push_entry_speed_mm_s: 120
 
+# 토큰 직렬화의 변화분 규칙 (docs/08 §3.1, 계약 v0.3). 모델 쪽 `robo_jev.model.serialize.DELTA_RULES`와 같아야 한다
+# (검사가 대조한다) — 값은 여기가 적고 레코드의 `config_digest`에 든다. 물체 소개 줄(정적 필드)은 시작·처음 관측·정적 필드
+# 변경·`object_intro_period_ticks`(윈도우 길이)마다, 동적 줄은 변화(자세 > max(정밀도 s, object_pose_delta_mm), 회전, 가시
+# 비율 변화 ≥ object_visibility_delta, 관측 정지의 시작·끝, 재식별, 들고 있는 물체) 또는 `object_dynamic_period_ticks`마다,
+# 지시 텍스트는 `goal_text_period_ticks`마다 다시 싣는다(그 밖에는 goal 줄의 압축 참조만).
+serialization:
+  object_intro_period_ticks: 30
+  object_dynamic_period_ticks: 10
+  goal_text_period_ticks: 10
+  object_pose_delta_mm: 0
+  object_visibility_delta: 0.25
+
 # 명령 생성 (docs/08 §6).
 command:
   frame: robot_base

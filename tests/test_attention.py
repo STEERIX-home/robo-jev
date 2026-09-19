@@ -333,16 +333,13 @@ def test_a_mid_stream_instruction_change_leaves_the_window_like_any_tick_token(s
         return out["ticks"][tick_index]["decision_positions"]["q_main"]
 
     def state_text_of(tick_index: int) -> str:
-        state = next(s for s in out["segments"] if s["tick"] == tick_index and s["name"] == "state")
-        return tokenizer.decode(out["tokens"][state["start"] : state["end"]])
+        state = [s for s in out["segments"] if s["tick"] == tick_index and s["name"].startswith("state:")]
+        return "".join(tokenizer.decode(out["tokens"][s["start"] : s["end"]]) for s in state)
 
     inside = decision_of(1 + WINDOW_TICKS - 1)  # 29틱 뒤: 아직 윈도우 안
     outside = decision_of(1 + WINDOW_TICKS + 1)  # 31틱 뒤: 윈도우 밖
     assert all(bool(mask[inside, index]) for index in v2)
     assert not any(bool(mask[outside, index]) for index in v2)
     assert all(bool(mask[outside, index]) for index in range(out["prefix_end"]))  # 정적 prefix는 남는다
-    # 그 틱의 goal 줄은 여전히 version=2를 싣는다.
-    assert any(
-        line.startswith("goal ") and "version=2" in line
-        for line in state_text_of(1 + WINDOW_TICKS + 1).splitlines()
-    )
+    # 그 틱의 goal 줄은 여전히 v2를 싣는다 (압축 참조, 서식 v0.3).
+    assert any(line.startswith("goal v2 ") for line in state_text_of(1 + WINDOW_TICKS + 1).splitlines())

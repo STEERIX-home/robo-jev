@@ -120,7 +120,7 @@ def test_the_token_serializer_has_its_own_version_apart_from_the_record_serializ
     from robo_jev.model import serialize as serialize_module
 
     config = yaml.safe_load(SIM_CONFIG.read_text(encoding="utf-8"))
-    assert TOKEN_SERIALIZER_VERSION == "ts0.3"
+    assert TOKEN_SERIALIZER_VERSION == "ts0.4"
     assert TOKEN_SERIALIZER_VERSION.startswith("ts") and str(config["version"]).startswith("s")
     assert TOKEN_SERIALIZER_VERSION != config["version"]
     assert not hasattr(serialize_module, "SERIALIZER_VERSION")  # 옛 이름은 뜻이 둘이라 없앴다
@@ -409,15 +409,29 @@ def test_stream_dynamic_candidates_live_in_the_tick_and_static_ones_in_the_prefi
             assert all(index < tick["decision_positions"][question_id] for index in boundaries)
 
 
-def test_stream_exec_history_is_the_actual_history_line(stream, tokenizer):
-    stream["ticks"][2]["request"]["exec_history"] = "main=c1 phase=approach path=p0 speed=1 force=0 gripper=open stop=0 ack=ok"
+def test_stream_exec_history_is_the_actual_history_line_in_short_form(stream, tokenizer):
+    """실행 이력 줄(서식 v0.3): 하네스의 `main=… phase=…` 줄을 짧은 이름으로 다시 적고 기본값(stop=0·gate=none·fails=0)은 뺀다."""
+    stream["ticks"][2]["request"]["exec_history"] = "main=c1 phase=approach path=p0 speed=1 force=0 gripper=open stop=0 gate=none ack=ok fails=0"
+    stream["ticks"][3]["request"]["exec_history"] = "main=c1 phase=grasp path=via:w2@10,20,30 speed=2 force=1 gripper=closed stop=1 gate=observe ack=collision fails=2"
     out = serialize_request(stream, tokenizer, layout="stream_l1a")
     tick = out["ticks"][2]
     exec_segments = [s for s in out["segments"] if s["kind"] == "exec" and s["tick"] == 2]
     assert len(exec_segments) == 1
     chunk = tokenizer.decode(out["tokens"][exec_segments[0]["start"] : exec_segments[0]["end"]])
-    assert chunk == "exec_history main=c1 phase=approach path=p0 speed=1 force=0 gripper=open stop=0 ack=ok\n"
+    assert chunk == "hist main=c1 ph=approach path=p0 v=1 f=0 g=open ack=ok\n"
     assert tick["start"] <= exec_segments[0]["start"] < tick["body_end"]
+    third = next(s for s in out["segments"] if s["kind"] == "exec" and s["tick"] == 3)
+    assert tokenizer.decode(out["tokens"][third["start"] : third["end"]]) == "hist main=c1 ph=grasp path=via:w2@10,20,30 v=2 f=1 g=closed stop gate=observe ack=collision fails=2\n"
+    first = next(s for s in out["segments"] if s["kind"] == "exec" and s["tick"] == 0)
+    assert tokenizer.decode(out["tokens"][first["start"] : first["end"]]) == "hist none\n"
+
+
+def test_the_history_line_reads_the_fields_the_harness_writes():
+    """직렬화의 이력 파서는 하네스의 `parse_exec_history`와 같은 규칙이다 (모델 코드가 하네스를 import하지 않으므로 대조)."""
+    from robo_jev.harness.robot import parse_exec_history
+
+    for text in ("none", "", "main=c1 phase=approach path=p0 speed=1 force=0 gripper=open stop=0 gate=none ack=ok fails=0", "odd tokens x=1"):
+        assert serialize_module._history_fields(text) == parse_exec_history(text)
 
 
 def test_an_instruction_change_is_appended_before_the_tick_that_first_carries_it(streams, tokenizer):
@@ -459,26 +473,280 @@ def test_an_instruction_change_is_appended_before_the_tick_that_first_carries_it
     assert truncated["ticks"][-1]["end"] == len(truncated["tokens"])
 
 
-def test_tick_header_does_not_repeat_the_states_own_t_line(stream, tokenizer):
-    """틱 머리는 `[tick t]`뿐이다. 상태에 `t` 구간이 없는 레코드(D0 fixture)에서만 틱 겉봉투의
-    시각 값을 머리에 실어 정보를 잃지 않는다."""
+def test_the_tick_header_is_the_t_line_without_the_envelope_values(stream, tokenizer):
+    """틱 머리는 `t <tick> age g<ms> p<ms> seq <n>` 한 줄이다 (서식 v0.3). 모의 시각·관측 시각·후보 집합 해시는 겉봉투
+    (레코드·계약 검사)에만 있고 모델은 읽지 않는다. 상태에 `t` 구간이 없는 레코드(D0 fixture)는 겉봉투의 나이로 채운다."""
     out = serialize_request(stream, tokenizer, layout="stream_l1a")
     lines = out["text"].splitlines()
-    assert "[tick 0] sim_ms=0 observed_at_ms=0 obs_age_ms=geom:100,proprio:20" in lines
+    assert "t 0 age g100 p20" in lines
+    assert not any(line.startswith("[tick ") for line in lines)
 
     harness_like = copy.deepcopy(stream)
     for tick in harness_like["ticks"]:
         tick["request"]["state"] = {
             "t": {"tick": tick["t"], "sim_ms": tick["sim_ms"], "observed_at_ms": tick["observed_at_ms"],
-                  "age_ms": tick["obs_age_ms"], "seq": tick["t"] + 1},
+                  "age_ms": tick["obs_age_ms"], "seq": tick["t"] + 1, "candidate_set_version": "cs-abcdef12"},
             **tick["request"]["state"],
         }
     out = serialize_request(harness_like, tokenizer, layout="stream_l1a")
-    lines = out["text"].splitlines()
-    assert "[tick 0]" in lines
-    assert "t tick=0 sim_ms=0 observed_at_ms=0 age_ms=geom:100,proprio:20 seq=1" in lines
-    assert not any(line.startswith("[tick ") and "sim_ms" in line for line in lines)
-    assert sum(line.startswith("[tick 0]") for line in lines) == 1
+    # 결정 표지 뒤에는 줄바꿈이 없으므로(1토큰 분기) 틱 몸통을 따로 읽는다.
+    assert tick_text(out, tokenizer, 0).splitlines()[0] == "t 0 age g100 p20 seq 1"
+    assert tick_text(out, tokenizer, 3).splitlines()[0] == "t 3 age g100 p20 seq 4"
+    assert "cs-abcdef12" not in out["text"] and "sim_ms" not in out["text"] and "observed_at" not in out["text"]
+
+
+# --------------------------------------------------------------------------
+# 서식 v0.3 — 짧은 이름, 물체 소개/동적 분리, 변화분 틱 (docs/08 §3.1·§3.2)
+# --------------------------------------------------------------------------
+
+
+def synthetic_stream(ticks: int, *, mutate=None) -> dict:
+    """하네스 상태 모양의 손으로 만든 스트림: 물체 둘, 영역 하나, `t` 구간과 물체별 나이·정밀도가 있다.
+
+    `mutate(index, state)`가 틱마다 상태를 바꾼다(자세·가시성·관측 정지 …)."""
+
+    def obj(object_id: str, pose, *, attributes=()):
+        return {
+            "id": object_id, "desc": f"{object_id} 상자", "class": "box", "pose_mm": list(pose), "quat": [0.0, 0.0, 0.0, 1.0],
+            "precision_mm": 3, "pose_source": "geom", "obb_mm": [60, 60, 64], "top_mm": -48, "graspable_faces": ["top", "side"],
+            "surface_conf": 0.92, "visible_ratio": 1.0, "last_seen_ms": 0, "age_ms": 0, "reid": [], "attributes": list(attributes),
+        }
+
+    record = {
+        "schema_version": "stream-v0", "episode_id": "ep-v03",
+        "prefix": {"instructions": [{"version": 1, "t_ms": 0, "text": "o0 상자를 zoneL로 옮겨라"}], "question_set": "qs-v0"},
+        "ticks": [],
+    }
+    for index in range(ticks):
+        now = 100 * index
+        state = {
+            "t": {"tick": index, "sim_ms": now, "observed_at_ms": now, "age_ms": {"geom": 0, "proprio": 0}, "seq": index + 1, "candidate_set_version": "cs-1"},
+            "goal": {"text": "o0 상자를 zoneL로 옮겨라", "version": 1, "t_ms": 0, "target_ref": "o0", "target_desc": "o0 상자", "target_zone": "zoneL", "forbidden_contact": [], "fragile": ["o1"]},
+            "objects": [obj("o0", (300, 0, -80)), obj("o1", (200, 220, -80), attributes=("fragile",))],
+            "scene": {"work_surface_mm": -112, "free_width_mm": 300, "corridor_mm": 100, "clearance_mm": 40},
+            "zones": [{"id": "zoneL", "desc": "왼쪽 정리 영역", "bounds_mm": [-120, 150, 180, 330]}],
+            "robot": {"ee_pose_mm": [0, 0, 200], "ee_quat": [0.0, 0.0, 0.0, 1.0], "gripper_mm": 80, "holding": None, "contact_n": 0.0, "speed_mm_s": 0},
+            "exec": {"seq": index, "action_ref": None, "phase": None, "path": None, "speed_level": 0, "force_level": None, "gripper": None, "stop": False, "progress": None, "applied": None, "reject": None, "gripper_wait": None, "events": [], "executor": "HOLD"},
+            "events": [], "derived": [
+                {"object": "o0", "relative_mm": [300, 0, -280], "clearance_mm": 40, "corridor_mm": 100, "age_ms": 0},
+                {"object": "o1", "relative_mm": [200, 220, -280], "clearance_mm": 40, "corridor_mm": 100, "age_ms": 0},
+            ],
+            "commitment": None, "image": [], "geom": [], "extractor": "pw0.1",
+        }
+        for entry in state["objects"]:
+            entry["last_seen_ms"] = now
+        if mutate is not None:
+            mutate(index, state)
+        record["ticks"].append({
+            "t": index, "sim_ms": now, "observed_at_ms": now, "obs_age_ms": {"geom": 0, "proprio": 0},
+            "request": {
+                "state": state, "exec_history": "none", "commitment": None,
+                "candidates": {"q_main": [
+                    {"id": "c1", "action_ref": "c1", "key": "grasp:o0:top:zoneL", "d": 381, "clr": 40, "path": "ok", "g": 0},
+                    {"id": "c2", "action_ref": "c2", "key": "push:o0:-x:none", "d": 417, "clr": 40, "path": "blocked", "g": 0},
+                    {"id": "ch", "action_ref": "ch", "key": "hold"},
+                ], "q_path": [{"id": "p0", "kind": "direct", "action_ref": "ch"}, {"id": "p1", "kind": "via", "ref": "w1", "action_ref": "ch"}, {"id": "ph", "kind": "hold", "action_ref": "ch"}]},
+            },
+        })
+    return record
+
+
+def tick_text(out: dict, tokenizer, index: int) -> str:
+    tick = out["ticks"][index]
+    return tokenizer.decode(out["tokens"][tick["start"] : tick["body_end"]])
+
+
+def section_text(out: dict, tokenizer, index: int, name: str) -> str:
+    return "".join(
+        tokenizer.decode(out["tokens"][segment["start"] : segment["end"]])
+        for segment in out["segments"] if segment["tick"] == index and segment["name"] == name
+    )
+
+
+def test_stream_format_v03_uses_short_names_and_key_based_candidate_lines(tokenizer):
+    out = serialize_request(synthetic_stream(1), tokenizer, layout="stream_l1a")
+    assert out["format"] == serialize_module.STREAM_FORMAT == "v0.3"
+    assert out["delta_rules"] == serialize_module.DELTA_RULES
+    text = tick_text(out, tokenizer, 0)
+    lines = text.splitlines()
+    assert lines[0] == "t 0 age g0 p0 seq 1"
+    assert lines[1] == "goal v1 target=o0 zone=zoneL fragile=o1"  # 압축 참조: 텍스트는 지시 조각(prefix)에 있다
+    assert "obj o0 o0 상자 obb=60,60,64 top=-48 faces=top,side" in lines
+    assert "obj o1 o1 상자 obb=60,60,64 top=-48 faces=top,side attr=fragile" in lines
+    # 동적 줄: 회전 없음(yaw=0)·다 보임(vis=1)은 기본값이라 없고, 말단 기준 상대 벡터는 싣지 않는다 (ee와 p로 정해진다).
+    assert "o0 p=300,0,-80 s=3 conf=0.92 clr=40 corr=100" in lines
+    assert "robot ee=0,0,200 eq=0.00,0.00,0.00,1.00 grip=80" in lines  # holding·contact_n·speed의 기본값은 뺀다
+    assert "exec ex=HOLD" in lines
+    assert "commitment none" in lines and "hist none" in lines
+    # 후보 줄: 대상 기하 나이 g는 틱의 기하 나이(여기 0)와 같으면 뺀다.
+    assert "c1: grasp o0 top→zoneL d=381 clr=40 path=ok" in lines
+    assert "c2: push o0 -x d=417 clr=40 path=blocked" in lines
+    assert "ch: hold" in lines and "p0: direct" in lines and "p1: via w1" in lines and "ph: hold" in lines
+    for absent in ("pose_mm", "visible_ratio", "graspable_faces", "extractor", "image", "geom", "candidate_set_version", "target_desc", "action_ref", "key=", "rel=", "g=0"):
+        assert absent not in text, absent
+    stale = synthetic_stream(1)
+    stale["ticks"][0]["request"]["candidates"]["q_main"][0]["g"] = 200
+    assert "c1: grasp o0 top→zoneL d=381 clr=40 path=ok g=200" in tick_text(serialize_request(stale, tokenizer, layout="stream_l1a"), tokenizer, 0)
+    # 영역·장면 요약은 prefix에 있다.
+    prefix_text = tokenizer.decode(out["tokens"][: out["prefix_end"]])
+    assert "zone zoneL 왼쪽 정리 영역 b=-120,150,180,330" in prefix_text.splitlines()
+    assert "scene surf=-112 free=300 corr=100 clr=40" in prefix_text.splitlines()
+    assert "zone " not in text and "scene " not in text
+
+
+def test_the_goal_line_names_the_target_description_only_while_the_target_is_untracked(tokenizer):
+    def mutate(index, state):
+        if index == 1:
+            state["goal"]["target_ref"] = None  # 아직 관측되지 않은 대상: 설명이 유일한 단서
+        if index == 2:
+            state["goal"]["forbidden_contact"] = ["o1"]
+
+    out = serialize_request(synthetic_stream(3, mutate=mutate), tokenizer, layout="stream_l1a")
+    assert section_text(out, tokenizer, 0, "state:goal") == "goal v1 target=o0 zone=zoneL fragile=o1\n"
+    assert section_text(out, tokenizer, 1, "state:goal") == "goal v1 target=none desc=o0 상자 zone=zoneL fragile=o1\n"
+    assert section_text(out, tokenizer, 2, "state:goal") == "goal v1 target=o0 zone=zoneL forbid=o1 fragile=o1\n"
+
+
+def test_the_commitment_line_drops_the_key_the_candidate_line_carries(tokenizer):
+    record = synthetic_stream(2)
+    record["ticks"][1]["request"]["commitment"] = {"action_ref": "c1", "key": "grasp:o0:top:zoneL", "phase": "approach", "held_ticks": 0, "last_switch_tick": 0}
+    out = serialize_request(record, tokenizer, layout="stream_l1a")
+    assert "commitment a=c1 ph=approach held=0" in tick_text(out, tokenizer, 1).splitlines()
+    assert "grasp:o0:top:zoneL" not in tick_text(out, tokenizer, 1)
+
+
+def test_objects_are_introduced_once_and_dynamic_lines_follow_changes(tokenizer):
+    """소개 줄은 시작·처음 관측·정적 필드 변경 때, 동적 줄은 변화(자세 > 정밀도, 회전, 가시 비율, 관측 정지, 재식별) 때만.
+    바뀌지 않은 물체는 틱에서 빠진다."""
+
+    def mutate(index, state):
+        o0, o1 = state["objects"]
+        if index >= 2:
+            o0["pose_mm"] = [300, 0 + (2 if index == 2 else 20), -80]  # 틱 2: 정밀도 안(2 < 3), 틱 3부터 20mm
+        if index >= 4:
+            o0["quat"] = [0.0, 0.0, 0.38, 0.92]  # 틱 4에 회전, 그 뒤로 그대로
+        if index in (5, 6):
+            o1["visible_ratio"] = 0.3  # 가시 비율 변화 (틱 5), 틱 6은 같음
+        if index == 7:
+            o1["visible_ratio"] = 0.3
+            o1["age_ms"] = 200  # 관측 정지: 기하 나이 0인데 이 물체는 200ms 전 것
+            o1["last_seen_ms"] = 500
+        if index == 8:
+            o1["visible_ratio"] = 1.0
+            o1["reid"] = ["merge:o9"]
+        if index == 9:
+            o1["attributes"] = ["fragile", "forbidden"]  # 정적 필드 변경 → 소개 줄
+            o1["visible_ratio"] = 1.0
+
+    out = serialize_request(synthetic_stream(10, mutate=mutate), tokenizer, layout="stream_l1a")
+    intro = [section_text(out, tokenizer, i, "state:objects_intro") for i in range(10)]
+    dynamic = [section_text(out, tokenizer, i, "state:objects_dynamic") for i in range(10)]
+    assert intro[0].count("obj ") == 2 and dynamic[0].count("\n") == 2
+    assert intro[1] == "" and dynamic[1] == ""  # 아무것도 바뀌지 않았다
+    assert dynamic[2] == ""  # 정밀도(3mm) 안의 흔들림은 변화가 아니다
+    assert dynamic[3] == "o0 p=300,20,-80 s=3 clr=40 corr=100\n"  # 바뀐 것은 자세뿐: 선택 필드(방향·신뢰도·가시 비율)는 없다
+    assert dynamic[4] == "o0 p=300,20,-80 yaw=45 s=3 clr=40 corr=100\n"  # z축 회전은 yaw(도)로
+    assert dynamic[5] == "o1 p=200,220,-80 s=3 vis=0.3 clr=40 corr=100\n"
+    assert dynamic[6] == ""
+    assert dynamic[7] == "o1 p=200,220,-80 s=3 seen=500 clr=40 corr=100\n"  # 관측이 끊겼다 (가시 비율은 그대로라 없다)
+    assert dynamic[8] == "o1 p=200,220,-80 s=3 clr=40 corr=100 reid=merge:o9\n"  # 다시 보인다(vis=1은 기본값), 재식별
+    assert "seen=" not in dynamic[8]
+    assert intro[9] == "obj o1 o1 상자 obb=60,60,64 top=-48 faces=top,side attr=fragile,forbidden\n"
+    assert all(intro[i] == "" for i in range(1, 9))
+
+
+def test_intro_and_dynamic_lines_refresh_on_their_periods_and_the_goal_text_on_its_own(tokenizer):
+    out = serialize_request(synthetic_stream(31), tokenizer, layout="stream_l1a")
+    rules = serialize_module.DELTA_RULES
+    for index in range(31):
+        intro = section_text(out, tokenizer, index, "state:objects_intro")
+        dynamic = section_text(out, tokenizer, index, "state:objects_dynamic")
+        goal = section_text(out, tokenizer, index, "state:goal")
+        robot = section_text(out, tokenizer, index, "state:robot")
+        assert (intro != "") == (index % rules["object_intro_period_ticks"] == 0), index
+        assert (dynamic != "") == (index % rules["object_dynamic_period_ticks"] == 0), index
+        assert ("text=" in goal) == (index > 0 and index % rules["goal_text_period_ticks"] == 0), index
+        assert ("eq=" in robot) == (index % rules["object_intro_period_ticks"] == 0), index  # 말단 자세는 소개 틱과 변화 때만
+    assert section_text(out, tokenizer, 30, "state:objects_intro").count("obj ") == 2
+    assert section_text(out, tokenizer, 10, "state:objects_dynamic").count("\n") == 2
+    # 갱신 틱의 동적 줄은 자세·정밀도·여유·통로뿐, 소개 틱의 동적 줄은 전체(표면 신뢰도까지)다.
+    assert "conf=" not in section_text(out, tokenizer, 10, "state:objects_dynamic")
+    assert section_text(out, tokenizer, 30, "state:objects_dynamic").count("conf=0.92") == 2
+    assert "text=o0 상자를 zoneL로 옮겨라" in section_text(out, tokenizer, 10, "state:goal")
+
+
+def test_delta_rules_can_be_overridden_but_only_by_known_keys(tokenizer):
+    record = synthetic_stream(6)
+    out = serialize_request(record, tokenizer, layout="stream_l1a", delta_rules={"object_dynamic_period_ticks": 2})
+    assert out["delta_rules"]["object_dynamic_period_ticks"] == 2 and out["delta_rules"]["object_intro_period_ticks"] == 30
+    assert [section_text(out, tokenizer, i, "state:objects_dynamic") != "" for i in range(6)] == [True, False, True, False, True, False]
+    with pytest.raises(ValueError, match="delta_rules.bogus"):
+        serialize_request(record, tokenizer, layout="stream_l1a", delta_rules={"bogus": 1})
+
+
+def test_delta_rules_match_the_harness_config():
+    """문턱·주기의 단일 출처는 하네스 설정의 `serialization:` 블록이다(레코드 지문에 든다); 모듈 상수가 그것을 비춘다."""
+    from helpers import HARNESS_CONFIG
+
+    config = yaml.safe_load(HARNESS_CONFIG.read_text(encoding="utf-8"))
+    assert config["serialization"] == serialize_module.DELTA_RULES
+
+
+def test_zones_and_scene_return_to_a_tick_only_when_they_change(tokenizer):
+    def mutate(index, state):
+        if index == 3:
+            state["scene"]["clearance_mm"] = 12
+        if index >= 5:
+            state["zones"].append({"id": "zoneR", "desc": "오른쪽 정리 영역", "bounds_mm": [-120, -330, 180, -150]})
+
+    out = serialize_request(synthetic_stream(7, mutate=mutate), tokenizer, layout="stream_l1a")
+    scene = [section_text(out, tokenizer, i, "state:scene") for i in range(7)]
+    zones = [section_text(out, tokenizer, i, "state:zones") for i in range(7)]
+    assert scene[3] == "scene surf=-112 free=300 corr=100 clr=12\n" and scene[4] == "scene surf=-112 free=300 corr=100 clr=40\n"
+    assert all(scene[i] == "" for i in (0, 1, 2, 5, 6))
+    assert zones[5].count("zone ") == 2 and all(zones[i] == "" for i in (0, 1, 2, 3, 4, 6))
+
+
+def test_events_and_waypoints_are_short_lines(tokenizer):
+    def mutate(index, state):
+        if index == 1:
+            state["events"] = [{"kind": "object_moved", "sim_ms": 100, "object": "o1", "displacement_mm": 42}, {"kind": "reflex_force", "sim_ms": 100}]
+            state["derived"].append({"waypoint": "w1", "kind": "over", "pos_mm": [150, 100, 60], "around": "o1", "extra_mm": 120})
+
+    out = serialize_request(synthetic_stream(2, mutate=mutate), tokenizer, layout="stream_l1a")
+    assert section_text(out, tokenizer, 1, "state:events") == "ev object_moved o=o1 d=42\nev reflex_force\n"
+    assert section_text(out, tokenizer, 1, "state:waypoints") == "wp w1 over p=150,100,60 around=o1 extra=120\n"
+    assert section_text(out, tokenizer, 0, "state:events") == "" and section_text(out, tokenizer, 0, "state:waypoints") == ""
+
+
+def test_serializing_a_prefix_of_the_ticks_gives_a_prefix_of_the_tokens(streams, tokenizer):
+    """변화분은 입력의 정의다: 틱 k의 토큰은 틱 0..k의 레코드만으로 정해지므로 앞 n틱의 직렬화는 전체의 접두다 —
+    틱마다 새 토큰만 붙이는 증분 계산과 처음부터 계산이 같다 (docs/08 §3.1)."""
+    for record in (copy.deepcopy(streams[0]), synthetic_stream(35, mutate=lambda i, s: s["objects"][0].__setitem__("pose_mm", [300 + 5 * i, 0, -80]))):
+        record["ticks"] = record["ticks"][:35]
+        whole = serialize_request(record, tokenizer, layout="stream_l1a")
+        for n in (1, 2, 9, 10, 11, 30, 31, 34):
+            head = copy.deepcopy(record)
+            head["ticks"] = head["ticks"][:n]
+            head["prefix"]["instructions"] = [ins for ins in head["prefix"]["instructions"] if int(ins["version"]) <= max(int((t["request"]["state"].get("goal") or {}).get("version", 1)) if isinstance(t["request"]["state"].get("goal"), dict) else 1 for t in head["ticks"])]
+            part = serialize_request(head, tokenizer, layout="stream_l1a")
+            end = whole["ticks"][n - 1]["end"]
+            assert part["tokens"] == whole["tokens"][:end], n
+            assert part["ticks"] == whole["ticks"][:n], n
+            assert part["prefix_end"] == whole["prefix_end"]
+
+
+def test_legacy_candidate_entries_lose_their_prose_but_keep_the_key(tokenizer, stream):
+    """다른 도구가 만든 틱(D0 fixture)의 옛 항목: 설명·산문 파생 값은 버리고 키(5조각이면 뒤 조각은 그대로)와 그 밖의 필드만."""
+    from robo_jev.model.serialize import stream_candidate_line
+
+    assert stream_candidate_line({"id": "c1", "action_ref": "c1", "key": "grasp:o7:top:zoneL:slow", "desc": "…", "derived": "reach ok"}) == "c1: grasp o7 top→zoneL slow\n"
+    assert stream_candidate_line({"id": "c9", "action_ref": "c9", "key": "push:o4:+x:none"}) == "c9: push o4 +x\n"
+    assert stream_candidate_line({"id": "c3", "action_ref": "c3", "key": "place:o0:release:zoneR", "d": 5, "clr": 6, "path": "ok", "g": 7}) == "c3: place o0 release→zoneR d=5 clr=6 path=ok g=7\n"
+    assert stream_candidate_line({"id": "p1", "kind": "via", "ref": "w1", "action_ref": "c3", "desc": "경유"}) == "p1: via w1\n"
+    assert stream_candidate_line({"id": "cx", "action_ref": "c3", "key": "hold"}) == "cx: hold action_ref=c3\n"  # 다른 후보를 가리키면 남는다
+    out = serialize_request(stream, tokenizer, layout="stream_l1a")
+    assert "c1: grasp o7 top→zoneL slow" in out["text"] and "빨간 컵을 top 면으로" not in out["text"]
 
 
 def test_unknown_question_set_is_an_error(stream, tokenizer):
