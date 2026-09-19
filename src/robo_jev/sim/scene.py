@@ -393,6 +393,14 @@ def _sample_instructions(
 
     first = plain[int(rng.integers(len(plain)))]
     zone = zones[int(rng.integers(len(zones)))]
+    # 지시의 대상이 이미 목표 영역 안에 놓여 있으면 에피소드가 틱 0에 끝난다(E1 seed 400100). 난수 소비는 그대로
+    # 두고 **위반한 조합만** 바꾼다 — 대상을 담지 않는 영역이 있으면 그것을, 없으면 그 영역 밖의 다른 대상을.
+    fixed = _target_outside_zone(first, zone, plain, zones)
+    if fixed is None:
+        raise RuntimeError(
+            f"지시의 대상 {first.id}가 모든 영역 안에 있고 영역 {zone.id} 밖의 평범한 물체도 없다 — 장면 설정을 확인하라"
+        )
+    first, zone = fixed
     text = spec["v1_template"].format(
         color=first.colour_ko,
         shape=labels[first.shape],
@@ -411,6 +419,12 @@ def _sample_instructions(
     if not others:
         return tuple(steps)
     second = others[int(rng.integers(len(others)))]
+    # v2의 대상도 같은 영역 밖이어야 한다(영역은 v1의 것으로 고정이므로 대상만 바꾼다). 영역 밖의 다른 대상이
+    # 없으면 지시 변경은 없다 — 틱 0에 끝난 두 번째 목표를 만들지 않는다.
+    fixed = _target_outside_zone(second, zone, others, (zone,))
+    if fixed is None:
+        return tuple(steps)
+    second, _ = fixed
     low, high = spec["change_window_ms"]
     at_ms = _quantise(float(rng.uniform(low, high)), grid_ms)
     at_ms = min(max(at_ms, _quantise(low, grid_ms) + grid_ms), _quantise(high, grid_ms))
@@ -432,6 +446,32 @@ def _sample_instructions(
         )
     )
     return tuple(steps)
+
+
+def _inside_zone(obj: SceneObject, zone: Zone) -> bool:
+    x0, y0, x1, y1 = [float(value) for value in zone.bounds_mm]
+    x, y = float(obj.pos_mm[0]), float(obj.pos_mm[1])
+    return min(x0, x1) <= x <= max(x0, x1) and min(y0, y1) <= y <= max(y0, y1)
+
+
+def _target_outside_zone(
+    target: SceneObject, zone: Zone, targets: list[SceneObject], zones: tuple[Zone, ...]
+) -> tuple[SceneObject, Zone] | None:
+    """지시의 (대상, 영역) 조합에서 대상이 영역 안에 놓인 것을 고친다 — 생성 제약(계약 v0.3 이월 항목).
+
+    조합이 이미 괜찮으면 그대로다. 아니면 먼저 대상을 담지 않는 다른 영역(설정 순서의 첫 것), 그것도 없으면 그
+    영역 밖의 다른 대상(id 순서의 첫 것)을 고른다. 둘 다 없으면 `None`. 난수를 더 쓰지 않으므로 위반이 없는
+    seed의 장면·일정은 그대로다.
+    """
+    if not _inside_zone(target, zone):
+        return target, zone
+    for other in zones:
+        if not _inside_zone(target, other):
+            return target, other
+    for candidate in sorted(targets, key=lambda obj: obj.id):
+        if not _inside_zone(candidate, zone):
+            return candidate, zone
+    return None
 
 
 def _sample_disturbances(
