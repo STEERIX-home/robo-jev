@@ -1,0 +1,123 @@
+# configs/model/candidates.yaml — Task 2b backbone 후보의 고정 (docs/06 Task 2b 1단계 G0a "revision·라이선스·층 구성을
+# 고정한다", docs/03 §"지연 예산에서 역산하는 backbone 선정", HANDOFF §2 결정 3).
+#
+# `scripts/measure_candidates.py`가 이 목록을 읽어 잰다. `scripts/fetch_backbone.py`가 후보 하나를 받은 뒤 해석된
+# commit SHA(`revision`)·모델 카드의 `license`·받은 safetensors의 tensor를 **실제로 센** 파라미터 수(`params_total` =
+# 언어 모델 + lm_head, `params_checkpoint` = vision·MTP까지 전부)를 써 넣는다 — 이름의 "2B/4B/9B"를 믿지 않는다.
+# 구조 값은 2026-09-19의 공식 config.json에서 옮겼고 fetch가 받은 config.json과 대조한다(다르면 실패 — 조용히
+# 바뀐 후보를 재지 않는다). 항목 안에는 주석을 두지 않는다 — fetch가 이 머리말만 남기고 항목을 다시 쓴다.
+#
+# 네 후보 모두 Hub 공개(ungated), `model_type: qwen3_5`(text_config는 `qwen3_5_text`, 체크포인트는 vision tower를
+# 포함한 `Qwen3_5ForConditionalGeneration`이고 native 경로는 `AutoModelForCausalLM`으로 언어 모델만 싣는다),
+# vocab 248,320, linear:full = 3:1(`full_attention_interval: 4`), linear conv kernel 4.
+#
+# tokenizer: 측정은 artifacts/tokenizers의 Qwen3.8-27B tokenizer.json(sha256 0997f410…)으로 직렬화한 토큰을 넣는다.
+# Qwen3.5-2B/4B/9B의 tokenizer.json(세 후보가 한 파일, sha256 5f9e4d49…)은 그것과 BPE 어휘·merges·pre_tokenizer·
+# normalizer·post_processor·decoder가 전부 같고, 27B 쪽에만 added token 7개(<|audio_start|> … <|audio_pad|>,
+# id 248070~248076)가 더 있다(2026-09-19 대조). 직렬화 텍스트에는 그 글자열이 없으므로 넣는 id는 두 tokenizer에서
+# 같다 — 그래도 학습 manifest는 실제로 쓴 tokenizer의 sha256을 적는다.
+#
+# `head_dim`은 full-attention 층의 K/V head 차원(256)이고 `linear_attention.*_head_dim`(128)은 gated DeltaNet 층의
+# 것이다 — 윈도우 KV 산정(docs/05 §4의 27B ≈ 1.0 GiB)은 256을 쓴다.
+#
+# `role`: main(본선 2~4B) | separate(9B — FP8은 별도 후속이며 Hub에 2B/4B/9B의 *-FP8 변형은 없다) |
+#         reference(27B — 품질 기준. `--include-reference`를 줄 때만 잰다).
+version: cand-v0
+tokenizer: Qwen/Qwen3.8-27B
+candidates:
+- id: Qwen/Qwen3.5-2B
+  role: main
+  revision: 15852e8c16360a2fea060d615a32b45270f8a8fc
+  license: apache-2.0
+  model_type: qwen3_5
+  layer_types:
+    linear_attention: 18
+    full_attention: 6
+  full_attention_interval: 4
+  hidden_size: 2048
+  intermediate_size: 6144
+  num_attention_heads: 8
+  num_key_value_heads: 2
+  head_dim: 256
+  linear_attention:
+    num_key_heads: 16
+    num_value_heads: 16
+    key_head_dim: 128
+    value_head_dim: 128
+    conv_kernel_dim: 4
+  vocab_size: 248320
+  tie_word_embeddings: true
+  params_total: 1881825088
+  params_checkpoint: 2274069824
+- id: Qwen/Qwen3.5-4B
+  role: main
+  revision: 851bf6e806efd8d0a36b00ddf55e13ccb7b8cd0a
+  license: apache-2.0
+  model_type: qwen3_5
+  layer_types:
+    linear_attention: 24
+    full_attention: 8
+  full_attention_interval: 4
+  hidden_size: 2560
+  intermediate_size: 9216
+  num_attention_heads: 16
+  num_key_value_heads: 4
+  head_dim: 256
+  linear_attention:
+    num_key_heads: 16
+    num_value_heads: 32
+    key_head_dim: 128
+    value_head_dim: 128
+    conv_kernel_dim: 4
+  vocab_size: 248320
+  tie_word_embeddings: true
+  params_total: 4205751296
+  params_checkpoint: 4659865088
+- id: Qwen/Qwen3.5-9B
+  role: separate
+  revision: c202236235762e1c871ad0ccb60c8ee5ba337b9a
+  license: apache-2.0
+  model_type: qwen3_5
+  layer_types:
+    linear_attention: 24
+    full_attention: 8
+  full_attention_interval: 4
+  hidden_size: 4096
+  intermediate_size: 12288
+  num_attention_heads: 16
+  num_key_value_heads: 4
+  head_dim: 256
+  linear_attention:
+    num_key_heads: 16
+    num_value_heads: 32
+    key_head_dim: 128
+    value_head_dim: 128
+    conv_kernel_dim: 4
+  vocab_size: 248320
+  tie_word_embeddings: false
+  params_total: 8953803264
+  params_checkpoint: 9653104368
+- id: Qwen/Qwen3.8-27B
+  role: reference
+  revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+  license: apache-2.0
+  model_type: qwen3_5
+  layer_types:
+    linear_attention: 48
+    full_attention: 16
+  full_attention_interval: 4
+  hidden_size: 5120
+  intermediate_size: 17408
+  num_attention_heads: 24
+  num_key_value_heads: 4
+  head_dim: 256
+  linear_attention:
+    num_key_heads: 16
+    num_value_heads: 48
+    key_head_dim: 128
+    value_head_dim: 128
+    conv_kernel_dim: 4
+  vocab_size: 248320
+  tie_word_embeddings: false
+  params_total: 26895998464
+  params_checkpoint: 27781427952

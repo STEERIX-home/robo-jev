@@ -9,8 +9,9 @@ __pycache__/
 *.egg-info/
 
 # data, checkpoints, caches (manifest와 작은 fixture만 추적)
-# 맨 앞의 /는 저장소 뿌리에만 건다 — 없으면 src/robo_jev/data나 configs/data까지 삼킨다.
-/artifacts/
+# 맨 앞의 /는 저장소 뿌리에만 건다 — 없으면 src/robo_jev/data나 configs/data까지 삼킨다. 뒤에 /를 붙이지 않는다 —
+# 붙이면 디렉터리만 맞아 worktree의 `artifacts` symlink(뿌리의 artifacts/를 가리킨다)가 untracked로 남는다.
+/artifacts
 /data/
 /checkpoints/
 *.parquet
