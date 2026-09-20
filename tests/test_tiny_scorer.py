@@ -156,6 +156,15 @@ def test_evaluate_checkpoint_reproduces_the_trained_tables_without_training_and_
         load_checkpoint(tmp_path / "scorer.pt", config={**SMALL, "model": {**SMALL["model"], "d_model": 64}})
     with pytest.raises(ValueError, match="max_context_bytes"):
         load_checkpoint(tmp_path / "scorer.pt", config={**SMALL, "data": {**SMALL["data"], "max_context_bytes": 512}})
+    # D1 리뷰 2 N5: `sources`의 학습 수를 정하는 설정이 다르면 그 checkpoint의 것이 아닌 학습 수를 찍게 된다 — 거절한다.
+    for key, value in (("robot_tick_stride", 5), ("train_splits", ["train", "dev"]), ("manifests", [])):
+        with pytest.raises(ValueError, match=f"data.{key}"):
+            load_checkpoint(tmp_path / "scorer.pt", config={**SMALL, "data": {**SMALL["data"], key: value}})
+    # 평가 쪽 설정은 묶지 않는다 (대조군 열을 바꾼 재평가가 이 진입점의 목적이다) — 저장 시 설정 전체는 보고서에 남는다.
+    other_eval = {**SMALL, "data": {**SMALL["data"], "eval_splits": ["dev"], "eval_robot_tick_stride": 4}}
+    report = evaluate_checkpoint(other_eval, tmp_path / "scorer.pt", training_report=trained)
+    assert report["evaluation"]["checkpoint_config"] == SMALL
+    assert report["sources"] == trained["sources"] and report["train_examples_by_kind"] == trained["train_examples_by_kind"]
 
 
 def test_pattern_marks_name_what_they_measure(d0):

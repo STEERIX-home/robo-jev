@@ -1421,19 +1421,22 @@ class StreamRunner:
         lever = dict(LEVER_SETTINGS["baseline"])
         lever.update(config.get("lever") or {})
         backbone = QwenBackbone.load(config["id"], dtype=self.dtype, device=self.device, kv_mode="static")
+        readout_dtype = torch.float32 if lever["readout_dtype"] == "float32" else torch.bfloat16
+        judge = Judge(backbone, rank=int(config.get("readout_rank") or 64), readout="pointer", seed=1000, readout_dtype=readout_dtype)
+        # **적재가 먼저, 컴파일이 나중** (G0b 리뷰 2 M-b): `torch.compile`은 감싼 module의 state_dict 키에 `_orig_mod.` 접두사를
+        # 붙이므로 컴파일한 모델에 LoRA checkpoint를 실으면 `lora_*` 키가 "모델에 없는 파라미터"로 거절된다. readout만 있는
+        # checkpoint는 backbone 밖이라 우연히 통과했을 뿐이다.
+        if config.get("checkpoint"):
+            from robo_jev.train import load_readout_checkpoint
+
+            # 배포 계약 digest의 네 조각(tokenizer 파일 해시 포함)을 지금 체크아웃 기준으로 대조한다 (리뷰 1 I2)
+            load_readout_checkpoint(judge, config["checkpoint"], tokenizer_sha256=config.get("tokenizer_sha256"))
         backbone.use_branch_graph = bool(lever["graphs"])
         compile_seconds = None
         if lever["compile"]:
             started = time.perf_counter()
             compile_seconds = backbone.compile_dense_parts()
             compile_seconds = round(time.perf_counter() - started, 1) if compile_seconds is None else compile_seconds
-        readout_dtype = torch.float32 if lever["readout_dtype"] == "float32" else torch.bfloat16
-        judge = Judge(backbone, rank=int(config.get("readout_rank") or 64), readout="pointer", seed=1000, readout_dtype=readout_dtype)
-        if config.get("checkpoint"):
-            from robo_jev.train import load_readout_checkpoint
-
-            # 배포 계약 digest의 네 조각(tokenizer 파일 해시 포함)을 지금 체크아웃 기준으로 대조한다 (리뷰 1 I2)
-            load_readout_checkpoint(judge, config["checkpoint"], tokenizer_sha256=config.get("tokenizer_sha256"))
         return {"backbone": backbone, "judge": judge, "config": config, "lever": lever, "compile_seconds": compile_seconds}
 
     # -- 에피소드·틱 --

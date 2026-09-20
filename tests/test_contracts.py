@@ -14,6 +14,7 @@ from helpers import all_keys
 from robo_jev.contracts import (
     FORBIDDEN_REQUEST_KEYS,
     NON_INPUT_FIELDS,
+    PROFILE_LIMITS,
     QUESTION_SET_V0,
     model_input,
     validate_record,
@@ -848,3 +849,55 @@ def test_question_set_v0_has_the_fixed_ids():
         "q_speed",
         "q_force",
     ]
+
+
+# --------------------------------------------------------------------------
+# 프로파일 상한 Q≤16 · K≤32 (docs/06 Task 5 전제 5)
+# --------------------------------------------------------------------------
+
+
+def test_profile_limits_reject_too_many_questions_and_too_many_candidates():
+    """`validate_record`가 질문 수(Q)와 후보 수(K)의 프로파일 상한을 강제한다 — 넘는 레코드는 경로와 실제 수를 말하며 거절된다."""
+    record = single_record()
+    template = record["request"]["questions"][0]
+    record["request"]["questions"] = [template] + [
+        {**copy.deepcopy(template), "id": f"q{index}"} for index in range(PROFILE_LIMITS["max_questions"] - 1)
+    ]
+    validate_record(record)  # 상한과 같은 수는 통과한다
+
+    record["request"]["questions"].append({**copy.deepcopy(template), "id": "q_over"})
+    with pytest.raises(ValueError, match=r"^request\.questions: 질문 수가 프로파일 상한을 넘는다: 17 > Q≤16"):
+        validate_record(record)
+
+    wide = single_record()
+    wide["request"]["questions"][0]["criteria"] = [
+        {"id": f"c{index}", "description": f"후보 {index}"} for index in range(PROFILE_LIMITS["max_candidates"] + 1)
+    ]
+    wide["labels"][0]["candidate_ids"] = ["c0"]
+    with pytest.raises(ValueError, match=r"^request\.questions\[0\]\.criteria: 후보 수가 프로파일 상한을 넘는다: 33 > K≤32"):
+        validate_record(wide)
+
+
+def test_profile_limits_apply_to_stream_tick_candidates_and_are_profile_arguments():
+    """스트림은 틱의 후보 목록에 걸리고, `limits`로 다른 프로파일을 줄 수 있다(상한을 넓히는 것은 호출자의 명시적 선택이다)."""
+    record = stream_record()
+    entries = record["ticks"][0]["request"]["candidates"]["q_main"]
+    base = entries[0]
+    entries.extend({**copy.deepcopy(base), "id": f"x{index}", "action_ref": f"x{index}"} for index in range(29))
+    assert len(entries) == 33
+    with pytest.raises(ValueError, match=r"^ticks\[0\]\.request\.candidates\.q_main: 후보 수가 프로파일 상한을 넘는다: 33 > K≤32"):
+        validate_record(record)
+    validate_record(record, limits={"max_questions": 16, "max_candidates": 64})
+    with pytest.raises(ValueError, match=r"prefix\.question_set: 질문 세트 v0의 질문 수가 프로파일 상한을 넘는다: 10 > Q≤4"):
+        validate_record(stream_record(), limits={"max_questions": 4, "max_candidates": 64})
+
+
+def test_d1_records_stay_inside_the_profile_limits(streams, singles):
+    """D0 fixture(계약이 같은 꼴)의 레코드는 상한 안에 있다 — D1 실측 최댓값은 보고서에 있다(스트림 K≤12, 비로봇 Q≤16·K≤14)."""
+    for record in [*streams, *singles]:
+        validate_record(record)
+        questions = (
+            record["request"]["questions"] if record["schema_version"] == "judgment-v0"
+            else [entries for tick in record["ticks"] for entries in tick["request"]["candidates"].values()]
+        )
+        assert len(questions) <= PROFILE_LIMITS["max_questions"] or record["schema_version"] == "stream-v0"

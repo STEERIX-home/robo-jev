@@ -28,6 +28,11 @@ def _load(name: str) -> dict[str, Any] | None:
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
 
 
+#: `context_shuffle_kind`가 없는 평가 JSON은 그 키를 만들기 전(G0b)의 것이다 — 그때의 로봇 스트림 열은 **지시 텍스트** 대조군,
+#: 비로봇 단일 요청 열은 상태 전체 대조군이었다. 지금의 표준 열(id 재매핑 **상태** 섞기)과 같은 것으로 읽으면 안 된다.
+LEGACY_CONTEXT_SHUFFLE_KIND = "unrecorded (G0b, key predates the run: robot streams = instruction/text control, non-robot singles = whole-state control)"
+
+
 def _eval_summary(evaluation: dict[str, Any] | None) -> dict[str, Any] | None:
     if not evaluation:
         return None
@@ -42,6 +47,10 @@ def _eval_summary(evaluation: dict[str, Any] | None) -> dict[str, Any] | None:
             "per_question": {q: {k: v for k, v in row.items() if k in ("n", "accuracy", "nll", "brier", "first_position_rate")} for q, row in model.items() if q != "_all"},
             "answer_change_rate": (table.get("answer_change") or {}).get("rate"),
             "context_shuffle_accuracy": (table.get("context_shuffle") or {}).get("_all", {}).get("accuracy"),
+            # 어느 대조군인지 (D1 리뷰 2 N4): 없는 값은 옛 실행의 텍스트 대조군이라고 이름으로 적는다 — null로 두지 않는다.
+            "context_shuffle_kind": table.get("context_shuffle_kind") or LEGACY_CONTEXT_SHUFFLE_KIND,
+            "instruction_shuffle_accuracy": (table.get("instruction_shuffle") or {}).get("_all", {}).get("accuracy"),
+            "instruction_shuffle_kind": table.get("instruction_shuffle_kind"),
             "rule_judge_accuracy": (table.get("rule_judge") or {}).get("_all", {}).get("accuracy"),
         }
     return out
@@ -56,6 +65,12 @@ def build(selection_text: str | None) -> dict[str, Any]:
         "task": "2b-g0b-selection",
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "gate": "docs/03 §7-6: on `upper` and batch-0, p95 model time ≤ 80 ms and obs→apply miss rate (> 100 ms) ≤ 0.05 → passes_10hz; 5 Hz analogue at 150 ms with the 200 ms deadline",
+        "context_shuffle_kind_note": (
+            "`context_shuffle_accuracy` is the control column; `context_shuffle_kind` says which control it is. "
+            f"Runs whose JSON predates the key are labelled {LEGACY_CONTEXT_SHUFFLE_KIND!r} — for those the robot-stream column is the "
+            "instruction/text control (goal line, physical state and candidates kept), not the state shuffle of the current standard column, "
+            "so the two are not comparable. New runs carry kind `state` plus a separate `instruction_shuffle_*` column (D1 review 2 N4)."
+        ),
         "sources": {
             "stream": "backbone-stream.json" if stream else None, "levers": "backbone-stream-levers.json" if levers else None,
             "attribution": "attribution.json" if attribution else None,
