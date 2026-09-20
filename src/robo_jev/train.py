@@ -81,7 +81,9 @@ from robo_jev.checkpoint import (
 )
 from robo_jev.contracts import QUESTION_SET_V0
 from robo_jev.loss import judgment_loss, question_losses
-from robo_jev.model.hybrid import DEFAULT_CONFIG
+from robo_jev.model.backbone_qwen import DEFAULT_WINDOW_CAPACITY, QwenBackbone, candidate_ids
+from robo_jev.model.contract_digest import contract_differences, contract_digest
+from robo_jev.model.hybrid import DEFAULT_CONFIG, TinyHybrid
 from robo_jev.model.judge import Judge
 from robo_jev.model.serialize import TOKEN_SERIALIZER_VERSION
 from robo_jev.model.stream import StreamState
@@ -128,6 +130,8 @@ __all__ = [
     "run_stream_chunk",
     "tokenizer_block",
     "train",
+    "load_readout_checkpoint",
+    "trainable_state_dict",
 ]
 
 # --------------------------------------------------------------------------
@@ -135,13 +139,20 @@ __all__ = [
 # --------------------------------------------------------------------------
 
 READOUTS = {"decision_pointer": "pointer", "candidate_branch": "candidate_branch"}
-DTYPES = {"float32": torch.float32, "float64": torch.float64}
-TRAINABLE = ("readout_only", "text_backbone_and_readout")
+DTYPES = {"float32": torch.float32, "float64": torch.float64, "bfloat16": torch.bfloat16}
+READOUT_DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16}
+TRAINABLE = ("readout_only", "text_backbone_and_readout", "lora_and_readout")
 EXECUTION_BACKENDS = ("independent_paths",)  # P0. `shared_hybrid`(P1)는 state_first에 아직 없다 (4b 보고 §5)
 OPTIMIZERS = ("adamw",)
-#: 만들 수 있는 모델. 지금은 4b의 소형 계산 fixture뿐이다 — 실제 backbone(Qwen 계열)의 adapter는 docs/06 Task 4의
-#: GPU 부분이라 아직 없다. 다른 id는 설정 단계에서 거절한다(리뷰 11 S2: 잘못된 설정이 성공처럼 보이면 안 된다).
-MODEL_IDS = ("tiny_hybrid",)
+DEVICES = ("cpu", "cuda")
+#: 만들 수 있는 모델: 4b의 소형 계산 fixture와 `configs/model/candidates.yaml`의 실제 backbone(Qwen3.5 계열, G0b의
+#: :class:`robo_jev.model.backbone_qwen.QwenBackbone` adapter). 다른 id는 설정 단계에서 거절한다(리뷰 11 S2).
+FIXTURE_MODEL_ID = "tiny_hybrid"
+MODEL_IDS = (FIXTURE_MODEL_ID, *candidate_ids())
+#: 실제 backbone의 기본 readout rank (fixture는 설정 파일의 값).
+DEFAULT_REAL_READOUT_RANK = 64
+#: LoRA 기본값 (analysis-nimble §3-1: r=16, α=32, attention·MLP projection) — `lora:` 블록이 덮어쓴다.
+DEFAULT_LORA = {"r": 16, "alpha": 32, "dropout": 0.0, "targets": ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj", "in_proj_qkv", "in_proj_z", "out_proj"]}
 DEFAULT_TICK_WEIGHTS = {"steady": 0.25, "event": 2.0, "goal_change": 2.0, "other": 1.0}
 DEFAULT_SAMPLER = {
     "material_shares": dict(DEFAULT_MATERIAL_SHARES),
@@ -149,6 +160,7 @@ DEFAULT_SAMPLER = {
     "material_tag": "provenance.material",
     "tick_weights": dict(DEFAULT_TICK_WEIGHTS),
     "steady_min_held_ticks": 3,
+    "permute_candidates_seed": None,  # 후보 순서 치환 증강 (null = 끔; 정수면 레코드·seed로 정해진 순열로 직렬화)
 }
 
 #: 재개할 때 checkpoint의 설정과 달라도 되는 키 — 중단·예산·경로·이름뿐이다(run id는 checkpoint의 것을
@@ -157,11 +169,11 @@ RESUME_FREE_KEYS = ("resume", "stop_after", "max_wall_hours", "checkpoint_every"
 #: 값이 경로·이름인 키 — 문자 그대로가 아니라 **가리키는 내용**(manifest의 identity 블록: 설정 파일 sha256, tokenizer
 #: 파일 sha256·id·revision)으로 대조한다. `dataset_manifests`도 경로는 내용(manifest·파일 sha256)으로, 태그는 그대로.
 RESUME_PATH_KEYS = ("model_config", "tokenizer")
-#: 실제로 만든 backbone 클래스 → 그 model_id (manifest의 `model.kind`). :func:`build_model`이 새 종류를 만들면 여기도 더한다.
-_BACKBONE_KINDS = {"TinyHybrid": "tiny_hybrid"}
+#: 실제로 만든 backbone 클래스 → 그 종류 (manifest의 `model.kind`). :func:`build_model`이 새 종류를 만들면 여기도 더한다.
+_BACKBONE_KINDS = {"TinyHybrid": "tiny_hybrid", "QwenBackbone": "qwen3_5"}
 #: identity 블록에 들어가는 tokenizer·모델 블록의 키 (:func:`manifest_identity`).
 _TOKENIZER_IDENTITY = ("kind", "sha256", "id", "revision")
-_MODEL_IDENTITY = ("kind", "class", "config_sha256", "name", "vocab_size", "seed", "readout", "rank", "parameters")
+_MODEL_IDENTITY = ("kind", "class", "config_sha256", "name", "vocab_size", "seed", "readout", "rank", "parameters", "revision", "digest", "trainable", "lora")
 
 DEFAULTS: dict[str, Any] = {
     "run_name": "run",
@@ -197,7 +209,7 @@ DEFAULTS: dict[str, Any] = {
     "world_size": 1,
     "max_total_tokens": 8192,
     "max_state_tokens": 2048,
-    "activation_checkpointing": False,
+    "activation_checkpointing": False,  # 실제 backbone의 층 단위 activation checkpointing (LoRA·full 학습; tiny_hybrid에는 없다)
     "max_steps": None,
     "max_wall_hours": None,
     "seed": 17,
@@ -207,6 +219,13 @@ DEFAULTS: dict[str, Any] = {
     "stop_after": None,
     "resume": None,
     "sampler": dict(DEFAULT_SAMPLER),
+    # 실제 backbone(G0b)용 — fixture는 기본값 그대로 둔다.
+    "device": "cpu",
+    "readout_rank": None,  # null = fixture는 설정 파일의 rank, 실제 backbone은 DEFAULT_REAL_READOUT_RANK
+    "readout_dtype": "float32",  # readout(U·V·b)의 dtype — BF16 backbone에도 fp32 readout이 기본 (docs/03 §5 FP32 loss)
+    "model_root": None,  # 가중치 보관 디렉터리 (null = artifacts/models)
+    "window_capacity": None,  # 윈도우 KV 버퍼 용량(토큰; null = DEFAULT_WINDOW_CAPACITY)
+    "lora": None,  # trainable: lora_and_readout일 때 {r, alpha, dropout, targets} (없는 키는 DEFAULT_LORA)
 }
 
 
@@ -231,15 +250,17 @@ def _dataset_manifests(single: Any, many: Any) -> list[dict[str, Any]]:
         if isinstance(entry, str):
             entry = {"path": entry}
         _need(isinstance(entry, dict), f"dataset_manifests[{position}]: 경로 또는 {{path, domain, material}}여야 한다 (받은 값: {entry!r})")
-        unknown = [key for key in entry if key not in ("path", "domain", "material")]
-        _need(not unknown, f"dataset_manifests[{position}]: 알 수 없는 키 {unknown} (허용: ['path', 'domain', 'material'])")
+        unknown = [key for key in entry if key not in ("path", "domain", "material", "files")]
+        _need(not unknown, f"dataset_manifests[{position}]: 알 수 없는 키 {unknown} (허용: ['path', 'domain', 'material', 'files'])")
+        files = entry.get("files")
+        _need(files is None or (isinstance(files, list) and files and all(isinstance(f, str) for f in files)), f"dataset_manifests[{position}].files: manifest 파일 키의 fnmatch 패턴 목록이거나 null이어야 한다")
         path = entry.get("path")
         _need(isinstance(path, str) and bool(path), f"dataset_manifests[{position}].path: manifest 경로(문자열)가 필요하다")
         domain = entry.get("domain")
         _need(domain is None or domain in DOMAINS, f"dataset_manifests[{position}].domain: {list(DOMAINS)} 중 하나이거나 null이어야 한다 (받은 값: {domain!r})")
         material = entry.get("material")
         _need(material is None or material in MATERIALS, f"dataset_manifests[{position}].material: {list(MATERIALS)} 중 하나이거나 null이어야 한다 (받은 값: {material!r})")
-        out.append({"path": path, "domain": domain, "material": material})
+        out.append({"path": path, "domain": domain, "material": material, "files": None if files is None else list(files)})
     return out
 
 
@@ -270,16 +291,36 @@ def resolve_config(config: dict) -> dict:
     _need(_is_int(out["max_steps"]) and out["max_steps"] >= 1, f"max_steps: 1 이상의 정수여야 한다 (받은 값: {out['max_steps']!r})")
     _need(
         out["model_id"] in MODEL_IDS,
-        f"model_id: {list(MODEL_IDS)}만 만들 수 있다 — 실제 backbone(Qwen 계열)의 adapter는 아직 구현하지 않았다"
-        f"(docs/06 Task 4의 GPU 부분). 이 경로는 소형 계산 fixture 전용이라 다른 id를 조용히 fixture로 바꾸지 않는다 "
-        f"(받은 값: {out['model_id']!r})",
+        f"model_id: {list(MODEL_IDS)}만 만들 수 있다 — 소형 계산 fixture({FIXTURE_MODEL_ID!r})와 candidates.yaml의 실제 backbone"
+        f"(adapter: robo_jev.model.backbone_qwen). 다른 id를 조용히 fixture로 바꾸지 않는다 (받은 값: {out['model_id']!r})",
     )
+    real = out["model_id"] != FIXTURE_MODEL_ID
     _need(out["execution_backend"] in EXECUTION_BACKENDS, f"execution_backend: {list(EXECUTION_BACKENDS)}만 구현했다 — shared_hybrid(P1)는 state_first에 아직 없다 (받은 값: {out['execution_backend']!r})")
     _need(out["readout"] in READOUTS, f"readout: {list(READOUTS)} 중 하나여야 한다 (받은 값: {out['readout']!r})")
-    _need(out["dtype"] in DTYPES, f"dtype: {list(DTYPES)}만 CPU 검증 범위다 — BF16 허용 오차는 클라우드 단계 (받은 값: {out['dtype']!r})")
+    _need(out["dtype"] in DTYPES, f"dtype: {list(DTYPES)} 중 하나여야 한다 (받은 값: {out['dtype']!r})")
+    _need(real or out["dtype"] != "bfloat16", "dtype: bfloat16은 실제 backbone에서만 — fixture의 CPU 검증은 float32/float64다 (BF16 허용 오차는 G0b가 실측)")
     _need(out["trainable"] in TRAINABLE, f"trainable: {list(TRAINABLE)} 중 하나여야 한다 (받은 값: {out['trainable']!r})")
+    _need(out["device"] in DEVICES, f"device: {list(DEVICES)} 중 하나여야 한다 (받은 값: {out['device']!r})")
+    _need(out["readout_dtype"] in READOUT_DTYPES, f"readout_dtype: {list(READOUT_DTYPES)} 중 하나여야 한다 (받은 값: {out['readout_dtype']!r})")
+    _need(out["readout_rank"] is None or (_is_int(out["readout_rank"]) and out["readout_rank"] >= 1), f"readout_rank: 1 이상의 정수이거나 null이어야 한다 (받은 값: {out['readout_rank']!r})")
+    _need(out["window_capacity"] is None or (_is_int(out["window_capacity"]) and out["window_capacity"] >= 1), f"window_capacity: 1 이상의 정수이거나 null이어야 한다 (받은 값: {out['window_capacity']!r})")
+    _need(out["model_root"] is None or isinstance(out["model_root"], str), "model_root: 경로(문자열)이거나 null이어야 한다")
+    if out["trainable"] == "lora_and_readout":
+        _need(real, "trainable: lora_and_readout은 실제 backbone에서만 (fixture에는 LoRA를 붙이지 않는다)")
+        lora = dict(DEFAULT_LORA)
+        lora.update(out["lora"] or {})
+        unknown = [key for key in lora if key not in DEFAULT_LORA]
+        _need(not unknown, f"lora: 알 수 없는 키 {unknown} (허용: {list(DEFAULT_LORA)})")
+        _need(_is_int(lora["r"]) and lora["r"] >= 1, f"lora.r: 1 이상의 정수여야 한다 (받은 값: {lora['r']!r})")
+        _need(_is_number(lora["alpha"]) and lora["alpha"] > 0, f"lora.alpha: 양수여야 한다 (받은 값: {lora['alpha']!r})")
+        _need(_is_number(lora["dropout"]) and 0.0 <= lora["dropout"] < 1.0, f"lora.dropout: [0, 1) 안이어야 한다 (받은 값: {lora['dropout']!r})")
+        _need(isinstance(lora["targets"], list) and lora["targets"] and all(isinstance(t, str) for t in lora["targets"]), "lora.targets: module 이름 목록이어야 한다")
+        out["lora"] = lora
+    else:
+        _need(out["lora"] is None, "lora: trainable이 lora_and_readout일 때만 준다")
     _need(out["optimizer"] in OPTIMIZERS, f"optimizer: {list(OPTIMIZERS)}만 구현했다 (받은 값: {out['optimizer']!r})")
-    _need(out["activation_checkpointing"] is False, "activation_checkpointing: CPU fixture 경로에는 없다 — 클라우드 단계에서 붙인다 (false여야 한다)")
+    _need(isinstance(out["activation_checkpointing"], bool), "activation_checkpointing: true/false여야 한다")
+    _need(out["activation_checkpointing"] is False or out["model_id"] != "tiny_hybrid", "activation_checkpointing: CPU fixture 경로에는 없다 — 실제 backbone(qwen3_5)의 층 단위 checkpointing만 있다 (tiny_hybrid에서는 false여야 한다)")
     _need(out["world_size"] == 1, f"world_size: 이 학습기는 단일 프로세스다 (1이어야 한다, 받은 값: {out['world_size']!r})")
     _need(isinstance(out["freeze_vision_encoder"], bool), "freeze_vision_encoder: true/false여야 한다")
     layout = out["layout"]
@@ -312,6 +353,7 @@ def resolve_config(config: dict) -> dict:
         out["run_id"] = f"{out['run_name']}-{time.strftime('%Y%m%d-%H%M%S')}"
     _need(isinstance(out["run_id"], str) and out["run_id"], "run_id: 비어 있지 않은 문자열이어야 한다")
     _need(_is_int(sampler["steady_min_held_ticks"]) and sampler["steady_min_held_ticks"] >= 1, "sampler.steady_min_held_ticks: 1 이상의 정수여야 한다")
+    _need(sampler["permute_candidates_seed"] is None or _is_int(sampler["permute_candidates_seed"]), "sampler.permute_candidates_seed: 정수이거나 null이어야 한다")
     weights = sampler["tick_weights"]
     _need(isinstance(weights, dict) and set(weights) == set(TICK_CLASSES), f"sampler.tick_weights: {list(TICK_CLASSES)} 네 종류의 가중치가 필요하다 (받은 값: {weights!r})")
     return out
@@ -329,15 +371,102 @@ def build_tokenizer(name: str) -> Any:
 
 
 def build_model(config: dict) -> Judge:
-    """설정의 backbone fixture + readout. FSDP 등 wrapper는 이 함수의 결과에 씌운다."""
-    judge = Judge.from_config(
-        config["model_config"], seed=config["model_seed"], readout=READOUTS[config["readout"]],
-        vocab_size=config["model_vocab_size"],
+    """설정의 backbone(fixture 또는 실제 Qwen3.5 adapter) + readout. FSDP 등 wrapper는 이 함수의 결과에 씌운다.
+
+    실제 backbone은 BF16으로 싣고(가중치는 `artifacts/models/<id>`, manifest 대조), readout은 `readout_dtype`(기본 fp32)이다.
+    `trainable: lora_and_readout`이면 peft LoRA를 text 모델의 projection에 붙인다(LoRA·readout만 학습, 나머지는 고정).
+    """
+    if config["model_id"] == FIXTURE_MODEL_ID:
+        judge = Judge.from_config(
+            config["model_config"], seed=config["model_seed"], readout=READOUTS[config["readout"]],
+            vocab_size=config["model_vocab_size"],
+        )  # fmt: skip
+        judge = judge.to(DTYPES[config["dtype"]])
+        if config["readout_rank"] is not None and config["readout_rank"] != judge.rank:
+            judge = Judge(judge.backbone, rank=config["readout_rank"], readout=judge.readout, seed=(judge.backbone.config.seed if config["model_seed"] is None else config["model_seed"]) + 1000)
+        if config["trainable"] == "readout_only":
+            judge.backbone.requires_grad_(False)  # T0: readout만 (docs/03 §5)
+        return judge
+    kv_mode = "dynamic" if config["trainable"] != "readout_only" else "static"
+    backbone = QwenBackbone.load(
+        config["model_id"], root=config["model_root"], dtype=DTYPES[config["dtype"]], device=config["device"], kv_mode=kv_mode,
+        window_capacity=DEFAULT_WINDOW_CAPACITY if config["window_capacity"] is None else int(config["window_capacity"]),
     )  # fmt: skip
-    judge = judge.to(DTYPES[config["dtype"]])
-    if config["trainable"] == "readout_only":
-        judge.backbone.requires_grad_(False)  # T0: readout만 (docs/03 §5)
-    return judge
+    if config["trainable"] == "text_backbone_and_readout":
+        backbone.model.requires_grad_(True)
+    elif config["trainable"] == "lora_and_readout":
+        attach_lora(backbone, config["lora"])
+    backbone.activation_checkpointing = bool(config["activation_checkpointing"])  # 층 단위 (gradient가 켜진 forward에서만 작동)
+    rank = DEFAULT_REAL_READOUT_RANK if config["readout_rank"] is None else int(config["readout_rank"])
+    seed = 1000 + (0 if config["model_seed"] is None else int(config["model_seed"]))
+    return Judge(backbone, rank=rank, readout=READOUTS[config["readout"]], seed=seed, readout_dtype=READOUT_DTYPES[config["readout_dtype"]])
+
+
+def attach_lora(backbone: QwenBackbone, lora: dict[str, Any]) -> list[str]:
+    """peft LoRA를 text 모델의 `targets` projection에 붙인다 (LoRA 파라미터는 fp32, 학습 대상; 기본 가중치는 고정)."""
+    from peft import LoraConfig
+    from peft.mapping import inject_adapter_in_model
+
+    config = LoraConfig(r=int(lora["r"]), lora_alpha=float(lora["alpha"]), lora_dropout=float(lora["dropout"]), target_modules=list(lora["targets"]), bias="none")
+    inject_adapter_in_model(config, backbone.text)
+    names: list[str] = []
+    for name, parameter in backbone.text.named_parameters():
+        if "lora_" in name:
+            parameter.data = parameter.data.to(torch.float32)
+            parameter.requires_grad_(True)
+            names.append(name)
+        else:
+            parameter.requires_grad_(False)
+    if not names:
+        raise ValueError(f"lora.targets: {lora['targets']}에 맞는 module이 없다")
+    return names
+
+
+def load_trainable_state(model: Judge, saved: dict[str, Tensor]) -> None:
+    """:func:`trainable_state_dict` 가 저장한 것을 싣는다 — 저장된 키는 전부 있어야 하고, 빠진 키는 고정된 backbone 가중치뿐이어야 한다."""
+    result = model.load_state_dict(saved, strict=False)
+    if result.unexpected_keys:
+        raise ValueError(f"checkpoint: 모델에 없는 파라미터가 저장되어 있다: {sorted(result.unexpected_keys)[:5]}")
+    trainable = {
+        name for name, parameter in model.named_parameters(remove_duplicate=False)
+        if parameter.requires_grad or not name.startswith("backbone.")
+    }  # 묶인 가중치(lm_head↔embedding)는 이름이 둘이라 중복을 지우지 않고 본다
+    missing = [name for name in result.missing_keys if name in trainable]
+    if missing:
+        raise ValueError(f"checkpoint: 학습 대상 파라미터가 저장되어 있지 않다: {missing[:5]}")
+
+
+def load_readout_checkpoint(model: Judge, path: str | Path, *, tokenizer_sha256: str | None, trust_checkpoint_tokenizer: bool = False) -> dict[str, Any]:
+    """서빙·평가용: checkpoint의 readout(과 LoRA)을 `model`에 싣는다 — 먼저 배포 계약 digest(직렬화·계약 소스, 하네스 버전,
+    **tokenizer 파일 해시**)를 지금 체크아웃과 대조해 다르면 거절한다(다른 조각 이름을 말한다).
+
+    `tokenizer_sha256`은 지금 체크아웃의 tokenizer 파일 해시(`tokenizer_block(name)["sha256"]`)다. `None`은
+    `trust_checkpoint_tokenizer=True`와 함께일 때만 허용되며(checkpoint가 적은 해시로 digest를 만들어 코드·하네스 버전만 대조 —
+    tokenizer가 없는 검사용), 그 밖에는 ValueError. 돌려주는 것은 checkpoint의 manifest.
+    """
+    state = load_checkpoint(path)
+    manifest = state.get("manifest") if isinstance(state.get("manifest"), dict) else {}
+    if tokenizer_sha256 is None:
+        if not trust_checkpoint_tokenizer:
+            raise ValueError(f"{path}: tokenizer_sha256이 없다 — 지금 체크아웃의 tokenizer 해시를 주거나 trust_checkpoint_tokenizer=True를 명시한다")
+        tokenizer_sha256 = (manifest.get("contract") or {}).get("tokenizer_sha256") or (manifest.get("tokenizer") or {}).get("sha256") or "whitespace"
+    current = contract_digest(tokenizer_sha256)
+    differences = contract_differences(manifest.get("contract"), current)
+    if differences:
+        raise ValueError(f"{path}: 배포 계약 digest가 지금 체크아웃과 다르다 (다른 조각: {differences}) — 이 checkpoint를 싣지 않는다")
+    saved_rank = (manifest.get("model") or {}).get("rank")
+    if saved_rank is not None and int(saved_rank) != model.rank:
+        raise ValueError(f"{path}: checkpoint의 readout rank {saved_rank}와 모델의 {model.rank}가 다르다")
+    load_trainable_state(model, state["model"])
+    return manifest
+
+
+def trainable_state_dict(model: Judge) -> dict[str, Tensor]:
+    """저장할 가중치: fixture는 전부, 실제 backbone은 readout(U·V·b)과 학습 대상(LoRA) 파라미터만 — 고정된 backbone은 저장하지 않는다."""
+    if isinstance(model.backbone, TinyHybrid):
+        return model.state_dict()
+    trainable = {name for name, parameter in model.named_parameters() if parameter.requires_grad or not name.startswith("backbone.")}
+    return {name: tensor for name, tensor in model.state_dict().items() if name in trainable}
 
 
 def parameter_groups(model: Judge, config: dict) -> list[dict]:
@@ -354,7 +483,7 @@ def parameter_groups(model: Judge, config: dict) -> list[dict]:
 
     readout = [p for n, p in model.named_parameters() if not n.startswith("backbone.")]
     backbone = [p for n, p in model.named_parameters() if n.startswith("backbone.") and p.requires_grad]
-    if config["trainable"] == "text_backbone_and_readout":
+    if config["trainable"] in ("text_backbone_and_readout", "lora_and_readout"):
         add("backbone", backbone, config["backbone_lr"])
     add("readout", readout, config["readout_lr"])
     return groups
@@ -422,35 +551,16 @@ def layout_prefix(layout: dict, end_tick: int) -> dict:
     return view
 
 
-def detach_stream_state(state: StreamState, *, requires_grad: bool = False) -> StreamState:
+def detach_stream_state(state: Any, *, requires_grad: bool = False) -> Any:
     """구간 경계에서 넘기는 공통 상태 — 모든 tensor를 detach한 새 상태 (값은 같고 gradient만 끊긴다).
 
     `requires_grad=True`면 detach한 tensor를 leaf로 만들어 다음 구간의 gradient가 경계에 얼마나
-    닿는지 관찰할 수 있다(검사용).
+    닿는지 관찰할 수 있다(검사용). 상태 클래스(fixture의 :class:`StreamState`, 실제 backbone의
+    :class:`robo_jev.model.backbone_qwen.QwenStreamState`)의 ``detach``에 맡긴다.
     """
     if state.is_branch:
         raise ValueError("branch 상태는 넘기지 않는다 — 다음 구간은 분기 이전 공통 상태에서 이어간다")
-
-    def cut(tensor: Tensor | None) -> Tensor | None:
-        if tensor is None:
-            return None
-        out = tensor.detach()
-        if requires_grad and out.is_floating_point():
-            out.requires_grad_(True)
-        return out
-
-    return StreamState(
-        state.backbone,
-        delta=[{key: cut(value) for key, value in layer.items()} for layer in state.delta],
-        kv=[{key: cut(value) for key, value in layer.items()} for layer in state.kv],
-        cache_ticks=state.cache_ticks.detach(),
-        position=state.position,
-        tick=state.tick,
-        window_ticks=state.window_ticks,
-        prefix_hidden=cut(state.prefix_hidden),
-        hidden=cut(state.hidden),
-        is_branch=False,
-    )
+    return state.detach(requires_grad=requires_grad)
 
 
 @dataclass
@@ -634,25 +744,33 @@ def tokenizer_block(name: str) -> dict[str, Any]:
 
 def model_block(config: dict, model: Judge) -> dict[str, Any]:
     """manifest의 model 블록 — 요청한 id가 아니라 **실제로 만든 것**: 종류·클래스·설정 파일과 그 sha256·이름·어휘·seed·
-    readout·rank·파라미터 수(전체·학습 대상)·dtype·장치 (리뷰 11 S2)."""
+    readout·rank·파라미터 수(전체·학습 대상)·dtype·장치 (리뷰 11 S2). 실제 backbone은 가중치 manifest의 revision·지문과
+    학습 범위(`trainable`, LoRA 설정)도 정체다."""
     parameters = list(model.parameters())
-    config_path = Path(config["model_config"])
     backbone = type(model.backbone).__name__
+    real = isinstance(model.backbone, QwenBackbone)
+    config_path = None if real else Path(config["model_config"])
+    manifest = model.backbone.manifest if real else {}
     return {
         "kind": _BACKBONE_KINDS.get(backbone, backbone),
         "id": config["model_id"],
         "class": backbone,
-        "config": str(config_path),
-        "config_sha256": sha256_of(config_path),
+        "config": None if config_path is None else str(config_path),
+        "config_sha256": None if config_path is None else sha256_of(config_path),
         "name": model.backbone.config.name,
         "vocab_size": model.backbone.config.vocab_size,
         "seed": model.backbone.config.seed if config["model_seed"] is None else config["model_seed"],
         "readout": model.readout,
         "rank": model.rank,
+        "readout_dtype": str(model.readout_dtype).removeprefix("torch."),
         "parameters": sum(p.numel() for p in parameters),
         "trainable_parameters": sum(p.numel() for p in parameters if p.requires_grad),
-        "dtype": str(parameters[0].dtype).removeprefix("torch."),
+        "trainable": config["trainable"],
+        "lora": copy.deepcopy(config["lora"]),
+        "dtype": str(next(model.backbone.parameters()).dtype).removeprefix("torch."),
         "device": str(parameters[0].device),
+        "revision": manifest.get("revision"),
+        "digest": manifest.get("digest"),
         "revision_manifest": config["model_revision_manifest"],
     }
 
@@ -670,6 +788,7 @@ def manifest_identity(manifest: dict) -> dict[str, Any]:
         "layouts": dict(manifest["layouts"]),
         "tokenizer": {key: manifest["tokenizer"][key] for key in _TOKENIZER_IDENTITY if key in manifest["tokenizer"]},
         "model": {key: manifest["model"].get(key) for key in _MODEL_IDENTITY},
+        "contract_sha256": manifest.get("contract_sha256"),
     }
 
 
@@ -711,7 +830,7 @@ def resume_config(config: dict) -> dict[str, Any]:
     뺀 것. `dataset_manifests`는 경로를 빼고 태그(domain·material)만 남긴다."""
     out = {key: value for key, value in config.items() if key not in RESUME_FREE_KEYS and key not in RESUME_PATH_KEYS}
     out["dataset_manifests"] = [
-        {"domain": entry.get("domain"), "material": entry.get("material")} for entry in config.get("dataset_manifests") or []
+        {"domain": entry.get("domain"), "material": entry.get("material"), "files": entry.get("files")} for entry in config.get("dataset_manifests") or []
     ]
     return out
 
@@ -736,19 +855,36 @@ def build_manifest(config: dict, items: list[Item], model: Judge) -> dict[str, A
                 "records": {"single": sum(i.kind == "single" for i in own), "stream": sum(i.kind == "stream" for i in own)},
             }
         )
+    tokenizer = tokenizer_block(config["tokenizer"])
+    contract = contract_digest(tokenizer.get("sha256") or "whitespace")
     manifest = {
         "dataset_manifests": datasets,
         "splits": list(config["splits"]),
         "serializer_version": TOKEN_SERIALIZER_VERSION,  # 토큰 직렬화의 버전 (레코드의 versions.serializer와 다른 것)
         "question_set": {"id": "qs-v0", "markers": {qid: spec["marker"] for qid, spec in QUESTION_SET_V0.items()}},
         "layouts": dict(config["layout"]),
-        "tokenizer": tokenizer_block(config["tokenizer"]),
+        "tokenizer": tokenizer,
         "model": model_block(config, model),
+        # 배포 계약 digest (analysis-nimble §3-4): 직렬화·질문 세트 소스, 하네스 버전, tokenizer 해시 — 적재·서빙이 대조한다
+        "contract_sha256": contract["sha256"],
+        "contract": contract,
         "git": git_revision(),
         "torch": str(torch.__version__),  # TorchVersion 객체가 아니라 문자열 — weights_only 로 읽힌다
     }
     manifest["identity"] = manifest_identity(manifest)
     return manifest
+
+
+def check_contract(saved_manifest: Any, current_manifest: dict[str, Any], *, where: str) -> None:
+    """저장된 manifest의 계약 digest가 지금 체크아웃과 다르면 거절한다 (어느 조각이 다른지 이름으로)."""
+    saved = saved_manifest.get("contract") if isinstance(saved_manifest, dict) else None
+    differences = contract_differences(saved, current_manifest["contract"])
+    if differences:
+        raise ValueError(
+            f"{where}: 배포 계약 digest가 지금 체크아웃과 다르다 (다른 조각: {differences}; 저장 "
+            f"{str((saved or {}).get('sha256'))[:12]}…, 지금 {current_manifest['contract_sha256'][:12]}…) — 직렬화·질문 세트·하네스 버전·"
+            "tokenizer가 같은 체크아웃에서만 이 checkpoint를 싣는다"
+        )
 
 
 # --------------------------------------------------------------------------
@@ -823,7 +959,7 @@ class Trainer:
             layouts=self.config["layout"], window_ticks=self.config["stream_window_ticks"],
             max_state_tokens=self.config["max_state_tokens"], max_total_tokens=self.config["max_total_tokens"],
             stream_max_ticks=self.config["stream_max_ticks"], domain_tag=sampler_config["domain_tag"],
-            material_tag=sampler_config["material_tag"],
+            material_tag=sampler_config["material_tag"], permute_seed=sampler_config["permute_candidates_seed"],
         )  # fmt: skip
         if not self.items:
             raise ValueError(f"dataset_manifests: split {self.config['splits']}에 레코드가 없다")
@@ -1152,7 +1288,7 @@ class Trainer:
             "run_id": self.run_id,
             "step": self.step,
             "status": self.status,
-            "model": self.model.state_dict(),
+            "model": trainable_state_dict(self.model),
             "optimizer": self.optimizer.state_dict(),
             "scheduler": self.scheduler.state_dict(),
             "rng": collect_rng_state(),
@@ -1175,6 +1311,7 @@ class Trainer:
 
     def _load(self, path: str | Path) -> None:
         state = load_checkpoint(path)
+        check_contract(state.get("manifest"), self.manifest, where=f"resume: {path}")
         saved, current = resume_config(state["config"]), resume_config(self.config)
         differences = [key for key in current if saved.get(key) != current[key]]
         if differences:
@@ -1195,7 +1332,7 @@ class Trainer:
             )
         self.run_id = str(state["run_id"])
         self.config["run_id"] = self.run_id  # 이어가는 run의 정체는 checkpoint의 것
-        self.model.load_state_dict(state["model"])
+        load_trainable_state(self.model, state["model"])
         self.optimizer.load_state_dict(state["optimizer"])
         self.scheduler.load_state_dict(state["scheduler"])
         restore_rng_state(state["rng"])

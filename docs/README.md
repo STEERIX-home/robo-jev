@@ -12,10 +12,10 @@
 | --- | --- | --- |
 | [연구 컨셉과 목표](01-research-concept-and-goals.md) | 병렬 판단 모델과 하네스의 책임, 입출력, 연구 목표와 비교 원칙 | 연구 설계 초안 |
 | [첫 로봇 하네스와 학습 문제](02-task-and-learning-problem.md) | 대표 작업, 질문 묶음, 답의 조합·실행, 데이터 생성과 실제 학습 | 단일 팔·평행 그리퍼를 전제로 한 초안 |
-| [모델 구조와 학습 설계](03-model-and-training-design.md) | backbone 후보, 공유 prefix·질문 분기·후보 readout, 손실, 실제 학습 단계와 기준군 | 구현 전 설계 |
+| [모델 구조와 학습 설계](03-model-and-training-design.md) | backbone 후보, 공유 prefix·질문 분기·후보 readout, 손실, 실제 학습 단계와 기준군 | backbone 확정(2026-09-20, Qwen3.5-2B + fused; §"지연 예산" stream 실측 표·§7 상태) |
 | [데이터 생성 계획](04-data-generation-plan.md) | 다분야 질문 묶음, 라벨 근거, 시뮬레이션 결과, split·QA, 5K→50K와 반복 수집 | 제작 계획 |
-| [실험 환경·GPU 클라우드·비용](05-experiment-and-cloud-plan.md) | 시뮬레이터, 학습 환경, GPU 메모리·가격·비용, checkpoint·평가 | 공개 가격 확인, 자원 미생성 |
-| [첫 학습 파이프라인 실행 계획](06-execution-roadmap.md) | 파일·인터페이스·인수 검사, 최초 학습까지의 순서, 12주 산출물과 판단 기준 | 구현 대기 |
+| [실험 환경·GPU 클라우드·비용](05-experiment-and-cloud-plan.md) | 시뮬레이터, 학습 환경, GPU 메모리·가격·비용, checkpoint·평가 | §4 구간 메모리 실측(2B/4B), §6 확정 backbone 기준 재산정(파일럿 T0/LoRA는 Spark) |
+| [첫 학습 파이프라인 실행 계획](06-execution-roadmap.md) | 파일·인터페이스·인수 검사, 최초 학습까지의 순서, 12주 산출물과 판단 기준 | Task 2b 2단계(G0b) 완료 — backbone 확정 |
 | [설계 변경 검토](07-design-change-review.md) | 다섯 가지 변경에 대한 외부 검토(R1~R6)와 공개 근거 해석 정정 | 검토 결과, R1~R6 반영 완료 |
 | [스트리밍 입출력·데이터 계약](08-streaming-io-and-data-contract.md) | robojev의 계층(L2), 10Hz 스트림 입력(v0.3: 변화분 틱·서식 v0.3), 10개 질문 세트(K≤12), 조합 규칙, 컨트롤러 계약, 라벨(비용 허용 집합·hold∉A)·레코드 정의, 01~06 반영 목록 | **계약 v0.3**(2026-09-19, HANDOFF 결정 1·2). 로봇 스트림의 정본이며 01~06에 반영 완료 |
 | [스트리밍 계약 검토](09-streaming-contract-review.md) | 08에 대한 외부 검토(S1~S7)와 수치 검산 | 검토 결과, 08에 반영 완료 |
@@ -39,5 +39,6 @@
 | 2026-09-19 계약 v0.3 (Task v0.3, 결정 1·2) | 서식 v0.3(짧은 이름, 물체 소개/동적 분리, 변화분 틱, 키 기반 후보 줄; 10물체·K=12에서 틱당 p50 392·p95 662·첫 틱 943), 후보 공간(프로파일 없는 결합 키, 영역 쪽 밀기, K≤12 + 지시 조합 예약; E1 퇴화 틱 49.7% → 0%, 완료 20/26 → 23/26), 비키프레임 비용 허용 집합(τ=0.15)과 hold∉A, holdout 봉인(템플릿 변형·개념 계열, ood_dev/ood_test, 누출 QA; 04 §5 표), batch-0 재생성, Spark 2B·4B 재실행 | [08](08-streaming-io-and-data-contract.md), [04 §5](04-data-generation-plan.md), `.superpowers/sdd/decisions-1-2-v03.md`, `task-v03-contract-report.md` |
 | 2026-09-19 계약 v0.3 리뷰 1 수정 | 로봇 문구 변형을 origin group 해시로(걸친 group 0), OOD 몫을 생성 비중으로 ≈10~15 %에(비로봇 분야별 10.6~12.5 %, 로봇 400편 14.5 %), 변화분 줄이 기본값 복귀(`vis=1`·`yaw=0`)를 적음, `<id> gone` 줄, soft token 슬롯 거절, 후보 줄의 `path=ok`·중복 `clr` 생략(10물체·K12 틱당 p50 332·p95 599·첫 틱 880), Spark 판정에 `passes_10hz_window`와 `deadline_fail`·외삽 표기, E1 sweep의 동일 seed 대조, 놓기 국면의 운반 높이 낙하 결함(seed 15·19) 이월 | [08](08-streaming-io-and-data-contract.md), [04 §5](04-data-generation-plan.md), [03](03-model-and-training-design.md), `.superpowers/sdd/task-v03-contract-review-1.md`, `task-v03-fix-round-1-report.md` |
 | 2026-09-19 D1-prep (놓기 규칙, 대조 쌍) | 놓기점을 영역 안의 빈 자리로(관측된 바닥 높이, 명령의 `place_mm`, hold·retreat 틱에는 open 없음; h0.5·e0.4·c0.6 — E1 sweep 23/26 → 26/26, 놓기 높이 위 이벤트 0), batch-0 재생성; 대조 sibling·삭제 검사(04 §3·§6) | [08 §4](08-streaming-io-and-data-contract.md), [04 §3](04-data-generation-plan.md), `.superpowers/sdd/task-d1-prep-report.md` |
+| 2026-09-20 Task 2b G0b (backbone 최종) | 실제 `stream` 경로(정적 윈도우 KV·마스크 없는 flash·배치 결정 분기·pointer readout)를 Qwen3.5-2B/4B에 구현하고 Spark에서 실측: 2B baseline upper p95 83.8 ms(3.8 ms 미달) → `fused`(몸통+분기 한 forward) 40편 재실측 62.7 / 60.2 ms(`all` 52.5 / 52.0)로 10 Hz 통과, 4B는 5 Hz만; 귀속 측정(절편 = weight-read) → FP8-9B 닫음; readout-only T0·짧은 LoRA·무학습 점수·위치 편향·문맥 섞기·규칙 기준군 평가; 10초 구간 메모리(층 checkpointing 필수, 통합 메모리 울타리); **backbone = 2B + fused**, 4B 5 Hz 대비; 03·05·06·08·README·HANDOFF 갱신 | `artifacts/reports/backbone-stream{,-levers}.json`, `backbone-selection.json`, `.superpowers/sdd/task-g0b-report.md` |
 
 가설·잠정 목표·측정 결과를 구분한다. 하네스가 구성할 내용과 모델이 학습할 내용을 분리하고 각각의 버전을 기록한다.

@@ -44,6 +44,8 @@ index가 가리키는 **레코드의 출처**(파일별 sha256·적재 순서·�
 
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import random
 from dataclasses import dataclass, field
@@ -64,6 +66,7 @@ __all__ = [
     "load_items",
     "load_manifests",
     "manifest_files",
+    "permute_candidates",
     "record_sources",
     "sha256_of",
     "tick_class",
@@ -83,6 +86,50 @@ DEFAULT_MATERIAL_SHARES = {"existing": 0.7, "error_family": 0.2, "new_semantic_f
 DEFAULT_LAYOUTS = {"single": "state_first", "stream": "stream_l1a"}
 _KIND_OF_SCHEMA = {SCHEMA_SINGLE_REQUEST: "single", SCHEMA_STREAM: "stream"}
 _DEFAULT_DOMAIN = {"single": "non_robot", "stream": "robot"}
+
+
+# --------------------------------------------------------------------------
+# 후보 순서 치환 증강 (docs/03 §3 "후보 순서 불변성은 구조로 보장하지 않는다 — 증강·평가로 다룬다"; analysis-nimble §3-3)
+# --------------------------------------------------------------------------
+
+
+def _permutation(rng_key: str, n: int) -> list[int]:
+    """`rng_key`(레코드 id·seed·질문)로 결정되는 0..n−1의 순열 — 파일·프로세스와 무관하게 같은 레코드는 같은 순열."""
+    digest = hashlib.sha256(rng_key.encode("utf-8")).digest()
+    rng = random.Random(int.from_bytes(digest[:8], "big"))
+    order = list(range(n))
+    rng.shuffle(order)
+    return order
+
+
+def permute_candidates(record: dict, seed: int, *, questions: str = "choice") -> dict:
+    """후보 순서를 레코드·seed로 정해진 순열로 바꾼 **새** 레코드 (라벨은 후보 id를 가리키므로 그대로 유효하다).
+
+    단일 요청은 `choice` 질문의 `criteria` 순서(boolean은 true/false 고정, ordinal은 수준 순서가 뜻이라 두지 않는다),
+    스트림은 틱마다 `request.candidates`의 동적 후보 목록(q_main·q_path)의 순서를 바꾼다. 같은 seed·레코드는 언제나 같은
+    순열이고 seed마다 다르다. 평가는 원래 순서와 치환한 순서의 답 변화율(위치 편향)을 함께 적는다(:mod:`robo_jev.evaluate`).
+    """
+    out = copy.deepcopy(record)
+    schema = out.get("schema_version")
+    if schema == SCHEMA_SINGLE_REQUEST:
+        rid = str(out["request"].get("request_id") or out.get("origin_group") or "")
+        for question in out["request"]["questions"]:
+            if question.get("type") != questions or len(question.get("criteria") or []) < 2:
+                continue
+            order = _permutation(f"{rid}|{seed}|{question['id']}", len(question["criteria"]))
+            question["criteria"] = [question["criteria"][i] for i in order]
+        return out
+    if schema == SCHEMA_STREAM:
+        eid = str(out.get("episode_id") or out.get("origin_group") or "")
+        for tick in out["ticks"]:
+            candidates = tick["request"].get("candidates") or {}
+            for qid, entries in candidates.items():
+                if len(entries) < 2:
+                    continue
+                order = _permutation(f"{eid}|{seed}|{tick.get('t', 0)}|{qid}", len(entries))
+                candidates[qid] = [entries[i] for i in order]
+        return out
+    raise ValueError(f"permute_candidates: 알 수 없는 schema_version: {schema!r}")
 
 
 # --------------------------------------------------------------------------
@@ -155,9 +202,14 @@ def load_items(
     domain: str | None = None,
     material: str | None = None,
     index_offset: int = 0,
+    permute_seed: int | None = None,
+    files: list[str] | None = None,
 ) -> list[Item]:
     """manifest의 파일들을 읽어 직렬화된 :class:`Item` 목록으로 (모듈 설명 참조).
 
+    ``permute_seed``가 있으면 레코드마다 :func:`permute_candidates` 로 후보 순서를 바꾼 뒤 직렬화한다(학습 증강; 라벨은
+    id 기준이라 그대로). `Item.record`도 치환된 레코드다 — 라벨·틱 종류 계산은 순서와 무관하다. ``files``는 manifest 파일
+    키의 fnmatch 패턴 목록 — 맞는 파일만 읽는다(예: 로봇 batch의 에피소드만: ``["episodes/*/streams.jsonl"]``).
     ``stream_max_ticks``는 CPU 검사용이다 — 에피소드를 앞 N틱으로 자른다(실제 학습에서는 `None`).
     ``domain``·``material``은 **이 manifest의** 기본 태그다(학습 설정 `dataset_manifests[].domain`): 레코드에
     태그(`domain_tag`·`material_tag`)가 없을 때 종류별 기본값(스트림 = robot, 단일 = non_robot; existing) 대신
@@ -187,10 +239,18 @@ def load_items(
         raise ValueError(f"{manifest_file}: material은 {list(MATERIALS)} 중 하나여야 한다 (받은 값: {material!r})")
     layouts = {**DEFAULT_LAYOUTS, **(layouts or {})}
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-    files = manifest_files(manifest, manifest_file)
+    files_all = manifest_files(manifest, manifest_file)
 
     items: list[Item] = []
-    for name, entry in files.items():
+    if files is not None:
+        from fnmatch import fnmatch
+
+        patterns = list(files)
+        selected = {name: entry for name, entry in files_all.items() if any(fnmatch(name, pattern) for pattern in patterns)}
+        if not selected:
+            raise ValueError(f"{manifest_file}: files 패턴 {patterns}에 맞는 파일이 없다 (있는 것: {list(files_all)[:5]}…)")
+        files_all = selected
+    for name, entry in files_all.items():
         path = manifest_file.parent / name
         if not path.is_file():
             raise FileNotFoundError(f"{manifest_file}: 파일이 없다: {path}")
@@ -223,6 +283,8 @@ def load_items(
                 record_material = material if material is not None else MATERIALS[0]
             elif record_material not in MATERIALS:
                 raise ValueError(f"{where}: {material_tag}는 {list(MATERIALS)} 중 하나여야 한다 (받은 값: {record_material!r})")
+            if permute_seed is not None:
+                record = permute_candidates(record, int(permute_seed))
             if kind == "single":
                 layout = serialize_request(
                     record, tokenizer, layout=layouts["single"],
@@ -255,7 +317,7 @@ def load_manifests(manifests: list[dict[str, Any]], **kwargs: Any) -> list[Item]
     for entry in manifests:
         items.extend(
             load_items(
-                entry["path"], domain=entry.get("domain"), material=entry.get("material"), index_offset=len(items),
+                entry["path"], domain=entry.get("domain"), material=entry.get("material"), files=entry.get("files"), index_offset=len(items),
                 **kwargs,
             )
         )

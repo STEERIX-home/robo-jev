@@ -229,7 +229,7 @@ def test_a_generated_robot_batch_and_the_d0_singles_train_together_from_two_mani
     resolved = resolve_config(config)
     assert resolved["dataset_manifest"] is None
     assert resolved["dataset_manifests"] == [
-        {"path": robot, "domain": None, "material": None}, {"path": singles, "domain": "non_robot", "material": None},
+        {"path": robot, "domain": None, "material": None, "files": None}, {"path": singles, "domain": "non_robot", "material": None, "files": None},
     ]
     # `dataset_manifest: x`는 `dataset_manifests: [x]`와 같은 run이다 (재개의 정체 비교).
     assert resolve_config(tiny_config(tmp_path, dataset_manifest=singles))["dataset_manifests"] == resolve_config(
@@ -440,6 +440,21 @@ def test_lr_factor_warms_up_linearly_then_decays_by_cosine():
     assert lr_factor(0, max_steps=10, warmup_ratio=0.0) == 1.0
 
 
+def test_dataset_manifest_files_pattern_selects_only_matching_files(tmp_path):
+    """`dataset_manifests[].files`(fnmatch)로 manifest의 일부 파일만 읽는다 — 로봇 batch의 에피소드만, 대조 단일 요청은 빼는 용도."""
+    from robo_jev.sampler import load_items
+
+    tokenizer = WhitespaceTokenizer()
+    only_streams = load_items(D0_MANIFEST, tokenizer=tokenizer, splits=("train",), files=["d0_streams*"], stream_max_ticks=2)
+    assert only_streams and all(item.kind == "stream" for item in only_streams)
+    with pytest.raises(ValueError, match="files"):
+        load_items(D0_MANIFEST, tokenizer=tokenizer, files=["nothing/*"])
+    config = resolve_config(tiny_config(tmp_path, dataset_manifests=[{"path": str(D0_MANIFEST), "files": ["d0.jsonl"]}], dataset_manifest=None))
+    assert config["dataset_manifests"][0]["files"] == ["d0.jsonl"]
+    with pytest.raises(ValueError, match="files"):
+        resolve_config(tiny_config(tmp_path, dataset_manifests=[{"path": str(D0_MANIFEST), "files": "d0.jsonl"}], dataset_manifest=None))
+
+
 def test_config_rejects_what_the_cpu_path_does_not_implement(tmp_path):
     base = tiny_config(tmp_path)
     resolved = resolve_config(base)
@@ -468,16 +483,22 @@ def test_config_rejects_what_the_cpu_path_does_not_implement(tmp_path):
 
 
 def test_model_id_other_than_the_fixture_is_rejected_and_the_manifest_records_what_was_built(tmp_path):
-    """리뷰 11 S2: fixture 전용 경로는 `tiny_hybrid` 이외의 model_id를 설정 단계에서 거절한다(실모델 adapter는 아직
-    없다 — 잘못된 설정이 성공처럼 보이면 안 된다). manifest의 `model` 블록은 요청한 id가 아니라 **실제로 만든 것**
-    (종류·설정 파일 해시·파라미터 수·dtype·장치)을 적는다."""
+    """리뷰 11 S2: 만들 수 있는 model_id는 fixture(`tiny_hybrid`)와 `candidates.yaml`의 실제 backbone뿐이다 — 그 밖의 id는
+    설정 단계에서 거절한다(잘못된 설정이 성공처럼 보이면 안 된다). manifest의 `model` 블록은 요청한 id가 아니라 **실제로
+    만든 것**(종류·설정 파일 해시·파라미터 수·dtype·장치)을 적는다."""
     with pytest.raises(ValueError, match="model_id") as excinfo:
-        resolve_config(tiny_config(tmp_path, model_id="Qwen/Qwen3.5-9B"))
+        resolve_config(tiny_config(tmp_path, model_id="Qwen/Qwen3-8B"))
     assert "adapter" in str(excinfo.value) and "tiny_hybrid" in str(excinfo.value)
     shipped = yaml.safe_load((REPO / "configs" / "train" / "tiny_cpu.yaml").read_text(encoding="utf-8"))
     assert shipped["model_id"] == "tiny_hybrid"
     with pytest.raises(ValueError, match="model_id"):  # 리뷰의 재현 그대로: 배포 설정에서 model_id만 바꾼다
-        resolve_config({**shipped, "model_id": "Qwen/Qwen3.5-9B"})
+        resolve_config({**shipped, "model_id": "Qwen/Qwen3-8B"})
+    # candidates.yaml의 실제 backbone id는 설정 단계를 지난다 (가중치는 build 때 대조한다); bfloat16은 실제 backbone에서만
+    assert resolve_config({**shipped, "model_id": "Qwen/Qwen3.5-2B", "dtype": "bfloat16"})["model_id"] == "Qwen/Qwen3.5-2B"
+    with pytest.raises(ValueError, match="bfloat16"):
+        resolve_config({**shipped, "dtype": "bfloat16"})
+    with pytest.raises(ValueError, match="lora_and_readout"):
+        resolve_config({**shipped, "trainable": "lora_and_readout"})
 
     with Trainer(tiny_config(tmp_path, max_steps=1)) as trainer:
         model = trainer.manifest["model"]

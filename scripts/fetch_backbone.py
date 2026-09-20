@@ -112,7 +112,8 @@ def fetch(
     """
     hub = HubClient() if hub is None else hub
     resolved = hub.revision(identifier, revision)
-    expected = sorted(name for name in hub.files(identifier, resolved) if matches_patterns(name))
+    # 저장소 뿌리의 파일만 (`sub/x.safetensors` 같은 중첩 파일은 받지도 해시하지도 않는다 — 2b-G0a 리뷰 2 M14b)
+    expected = sorted(name for name in hub.files(identifier, resolved) if "/" not in name and matches_patterns(name))
     if "config.json" not in expected or not any(name.endswith(".safetensors") for name in expected):
         raise FileNotFoundError(f"{identifier}@{resolved}: Hub의 그 revision에 config.json과 safetensors가 있어야 한다 (있는 것: {expected})")
     target = root / identifier
