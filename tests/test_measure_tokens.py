@@ -10,6 +10,8 @@ import importlib.util
 import sys
 from pathlib import Path
 
+import pytest
+
 from helpers import D0, D0_STREAMS, read_jsonl
 
 from robo_jev.contracts import validate_record
@@ -49,7 +51,11 @@ def test_synthetic_scenes_are_valid_streams_with_the_requested_k():
     assert module.SYNTHETIC_CELLS == ((6, 12), (10, 12), (10, None))  # K=32는 계약 v0.3에 없다
     for n_objects, k_cap in module.SYNTHETIC_CELLS:
         record = module.synthetic_record(n_objects, k_cap, instruction_change=True)
-        validate_record(record)
+        # 상한을 푼 셀은 프로파일(K≤32) 밖의 상계 참고값이라 그 셀만 넓힌 상한으로 검증한다 (계약이 넓어진 것이 아니다).
+        validate_record(record, limits=None if k_cap is not None else module.UNCAPPED_LIMITS)
+        if k_cap is None:
+            with pytest.raises(ValueError, match="프로파일 상한을 넘는다"):
+                validate_record(record)
         assert len(record["ticks"]) == 2
         k = len(record["ticks"][0]["request"]["candidates"]["q_main"])
         assert k > 12 if k_cap is None else k == k_cap  # 상한을 풀면 실행 가능한 후보 전부 (상계)
