@@ -12,7 +12,7 @@
 
 **재개(D1 128k).** 에피소드를 `chunk_episodes`개씩 묶어 재생·rollout하고, 묶음이 끝날 때마다 결과를 `rollouts.jsonl`·
 `keyframes.jsonl`에 **덧붙이고** 완료한 에피소드마다 `progress.jsonl`에 표지(버전·rollout 수·벽시계)를 적는다. worker 풀은 한 번
-만들어 묶음 사이에 다시 쓴다. `--resume`은 표지가 있는 에피소드를 건너뛰고(표지가 없는 부분 결과는 버린다 — `--limit`에
+만들어 묶음 사이에 다시 쓰고, 풀이 한 묶음의 rollout을 도는 동안 주 프로세스가 다음 묶음을 재생한다(재생은 단일 프로세스라 겹치지 않으면 worker가 논다). `--resume`은 표지가 있는 에피소드를 건너뛰고(표지가 없는 부분 결과는 버린다 — `--limit`에
 잘린 묶음은 표지를 쓰지 않는다) 남은 것만 돌린 뒤 전체에서 라벨·비용을 다시 만든다. 표지의 버전이 지금 것과 다르면
 :class:`ConfigMismatch`다.
 
@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+from collections import Counter
 import copy
 import json
 import math
@@ -256,6 +257,12 @@ def build_jobs(
     envs: dict[str, Any] = {}
     replay_total = 0.0
     skipped_fidelity = 0
+    # 에피소드의 키프레임은 **한 번의 재생**으로 전부 snapshot한다(처음 쓰이는 순간, 그 에피소드의 모든 키프레임 색인을 한 번에) —
+    # 키프레임마다 reset부터 다시 돌리면 5배다. 재생 시간은 에피소드의 첫 키프레임에 적는다.
+    indices_by_episode: dict[str, list[int]] = {}
+    for _rank, _position, frame in ranked:
+        indices_by_episode.setdefault(frame["episode_id"], []).append(int(frame["index"]))
+    replays: dict[str, dict[int, dict[str, Any]]] = {}
     try:
         for _rank, _position, frame in ranked:
             if limit is not None and len(jobs) >= limit:
@@ -265,11 +272,13 @@ def build_jobs(
             env = envs.get(profile)
             if env is None:
                 env = envs[profile] = Environment(config_path=sim_config, profile=profile)
-            replayed = replay_to_keyframes(
-                record, [frame["index"]], sim_config=sim_config, harness_config=harness_config, control_steps=control_steps,
-                env=env, running=running,
-            )[frame["index"]]
-            replay_total += replayed["replay_s"]
+            if frame["episode_id"] not in replays:
+                replays[frame["episode_id"]] = replay_to_keyframes(
+                    record, indices_by_episode[frame["episode_id"]], sim_config=sim_config, harness_config=harness_config,
+                    control_steps=control_steps, env=env, running=running,
+                )
+                replay_total += max(item["replay_s"] for item in replays[frame["episode_id"]].values())
+            replayed = replays[frame["episode_id"]][int(frame["index"])]
             tick = record["ticks"][frame["index"]]
             label = next((item for item in tick.get("labels") or () if item.get("question_id") == "q_main"), None)
             keys = {entry["id"]: str(entry.get("key", "")) for entry in tick["request"]["candidates"]["q_main"]}
@@ -808,47 +817,70 @@ def run(
     if log is not None:
         print(f"rollouts: {len(records)} episodes, {len(prior['done'])} done before, {len(pending)} pending, {len(results)} results kept", file=log, flush=True)
 
+    step = max(1, int(chunk_episodes))
+    chunks = [pending[start : start + step] for start in range(0, len(pending), step)]
+
+    def persist(number: int, chunk: list[dict[str, Any]], jobs: list[dict[str, Any]], frames: list[dict[str, Any]], summary: dict[str, Any], chunk_results: list[dict[str, Any]], cut: bool, started_at: float) -> None:
+        nonlocal replay_s_total, skipped_fidelity
+        replay_s_total += float(summary["replay_s_total"])
+        skipped_fidelity += int(summary["skipped_fidelity"])
+        keyframes.extend(frames)
+        results.extend(chunk_results)
+        _append_jsonl(out / KEYFRAMES_INCREMENTAL, frames)
+        _append_jsonl(out / ROLLOUTS_FILE, chunk_results)
+        if not cut:  # `limit`에 잘린 묶음: 완료 표지를 쓰지 않는다
+            wall = time.perf_counter() - started_at
+            _append_jsonl(
+                out / PROGRESS_FILE,
+                [
+                    {
+                        "episode_id": record["episode_id"],
+                        "keyframes": sum(1 for frame in frames if frame["episode_id"] == record["episode_id"]),
+                        "rollouts": sum(1 for result in chunk_results if result["job"]["episode_id"] == record["episode_id"]),
+                        "wall_s": round(wall / len(chunk), 3),
+                        "replay_s": round(float(summary["replay_s_total"]) / len(chunk), 3),
+                        "skipped_fidelity": sum(1 for frame in frames if frame["episode_id"] == record["episode_id"] and not frame.get("exact")),
+                        "running_versions": dict(running),
+                        "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    }
+                    for record in chunk
+                ],
+            )
+        if log is not None:
+            outcomes = Counter(result["outcome"] for result in chunk_results)
+            print(f"chunk {number}/{len(chunks)}: {len(chunk)} episodes, {len(jobs)} jobs ({dict(outcomes)}), {len(results)} results so far ({time.perf_counter() - started_at:.0f}s){' [limit]' if cut else ''}", file=log, flush=True)
+
+    def build(chunk: list[dict[str, Any]], remaining: int | None):
+        return build_jobs(
+            chunk, events, limit=remaining, per_episode=per_episode, candidates_per_keyframe=candidates_per_keyframe, sim_config=sim_config,
+            harness_config=harness_config, control_steps=control_steps, log=log, running=running, generator_config=generator_config,
+        )
+
     with job_pool(workers, sim_config=sim_config, expert_config=events["followup"]["expert_config"]) as pool:
-        for start in range(0, len(pending), max(1, int(chunk_episodes))):
-            chunk = pending[start : start + max(1, int(chunk_episodes))]
-            remaining = None if limit is None else int(limit) - len(results)
+        in_flight: tuple | None = None  # (number, chunk, jobs, frames, summary, async_result, cut, started_at) — 풀이 도는 동안 다음 묶음을 재생한다
+        for number, chunk in enumerate(chunks, start=1):
+            planned = len(results) + (len(in_flight[2]) if in_flight else 0)
+            remaining = None if limit is None else int(limit) - planned
             if remaining is not None and remaining <= 0:
                 break
             chunk_started = time.perf_counter()
-            jobs, frames, summary = build_jobs(
-                chunk, events, limit=remaining, per_episode=per_episode, candidates_per_keyframe=candidates_per_keyframe, sim_config=sim_config,
-                harness_config=harness_config, control_steps=control_steps, log=log, running=running, generator_config=generator_config,
-            )
-            chunk_results = run_jobs(jobs, sim_config=sim_config, expert_config=events["followup"]["expert_config"], workers=workers, log=log, pool=pool)
-            replay_s_total += float(summary["replay_s_total"])
-            skipped_fidelity += int(summary["skipped_fidelity"])
-            keyframes.extend(frames)
-            results.extend(chunk_results)
-            _append_jsonl(out / KEYFRAMES_INCREMENTAL, frames)
-            _append_jsonl(out / ROLLOUTS_FILE, chunk_results)
-            cut = remaining is not None and len(jobs) >= remaining  # `limit`에 잘린 묶음: 완료 표지를 쓰지 않는다
-            if not cut:
-                wall = time.perf_counter() - chunk_started
-                _append_jsonl(
-                    out / PROGRESS_FILE,
-                    [
-                        {
-                            "episode_id": record["episode_id"],
-                            "keyframes": sum(1 for frame in frames if frame["episode_id"] == record["episode_id"]),
-                            "rollouts": sum(1 for result in chunk_results if result["job"]["episode_id"] == record["episode_id"]),
-                            "wall_s": round(wall / len(chunk), 3),
-                            "replay_s": round(float(summary["replay_s_total"]) / len(chunk), 3),
-                            "skipped_fidelity": sum(1 for frame in frames if frame["episode_id"] == record["episode_id"] and not frame.get("exact")),
-                            "running_versions": dict(running),
-                            "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-                        }
-                        for record in chunk
-                    ],
-                )
-            if log is not None:
-                print(f"chunk {start // max(1, int(chunk_episodes)) + 1}: {len(chunk)} episodes, {len(jobs)} jobs, {len(results)} results so far ({time.perf_counter() - chunk_started:.0f}s){' [limit]' if cut else ''}", file=log, flush=True)
+            jobs, frames, summary = build(chunk, remaining)  # 재생(주 프로세스) — 풀은 앞 묶음의 rollout을 돌리고 있다
+            cut = remaining is not None and len(jobs) >= remaining
+            if pool is None:
+                chunk_results = run_jobs(jobs, sim_config=sim_config, expert_config=events["followup"]["expert_config"], workers=1, log=log)
+                persist(number, chunk, jobs, frames, summary, chunk_results, cut, chunk_started)
+            else:
+                if in_flight is not None:
+                    prev_number, prev_chunk, prev_jobs, prev_frames, prev_summary, async_result, prev_cut, prev_started = in_flight
+                    persist(prev_number, prev_chunk, prev_jobs, prev_frames, prev_summary, async_result.get(), prev_cut, prev_started)
+                    in_flight = None
+                async_result = pool.map_async(_worker_run, jobs, chunksize=1)
+                in_flight = (number, chunk, jobs, frames, summary, async_result, cut, chunk_started)
             if cut:
                 break
+        if in_flight is not None:
+            prev_number, prev_chunk, prev_jobs, prev_frames, prev_summary, async_result, prev_cut, prev_started = in_flight
+            persist(prev_number, prev_chunk, prev_jobs, prev_frames, prev_summary, async_result.get(), prev_cut, prev_started)
 
     labels = label_keyframes(records, keyframes, results, events)
     batch_wall_s = (time.perf_counter() - started) + float(prior["wall_s"])  # 재개면 앞선 실행의 묶음 벽시계를 더한다
