@@ -73,7 +73,7 @@ src/robo_jev/
   model/  loss.py  sampler.py  train.py  checkpoint.py   # model contracts and CPU training path
 configs/     harness, controller, simulator, expert, events, data, model fixture, training
 scripts/     generate_episodes · rollout_keyframes · dagger_cycle · measure_tokens · fetch_tokenizer · fetch_backbone · measure_candidates · adapt_readout · attribution · select_backbone
-tests/       1020 tests; fixtures under tests/fixtures
+tests/       1021 tests; fixtures under tests/fixtures
 HANDOFF.md   how to continue on another machine; what lives outside git
 ```
 
