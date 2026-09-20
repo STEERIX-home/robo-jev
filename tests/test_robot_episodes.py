@@ -471,6 +471,7 @@ def test_tick_contrast_pairs_flip_the_named_question_and_pass_the_deletion_analo
     assert set(KINDS) == {"forbidden", "zone_boundary", "instruction"}
     expert = smoke["expert"]
     kinds_seen = set()
+    path_orders: list[list[str]] = []
     for (profile, seed), record in smoke["records"].items():
         pairs, reasons = build_pairs(record, expert=expert)
         assert pairs, reasons
@@ -501,6 +502,12 @@ def test_tick_contrast_pairs_flip_the_named_question_and_pass_the_deletion_analo
             assert sorted(c["id"] for c in base_main["criteria"]) == sorted(c["id"] for c in sibling_main["criteria"])
             tick = record["ticks"][sibling["evidence"]["tick_index"]]
             assert sorted(c["id"] for c in base_main["criteria"]) == sorted(entry["id"] for entry in tick["request"]["candidates"]["q_main"])
+            # 경로 후보도 섞는다 (gen-robot-contrast-v0.3): 하네스의 정식 순서(direct 첫 자리)를 그대로 두면 정답(거의 언제나 direct)이
+            # 첫 자리에 몰려 D1 규모의 QA 정답 위치 검사가 걸렸다(400편: K=3 표본 1,214 중 0.993이 첫 자리).
+            base_path = next((q for q in base["request"]["questions"] if q["id"] == "q_path"), None)
+            if base_path is not None:
+                assert sorted(c["id"] for c in base_path["criteria"]) == sorted(entry["id"] for entry in tick["request"]["candidates"]["q_path"])
+                path_orders.append([c["id"] for c in base_path["criteria"]])
             main_reasons = sibling["evidence"]["contrast"]["main_reasons"]
             assert main_reasons["base"] not in DEGENERATE_REASONS and main_reasons["sibling"] not in DEGENERATE_REASONS
             assert sibling["provenance"]["contrast"]["deletion"]["expert_version"] == expert.version
@@ -514,6 +521,7 @@ def test_tick_contrast_pairs_flip_the_named_question_and_pass_the_deletion_analo
                 )
                 assert listed or (holding is not None and holding != goal["target_ref"])
     assert {"forbidden", "zone_boundary"} <= kinds_seen, kinds_seen
+    assert path_orders and any(order[0] != "p0" for order in path_orders), path_orders  # 경로 후보의 첫 자리가 언제나 direct가 아니다
 
 
 def test_the_zone_boundary_flip_moves_the_placed_target_one_centimetre_out_and_forgetting_it_gates_to_observe(smoke):
@@ -648,8 +656,48 @@ def test_resume_skips_seeds_that_already_have_an_episode(tmp_path, monkeypatch):
     calls.clear()
     manifest = run(CONFIG, 3, tmp_path, resume=True)
     assert calls == [("E0", 101)]
-    assert manifest["run"] == {"requested": 3, "produced": 1, "skipped": 2, "resume": True}
+    assert manifest["run"] == {"requested": 3, "produced": 1, "skipped": 2, "excluded": 0, "resume": True}
     assert manifest["episodes"] == 3
+
+
+def test_exclude_groups_from_skips_the_origin_groups_a_previous_batch_used(tmp_path, monkeypatch):
+    """D-OOD (docs/04 §6, `configs/data/d_ood.yaml`): `exclude_groups_from`의 manifest `families`(origin group)에 든 seed는 건너뛰고 일정을
+    앞으로 늘려 `count`편을 채운다 — D1과 겹치지 않는 장면·목표 계열만 남는다. manifest `run.excluded`가 센다."""
+    import robo_jev.data.robot_episodes as module
+    from robo_jev.sim.scene import build_plan, origin_group
+
+    calls = []
+
+    def fake_generate(profile, seed, **kwargs):
+        calls.append((profile, seed))
+        record = copy.deepcopy(_SMOKE_TEMPLATE)
+        record["episode_id"] = episode_id(profile, seed)
+        record["provenance"]["profile"], record["provenance"]["seed"] = profile, seed
+        return record
+
+    monkeypatch.setattr(module, "generate_episode", fake_generate)
+    monkeypatch.setattr(module, "validate_record", lambda record: None)
+
+    class FakeEnv:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def close(self):
+            pass
+
+    import robo_jev.sim.environment as environment
+
+    monkeypatch.setattr(environment, "Environment", FakeEnv)
+    sim = yaml.safe_load(SIM_CONFIG.read_text(encoding="utf-8"))
+    used = {origin_group(profile, build_plan(sim, seed, profile)) for profile, seed in (("E0", 100), ("E1", 100), ("E0", 101))}
+    previous = tmp_path / "previous-manifest.json"
+    previous.write_text(json.dumps({"families": {group: 1 for group in used}}), encoding="utf-8")
+    config = {**CONFIG, "exclude_groups_from": [str(previous)], "exclude_schedule_factor": 8}
+    manifest = run(config, 2, tmp_path / "out")
+    assert len(calls) == 2 and manifest["run"]["produced"] == 2 and manifest["run"]["excluded"] >= 1
+    assert all(origin_group(profile, build_plan(sim, seed, profile)) not in used for profile, seed in calls)
+    assert calls[0] != ("E0", 100)  # 첫 seed는 D1이 쓴 계열이라 건넌다
+    assert module.excluded_groups(CONFIG) == set()
 
 
 _SMOKE_TEMPLATE = {

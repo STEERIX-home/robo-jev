@@ -16,6 +16,7 @@ import json
 import os
 import random
 import subprocess
+from pathlib import Path
 import sys
 from collections import Counter, defaultdict
 
@@ -1142,3 +1143,28 @@ def test_generate_module_runs_as_a_script(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "tiny" / "records.jsonl").exists()
+
+
+def test_origin_prefix_renames_groups_and_request_ids_for_a_disjoint_dataset_lineage():
+    """D-OOD (`configs/data/d_ood_single.yaml`): 다른 seed의 계열은 새 장면이지만 이름 `<분야>/<장면>/<번호>`는 D1과 겹친다 — `origin_prefix`가
+    group과 요청 id에 접두사를 붙여 계보를 가른다. 접두사 없이는(기본 "") 레코드가 그대로다."""
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    plain = generate_records(count=60, seed=9001, config=config)
+    config["origin_prefix"] = "dood"
+    prefixed = generate_records(count=60, seed=9001, config=config)
+    assert len(plain) == len(prefixed) == 60
+    for a, b in zip(plain, prefixed):
+        assert b["origin_group"] == "dood/" + a["origin_group"] and b["provenance"]["origin_group"] == b["origin_group"]
+        assert b["request"]["request_id"] == "dood-" + a["request"]["request_id"]
+        derived = b["provenance"].get("derived_from")
+        if derived is not None:
+            assert derived.startswith("dood-") and derived == "dood-" + a["provenance"]["derived_from"]
+        # 문구·후보 배열의 seed 문자열에 group이 들어가므로 후보 id·문장은 달라진다; 장면 계열(분야·장면·번호·언어·질문 종류)은 같다.
+        for key in ("domain", "template", "family", "language", "derivation"):
+            assert b["provenance"].get(key) == a["provenance"].get(key)
+        assert [q["type"] for q in b["request"]["questions"]] == [q["type"] for q in a["request"]["questions"]]
+        validate_record(b)
+    assert generate_records(count=20, seed=9001, config={**DEFAULT_CONFIG, "origin_prefix": ""}) == plain[:20]
+    assert DEFAULT_CONFIG["origin_prefix"] == "" and load_config(Path(__file__).resolve().parent.parent / "configs" / "data" / "pilot.yaml")["origin_prefix"] == ""
+    ood = generate_records(count=40, seed=9001, config={**config, "split": {**config["split"], "holdout_prefixes": ["dood/"]}})
+    assert {record["split"] for record in ood} <= {"ood_dev", "ood_test"} and len({record["split"] for record in ood}) == 2
