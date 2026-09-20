@@ -436,11 +436,13 @@ def main(argv: list[str] | None = None) -> int:
         if not separator:
             parser.error(f"--set은 KEY=VALUE 꼴이어야 한다: {assignment!r}")
         overrides[key] = yaml.safe_load(value)
-    run_id = f"p1-{args.mode}-{(args.model or '').split('/')[-1].lower() or 'model'}-{dt.datetime.now().strftime('%Y%m%d-%H%M%S')}"
     config = load_train_config(
         args.config, mode=args.mode if args.mode in ("t0", "lora", "t1") else "t0", steps=args.steps, seed=args.seed,
-        dataset=args.dataset, run_id=run_id, overrides=overrides,
+        dataset=args.dataset, overrides=overrides,
     )  # fmt: skip
+    # run id는 **실제로 쓰는 모델**에서 짓는다 (`--model`을 주지 않고 설정이 모델을 정하는 것이 기본이다)
+    stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
+    config["run_id"] = f"p1-{args.mode}-{str(config['model_id']).split('/')[-1].lower()}-{stamp}"
     started = time.perf_counter()
     if args.mode in ("t0", "lora", "t1") and args.eval_checkpoint:
         result = evaluate_checkpoint(config, mode=args.mode, checkpoint=args.eval_checkpoint, eval_config=args.eval_config)
