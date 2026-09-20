@@ -34,7 +34,9 @@ train:
   weight_decay: 0.01
   warmup_ratio: 0.05
   gradient_clip: 1.0
-  max_wall_minutes: 90                        # 예산을 넘으면 그 epoch에서 멈춘다 (표에 적는다). D1 실측: 644 step/epoch × 1.14 s(8 thread) ≈ 12분/epoch, 3 epoch ≈ 37분; 평가 32상태 0.76 s
+  max_wall_minutes: 90                        # 예산을 넘으면 그 epoch에서 멈춘다 (표에 적는다). D1 실측(8 thread): 혼합 배치 3.95~4.1 s/step × 644 step/epoch ≈ 43분/epoch → 90분 상한은
+                                              # ≈2.1 epoch(≈1,350 step)에서 멈춘다. step의 ≈3 s는 단일 스레드 Python(collate의 byte 인코딩·질문별 손실 루프; CPU ≈120 %)이고 8 thread 행렬은 ≈1 s —
+                                              # 이월: 예제를 한 번 byte 텐서로 미리 인코딩(epoch마다 재사용)하면 step이 ≈1 s가 된다 (로봇 틱만의 warm 벤치마크 1.14 s).
   log_every: 50
 
 eval:

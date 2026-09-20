@@ -177,9 +177,9 @@ python -m robo_jev.data.validate --dataset artifacts/datasets/d1 --report artifa
 
 **Interfaces:** `train_tiny_scorer(config: dict) -> dict`는 D1(비로봇 단일 요청 + 로봇 틱)을 문맥/후보 byte 텍스트로 읽어 option-attention scorer를 처음부터 학습하고 분할별 정확도·NLL·ECE와 문맥 섞기 대조군 값을 돌려준다. `selective_metrics(predictions, records) -> dict`는 coverage·abstention·selective accuracy·wrong target·unsafe action rate를 낸다(08 §10).
 
-- [ ] jevlike/cua-s1 계열 구조(byte 임베딩 → 작은 Transformer 인코더 → 후보가 문맥에 attention → 공유 dot product → 후보 위 softmax)를 ≈1M 파라미터로 구현한다. 문맥은 직렬화한 상태·질문(허용 필드만), 후보는 후보 줄이다.
-- [ ] D1의 train/dev/test/ood에서 학습·평가하고, 같은 분할에서 규칙 기준군과 나란히 보고한다. **이 기준군이 높은 분할·질문은 의미 판단이 아니라 패턴으로 풀린다**는 표지이며, 그 분할은 backbone의 성과 주장에 쓰지 않는다.
-- [ ] 문맥 섞기 대조군을 모든 모델 평가의 표준 열로 넣는다.
+- [x] jevlike/cua-s1 계열 구조(byte 임베딩 → 작은 Transformer 인코더 → 후보가 문맥에 attention → 공유 dot product → 후보 위 softmax)를 ≈1M 파라미터로 구현한다. 문맥은 직렬화한 상태·질문(허용 필드만), 후보는 후보 줄이다. (2026-09-20, Task D1: `robo_jev.baselines.tiny_scorer` 884K 파라미터; 문맥 = `state_lines` / `serialize.full_tick_sections`(틱을 첫 틱처럼 전부, 1,024 byte), 후보 = 직렬화의 후보 줄·계약의 고정 후보; D1 train 10,303 예제·90분 상한에서 1.98 epoch, ≈4.1 s/step)
+- [x] D1의 train/dev/test/ood에서 학습·평가하고, 같은 분할에서 규칙 기준군과 나란히 보고한다. **이 기준군이 높은 분할·질문은 의미 판단이 아니라 패턴으로 풀린다**는 표지이며, 그 분할은 backbone의 성과 주장에 쓰지 않는다. (표: `artifacts/reports/tiny-scorer.json`, `.superpowers/sdd/task-d1-report.md` stage C. 로봇 게이트·부가 질문 전부(0.93~1.00 = 문맥 섞기)와 dev/test의 `q_main`(0.77~0.79 = 문맥 섞기; 규칙 0.74)은 패턴으로 풀린다 — backbone 주장에서 제외; **ood_dev의 `q_main`은 아니다**(scorer 0.40 = 섞기 0.39, 규칙 0.73); 비로봇은 0.43~0.45 = 섞기(패턴 없음); 로봇 대조 단일의 boolean은 패턴(0.92), choice는 아니다(0.60~0.71 vs 0.58~0.64))
+- [x] 문맥 섞기 대조군을 모든 모델 평가의 표준 열로 넣는다. (`robo_jev.evaluate`: `context_shuffle_records`·`answer_change_rate`·`rule_judge_predictions`·`calibration_error`·`selective_metrics`(08 §10) — G0b 평가와 소형 scorer 표가 같은 열을 쓴다)
 
 실행: `python -m pytest tests/test_tiny_scorer.py -q`. 통과 산출물은 분할별 (규칙, 소형 scorer, 문맥 섞기) 표다. 인수 기준은 성능이 아니라 **표가 있다는 것**이다 — 이 값이 backbone 실험의 해석 기준이 된다.
 
