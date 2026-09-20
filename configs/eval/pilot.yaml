@@ -62,15 +62,98 @@ splits:
     domain: robot
     split: dev
     files: ["contrast/records.jsonl"]
-    limit: 40                 # 20쌍 (forbidden / zone_boundary / instruction)
     selection: true
+    note: "20쌍 = forbidden 7 + zone_boundary 7 + **instruction 6**. 종류를 이름으로 고른다 — 적재 순서 앞 40건은 E0의
+      forbidden·zone_boundary뿐이고 지시 대조 쌍(E1에만 있다)이 하나도 안 들어온다. base와 sibling은 반드시 짝으로."
+    records:
+      - ep-E0-000114@5-forbidden-base
+      - ep-E0-000114@5-forbidden
+      - ep-E0-000128@100-forbidden-base
+      - ep-E0-000128@100-forbidden
+      - ep-E0-000156@35-forbidden-base
+      - ep-E0-000156@35-forbidden
+      - ep-E0-000208@190-forbidden-base
+      - ep-E0-000208@190-forbidden
+      - ep-E0-000238@40-forbidden-base
+      - ep-E0-000238@40-forbidden
+      - ep-E1-000118@25-forbidden-base
+      - ep-E1-000118@25-forbidden
+      - ep-E1-000147@25-forbidden-base
+      - ep-E1-000147@25-forbidden
+      - ep-E0-000114@265-zone_boundary-base
+      - ep-E0-000114@265-zone_boundary
+      - ep-E0-000128@325-zone_boundary-base
+      - ep-E0-000128@325-zone_boundary
+      - ep-E0-000156@300-zone_boundary-base
+      - ep-E0-000156@300-zone_boundary
+      - ep-E0-000208@360-zone_boundary-base
+      - ep-E0-000208@360-zone_boundary
+      - ep-E0-000238@275-zone_boundary-base
+      - ep-E0-000238@275-zone_boundary
+      - ep-E1-000118@305-zone_boundary-base
+      - ep-E1-000118@305-zone_boundary
+      - ep-E1-000147@315-zone_boundary-base
+      - ep-E1-000147@315-zone_boundary
+      - ep-E1-000118@115-instruction-base
+      - ep-E1-000118@115-instruction
+      - ep-E1-000129@230-instruction-base
+      - ep-E1-000129@230-instruction
+      - ep-E1-000132@280-instruction-base
+      - ep-E1-000132@280-instruction
+      - ep-E1-000147@215-instruction-base
+      - ep-E1-000147@215-instruction
+      - ep-E1-000169@135-instruction-base
+      - ep-E1-000169@135-instruction
+      - ep-E1-000226@275-instruction-base
+      - ep-E1-000226@275-instruction
   - name: robot_contrast/ood_dev
     manifest: artifacts/datasets/d1-robot/d1-rollout-labels/manifest.json
     domain: robot
     split: ood_dev
     files: ["contrast/records.jsonl"]
-    limit: 40
     selection: true
+    note: "같은 구성 — forbidden 7 + zone_boundary 7 + instruction 6쌍"
+    records:
+      - ep-E0-000110@40-forbidden-base
+      - ep-E0-000110@40-forbidden
+      - ep-E0-000164@20-forbidden-base
+      - ep-E0-000164@20-forbidden
+      - ep-E0-000246@140-forbidden-base
+      - ep-E0-000246@140-forbidden
+      - ep-E1-000149@525-forbidden-base
+      - ep-E1-000149@525-forbidden
+      - ep-E1-000206@65-forbidden-base
+      - ep-E1-000206@65-forbidden
+      - ep-E1-000229@0-forbidden-base
+      - ep-E1-000229@0-forbidden
+      - ep-E1-000244@5-forbidden-base
+      - ep-E1-000244@5-forbidden
+      - ep-E0-000110@440-zone_boundary-base
+      - ep-E0-000110@440-zone_boundary
+      - ep-E0-000164@275-zone_boundary-base
+      - ep-E0-000164@275-zone_boundary
+      - ep-E0-000246@400-zone_boundary-base
+      - ep-E0-000246@400-zone_boundary
+      - ep-E1-000149@1005-zone_boundary-base
+      - ep-E1-000149@1005-zone_boundary
+      - ep-E1-000206@325-zone_boundary-base
+      - ep-E1-000206@325-zone_boundary
+      - ep-E1-000229@350-zone_boundary-base
+      - ep-E1-000229@350-zone_boundary
+      - ep-E1-000263@340-zone_boundary-base
+      - ep-E1-000263@340-zone_boundary
+      - ep-E1-000149@265-instruction-base
+      - ep-E1-000149@265-instruction
+      - ep-E1-000181@120-instruction-base
+      - ep-E1-000181@120-instruction
+      - ep-E1-000219@110-instruction-base
+      - ep-E1-000219@110-instruction
+      - ep-E1-000235@135-instruction-base
+      - ep-E1-000235@135-instruction
+      - ep-E1-000261@190-instruction-base
+      - ep-E1-000261@190-instruction
+      - ep-E1-000267@300-instruction-base
+      - ep-E1-000267@300-instruction
 
   # --- 비로봇 단일 요청 (판정 칸: 소형 scorer가 0.43~0.45 = 상태 섞기라 패턴이 없다) ---
   - name: non_robot/dev

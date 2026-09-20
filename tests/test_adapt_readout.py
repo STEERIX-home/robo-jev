@@ -118,5 +118,13 @@ def test_the_pilot_eval_set_is_fixed_by_name_and_keeps_test_out_of_selection():
         assert records and len(set(records)) == len(records) and all(record.startswith("ep-E") for record in records)
         assert "max_ticks" not in by_name[name]  # 로봇은 에피소드를 통째로 (지시 변경 틱이 중반에 있다)
     for name in ("robot_contrast/dev", "robot_contrast/ood_dev"):
-        assert by_name[name]["limit"] % 2 == 0  # 대조 쌍은 적재 순서로 붙어 있다 — 짝수여야 쌍이 잘리지 않는다
+        # 대조 쌍은 **이름으로** 고른다: 적재 순서 앞쪽은 E0의 forbidden·zone_boundary뿐이라 지시 대조 쌍(E1에만 있다)이
+        # 들어오지 않는다. base와 sibling이 반드시 짝이고 세 종류가 모두 있어야 한다.
+        records = by_name[name]["records"]
+        assert len(records) % 2 == 0 and len(set(records)) == len(records)
+        bases = [record for record in records if record.endswith("-base")]
+        assert len(bases) * 2 == len(records)
+        assert all(f"{base[:-len('-base')]}" in records for base in bases)
+        kinds = {base.split("-")[-2] for base in bases}
+        assert {"forbidden", "zone_boundary", "instruction"} == kinds, kinds
     assert yaml.safe_load(EVAL_PILOT.read_text(encoding="utf-8"))["tiny_scorer_report"].endswith("tiny-scorer.json")
