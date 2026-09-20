@@ -35,7 +35,7 @@ N_active 상한 ≈ 실효 FLOPs/s × 모델 시간 예산 / (2 × 틱당 새 �
 | 150ms (5Hz 주기 안) | 약 30B | 약 15B | 약 10B |
 | 80ms (10Hz 주기 안) | 약 16B | 약 8B | 약 5B |
 
-이 가정에서 27B dense는 틱당 새 토큰을 약 1.1K 이하로 유지해야 5Hz에, 약 550 이하로 유지해야 10Hz에 들어온다. 로봇 스트림(L1-a)의 틱당 새 토큰은 설계 시 400~600으로 추정했으나, 옛 서식(h0.3/ts0.3)의 실측은 최초 틱 1,764~3,469, 후속 틱 최대 3,712였다. **계약 v0.3(서식 축약·변화분 틱, 2026-09-19 실측, 08 §3.4)에서는 10물체·K=12 장면의 틱당 p50 392, p95 662, 첫 틱 943(+prefix 451), 100틱 구간 43.4K이고 재생성한 batch-0(40편) 실측은 p50 443·p95 608·100틱 49K**다 — 예산(500/800/1,200/60K) 안이다. 또한 배포·실행 장비는 H100이 아니라 DGX Spark/Jetson급 엣지(≈273GB/s, H100의 1/4~1/8 연산)이므로 이 표는 참고이고 **지연 판정은 배포급 장비에서 대표 입력(현재 서식 하한·상한, K=32, 지시 변경 틱, warm history 30틱)으로 실측**한다. BF16이 주 비교 조건이고 FP8은 kernel 지원·양자화 대상·품질 차이를 명시한 별도 조건이다. 본선은 아래 Spark 실측으로 **2B(주)·4B(5 Hz 대비)**로 좁혔고(2026-09-19 확정), 무학습 판단 품질은 G0b에서 같은 후보에 대해 잰다. 틱당 토큰이 더 크면 active 약 10B 이하의 모델이나 여러 GPU에 나눈 서빙이 필요하다. 공개 분석이 관측한 Jev의 지연(360 tokens 57.5ms, 약 30K tokens 218ms)은 **서버 응답 헤더 시간**이며 GPU 시간도 클라이언트 전체 지연도 아니다(같은 원자료의 클라이언트 wall time은 서버 시간의 2~3.5배). 그 기울기 약 5µs/token은 서버 처리의 상한으로만 해석하며, 같은 가정의 27B dense·단일 GPU 계산값(약 135µs/token)과 범주가 달라 정확한 배속 차이로 쓰지 않는다. 후보 수 실험도 2~200개 범위이고 입력 길이 효과와 분리되지 않았다. 이 수치는 목표 설정의 참고이고 우리 모델의 성능으로 사용하지 않는다. [Jev 구조 분석 글](https://archerhume.com/posts/jevs-architecture-unmasked/?v=3)
+이 가정에서 27B dense는 틱당 새 토큰을 약 1.1K 이하로 유지해야 5Hz에, 약 550 이하로 유지해야 10Hz에 들어온다. 로봇 스트림(L1-a)의 틱당 새 토큰은 설계 시 400~600으로 추정했으나, 옛 서식(h0.3/ts0.3)의 실측은 최초 틱 1,764~3,469, 후속 틱 최대 3,712였다. **계약 v0.3(서식 축약·변화분 틱, 2026-09-19 실측, 08 §3.4)에서는 10물체·K=12 장면의 틱당 p50 392, p95 662, 첫 틱 943(+prefix 451), 100틱 구간 43.4K이고 재생성한 batch-0(40편) 실측은 p50 443·p95 608·100틱 49K**다 — 예산(500/800/1,200/60K) 안이다. 또한 배포·실행 장비는 H100이 아니라 DGX Spark/Jetson급 엣지(≈273GB/s, H100의 1/4~1/8 연산)이므로 이 표는 참고이고 **지연 판정은 배포급 장비에서 대표 입력(현재 서식 하한·상한, K=32, 지시 변경 틱, warm history 30틱)으로 실측**한다. BF16이 주 비교 조건이고 FP8은 kernel 지원·양자화 대상·품질 차이를 명시한 별도 조건이다. 본선은 아래 Spark 실측으로 **2B(주)·4B(5 Hz 대비)**로 좁혔고(2026-09-19), G0b의 `stream` 경로 실측(2026-09-20, 아래 표)으로 **Qwen3.5-2B + `fused` 지렛대(틱 몸통과 10개 결정 분기를 한 forward로)**를 10 Hz backbone으로 확정했다 — upper p95 65.0 ms·batch-0 57.3 ms, 100 ms 초과율 0; 4B는 `fused`/`all`로 5 Hz 예산(150 ms)만 든다. 무학습·readout-only·LoRA 품질은 같은 후보에 대해 G0b가 쟀다(06 Task 2b 2단계 결과). 틱당 토큰이 더 크면 active 약 10B 이하의 모델이나 여러 GPU에 나눈 서빙이 필요하다. 공개 분석이 관측한 Jev의 지연(360 tokens 57.5ms, 약 30K tokens 218ms)은 **서버 응답 헤더 시간**이며 GPU 시간도 클라이언트 전체 지연도 아니다(같은 원자료의 클라이언트 wall time은 서버 시간의 2~3.5배). 그 기울기 약 5µs/token은 서버 처리의 상한으로만 해석하며, 같은 가정의 27B dense·단일 GPU 계산값(약 135µs/token)과 범주가 달라 정확한 배속 차이로 쓰지 않는다. 후보 수 실험도 2~200개 범위이고 입력 길이 효과와 분리되지 않았다. 이 수치는 목표 설정의 참고이고 우리 모델의 성능으로 사용하지 않는다. [Jev 구조 분석 글](https://archerhume.com/posts/jevs-architecture-unmasked/?v=3)
 
 **DGX Spark 실측(2026-09-19, GB10, native BF16 forward, transformers 5.17.0 + flash-linear-attention 0.5.2·causal-conv1d 1.7.0 커널 활성, attention sdpa; `scripts/measure_candidates.py`, `artifacts/reports/backbone-screen.json`).** 단일 요청(101~315토큰, 캐시 없음)의 모델 시간을 새 토큰 수에 회귀하면 절편 + 기울기가 나오고, 연속 틱은 여기에 캐시 길이에 비례하는 attention 항이 더해진다.
 
@@ -57,19 +57,32 @@ N_active 상한 ≈ 실효 FLOPs/s × 모델 시간 예산 / (2 × 틱당 새 �
 
 토큰 비례 항은 실효 ≈97 / 78 / 118 TFLOPS로 GB10 BF16 dense 상한과 같은 자릿수의 연산이고, 절편이 4B→9B에서 +42 ms 느는 것은 launch-bound보다 weight-read(≈273 GB/s에서 9.5 GB ≈ 35 ms)에 가깝다 — 어느 쪽인지는 G0b에서 profiler·CUDA graph로 귀속 측정한다. attention 항은 2B에서 캐시 1K 토큰당 ≈2.1 ms로 윈도우 틱(≈83 ms)의 ≈40%이며 FLOP 시간(≈4 ms)의 ≈8× — sdpa가 마스크를 물질화한 채 sm80용 memory-efficient 커널로 실행되기 때문이다. 따라서 위 H100 표의 9B 25 ms 같은 계산값은 배포 장비에서 성립하지 않으며, 지연 판정은 이 실측과 G0b의 `stream` 경로 실측으로 한다. cold(무상태 재계산)는 warm의 7~25×라 캐시·윈도우 경로가 전제다.
 
+**G0b `stream` 경로 실측(2026-09-20, 같은 GB10·BF16; `scripts/measure_candidates.py --path stream`, `artifacts/reports/backbone-stream.json`(baseline, batch-0 40편 × 35틱 = 1,348틱) · `backbone-stream-levers.json`(지렛대, upper + batch-0 앞 8편 = 276틱) · `attribution.json`).** Task 4의 실제 경로 — 정적 prefix KV + 미리 할당한 30틱 윈도우 버퍼(틱 단위 퇴출, `torch.cat` 없음), DeltaNet recurrent·conv 상태를 fla `chunk_gated_delta_rule(initial_state)`·causal-conv1d로 명시 전달, **마스크 없는** varlen flash attention(prefix·윈도우·자기 틱 조각을 logsumexp로 합침), 10개 결정 표지를 공통 상태 위의 1토큰 배치 forward로, pointer readout — 이므로 캐시는 구성상 윈도우 크기(≈11.1K~14.3K 토큰)이고 외삽이 필요 없다. 틱당 모델 ms(p50 / p95), 100 ms 초과율:
+
+| 후보 | 지렛대 | lower · upper · 지시 변경 (35틱) | batch-0 | 판정(03 §7-6: upper·batch-0 p95 ≤ 80 ms, 초과율 ≤ 5 %) | 5 Hz(150 ms, 200 ms 초과율) |
+| --- | --- | --- | --- | --- | --- |
+| `Qwen3.5-2B` | baseline(두 forward) | 63.7 / 74.7 · 65.1 / **83.8** · 63.8 / 82.3 (초과율 0 · 0.029 · 0.029) | 68.6 / **80.0** (0.014) | **upper에서 3.8 ms 미달**, batch-0는 0.0 ms | 통과 |
+| `Qwen3.5-2B` | **fused**(몸통 + 분기 한 forward) | — · 45.6 / **65.0** (0) · — | 48.8 / **57.3** (0) | **통과 — 여유 15.0 / 22.7 ms** | 통과 |
+| `Qwen3.5-2B` | all(fused + dense `torch.compile` + bf16 readout) | — · 40.6 / 52.9 (0) · — | 43.4 / 50.3 (0) | 통과 — 여유 27 ms | 통과 |
+| `Qwen3.5-4B` | baseline | 137.1 / 160.7 · 136.7 / 182.3 · 138.4 / 185.5 (1.0) | 146.7 / 175.7 (1.0) | 미달 102 / 96 ms | **미달**(p95 > 150) |
+| `Qwen3.5-4B` | fused | — · 97.9 / 144.6 (0.171) · — | 105.7 / 122.6 (0.942) | 미달 64.6 / 42.6 ms | 통과(여유 5.4 / 27.4 ms; 200 ms 초과율 0.029 / 0) |
+| `Qwen3.5-4B` | all | — · 89.7 / 129.9 (0.086) · — | 95.8 / 110.5 (0.322) | 미달 49.9 / 30.5 ms | 통과(여유 20 / 40 ms) |
+
+지렛대별 효과(2B upper p95 기준): 결정 분기 forward의 CUDA graph −2 ms(분기 forward는 launch-bound가 아니다; 메모리 +0.33 GiB), 층의 dense 부분 `torch.compile` −13 ms(컴파일 1.4 s, fla·conv·flash와 공존), readout bf16 0, **fused −15 ms**(틱마다 전 층 가중치를 두 번 읽던 것을 한 번으로). 메모리: 2B 가중치 3.51 GiB + peak allocated 4.14 GiB(윈도우 버퍼 475 MiB 고정, reserved = allocated + 1 %, 틱 사이 증가 없음), 4B 7.83 / 9.45 GiB. 느린 틱은 30틱마다의 소개 틱(2B fused 96 ms)과 10틱마다의 갱신 틱이다. **귀속(단일 요청 186토큰, 공식 forward, 2B/4B/9B):** eager 25.4 / 56.9 / 97.9 ms 가운데 CUDA graph 재생으로 사라지는 launch 빈틈은 3.4 / 4.6 / 4.6 ms(13 / 8 / 5 %)뿐이고 나머지는 kernel 시간, 그중 가중치 읽기 하한(바이트/273 GB/s) 13.8 / 30.8 / 65.6 ms가 63 / 59 / 70 % — 절편은 launch가 아니라 weight-read다. **FP8-9B는 닫는다**: 재개 조건(9B 절편이 주로 launch 빈틈이고 주기가 5 Hz로 감)의 앞부분이 거짓이며, FP8이 가중치 읽기를 반으로 줄여도 윈도우 크기 틱은 ≈170~200 ms로 5 Hz 예산 밖이다.
+
 **규모 고정의 원칙은 비교군 사이에 적용한다.** 구조 효과를 주장하는 모든 비교는 같은 backbone·초기 가중치를 사용한다. backbone 자체는 지연 예산이 허용하는 N_active 상한 안에서 고른다. 이는 학습된 큰 모델을 작은 학생으로 증류하는 일과 다르다. 처음부터 예산에 맞는 공개 사전학습 모델을 고르고 모든 비교군이 그 모델을 공유한다. 실시간 가능성에 대한 주장은 `backbone × 계산 구조 × 서빙 하드웨어`의 조합 단위로 보고한다.
 
 | 후보 축 | 확인한 예 (2026-09-18 공식 config) | 선정 시 확인할 것 |
 | --- | --- | --- |
 | Dense hybrid, 큰 규모 | `Qwen/Qwen3.8-27B` (linear 48층 + full 16층) | 10Hz 스트림의 틱당 토큰 예산과 deadline 초과율, 학습 구간(실측 서식 176K~371K token, v0.3 목표 ≈50K)의 메모리, 분기 학습의 kernel 지원. 엣지 배포 전제에서는 본선 후보가 아님 — Spark 실측 500토큰 틱 886 ms(참고 실행) |
-| Dense hybrid, 소형 | `Qwen/Qwen3.5-2B`(linear 18층 + full 6층), `Qwen/Qwen3.5-4B`(linear 24층 + full 8층; 같은 `qwen3_5` 구현, vocab 248,320) | **G0b 후보(2026-09-19 확정)**: Spark 실측 500토큰 틱 83~123 / 197~305 ms. G0b에서 `stream` 경로 지연, readout-only 적응 뒤 D1 dev 품질, 무학습 품질을 잰다 |
-| Dense hybrid, 작은 규모 | `Qwen/Qwen3.5-9B` (같은 `qwen3_5` 구현, linear 24층 + full 8층) | 무학습 판단 품질의 하락 폭. 27B와 코드 경로를 공유하므로 1 GPU 디버깅에도 사용. Spark 실측 500토큰 틱 278~378 ms → 10 Hz 트랙 제외; FP8-9B는 G0b 귀속 측정 뒤(주기가 5 Hz로 가고 attention·graph 지렛대가 든 뒤에만 의미) |
+| Dense hybrid, 소형 | `Qwen/Qwen3.5-2B`(linear 18층 + full 6층), `Qwen/Qwen3.5-4B`(linear 24층 + full 8층; 같은 `qwen3_5` 구현, vocab 248,320) | **확정(2026-09-20, G0b)**: `stream` 경로 실측 2B `fused` p95 65.0(upper) / 57.3(batch-0) ms → 10 Hz backbone; 4B는 fused 144.6 / 122.6 ms로 5 Hz 대비만. readout-only·LoRA·무학습 품질은 06 Task 2b 2단계 결과와 `artifacts/reports/backbone-selection.json` |
+| Dense hybrid, 작은 규모 | `Qwen/Qwen3.5-9B` (같은 `qwen3_5` 구현, linear 24층 + full 8층) | 무학습 판단 품질의 하락 폭. 27B와 코드 경로를 공유하므로 1 GPU 디버깅에도 사용. Spark 실측 500토큰 틱 278~378 ms → 10 Hz 트랙 제외; FP8-9B는 G0b 귀속 측정(launch 빈틈 5 %, weight-read 하한 65.6 ms = graph 시간의 70 %)으로 **닫음** — 5 Hz 예산에도 들지 않는다 |
 | MoE hybrid | `Qwen/Qwen3.5-35B-A3B` (256 experts 중 8개 활성, linear 32층 + full 8층) | 추론 연산은 active에 비례하지만 **학습 메모리는 총 파라미터에 비례**한다. router 안정성과 FSDP 분할도 확인 |
 | Full attention | `Qwen/Qwen3-14B` 등 (전 층 일반 attention) | 분기 격리를 mask만으로 구현할 수 있다. 세대가 이전이므로 판단 품질을 함께 비교 |
 
 후보 목록은 측정 직전에 공식 최신 공개를 다시 확인해 고정한다. 선정 기준은 (1) 목표 판단 주기와 토큰 예산에서의 실측 지연, (2) D0·D1 dev의 무학습 판단 품질(같은 입력에서 후보 라벨 점수 읽기), (3) 분기 격리와 prefix gradient의 구현 가능성, (4) 기준군이 사용할 prefix cache의 지원 여부, (5) 라이선스와 학습 메모리다. 예산 안에서 품질이 가장 좋은 후보를 본 실험 backbone으로 확정하고, 탈락한 후보의 측정값도 보존한다. [Qwen3.5-2B config](https://huggingface.co/Qwen/Qwen3.5-2B/blob/main/config.json), [Qwen3.5-4B config](https://huggingface.co/Qwen/Qwen3.5-4B/blob/main/config.json), [Qwen3.5-9B config](https://huggingface.co/Qwen/Qwen3.5-9B/blob/main/config.json), [Qwen3.5-35B-A3B config](https://huggingface.co/Qwen/Qwen3.5-35B-A3B/blob/main/config.json), [Qwen3-14B config](https://huggingface.co/Qwen/Qwen3-14B/blob/main/config.json)
 
-아래 구조·학습 설계는 첫 후보인 Qwen3.8-27B를 기준으로 서술한다. 다른 후보로 확정하면 층 구성·메모리·비용의 해당 수치를 교체한다.
+아래 구조·학습 설계는 첫 후보인 Qwen3.8-27B를 기준으로 서술한다. 확정 backbone은 Qwen3.5-2B(linear 18층 + full 6층, 4B가 5 Hz 대비)이며 메모리·비용의 수치는 [05 §4·§6](05-experiment-and-cloud-plan.md)에서 2B/4B 기준으로 다시 산정했다; 분기 격리의 구조 요구(아래)는 같은 `qwen3_5` hybrid라 그대로다.
 
 ### Hybrid 후보를 사용할 때의 구조상 차이
 
@@ -251,5 +264,7 @@ T0는 완료 모델이 아니다. 메모리가 모자라면 LoRA·부분 학습�
 5. 동등한 기능·품질 조건의 지연을 비교한다. 본 로봇 시험의 비열등 기준은 [실험 환경 문서](05-experiment-and-cloud-plan.md)에 따라 파일럿 후 동결한다.
 6. 10Hz 연속 틱 조건에서 실측한 모델 시간과 관측→명령 적용 시간이 예산 안에 있고 100ms deadline 초과율이 기준을 넘지 않는다. 미달이면 토큰 예산(변화분 틱), 서빙 구성, backbone의 순서로 조정하고 변경과 재측정 결과를 기록한다.
 7. 관측 잡음 범위 안의 입력 변화에서 주 결정이 뒤집히는 비율을 보고한다. 폐루프의 결정 안정성 지표는 [학습 문제 정의](02-task-and-learning-problem.md)를 따른다.
+
+**상태(2026-09-20, G0b 실측, `.superpowers/sdd/task-g0b-report.md`).** 2 — BF16 허용 오차를 실제 2B에서 5회 반복 측정해 상수로 고정(readout 위치 상대 L2 ≤ 0.04, 중앙값 ≤ 0.03, 전체 최대 ≤ 0.6; fp32 ≤ 0.03 — 공식 구현의 kernel 간 편차 안), recurrent·conv 상태의 prefix까지 gradient 전달 검사 통과. 3 — 결정 분기 배치가 서로의 logits와 다음 틱의 공통 상태를 바꾸지 않음(bit-identical) 검사 통과; 후보 재배열 지표(치환 답 변경률·선택 위치 분포)는 평가 표준 열이고 학습에 후보 순서 치환 증강이 든다 — 값은 아직 크다(T0 2B pilot dev 33 %). 4 — 봉인 holdout(ood_dev)의 정확도·NLL·Brier를 T0·LoRA·무학습에 대해 06 Task 2b 2단계 결과에 적었다(D1 dev는 5편이라 작다). 6 — **2B `fused` 경로 upper p95 65.0 / batch-0 57.3 ms, 100 ms 초과율 0 → 통과**(baseline은 upper에서 3.8 ms 미달); 4B는 5 Hz만. 1·5·7은 첫 학습 뒤.
 
 다음 단계의 입력은 [데이터 생성 계획](04-data-generation-plan.md), 자원과 실행 조건은 [GPU·실험 계획](05-experiment-and-cloud-plan.md)을 따른다.
