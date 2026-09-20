@@ -312,44 +312,53 @@ def test_decision_branches_do_not_leak_into_next_tick():
 
 **Interfaces:** `train(config: dict) -> dict`는 run ID·checkpoint 경로·마지막 step·지표를 반환한다. `save_checkpoint(path: str, state: dict) -> None`, `load_checkpoint(path: str) -> dict`는 model/optimizer/scheduler/RNG/sampler/config/manifest를 다룬다.
 
-- [ ] T0 readout-only 학습에서 optimizer step 전후 readout이 바뀌고 frozen backbone은 그대로인지 검사한다.
-- [ ] T1에서 text backbone gradient와 실제 parameter 변경을 확인한다. loss만 감소하고 backbone 업데이트가 빠지는 오류를 차단한다. vision encoder는 고정 상태를 유지한다.
-- [ ] 스트림 데이터의 truncated BPTT를 구현한다. 에피소드를 10초 구간으로 나눠 같은 optimizer step 안에서 차례로 forward·backward하고 recurrent/conv 상태와 윈도우 KV를 detach해 전달하며, 한 에피소드를 하나의 accumulation 단위로 둔다. 구간 경계의 상태가 추론 시 증분 계산과 일치하는지, 분기 gradient가 공통 상태로 합쳐지는지 검사한다. 단일 요청 데이터와 스트림 데이터를 같은 step에 섞는 sampler(로봇/비로봇 축, 70/20/10 축, 정상 유지 틱 하향 가중)를 두고 실제 유효 loss 비중을 기록한다.
-- [ ] 단일 GPU의 readout-only 저장·재개를 검증한 다음, 8 GPU FSDP2의 text backbone full training에서도 재검증한다. 재개 시 진행 중이던 에피소드의 구간 위치와 상태를 복원한다.
-- [ ] 아래 시작 설정으로 200 step profile을 수행하고 실제 메모리·처리량·checkpoint 크기를 기록한다.
-- [ ] 재개 직후 다음 batch·loss·업데이트를 중단 없는 실행과 비교하고 G0를 판정한다.
+- [x] T0 readout-only 학습에서 optimizer step 전후 readout이 바뀌고 frozen backbone은 그대로인지 검사한다. (2026-09-21, Task P1 C1, 실제 2B: backbone tensor **320개 전부**의 sha256을 step 전후로 대조해 **0개 변경**·requires_grad 0개, readout 3/3 이동(U·V 최대 0.0003, bias 1.03e-05), `trainable_state_dict` 저장 키 ['U.weight', 'V.weight', 'bias']; `scripts/p1_acceptance.py --check frozen`, `artifacts/reports/p1-acceptance.json`)
+- [x] T1에서 text backbone gradient와 실제 parameter 변경을 확인한다. loss만 감소하고 backbone 업데이트가 빠지는 오류를 차단한다. vision encoder는 고정 상태를 유지한다. (2026-09-21, Task P1 C2, 실제 2B 3 step: gradient가 text backbone **320개 tensor 전부**에 0이 아니게 닿고(최대 30.2) 고정 표본 8개 중 **7개**가 움직였다; 움직인 폭은 모두 정확히 bf16 격자 한 칸(2^-13 = 1.22e-4)이고 |p|가 큰 `dt_bias` 2개는 0이다 — **BF16 master weight의 반올림 손실**이다. `backbone_lr` 5e-5에서는 손실이 2.63 → 28.93로 발산했으므로 파일럿 T1은 §5 계획값 1e-5를 쓴다. LoRA(진단 조건) 같은 검사: gradient tensor 300개 중 첫 backward에 0이 아닌 것 150개(peft가 `lora_B`를 0으로 초기화하므로 `lora_A`는 첫 step에 0이다), 표본 8/8 이동, 손실 2.63 → 1.76. vision encoder는 이 backbone(Qwen3.5 text-only)에 없다 — `freeze_vision_encoder`는 계약상 true로 두고 대상이 없다는 것을 여기 적는다. 진짜 T1에는 fp32 master weight(혼합 정밀도)가 필요하다 — 이 학습기에 없고 다음 브리프의 항목이다)
+- [x] 스트림 데이터의 truncated BPTT를 구현한다. 에피소드를 10초 구간으로 나눠 같은 optimizer step 안에서 차례로 forward·backward하고 recurrent/conv 상태와 윈도우 KV를 detach해 전달하며, 한 에피소드를 하나의 accumulation 단위로 둔다. 구간 경계의 상태가 추론 시 증분 계산과 일치하는지, 분기 gradient가 공통 상태로 합쳐지는지 검사한다. 단일 요청 데이터와 스트림 데이터를 같은 step에 섞는 sampler(로봇/비로봇 축, 70/20/10 축, 정상 유지 틱 하향 가중)를 두고 실제 유효 loss 비중을 기록한다.
+- [ ] 단일 GPU의 readout-only 저장·재개를 검증한 다음, 8 GPU FSDP2의 text backbone full training에서도 재검증한다. 재개 시 진행 중이던 에피소드의 구간 위치와 상태를 복원한다. (**앞쪽 절반 완료** 2026-09-21, Task P1 C3 — 단일 GPU readout-only 저장·재개가 비트 동일; 구간 경계 재개(진행 중 에피소드의 구간 index·상태·누적 gradient)는 CPU에서 `tests/test_resume.py`가 검사한다. **8 GPU FSDP2는 아직** — 이 상자에 GPU가 하나다)
+- [x] 아래 시작 설정으로 200 step profile을 수행하고 실제 메모리·처리량·checkpoint 크기를 기록한다. (2026-09-21, Task P1 C4/D: 확정 backbone 2B의 T0 200 step — **9.94 s/step**(p50 9.07, max 24.94), peak allocated **10.08 GiB**, 4664 tokens/s(총 9,267,745), 학습 33.1분 + 고정 평가 집합 13.5분, checkpoint 3.4 MiB(readout만), RSS 7.11 GiB. 아래 YAML은 실제로 돌린 값으로 고쳤다)
+- [x] 재개 직후 다음 batch·loss·업데이트를 중단 없는 실행과 비교하고 G0를 판정한다. (2026-09-21, Task P1 C3, 실제 2B T0 20 step: 연속 실행 대 10 step 저장 + **프로세스 재시작** + 10 step에서 step마다의 loss 차 최대 0.0, 학습 대상 tensor 3/3 **비트 동일**, sampler 위치·뽑힌 레코드·optimizer step 수 일치. 허용 오차 {'loss_abs': 0.02, 'loss_rel': 0.02, 'param_max_abs': 0.01, 'param_rel_l2': 0.05}는 비교 **전에** `scripts/p1_acceptance.py`에 고정했다 — 다른 프로세스는 kernel 선택이 달라질 수 있어 비트 동일을 요구하지 않았는데 결과는 비트 동일이었다. **G0 통과**)
+
+**실제로 돌린 설정(2026-09-21, Task P1; 정본은 `configs/train/qwen35-2b-pilot.yaml`).** 아래 값은 예시가 아니라 이 profile을 만든 설정이다 —
+옛 예시의 `model_id: Qwen/Qwen3.8-27B`와 `world_size: 8`은 backbone 확정(2B) 전·다중 GPU 계획의 것이었다.
 
 ```yaml
-model_id: Qwen/Qwen3.8-27B
-model_revision_manifest: artifacts/models/qwen38-27b-manifest.json
-dataset_manifest: artifacts/datasets/d1/manifest.json
+model_id: Qwen/Qwen3.5-2B              # Task 2b에서 확정한 backbone (옛 예시는 Qwen3.8-27B)
+model_revision_manifest: artifacts/models/manifest.json
+dataset_manifests:                     # 로봇 rollout 라벨판 + 비로봇, 한 run에 (splits: [train])
+  - {path: artifacts/datasets/d1-robot/d1-rollout-labels/manifest.json, domain: robot, files: ["episodes/*/streams.jsonl"]}
+  - {path: artifacts/datasets/d1/single/manifest.json, domain: non_robot}
 dtype: bfloat16
-execution_backend: independent_paths
 readout: decision_pointer
-layout: state_first          # 비로봇 단일 요청. 로봇 스트림은 stream_l1a
-stream_chunk_seconds: 10     # 스트림의 truncated BPTT 구간
-stream_window_ticks: 30      # full-attention 윈도우(정적 prefix 별도 보존)
-trainable: text_backbone_and_readout
-freeze_vision_encoder: true
+readout_rank: 64
+readout_dtype: float32
+execution_backend: independent_paths
+layout: {single: state_first, stream: stream_l1a}
+stream_chunk_seconds: 10               # T0·T1; LoRA는 5
+stream_window_ticks: 30
+trainable: readout_only                # 이 profile은 T0. T1은 text_backbone_and_readout + backbone_lr 1e-5
+freeze_vision_encoder: true            # 이 backbone에는 vision encoder가 없다 (text-only)
 optimizer: adamw
-backbone_lr: 0.00001
-readout_lr: 0.0001
+backbone_lr: 0.00005                   # LoRA·T1용. T1은 1e-5 (5e-5는 발산 — C2)
+readout_lr: 0.0003                     # G0b 실측 (1e-3은 한 step에 발산, 계획값은 1e-4)
 weight_decay: 0.01
 gradient_clip: 1.0
 warmup_ratio: 0.05
 microbatch_states_per_rank: 1
-gradient_accumulation: 4
-world_size: 8
+gradient_accumulation: 2               # 로봇 스트림 단위 1 + 비로봇 묶음 1 (계획값 4는 8 GPU 목표)
+world_size: 1                          # GB10 한 장 (옛 예시는 8)
 max_total_tokens: 8192
-activation_checkpointing: true
+activation_checkpointing: false        # T0. LoRA·T1은 true
 max_steps: 200
-max_wall_hours: 2
-estimated_hourly_usd: 31.92
-budget_usd: 63.84
 seed: 17
 ```
 
-학습 설정은 `dataset_manifests: [...]`로 로봇 batch와 비로봇 데이터의 manifest를 여러 개 받아 한 run에 넣는다(manifest별 domain 기본값, 레코드의 `provenance.domain`이 우선). step마다 로봇 스트림 단위와 비로봇 묶음 단위를 둘 다 넣고 손실은 04의 0.6/0.4 혼합이다(CPU 검증 완료). `independent_paths`는 질문별 causal 경로를 복제하는 P0다. Q개 경로를 내부 microbatch로 나누어 상태별 loss를 구성하고 실제 처리량을 기록한다. `readout: candidate_branch`는 비교군 R이며 경로가 Q×K개로 늘어난다. 로봇 스트림 레코드는 `layout: stream_l1a`로 읽히며 `stream_chunk_seconds`·`stream_window_ticks`가 truncated BPTT와 윈도우를 정한다. `model_id`는 Task 2b에서 확정한 backbone으로 바꾸며, 위 값은 첫 후보의 예시다. 이후 `shared_hybrid` P1을 따로 profile한다. 이 경로는 full-attention과 DeltaNet의 정합성 검사를 모두 통과해야 한다. 입력 축소만으로 최대 지원 길이를 통과한 것처럼 표시하지 않는다. profile 후 본 학습용 step·epoch 상한을 다시 산정한다.
+**실측(2B T0 200 step, DGX Spark GB10).** 9.94 s/step(p50 9.07, max 24.94) · peak allocated 10.08 GiB ·
+4664 tokens/s(총 9,267,745) · 학습 33.1분 · 고정 평가 집합 13.5분 ·
+checkpoint 3.4 MiB(readout만; T1은 backbone 전체라 GB 단위) · 프로세스 RSS 7.11 GiB ·
+비용은 이 상자에 시간 단가가 없어 적지 않는다(Task 6의 launcher가 붙인다).
+
+학습 설정은 `dataset_manifests: [...]`로 로봇 batch와 비로봇 데이터의 manifest를 여러 개 받아 한 run에 넣는다(manifest별 domain 기본값, 레코드의 `provenance.domain`이 우선). step마다 로봇 스트림 단위와 비로봇 묶음 단위를 둘 다 넣고 손실은 04의 0.6/0.4 혼합이다(CPU 검증 완료). `independent_paths`는 질문별 causal 경로를 복제하는 P0다. Q개 경로를 내부 microbatch로 나누어 상태별 loss를 구성하고 실제 처리량을 기록한다. `readout: candidate_branch`는 비교군 R이며 경로가 Q×K개로 늘어난다. 로봇 스트림 레코드는 `layout: stream_l1a`로 읽히며 `stream_chunk_seconds`·`stream_window_ticks`가 truncated BPTT와 윈도우를 정한다. `model_id`는 Task 2b에서 확정한 backbone(`Qwen/Qwen3.5-2B`)이고 위 블록은 예시가 아니라 **실제로 돌린 설정**이다(`configs/train/qwen35-2b-pilot.yaml`가 정본). 이후 `shared_hybrid` P1을 따로 profile한다. 이 경로는 full-attention과 DeltaNet의 정합성 검사를 모두 통과해야 한다. 입력 축소만으로 최대 지원 길이를 통과한 것처럼 표시하지 않는다. profile 후 본 학습용 step·epoch 상한을 다시 산정한다.
 
 예정 CLI:
 
