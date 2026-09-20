@@ -357,3 +357,90 @@ def test_rollout_labels_are_attached_in_a_successor_dataset_version_that_keeps_t
     cost_path.write_text(json.dumps(cost), encoding="utf-8")
     with pytest.raises(ConfigMismatch):
         attach_rollout_labels(dataset, rollouts, tmp_path / "rejected")
+
+
+def test_holding_twin_statistics_pair_the_grasp_and_place_keys_of_one_action_by_zone_and_seed():
+    """D1 리뷰 1 I2: 들고 있는 키프레임의 {grasp:held:zone, place:held:zone}는 같은 place-release 사건의 쌍둥이다 — (키프레임, 영역, seed)로
+    짝지어 commitment 영역/나머지 영역의 일치·불일치, 불일치 사유·grasp 키 첫 성공 틱·place 키 holding_at_end, 라벨의 섞인 허용 집합을 센다."""
+    from robo_jev.data.rollouts import holding_twin_statistics
+
+    keys = {"g1": "grasp:o0:top:zoneL", "p1": "place:o0:release:zoneL", "g2": "grasp:o0:top:zoneF", "p2": "place:o0:release:zoneF"}
+    keyframes = [
+        {"episode_id": "ep", "t": 10, "holding": "o0", "commitment": "g1", "candidates": list(keys), "keys": keys, "kind": "random"},
+        {"episode_id": "ep", "t": 3, "holding": None, "commitment": "x", "candidates": ["x", "y"], "keys": {"x": "grasp:o1:top:zoneL", "y": "push:o2:+x:none"}, "kind": "random"},
+    ]
+
+    def result(candidate, seed, outcome, reason=None, *, first_success=None, holding_at_end=None, keyframe="ep@10"):
+        return {"outcome": outcome, "reason": reason, "job": {"keyframe": keyframe, "candidate": candidate, "key": keys.get(candidate, "grasp:o1:top:zoneL"), "seed": seed},
+                "evidence": {"event_id": "place-release-v0", "first_success_tick": first_success, "holding_at_end": holding_at_end}}
+
+    results = [
+        result("g1", 0, "success", first_success=20), result("p1", 0, "success", first_success=21),       # commitment 영역, S/S
+        result("g1", 1, "failure", "horizon"), result("p1", 1, "failure", "horizon"),                    # commitment 영역, F/F
+        result("g2", 0, "success", first_success=41), result("p2", 0, "failure", "horizon", holding_at_end="o0"),  # 다른 영역, grasp 성공·place 실패
+        result("g2", 1, "success", first_success=39), result("p2", 1, "failure", "horizon", holding_at_end=None),
+        result("g2", 2, "censored", "candidate_unavailable"), result("p2", 2, "success"),
+        result("x", 0, "success", keyframe="ep@3"),  # 들고 있지 않은 키프레임은 세지 않는다
+    ]
+    labels = [
+        {"episode_id": "ep", "t": 10, "label": {"candidate_ids": ["g1", "p1"], "rollout_reason": "performance_allowed_set", "label_confidence": "high"}},
+        {"episode_id": "ep", "t": 3, "label": {"candidate_ids": ["x"], "rollout_reason": "commitment_kept", "label_confidence": "high"}},
+    ]
+    stats = holding_twin_statistics(keyframes, results, labels)
+    assert stats["keyframes"] == 1 and stats["candidates_per_keyframe"] == {"4": 1} and stats["keys_by_function"] == {"grasp": 2, "place": 2}
+    assert stats["commitment_key_function"] == {"grasp": 1} and stats["rollouts"] == 10 and stats["event_ids"] == {"place-release-v0": 10}
+    assert stats["pairs_by_zone"]["committed_zone"] == {"pairs": 2, "ss": 1, "ff": 1, "grasp_success_place_failure": 0, "place_success_grasp_failure": 0, "censored": 0}
+    assert stats["pairs_by_zone"]["other_zones"] == {"pairs": 3, "ss": 0, "ff": 0, "grasp_success_place_failure": 2, "place_success_grasp_failure": 0, "censored": 1}
+    assert stats["disagreement_reasons"] == {"place:horizon": 2}
+    assert stats["grasp_key_first_success_tick_on_disagreement"] == {"n": 2, "p50": 40, "max": 41} and stats["place_key_holding_at_end_on_disagreement"] == 1
+    assert stats["labels"] == {"rollout_reason": {"performance_allowed_set": 1}, "confidence": {"high": 1}, "allowed_sets_mixing_keys": 1}
+    assert "open_question" in stats
+
+
+def test_incremental_jsonl_tolerates_a_truncated_last_line_and_compacts_through_a_temp_file(tmp_path, capsys):
+    """리뷰 1 M4: 덧붙이는 중에 죽은 실행이 남긴 잘린 마지막 줄은 버리고(부분 결과는 어차피 버린다) 가운데가 깨진 파일은 거절한다;
+    다시 쓰기는 임시 파일 + os.replace다."""
+    from robo_jev.data.rollouts import _read_jsonl, _write_jsonl
+
+    path = tmp_path / "rollouts.jsonl"
+    path.write_text('{"a": 1}\n{"a": 2}\n{"a": 3, "tru', encoding="utf-8")
+    assert _read_jsonl(path) == [{"a": 1}, {"a": 2}]
+    assert "잘린 마지막 줄" in capsys.readouterr().err
+    path.write_text('{"a": 1}\n{"a": 2, "bro\n{"a": 3}\n', encoding="utf-8")
+    with pytest.raises(ValueError, match="손상"):
+        _read_jsonl(path)
+    assert _read_jsonl(tmp_path / "missing.jsonl") == []
+    _write_jsonl(path, [{"b": 1}, {"b": 2}])
+    assert _read_jsonl(path) == [{"b": 1}, {"b": 2}] and not (tmp_path / "rollouts.jsonl.tmp").exists()
+
+
+def test_the_overlapped_pool_loop_persists_each_chunk_once_and_resumes_like_a_whole_run(two_episodes, tmp_path):
+    """리뷰 1 M5: `workers=2, chunk_episodes=1`은 풀이 앞 묶음을 도는 동안 다음 묶음을 재생하는 `map_async` 경로다 — 표지는 에피소드마다
+    한 번, 결과 수 = 파일 줄 수, 표지의 wall_s 합은 배치 벽시계를 넘지 않고(M3: 제출 → get 창), 잘린 실행의 재개는 한 번에 돈 것과 같다."""
+    from robo_jev.data.rollouts import KEYFRAMES_INCREMENTAL, PROGRESS_FILE
+
+    dataset = two_episodes["out"]
+    common = dict(workers=2, per_episode=2, candidates_per_keyframe=2, chunk_episodes=1, events_override={"seeds": 1})
+    whole = run(dataset, limit=None, out=tmp_path / "whole", **common)
+    key = lambda result: (result["job"]["keyframe"], result["job"]["candidate"], result["job"]["seed"])  # noqa: E731
+    reference = {key(result): (result["outcome"], result["reason"]) for result in whole["results"]}
+    assert len(reference) == len(whole["results"]) >= 4
+    markers = [json.loads(line) for line in (tmp_path / "whole" / PROGRESS_FILE).read_text(encoding="utf-8").splitlines()]
+    assert [marker["episode_id"] for marker in markers] == [record["episode_id"] for record in two_episodes["records"]]
+    assert sum(marker["rollouts"] for marker in markers) == len(whole["results"]) == len((tmp_path / "whole" / "rollouts.jsonl").read_text(encoding="utf-8").splitlines())
+    cost = json.loads((tmp_path / "whole" / "costing.json").read_text(encoding="utf-8"))
+    assert sum(marker["wall_s"] for marker in markers) <= cost["batch_wall_s"] + 1e-6 and cost["keyframes"]["prior_wall_s"] == 0.0 and "batch_wall_s_note" in cost
+    assert all(marker["wall_s"] > 0 and marker["replay_s"] > 0 for marker in markers)
+    # 잘린 실행 → 재개 (풀 경로): 결과는 한 번에 돈 것과 같고, 표지는 여전히 에피소드마다 하나.
+    partial = run(dataset, limit=markers[0]["rollouts"] + 1, out=tmp_path / "resumed", **common)
+    assert len(partial["results"]) == markers[0]["rollouts"] + 1
+    resumed = run(dataset, limit=None, out=tmp_path / "resumed", resume=True, **common)
+    assert resumed["jobs"] == markers[1]["rollouts"]
+    assert {key(result): (result["outcome"], result["reason"]) for result in resumed["results"]} == reference
+    progress = [json.loads(line) for line in (tmp_path / "resumed" / PROGRESS_FILE).read_text(encoding="utf-8").splitlines()]
+    assert [marker["episode_id"] for marker in progress] == [marker["episode_id"] for marker in markers]
+    assert len((tmp_path / "resumed" / KEYFRAMES_INCREMENTAL).read_text(encoding="utf-8").splitlines()) == len(whole["keyframes"])
+    assert not (tmp_path / "resumed" / "rollouts.jsonl.tmp").exists()
+    cost = json.loads((tmp_path / "resumed" / "costing.json").read_text(encoding="utf-8"))
+    assert cost["keyframes"]["resumed"] is True and cost["keyframes"]["prior_wall_s"] == pytest.approx(progress[0]["wall_s"], abs=1e-3)
+    assert cost["batch_wall_s"] == pytest.approx(cost["keyframes"]["prior_wall_s"] + cost["keyframes"]["this_run_wall_s"], abs=1e-2)

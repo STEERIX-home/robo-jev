@@ -66,6 +66,7 @@ __all__ = [
     "run",
     "run_jobs",
     "running_versions_for",
+    "holding_twin_statistics",
     "summarise_sweep",
     "write_outputs",
 ]
@@ -580,6 +581,116 @@ def _rate_table(groups: dict[str, dict[str, int]]) -> dict[str, dict[str, Any]]:
     return table
 
 
+def _joint_parts(key: Any) -> tuple[str, str, str, str] | None:
+    parts = str(key).split(":")
+    return (parts[0], parts[1], parts[2], parts[3]) if len(parts) == 4 else None
+
+
+def holding_twin_statistics(keyframes: list[dict[str, Any]], results: list[dict[str, Any]], labels: list[dict[str, Any]]) -> dict[str, Any]:
+    """놓기 국면(`holding`이 있는) 키프레임의 **쌍둥이 키** 통계 (D1 리뷰 1 I2).
+
+    들고 있는 동안 결합 후보는 {`grasp:<held>:top:<zone>`, `place:<held>:release:<zone>`} × 영역이고(밀기 없음) 두 키가 모두
+    `place-release-v0` 사건을 돌린다 — 한 물리 행동에 키가 둘이다. 이 표는 (키프레임, 영역, seed)로 짝지은 두 키의 결과를
+    commitment의 영역과 나머지 영역으로 나눠 센다(S/S, F/F, grasp 키 성공·place 키 실패, 그 반대), 불일치의 사유·grasp 키 첫 성공 틱·
+    place 키의 `holding_at_end`를 적고, 라벨 쪽 영향(놓기 키프레임의 rollout_reason, 두 키를 섞은 허용 집합, commitment 키의 기능)을
+    센다. rollout을 다시 돌리지 않는다."""
+    holding = [frame for frame in keyframes if frame.get("holding")]
+    frame_of = {f"{frame['episode_id']}@{frame['t']}": frame for frame in holding}
+    key_functions: Counter = Counter()
+    candidates_per_keyframe: Counter = Counter()
+    commitment_function: Counter = Counter()
+    for frame in holding:
+        candidates_per_keyframe[len(frame.get("candidates") or ())] += 1
+        for key in (frame.get("keys") or {}).values():
+            parts = _joint_parts(key)
+            key_functions[parts[0] if parts else str(key)] += 1
+        committed = (frame.get("keys") or {}).get(frame.get("commitment"))
+        parts = _joint_parts(committed) if committed else None
+        commitment_function[parts[0] if parts else "none"] += 1
+
+    events: Counter = Counter()
+    outcomes: dict[tuple[str, str, str, int], tuple[str, dict[str, Any]]] = {}  # (keyframe, zone, function, seed) → (outcome, result)
+    n_rollouts = 0
+    for result in results:
+        job = result["job"]
+        frame = frame_of.get(job["keyframe"])
+        if frame is None:
+            continue
+        n_rollouts += 1
+        events[str((result.get("evidence") or {}).get("event_id"))] += 1
+        parts = _joint_parts(job.get("key"))
+        if parts and parts[1] == str(frame["holding"]) and parts[0] in ("grasp", "place"):
+            outcomes[(job["keyframe"], parts[3], parts[0], int(job["seed"]))] = (str(result["outcome"]), result)
+
+    def bucket() -> dict[str, Any]:
+        return {"pairs": 0, "ss": 0, "ff": 0, "grasp_success_place_failure": 0, "place_success_grasp_failure": 0, "censored": 0}
+
+    tables = {"committed_zone": bucket(), "other_zones": bucket()}
+    disagreement_reasons: Counter = Counter()
+    grasp_success_ticks: list[int] = []
+    place_holding_at_end = 0
+    for (keyframe, zone, function, seed), (outcome, result) in outcomes.items():
+        if function != "grasp":
+            continue
+        twin = outcomes.get((keyframe, zone, "place", seed))
+        if twin is None:
+            continue
+        frame = frame_of[keyframe]
+        committed = _joint_parts((frame.get("keys") or {}).get(frame.get("commitment")))
+        table = tables["committed_zone" if committed and committed[3] == zone else "other_zones"]
+        table["pairs"] += 1
+        place_outcome, place_result = twin
+        if "censored" in (outcome, place_outcome):
+            table["censored"] += 1
+        elif outcome == "success" and place_outcome == "success":
+            table["ss"] += 1
+        elif outcome == "failure" and place_outcome == "failure":
+            table["ff"] += 1
+        elif outcome == "success":
+            table["grasp_success_place_failure"] += 1
+            disagreement_reasons[f"place:{place_result.get('reason')}"] += 1
+            tick = (result.get("evidence") or {}).get("first_success_tick")
+            if tick is not None:
+                grasp_success_ticks.append(int(tick))
+            if (place_result.get("evidence") or {}).get("holding_at_end"):
+                place_holding_at_end += 1
+        else:
+            table["place_success_grasp_failure"] += 1
+            disagreement_reasons[f"grasp:{result.get('reason')}"] += 1
+
+    holding_ids = set(frame_of)
+    reasons: Counter = Counter()
+    confidence: Counter = Counter()
+    mixed = 0
+    for entry in labels:
+        if f"{entry['episode_id']}@{entry['t']}" not in holding_ids:
+            continue
+        label = entry["label"]
+        reasons[str(label.get("rollout_reason"))] += 1
+        confidence[str(label.get("label_confidence"))] += 1
+        keys = frame_of[f"{entry['episode_id']}@{entry['t']}"].get("keys") or {}
+        functions = {(_joint_parts(keys.get(cid)) or ("?",))[0] for cid in label.get("candidate_ids") or ()}
+        mixed += int({"grasp", "place"} <= functions)
+    return {
+        "keyframes": len(holding),
+        "candidates_per_keyframe": {str(k): v for k, v in sorted(candidates_per_keyframe.items())},
+        "keys_by_function": dict(sorted(key_functions.items())),
+        "commitment_key_function": dict(sorted(commitment_function.items())),
+        "rollouts": n_rollouts,
+        "event_ids": dict(sorted(events.items())),
+        "pairs_by_zone": tables,
+        "disagreement_reasons": dict(sorted(disagreement_reasons.items())),
+        "grasp_key_first_success_tick_on_disagreement": {
+            "n": len(grasp_success_ticks),
+            "p50": statistics.median(grasp_success_ticks) if grasp_success_ticks else None,
+            "max": max(grasp_success_ticks) if grasp_success_ticks else None,
+        },
+        "place_key_holding_at_end_on_disagreement": place_holding_at_end,
+        "labels": {"rollout_reason": dict(sorted(reasons.items())), "confidence": dict(sorted(confidence.items())), "allowed_sets_mixing_keys": mixed},
+        "open_question": "놓기 국면에서 하네스가 한 키만 내야 하는가, place 키 쌍둥이를 같은 행동으로 셀 것인가 — 후속 정책이 첫 release 뒤 place commitment에서 흔들리는 원인과 함께 (D1 리뷰 1 I2, 이월)",
+    }
+
+
 def summarise_sweep(out: Path) -> dict[str, Any]:
     """`rollouts/` 출력(keyframes·rollouts·labels·costing)에서 128k 전 관문의 표를 만든다 (`sweep-summary.json`으로도 쓴다).
 
@@ -690,6 +801,7 @@ def summarise_sweep(out: Path) -> dict[str, Any]:
         "grasp_by_start_distance_mm": _rate_table(grasp_by_distance),
         "place_by_keyframe_kind": _rate_table(place_by_kind),
         "labels": {"confidence": dict(sorted(confidence.items())), "rollout_reason": dict(sorted(rollout_reason.items()))},
+        "holding_twins": holding_twin_statistics(keyframes, results, labels),
         "wall_s_per_rollout": cost.get("wall_s_per_rollout"),
         "restore_s_per_rollout": cost.get("restore_s_per_rollout"),
         "throughput": cost.get("throughput"),
@@ -730,9 +842,21 @@ def write_outputs(out: Path, *, keyframes: list[dict[str, Any]], results: list[d
 
 
 def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    """증분 JSONL. **마지막** 줄이 잘려 있으면(덧붙이는 중에 죽은 실행) 그 줄만 버리고 stderr에 적는다 — 재개의 뜻이 그것이다;
+    가운데 줄이 깨진 것은 파일 손상이라 그대로 예외다."""
     if not path.is_file():
         return []
-    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows: list[dict[str, Any]] = []
+    for number, line in enumerate(lines):
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError as error:
+            if number == len(lines) - 1:
+                print(f"{path}: 잘린 마지막 줄을 버린다 ({len(line)} bytes; {error.msg})", file=sys.stderr, flush=True)
+                break
+            raise ValueError(f"{path}: {number + 1}번째 줄이 JSON이 아니다 — 파일이 손상됐다: {error.msg}") from error
+    return rows
 
 
 def _append_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
@@ -742,9 +866,14 @@ def _append_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
-    with path.open("w", encoding="utf-8") as handle:
+    """임시 파일에 다 쓴 뒤 `os.replace`로 바꿔 넣는다 — 다시 쓰는 도중 죽어도 원래 파일이 남는다 (리뷰 1 M4)."""
+    temporary = path.with_name(path.name + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
         for row in rows:
             handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
 
 
 def _load_progress(out: Path, running: dict[str, str]) -> dict[str, Any]:
@@ -821,7 +950,11 @@ def run(
     chunks = [pending[start : start + step] for start in range(0, len(pending), step)]
 
     def persist(number: int, chunk: list[dict[str, Any]], jobs: list[dict[str, Any]], frames: list[dict[str, Any]], summary: dict[str, Any], chunk_results: list[dict[str, Any]], cut: bool, started_at: float) -> None:
+        """묶음의 결과를 덧붙이고 표지를 적는다. `started_at`은 풀 경로에서는 `map_async` 제출 시각(표지의 `wall_s` = 제출 → `get` 반환;
+        겹침 루프에서 다음 묶음의 재생과 겹치지만 창은 묶음마다 서로 겹치지 않아 합이 배치 벽시계를 넘지 않는다 — 리뷰 1 M3),
+        직렬 경로에서는 재생 시작 시각이다."""
         nonlocal replay_s_total, skipped_fidelity
+        wall = time.perf_counter() - started_at  # `.get()`이 돌아온 직후
         replay_s_total += float(summary["replay_s_total"])
         skipped_fidelity += int(summary["skipped_fidelity"])
         keyframes.extend(frames)
@@ -829,7 +962,6 @@ def run(
         _append_jsonl(out / KEYFRAMES_INCREMENTAL, frames)
         _append_jsonl(out / ROLLOUTS_FILE, chunk_results)
         if not cut:  # `limit`에 잘린 묶음: 완료 표지를 쓰지 않는다
-            wall = time.perf_counter() - started_at
             _append_jsonl(
                 out / PROGRESS_FILE,
                 [
@@ -874,8 +1006,9 @@ def run(
                     prev_number, prev_chunk, prev_jobs, prev_frames, prev_summary, async_result, prev_cut, prev_started = in_flight
                     persist(prev_number, prev_chunk, prev_jobs, prev_frames, prev_summary, async_result.get(), prev_cut, prev_started)
                     in_flight = None
+                submitted = time.perf_counter()
                 async_result = pool.map_async(_worker_run, jobs, chunksize=1)
-                in_flight = (number, chunk, jobs, frames, summary, async_result, cut, chunk_started)
+                in_flight = (number, chunk, jobs, frames, summary, async_result, cut, submitted)
             if cut:
                 break
         if in_flight is not None:
@@ -889,7 +1022,12 @@ def run(
         "keyframes": len(keyframes), "skipped_fidelity": skipped_fidelity, "replay_s_total": round(replay_s_total, 3), "running_versions": dict(running),
         "labelled": len(labels), "events_version": events["version"], "episodes": len(records), "episodes_done": len(_read_jsonl(out / PROGRESS_FILE)),
         "resumed": bool(resume), "chunk_episodes": int(chunk_episodes),
+        "prior_wall_s": round(float(prior["wall_s"]), 3), "this_run_wall_s": round(time.perf_counter() - started, 3),
     }
+    cost["batch_wall_s_note"] = (
+        "재개한 실행의 batch_wall_s = 앞선 실행 표지의 wall_s 합(prior_wall_s) + 이번 실행의 벽시계(this_run_wall_s) — 여러 실행의 합이다. "
+        "표지의 wall_s는 풀 경로에서 map_async 제출 → get 반환(묶음마다 서로 겹치지 않는 창)이고 직렬 경로에서는 재생 시작부터다."
+    )
     cost["versions"] = dict(running)
     paths = write_outputs(out, keyframes=keyframes, results=None, labels=labels, cost=cost)
     return {"jobs": len(results) - len(prior["results"]), "results": results, "labels": labels, "costing": cost, "paths": paths, "keyframes": keyframes}

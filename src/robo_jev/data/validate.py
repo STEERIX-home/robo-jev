@@ -58,7 +58,7 @@ from robo_jev.contracts import (
 )
 from robo_jev.data.split import CONCEPT_TAG, OOD_SPLITS, TEMPLATE_TAG, SplitPolicy
 
-__all__ = ["REPORT_VERSION", "leaf_diff", "main", "validate_dataset"]
+__all__ = ["REPORT_VERSION", "leaf_diff", "main", "pooled_position_summary", "validate_dataset"]
 
 REPORT_VERSION = "qa-v1"
 
@@ -650,6 +650,18 @@ def validate_dataset(records: Sequence[dict], *, holdouts: dict | None = None) -
                         f"(균등 {1 / size:.3f}, 표본 {total})",
                     )
                 )
+    pooled = pooled_position_summary(positions)
+    if pooled["checked"]:
+        for name, value, expected in (("first_position_rate", pooled["first_position_rate"], pooled["expected_first_position_rate"]),
+                                      ("normalised_position_mean", pooled["normalised_position_mean"], 0.5)):
+            if abs(value - expected) > POSITION_BIAS_TOLERANCE:
+                errors.append(
+                    _error(
+                        -1,
+                        f"answer_position.pooled.{name}",
+                        f"후보 수를 합친 정답 위치가 쏠렸다: {name} {value:.3f} (기대 {expected:.3f}, 표본 {pooled['questions']})",
+                    )
+                )
 
     split_groups: Counter = Counter()
     for group, splits in group_splits.items():
@@ -689,6 +701,7 @@ def validate_dataset(records: Sequence[dict], *, holdouts: dict | None = None) -
             "tolerance": POSITION_BIAS_TOLERANCE,
             "max_excess": max_excess,
             "by_candidate_count": by_candidate_count,
+            "pooled": pooled,
         },
         "errors": errors,
     }
@@ -697,6 +710,30 @@ def validate_dataset(records: Sequence[dict], *, holdouts: dict | None = None) -
 # --------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------
+
+
+def pooled_position_summary(positions: dict[int, Counter]) -> dict:
+    """후보 수 K를 **합친** 정답 위치 통계 (리뷰 1 M6): 첫 자리 비율 vs Σ n_K/K / N, 정규화 위치 pos/(K−1)의 평균 vs 0.5.
+    K별 표본이 `POSITION_BIAS_MIN_SAMPLES`에 못 미치는 층(D1의 K=7·9·11)도 합쳐서는 검사된다; `checked`는 합계가 최소 표본 이상일 때다."""
+    total = sum(sum(counter.values()) for counter in positions.values())
+    if not total:
+        return {"questions": 0, "checked": False, "first_position_rate": None, "expected_first_position_rate": None, "first_position_excess": None,
+                "normalised_position_mean": None, "expected_normalised_position_mean": 0.5, "normalised_position_deviation": None}
+    first = sum(counter[0] for counter in positions.values())
+    expected_first = sum(sum(counter.values()) / size for size, counter in positions.items())
+    normalised = sum(position / (size - 1) * count for size, counter in positions.items() for position, count in counter.items() if size > 1)
+    counted = sum(sum(counter.values()) for size, counter in positions.items() if size > 1)
+    mean = normalised / counted if counted else 0.5
+    return {
+        "questions": total,
+        "checked": total >= POSITION_BIAS_MIN_SAMPLES,
+        "first_position_rate": first / total,
+        "expected_first_position_rate": expected_first / total,
+        "first_position_excess": first / total - expected_first / total,
+        "normalised_position_mean": mean,
+        "expected_normalised_position_mean": 0.5,
+        "normalised_position_deviation": mean - 0.5,
+    }
 
 
 def _read_jsonl(path: Path) -> list[dict]:
