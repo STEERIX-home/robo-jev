@@ -7,7 +7,10 @@ import pytest
 import torch
 from helpers import D0_MANIFEST, FIXTURES
 
-from robo_jev.baselines.tiny_scorer import Example, QuestionExample, TinyScorer, batch_loss, build_examples, build_model, collate, evaluate_split, load_records, predict, train_tiny_scorer
+from robo_jev.baselines.tiny_scorer import (
+    Example, QuestionExample, TinyScorer, _mark_pattern_solvable, batch_loss, build_examples, build_model, collate, count_examples_by_kind, evaluate_checkpoint,
+    evaluate_split, load_checkpoint, load_records, predict, train_tiny_scorer,
+)
 from robo_jev.contracts import QUESTION_SET_V0
 from robo_jev.evaluate import calibration_error, selective_metrics
 from robo_jev.model.serialize import full_tick_sections, serialize_request
@@ -19,7 +22,8 @@ SMALL = {
              "max_context_bytes": 384, "max_candidate_bytes": 48},
     "model": {"d_model": 32, "heads": 2, "ff": 64, "context_layers": 1, "candidate_layers": 1, "dropout": 0.0},
     "train": {"epochs": 1, "batch_states": 8, "lr": 0.002, "warmup_ratio": 0.1, "gradient_clip": 1.0, "max_wall_minutes": 5, "log_every": 1000},
-    "eval": {"shuffle_seed": 1, "context_shuffle": True, "rule_judge": True, "ece_bins": 5, "pattern_solvable": {"accuracy": 0.85, "shuffle_gap": 0.05, "min_accuracy_for_gap": 0.7}},
+    "eval": {"shuffle_seed": 1, "context_shuffle": True, "instruction_shuffle": True, "rule_judge": True, "ece_bins": 5,
+             "pattern_solvable": {"accuracy": 0.85, "shuffle_gap": 0.05, "min_accuracy_for_gap": 0.7, "rule_judge_margin": 0.0}},
 }
 
 
@@ -105,9 +109,10 @@ def test_train_tiny_scorer_returns_the_table_with_the_standard_columns(tmp_path)
     assert set(report["tables"]) == {"robot/dev", "robot_contrast/dev"}
     stream_table = report["tables"]["robot/dev"]
     assert stream_table["n_records"] == 1 and stream_table["n_states"] == 100 and stream_table["kinds"] == {"stream": 100}
-    for column in ("model", "permuted", "answer_change", "context_shuffle", "context_shuffle_ece", "rule_judge", "ece", "selective", "rule_judge_selective", "pattern_solvable"):
+    for column in ("model", "permuted", "answer_change", "context_shuffle", "context_shuffle_ece", "instruction_shuffle", "rule_judge", "ece", "selective", "rule_judge_selective", "pattern_solvable", "eval_robot_tick_stride"):
         assert column in stream_table, column
-    assert stream_table["context_shuffle_kind"] == "instruction"
+    assert stream_table["context_shuffle_kind"] == "state" and stream_table["instruction_shuffle_kind"] == "instruction"  # 상태 섞기가 표준 열, 지시 섞기는 둘째 열 (D1 리뷰 1 I1)
+    assert stream_table["instruction_shuffle"]["q_main"]["n"] == stream_table["context_shuffle"]["q_main"]["n"] == stream_table["model"]["q_main"]["n"]
     # 채점 가능한 라벨이 있는 질문마다 행이 있다 (D0 dev 스트림의 q_retry는 전부 마스크라 행이 없다 — aggregate의 규칙).
     assert {"q_main", "q_done", "q_gripper", "q_path", "q_speed", "q_force", "q_stop"} <= set(stream_table["model"]) and "_all" in stream_table["model"]
     assert set(stream_table["model"]) - {"_all"} <= set(QUESTION_SET_V0)
@@ -119,11 +124,59 @@ def test_train_tiny_scorer_returns_the_table_with_the_standard_columns(tmp_path)
     selective = stream_table["selective"]
     assert selective["n"] == 100 and abs(selective["coverage"] + selective["abstention"] - 1.0) < 1e-9
     marks = stream_table["pattern_solvable"]
-    assert set(marks) == set(stream_table["model"]) and all(set(mark) == {"accuracy", "shuffle_accuracy", "pattern_solvable", "reasons"} for mark in marks.values())
+    assert set(marks) == set(stream_table["model"])
+    assert all(set(mark) == {"accuracy", "shuffle_accuracy", "instruction_shuffle_accuracy", "rule_judge_accuracy", "pattern_solvable", "reasons"} for mark in marks.values())
+    assert marks["q_main"]["rule_judge_accuracy"] == stream_table["rule_judge"]["q_main"]["accuracy"] and marks["q_main"]["instruction_shuffle_accuracy"] == stream_table["instruction_shuffle"]["q_main"]["accuracy"]
+    assert all(reason in ("scorer_high", "shuffle_high", "state_shuffle_irrelevant", "scorer_beats_rule_judge") for mark in marks.values() for reason in mark["reasons"])
     single_table = report["tables"]["robot_contrast/dev"]
     assert single_table["kinds"] == {"single": 8} and single_table["context_shuffle_kind"] == "state" and "rule_judge" not in single_table
+    assert "instruction_shuffle" not in single_table and "eval_robot_tick_stride" not in single_table  # 단일 레코드만의 표에는 뜻이 없다 (리뷰 1 M8)
     assert {"choice", "boolean", "ordinal"} & set(single_table["model"])
     assert report["sources"][0]["train_examples"] == 32 + 2 * 10  # 단일 32 + 스트림 2편 × (100틱 / stride 10)
+    assert report["sources"][0]["train_examples_by_kind"] == {"single": 32, "stream": 20} == report["train_examples_by_kind"]
+
+
+def test_evaluate_checkpoint_reproduces_the_trained_tables_without_training_and_refuses_another_model_shape(tmp_path):
+    """D1 리뷰 1 I1: 대조군 열을 바꾼 재평가는 저장 모델에서 학습 없이 — 같은 모델이면 같은 표, `training`은 학습 보고서에서 옮겨 적고, 모델 모양이
+    다른 설정은 거절한다."""
+    trained = train_tiny_scorer(SMALL, checkpoint=tmp_path / "scorer.pt")
+    model, saved = load_checkpoint(tmp_path / "scorer.pt", config=SMALL)
+    assert saved["model"] == SMALL["model"] and model.parameter_count() == trained["parameters"]
+    again = evaluate_checkpoint(SMALL, tmp_path / "scorer.pt", training_report=trained)
+    assert again["evaluation"]["eval_only"] is True and again["evaluation"]["checkpoint"] == str(tmp_path / "scorer.pt")
+    assert again["training"] == trained["training"] and again["parameters"] == trained["parameters"]
+    assert again["sources"] == trained["sources"] and again["train_examples_by_kind"] == trained["train_examples_by_kind"]
+    assert set(again["tables"]) == set(trained["tables"])
+    for name, table in trained["tables"].items():
+        for column in ("model", "context_shuffle", "instruction_shuffle", "rule_judge", "pattern_solvable"):
+            if column in table:
+                assert again["tables"][name][column] == table[column], (name, column)
+    assert evaluate_checkpoint(SMALL, tmp_path / "scorer.pt")["training"] is None
+    with pytest.raises(ValueError, match="model"):
+        load_checkpoint(tmp_path / "scorer.pt", config={**SMALL, "model": {**SMALL["model"], "d_model": 64}})
+    with pytest.raises(ValueError, match="max_context_bytes"):
+        load_checkpoint(tmp_path / "scorer.pt", config={**SMALL, "data": {**SMALL["data"], "max_context_bytes": 512}})
+
+
+def test_pattern_marks_name_what_they_measure(d0):
+    """`state_shuffle_irrelevant`는 상태 섞기 열에만, `scorer_beats_rule_judge`는 규칙 열이 있을 때만; 지시 섞기 값은 적기만 하고 표지를 정하지 않는다."""
+    rule = {"accuracy": 0.85, "shuffle_gap": 0.05, "min_accuracy_for_gap": 0.7, "rule_judge_margin": 0.0}
+    model = {"q_main": {"accuracy": 0.79}, "q_done": {"accuracy": 0.99}, "q_low": {"accuracy": 0.40}}
+    state = {"q_main": {"accuracy": 0.60}, "q_done": {"accuracy": 0.98}, "q_low": {"accuracy": 0.39}}
+    instruction = {"q_main": {"accuracy": 0.79}, "q_done": {"accuracy": 0.99}, "q_low": {"accuracy": 0.40}}
+    judge = {"q_main": {"accuracy": 0.74}, "q_done": {"accuracy": 1.00}, "q_low": {"accuracy": 0.73}}
+    marks = _mark_pattern_solvable(model, state, rule, instruction_table=instruction, rule_table=judge)
+    assert marks["q_main"]["reasons"] == ["scorer_beats_rule_judge"] and marks["q_main"]["instruction_shuffle_accuracy"] == 0.79 and marks["q_main"]["rule_judge_accuracy"] == 0.74
+    assert marks["q_done"]["reasons"] == ["scorer_high", "shuffle_high", "state_shuffle_irrelevant"]  # 규칙 1.00 > scorer 0.99 → 규칙 이유 없음
+    assert marks["q_low"] == {"accuracy": 0.40, "shuffle_accuracy": 0.39, "instruction_shuffle_accuracy": 0.40, "rule_judge_accuracy": 0.73, "pattern_solvable": False, "reasons": []}
+    without_rule = _mark_pattern_solvable(model, state, rule, instruction_table=instruction)
+    assert without_rule["q_main"]["reasons"] == [] and without_rule["q_main"]["rule_judge_accuracy"] is None
+    assert "context_irrelevant" not in json.dumps(marks)
+    singles, streams = d0
+    stream = copy.deepcopy(streams[0])
+    stream["ticks"] = stream["ticks"][:7]
+    assert count_examples_by_kind([stream] + singles[:3], robot_tick_stride=3) == {"stream": 3, "single": 3}
+    assert count_examples_by_kind([stream], robot_tick_stride=1) == {"stream": 7}
 
 
 def test_selective_metrics_read_gates_as_abstention_and_forbidden_targets_as_unsafe(d0):

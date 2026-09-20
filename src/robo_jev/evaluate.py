@@ -11,12 +11,17 @@
   `distribution` Σ(p−q)², `event` (p_true − s/(s+f))².
 * 위치 편향 (analysis-nimble §3-3, docs/03 §3): 후보가 둘 이상인 `choice` 질문에서 **선택한 위치의 분포**(첫 위치 비율·
   위치별 수)와, `shuffle_seed`로 후보 순서를 치환한 레코드를 다시 평가했을 때의 **답 변경률**(예측 id가 바뀐 비율).
-* 문맥 섞기 대조군 (docs/03 §6): 분할 안에서 문맥을 한 칸 굴린 레코드 — 비로봇은 `request.state`를 다음 레코드의 것으로
-  (**상태 섞기**: 남는 것은 후보뿐이라 높으면 후보만으로 답이 나오는 단축 경로다), 로봇 스트림은 지시 텍스트
-  (`prefix.instructions[*].text`·`state.goal.text`)만 다음 에피소드의 것으로 바꾸고 **물리 상태·후보는 그대로 둔다**
-  (**지시 섞기**: 상태에 달린 답(경로·그리퍼·속도·힘·완료·정지)은 대조군에서도 맞는 것이 정상이고, 이 값이 모델과 같으면
-  모델이 지시·목표를 읽지 않는다는 뜻이다 — q_main이 그 잣대). 결과의 `context_shuffle_kind`가 어느 쪽인지 말한다.
-  상태 블록을 굴리고 후보 id를 다시 매핑하는 로봇 상태 섞기 대조군은 D1 dev 검사로 미룬다(G0b 리뷰 1 I3).
+* 문맥 섞기 대조군 (docs/03 §6): 분할 안에서 문맥을 한 칸 굴린 레코드 — **상태 섞기**가 표준 열(`context_shuffle`,
+  `context_shuffle_kind = "state"`)이다. 비로봇은 `request.state`를 다음 레코드의 것으로 바꾼다(남는 것은 후보뿐이라 높으면
+  후보만으로 답이 나오는 단축 경로다). 로봇 스트림은 틱마다 **구조화된 상태**(`goal` 줄 전체 — target·zone·forbid·fragile·
+  텍스트 —, 물체·영역·장면 줄, 물체별 파생 값)와 prefix의 지시 텍스트를 다음 에피소드의 같은 색인 틱(마지막 틱으로 clamp)의
+  것으로 바꾸되, 기증 에피소드의 물체·영역 id를 **이 틱의 id에 자리 순서로 다시 매핑**해 상태 안의 참조(`target_ref`·
+  `forbidden_contact`·`fragile`·`target_zone`·`derived[].object`)가 서로 맞게 두고, **질문·후보·commitment·실행 이력·robot·
+  exec 줄은 그대로 둔다**(G0b 리뷰 1 I3 / D1 리뷰 1 I1: 후보 키가 가리키는 id는 상태에 있지만 그 물체·목표는 다른 에피소드의
+  것이다). 이 값이 모델과 같으면 모델이 목표·장면을 읽지 않고 후보 줄(+ 자기 실행 상태)만으로 답한다는 뜻이다.
+  **지시 섞기**(`instruction_shuffle`, kind `instruction`; 로봇 스트림만)는 지시·목표 **텍스트**만 굴리고 구조화된 goal·물리
+  상태·후보를 그대로 두는 둘째 열이다 — 상태에 달린 답(경로·그리퍼·속도·힘·완료·정지)은 여기서도 맞는 것이 정상이고, `goal`
+  줄의 `target=`·`zone=`이 남아 있으므로 이 열과 같다는 것은 "텍스트가 불필요하다"는 뜻일 뿐 "문맥이 불필요하다"는 뜻이 아니다.
 * 규칙 기준군 (docs/02, `robo_jev.harness.rule_judge`): 로봇 틱마다 규칙 판단기의 10개 답을 같은 후보 목록 위의 확률로
   바꿔 같은 지표를 낸다 — 하네스만으로 풀리는 범위의 기준. 이 함수만 하네스를 import하므로 :mod:`robo_jev.train` 은
   이 모듈을 import하지 않는다(docs/06 §1의 경계는 학습 코드 쪽에 둔다).
@@ -343,8 +348,109 @@ def selective_metrics(predictions: list[dict[str, Any]], records: list[dict], *,
 # --------------------------------------------------------------------------
 
 
-def context_shuffle_records(records: list[dict]) -> list[dict]:
-    """분할 안에서 문맥을 한 칸 굴린 레코드들 (모듈 설명). 레코드가 하나면 그대로(굴릴 것이 없다)."""
+#: 로봇 상태 섞기가 기증 틱에서 가져오는 상태 구간 — 목표·물체·영역·장면·물체별 파생 값. 나머지(t·robot·exec·events·commitment·
+#: image·geom·extractor)와 요청의 후보·commitment·실행 이력은 이 틱의 것이다.
+_ROLLED_STATE_KEYS = ("goal", "objects", "zones", "scene")
+_ROBOT_SHUFFLE_KINDS = ("state", "instruction")
+
+
+def _ids(entries: Any) -> list[str]:
+    return [str(entry["id"]) for entry in entries or () if isinstance(entry, dict) and "id" in entry]
+
+
+def _id_remap(own: list[str], donor: list[str]) -> dict[str, str]:
+    """기증 id → 이 틱 id (자리 순서). 기증 쪽이 더 많으면 남는 id는 이 틱의 id와 부딪히지 않을 때만 그대로 두고, 부딪히면 새 id."""
+    mapping: dict[str, str] = {}
+    used = set(own)
+    for position, donor_id in enumerate(donor):
+        if position < len(own):
+            mapping[donor_id] = own[position]
+        elif donor_id not in used:
+            mapping[donor_id] = donor_id
+            used.add(donor_id)
+        else:
+            prefix = "".join(ch for ch in donor_id if not ch.isdigit()) or "id"
+            number = 0
+            while f"{prefix}{number}" in used:
+                number += 1
+            mapping[donor_id] = f"{prefix}{number}"
+            used.add(mapping[donor_id])
+    return mapping
+
+
+def _remap_ids(node: Any, mapping: dict[str, str]) -> Any:
+    if isinstance(node, str):
+        return mapping.get(node, node)
+    if isinstance(node, list):
+        return [_remap_ids(item, mapping) for item in node]
+    return node
+
+
+def _roll_stream_state(own_state: dict, donor_state: dict) -> dict:
+    """틱 상태 하나: 기증 틱의 목표·물체·영역·장면·물체별 파생 값을 id를 다시 매핑해 싣고 나머지는 이 틱의 것 (모듈 설명)."""
+    objects = _id_remap(_ids(own_state.get("objects")), _ids(donor_state.get("objects")))
+    zones = _id_remap(_ids(own_state.get("zones")), _ids(donor_state.get("zones")))
+    rolled = copy.deepcopy(own_state)
+    if isinstance(donor_state.get("goal"), dict):
+        goal = copy.deepcopy(donor_state["goal"])
+        for key in ("target_ref", "forbidden_contact", "fragile"):
+            if key in goal:
+                goal[key] = _remap_ids(goal[key], objects)
+        if "target_zone" in goal:
+            goal["target_zone"] = _remap_ids(goal["target_zone"], zones)
+        rolled["goal"] = goal
+    elif "goal" in donor_state:
+        rolled["goal"] = copy.deepcopy(donor_state["goal"])
+    if isinstance(donor_state.get("objects"), list):
+        new_objects = []
+        for entry in copy.deepcopy(donor_state["objects"]):
+            if isinstance(entry, dict) and "id" in entry:
+                entry["id"] = objects.get(str(entry["id"]), entry["id"])
+                if isinstance(entry.get("reid"), list):
+                    entry["reid"] = _remap_ids(entry["reid"], objects)
+            new_objects.append(entry)
+        covered = {str(entry["id"]) for entry in new_objects if isinstance(entry, dict) and "id" in entry}
+        # 기증 쪽 물체가 적으면 이 틱의 남는 물체는 그대로 둔다 — 후보가 가리키는 id는 언제나 상태에 있다.
+        new_objects.extend(copy.deepcopy(entry) for entry in own_state.get("objects") or () if isinstance(entry, dict) and str(entry.get("id")) not in covered)
+        rolled["objects"] = new_objects
+    if isinstance(donor_state.get("zones"), list):
+        new_zones = []
+        for entry in copy.deepcopy(donor_state["zones"]):
+            if isinstance(entry, dict) and "id" in entry:
+                entry["id"] = zones.get(str(entry["id"]), entry["id"])
+            new_zones.append(entry)
+        covered = {str(entry["id"]) for entry in new_zones if isinstance(entry, dict) and "id" in entry}
+        new_zones.extend(copy.deepcopy(entry) for entry in own_state.get("zones") or () if isinstance(entry, dict) and str(entry.get("id")) not in covered)
+        rolled["zones"] = new_zones
+    if "scene" in donor_state:
+        rolled["scene"] = copy.deepcopy(donor_state["scene"])
+    if isinstance(donor_state.get("derived"), list) or isinstance(own_state.get("derived"), list):
+        # 물체별 파생 값(relative·clearance·corridor)은 기증 틱의 것(id 재매핑), 경유점 줄은 이 틱의 실행에 달린 것이라 그대로.
+        rows = [
+            {**row, "object": objects.get(str(row["object"]), row["object"])}
+            for row in copy.deepcopy(donor_state.get("derived") or [])
+            if isinstance(row, dict) and "object" in row
+        ]
+        rows.extend(copy.deepcopy(row) for row in own_state.get("derived") or [] if isinstance(row, dict) and "object" not in row)
+        rolled["derived"] = rows
+    return rolled
+
+
+def _roll_instruction_text(shuffled: dict, donor: dict) -> None:
+    donor_texts = [i.get("text") for i in donor["prefix"].get("instructions", [])]
+    for position, instruction in enumerate(shuffled["prefix"].get("instructions", [])):
+        if position < len(donor_texts) and donor_texts[position] is not None:
+            instruction["text"] = donor_texts[position]
+
+
+def context_shuffle_records(records: list[dict], *, robot: str = "state") -> list[dict]:
+    """분할 안에서 문맥을 한 칸 굴린 레코드들 (모듈 설명). 레코드가 하나면 그대로(굴릴 것이 없다).
+
+    `robot`은 로봇 스트림에 무엇을 굴리는지다 — ``"state"``(표준: 구조화된 상태를 id 재매핑으로, 지시 텍스트도 함께) 또는
+    ``"instruction"``(지시·목표 텍스트만; 구조화된 goal·물리 상태·후보는 그대로). 비로봇 단일 요청은 어느 쪽이든 상태 전체를 굴린다.
+    """
+    if robot not in _ROBOT_SHUFFLE_KINDS:
+        raise ValueError(f"robot은 {_ROBOT_SHUFFLE_KINDS} 중 하나다: {robot!r}")
     groups: dict[str, list[int]] = {}
     for index, record in enumerate(records):
         groups.setdefault(str(record.get("schema_version")), []).append(index)
@@ -358,16 +464,21 @@ def context_shuffle_records(records: list[dict]) -> list[dict]:
         shuffled = copy.deepcopy(record)
         if record.get("schema_version") == SCHEMA_SINGLE_REQUEST:
             shuffled["request"]["state"] = copy.deepcopy(donor["request"]["state"])
-        elif record.get("schema_version") == SCHEMA_STREAM:
-            donor_texts = [i.get("text") for i in donor["prefix"].get("instructions", [])]
-            for position, instruction in enumerate(shuffled["prefix"].get("instructions", [])):
-                if position < len(donor_texts) and donor_texts[position] is not None:
-                    instruction["text"] = donor_texts[position]
-            donor_goal = ((donor["ticks"][0]["request"].get("state") or {}).get("goal") or {}).get("text")
-            for tick in shuffled["ticks"]:
-                goal = (tick["request"].get("state") or {}).get("goal")
-                if isinstance(goal, dict) and donor_goal is not None and "text" in goal:
-                    goal["text"] = donor_goal
+        elif record.get("schema_version") == SCHEMA_STREAM and donor is not record:
+            _roll_instruction_text(shuffled, donor)
+            donor_ticks = donor["ticks"]
+            if robot == "instruction":
+                donor_goal = ((donor_ticks[0]["request"].get("state") or {}).get("goal") or {}).get("text")
+                for tick in shuffled["ticks"]:
+                    goal = (tick["request"].get("state") or {}).get("goal")
+                    if isinstance(goal, dict) and donor_goal is not None and "text" in goal:
+                        goal["text"] = donor_goal
+            else:
+                for position, tick in enumerate(shuffled["ticks"]):
+                    donor_state = donor_ticks[min(position, len(donor_ticks) - 1)]["request"].get("state") or {}
+                    own_state = tick["request"].get("state")
+                    if isinstance(own_state, dict) and donor_state:
+                        tick["request"]["state"] = _roll_stream_state(own_state, donor_state)
         out.append(shuffled)
     return out
 
@@ -384,19 +495,21 @@ def evaluate_items(
     tokenizer: Any,
     shuffle_seed: int | None = 1,
     context_shuffle: bool = True,
+    instruction_shuffle: bool = False,
     rule_judge: bool = True,
     window_ticks: int = 30,
 ) -> dict[str, Any]:
     """분할 하나의 표: 모델(``model``), 치환한 순서(``permuted`` + ``answer_change``), 문맥 섞기(``context_shuffle`` +
-    ``context_shuffle_kind``: 비로봇 ``state`` / 로봇 스트림 ``instruction`` — 모듈 설명), 규칙 기준군(``rule_judge``)."""
+    ``context_shuffle_kind = "state"``: 비로봇은 상태 전체, 로봇 스트림은 id를 재매핑한 구조화 상태 — 모듈 설명), 로봇 스트림만의
+    지시 텍스트 섞기(``instruction_shuffle`` + ``instruction_shuffle_kind``; `instruction_shuffle=True`일 때), 규칙 기준군(``rule_judge``)."""
     from robo_jev.model.serialize import serialize_request
 
     predictions = predict_items(judge, items)
     result: dict[str, Any] = {"n_items": len(items), "n_states": len(predictions), "model": aggregate(predictions)}
 
-    def reserialised(records: list[dict]) -> list[Item]:
+    def reserialised(subset: list[Item], records: list[dict]) -> list[Item]:
         out: list[Item] = []
-        for item, record in zip(items, records):
+        for item, record in zip(subset, records):
             layout = (
                 serialize_request(record, tokenizer, layout="stream_l1a", window_ticks=window_ticks)
                 if item.kind == "stream"
@@ -406,14 +519,18 @@ def evaluate_items(
         return out
 
     if shuffle_seed is not None:
-        permuted = predict_items(judge, reserialised([permute_candidates(item.record, int(shuffle_seed)) for item in items]))
+        permuted = predict_items(judge, reserialised(items, [permute_candidates(item.record, int(shuffle_seed)) for item in items]))
         result["permuted"] = aggregate(permuted)
         result["answer_change"] = {"shuffle_seed": int(shuffle_seed), **answer_change_rate(predictions, permuted)}
     if context_shuffle:
-        shuffled = context_shuffle_records([item.record for item in items])
-        result["context_shuffle"] = aggregate(predict_items(judge, reserialised(shuffled)))
-        kinds = {"instruction" if item.kind == "stream" else "state" for item in items}
-        result["context_shuffle_kind"] = "+".join(sorted(kinds))  # state(비로봇: 상태 굴림) / instruction(로봇: 지시·목표 텍스트만 굴림)
+        shuffled = context_shuffle_records([item.record for item in items], robot="state")
+        result["context_shuffle"] = aggregate(predict_items(judge, reserialised(items, shuffled)))
+        result["context_shuffle_kind"] = "state"  # 비로봇: 상태 전체, 로봇 스트림: id를 재매핑한 구조화 상태 (모듈 설명)
+    if instruction_shuffle and any(item.kind == "stream" for item in items):
+        streams = [item for item in items if item.kind == "stream"]
+        rolled = context_shuffle_records([item.record for item in streams], robot="instruction")
+        result["instruction_shuffle"] = aggregate(predict_items(judge, reserialised(streams, rolled)))
+        result["instruction_shuffle_kind"] = "instruction"  # 로봇 스트림: 지시·목표 텍스트만 굴림, 구조화 goal·상태·후보 유지
     if rule_judge and any(item.kind == "stream" for item in items):
         result["rule_judge"] = aggregate(rule_judge_predictions(items))
     return result

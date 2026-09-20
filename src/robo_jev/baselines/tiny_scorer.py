@@ -2,10 +2,17 @@
 (docs/06 Task 2c, docs/03 §6; jevlike/cua-s1 계열 option-attention scorer, ≈1M 파라미터, CPU에서 처음부터 학습).
 
     uv run python -m robo_jev.baselines.tiny_scorer --config configs/baselines/tiny_scorer.yaml --out artifacts/reports/tiny-scorer.json
+    uv run python -m robo_jev.baselines.tiny_scorer --eval-checkpoint artifacts/runs/tiny-scorer-d1/scorer.pt \
+        --training-report artifacts/reports/tiny-scorer.json --out artifacts/reports/tiny-scorer.json   # 학습 없이 저장한 모델의 표만
 
 **무엇을 재는가.** 이 기준군이 높은 분할·질문은 의미 판단이 아니라 **패턴**(후보 줄·상태의 표면 규칙)으로 풀린다는 표지다 — 그
-분할은 backbone의 성과 주장에 쓰지 않는다(docs/06 Task 2c). 표는 분할마다 (소형 scorer, 문맥 섞기 대조군, 후보 순서 치환의 답 변경률,
-규칙 기준군(로봇 스트림), ECE, 선택적 지표)이며 :mod:`robo_jev.evaluate` 의 지표 함수를 그대로 쓴다.
+분할은 backbone의 성과 주장에 쓰지 않는다(docs/06 Task 2c). 표는 분할마다 (소형 scorer, 문맥 섞기 대조군 = **상태 섞기**(비로봇은
+상태 전체, 로봇 스트림은 id를 재매핑한 구조화 상태 — goal·물체·영역·장면; :func:`robo_jev.evaluate.context_shuffle_records`),
+로봇 스트림의 **지시 텍스트 섞기** 둘째 열, 후보 순서 치환의 답 변경률, 규칙 기준군(로봇 스트림), ECE, 선택적 지표)이며
+:mod:`robo_jev.evaluate` 의 지표 함수를 그대로 쓴다. 표지(`pattern_solvable`)의 이유는 `scorer_high`(scorer ≥ 기준),
+`shuffle_high`(상태 섞기 ≥ 기준), `state_shuffle_irrelevant`(scorer − 상태 섞기 ≤ gap: 목표·장면을 굴려도 답이 그대로 = 후보 줄과
+자기 실행 상태만으로 풀린다), `scorer_beats_rule_judge`(scorer ≥ 규칙 기준군 + margin: 0.9M byte 모델이 구조화 목표를 읽는 규칙보다
+낫다 — 표면 규칙으로 닿는 수준)다. 지시 섞기 열은 표지를 정하지 않는다(`goal` 줄의 target·zone이 남아 있어 "텍스트가 불필요"만 말한다).
 
 **입력.** 문맥은 허용 필드만 투영한(:func:`robo_jev.contracts.model_input`) 레코드의 상태 텍스트다 — 비로봇 단일 요청은
 :func:`robo_jev.model.serialize.state_lines`, 로봇 틱은 :func:`robo_jev.model.serialize.full_tick_sections`(그 틱을 첫 틱처럼 전부: 목표
@@ -52,7 +59,10 @@ __all__ = [
     "SCORER_VERSION",
     "TinyScorer",
     "build_examples",
+    "count_examples_by_kind",
+    "evaluate_checkpoint",
     "evaluate_split",
+    "load_checkpoint",
     "load_config",
     "load_records",
     "main",
@@ -424,24 +434,36 @@ def rule_judge_predictions_for(records: list[dict], examples: list[Example]) -> 
     return predictions
 
 
-def _mark_pattern_solvable(model_table: dict[str, Any], shuffle_table: dict[str, Any] | None, rule: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    """질문(id 또는 타입)마다 표지: 소형 scorer 정확도 ≥ `accuracy`, 문맥 섞기 정확도 ≥ `accuracy`, 또는 둘의 차이 ≤ `shuffle_gap`
-    (소형 scorer ≥ `min_accuracy_for_gap`)."""
+def _mark_pattern_solvable(
+    model_table: dict[str, Any], shuffle_table: dict[str, Any] | None, rule: dict[str, Any], *,
+    instruction_table: dict[str, Any] | None = None, rule_table: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """질문(id 또는 타입)마다 표지와 이유(모듈 설명): `scorer_high`(scorer ≥ `accuracy`), `shuffle_high`(상태 섞기 ≥ `accuracy`),
+    `state_shuffle_irrelevant`(scorer ≥ `min_accuracy_for_gap`이고 scorer − 상태 섞기 ≤ `shuffle_gap`), `scorer_beats_rule_judge`
+    (규칙 기준군 열이 있고 scorer ≥ `min_accuracy_for_gap`이고 scorer − 규칙 ≥ `rule_judge_margin`). 지시 섞기 값은 적기만 한다."""
     threshold = float(rule.get("accuracy", 0.85))
     gap = float(rule.get("shuffle_gap", 0.05))
     floor = float(rule.get("min_accuracy_for_gap", 0.7))
+    margin = float(rule.get("rule_judge_margin", 0.0))
     out: dict[str, dict[str, Any]] = {}
     for key, row in model_table.items():
         accuracy = row.get("accuracy")
         shuffled = (shuffle_table or {}).get(key, {}).get("accuracy") if shuffle_table else None
+        instruction = (instruction_table or {}).get(key, {}).get("accuracy") if instruction_table else None
+        judged = (rule_table or {}).get(key, {}).get("accuracy") if rule_table else None
         reasons = []
         if accuracy is not None and accuracy >= threshold:
             reasons.append("scorer_high")
         if shuffled is not None and shuffled >= threshold:
             reasons.append("shuffle_high")
         if accuracy is not None and shuffled is not None and accuracy >= floor and accuracy - shuffled <= gap:
-            reasons.append("context_irrelevant")
-        out[key] = {"accuracy": accuracy, "shuffle_accuracy": shuffled, "pattern_solvable": bool(reasons), "reasons": reasons}
+            reasons.append("state_shuffle_irrelevant")
+        if accuracy is not None and judged is not None and accuracy >= floor and accuracy - judged >= margin:
+            reasons.append("scorer_beats_rule_judge")
+        out[key] = {
+            "accuracy": accuracy, "shuffle_accuracy": shuffled, "instruction_shuffle_accuracy": instruction, "rule_judge_accuracy": judged,
+            "pattern_solvable": bool(reasons), "reasons": reasons,
+        }
     return out
 
 
@@ -452,30 +474,37 @@ def evaluate_split(model: TinyScorer, records: list[dict], *, domain: str, confi
     build = lambda recs: build_examples(recs, domain=domain, max_context=max_context, max_candidate=max_candidate, robot_tick_stride=stride)  # noqa: E731
     examples = build(records)
     predictions = predict(model, examples)
+    streams = [record for record in records if record.get("schema_version") == SCHEMA_STREAM]
     result: dict[str, Any] = {
         "n_records": len(records), "n_states": len(predictions), "kinds": dict(sorted(_count(example.kind for example in examples).items())),
-        "eval_robot_tick_stride": stride,
         "model": aggregate(predictions), "ece": calibration_error(predictions, bins=int(config.get("ece_bins", 10))),
     }
+    if streams:
+        result["eval_robot_tick_stride"] = stride  # 단일 레코드만의 표에는 뜻이 없다 (리뷰 1 M8)
     shuffle_seed = config.get("shuffle_seed", 1)
     if shuffle_seed is not None:
         permuted = predict(model, build([permute_candidates(record, int(shuffle_seed)) for record in records]))
         result["permuted"] = aggregate(permuted)
         result["answer_change"] = {"shuffle_seed": int(shuffle_seed), **answer_change_rate(predictions, permuted)}
     if config.get("context_shuffle", True):
-        shuffled = predict(model, build(context_shuffle_records(records)))
+        shuffled = predict(model, build(context_shuffle_records(records, robot="state")))
         result["context_shuffle"] = aggregate(shuffled)
         result["context_shuffle_ece"] = calibration_error(shuffled, bins=int(config.get("ece_bins", 10)))
-        kinds = {"instruction" if example.kind == "stream" else "state" for example in examples}
-        result["context_shuffle_kind"] = "+".join(sorted(kinds))
-    streams = [record for record in records if record.get("schema_version") == SCHEMA_STREAM]
+        result["context_shuffle_kind"] = "state"  # 비로봇: 상태 전체, 로봇 스트림: id를 재매핑한 구조화 상태 (evaluate 모듈 설명)
+        if streams and config.get("instruction_shuffle", True):
+            rolled = predict(model, build(context_shuffle_records(streams, robot="instruction")))
+            result["instruction_shuffle"] = aggregate(rolled)
+            result["instruction_shuffle_kind"] = "instruction"  # 지시·목표 텍스트만 굴림 — 표지를 정하지 않는 둘째 열
     if streams:
         result["selective"] = selective_metrics(predictions, streams)
         if config.get("rule_judge", True):
             rule_predictions = rule_judge_predictions_for(records, examples)
             result["rule_judge"] = aggregate(rule_predictions)
             result["rule_judge_selective"] = selective_metrics(rule_predictions, streams)
-    result["pattern_solvable"] = _mark_pattern_solvable(result["model"], result.get("context_shuffle"), config.get("pattern_solvable") or {})
+    result["pattern_solvable"] = _mark_pattern_solvable(
+        result["model"], result.get("context_shuffle"), config.get("pattern_solvable") or {},
+        instruction_table=result.get("instruction_shuffle"), rule_table=result.get("rule_judge"),
+    )
     return result
 
 
@@ -484,6 +513,19 @@ def _count(values) -> dict[str, int]:
     for value in values:
         out[value] = out.get(value, 0) + 1
     return out
+
+
+def count_examples_by_kind(records: list[dict], *, robot_tick_stride: int = 1) -> dict[str, int]:
+    """레코드 목록이 만들 예제 수를 종류별로 — 스트림은 `stride`로 솎은 틱 수(:func:`_stream_examples`와 같은 셈), 단일은 하나씩.
+    예제를 만들지 않고 센다(평가 전용 진입점의 `sources`; 리뷰 1 M8)."""
+    stride = max(1, int(robot_tick_stride))
+    out = {"stream": 0, "single": 0}
+    for record in records:
+        if record.get("schema_version") == SCHEMA_STREAM:
+            out["stream"] += len(range(0, len(record.get("ticks") or ()), stride))
+        elif record.get("schema_version") == SCHEMA_SINGLE_REQUEST:
+            out["single"] += 1
+    return {kind: count for kind, count in out.items() if count}
 
 
 # --------------------------------------------------------------------------
@@ -546,7 +588,10 @@ def train_tiny_scorer(config: dict[str, Any], *, log: Any = None, checkpoint: Pa
         train_records = load_records(entry["path"], splits=train_splits, files=entry.get("files"))
         examples = build_examples(train_records, domain=domain, max_context=max_context, max_candidate=max_candidate, robot_tick_stride=int(data.get("robot_tick_stride", 1)))
         train_examples.extend(examples)
-        sources.append({"path": str(entry["path"]), "domain": domain, "train_records": len(train_records), "train_examples": len(examples)})
+        sources.append({
+            "path": str(entry["path"]), "domain": domain, "train_records": len(train_records), "train_examples": len(examples),
+            "train_examples_by_kind": dict(sorted(_count(example.kind for example in examples).items())),
+        })
         for split in eval_splits:
             eval_records[(domain, split)] = load_records(entry["path"], splits=(split,), files=entry.get("files"))
     if not train_examples:
@@ -559,6 +604,15 @@ def train_tiny_scorer(config: dict[str, Any], *, log: Any = None, checkpoint: Pa
         checkpoint.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"version": SCORER_VERSION, "config": config, "state_dict": model.state_dict()}, checkpoint)
 
+    tables = _evaluate_tables(model, eval_records, config=config, data=data, log=log)
+    return {
+        "version": SCORER_VERSION, "config": copy.deepcopy(config), "parameters": model.parameter_count(), "sources": sources,
+        "train_examples": len(train_examples), "train_examples_by_kind": dict(sorted(_count(e.kind for e in train_examples).items())),
+        "training": training, "tables": tables, "wall_s": round(time.perf_counter() - started, 1),
+    }
+
+
+def _evaluate_tables(model: TinyScorer, eval_records: dict[tuple[str, str], list[dict]], *, config: dict[str, Any], data: dict[str, Any], log: Any) -> dict[str, dict[str, Any]]:
     tables: dict[str, dict[str, Any]] = {}
     for (domain, split), records in sorted(eval_records.items()):
         if not records:
@@ -575,25 +629,88 @@ def train_tiny_scorer(config: dict[str, Any], *, log: Any = None, checkpoint: Pa
             if log is not None:
                 print(f"evaluating {name}: {len(subset)} records", file=log, flush=True)
             tables[name] = evaluate_split(model, subset, domain=domain, config=config.get("eval") or {}, data=data)
-    return {
+    return tables
+
+
+#: 저장한 모델과 평가 설정이 같아야 하는 항목 — 다르면 표가 다른 모델의 것이 된다.
+_CHECKPOINT_BOUND_KEYS = (("model",), ("data", "max_context_bytes"), ("data", "max_candidate_bytes"))
+
+
+def _lookup(config: dict[str, Any], path: tuple[str, ...]) -> Any:
+    node: Any = config
+    for key in path:
+        node = (node or {}).get(key) if isinstance(node, dict) else None
+    return node
+
+
+def load_checkpoint(path: str | Path, *, config: dict[str, Any] | None = None) -> tuple[TinyScorer, dict[str, Any]]:
+    """저장한 소형 scorer(`torch.save`의 {version, config, state_dict}) → (모델, 저장 시 설정). `config`를 주면 모델 모양·byte 상한이
+    저장 시 설정과 같은지 대조하고 다르면 ValueError(다른 모델의 표를 내지 않는다)."""
+    saved = torch.load(Path(path), map_location="cpu", weights_only=True)
+    if saved.get("version") != SCORER_VERSION:
+        raise ValueError(f"{path}: 저장한 scorer 버전 {saved.get('version')!r} ≠ 지금 {SCORER_VERSION!r}")
+    saved_config = saved.get("config") or {}
+    if config is not None:
+        differences = [".".join(path_) for path_ in _CHECKPOINT_BOUND_KEYS if _lookup(config, path_) != _lookup(saved_config, path_)]
+        if differences:
+            raise ValueError(f"{path}: 평가 설정이 저장 시 설정과 다르다 — " + ", ".join(differences))
+    model = build_model(saved_config)
+    model.load_state_dict(saved["state_dict"])
+    model.eval()
+    return model, saved_config
+
+
+def evaluate_checkpoint(config: dict[str, Any], checkpoint: str | Path, *, log: Any = None, training_report: dict[str, Any] | None = None) -> dict[str, Any]:
+    """학습 없이 저장한 모델(`checkpoint`)의 분할·분야별 표 — :func:`train_tiny_scorer`와 같은 꼴의 보고서. 평가 설정(`eval`,
+    `data.eval_splits`·`eval_robot_tick_stride`)은 `config`의 것이고 모델 모양·byte 상한은 저장 시 설정과 같아야 한다. `sources`의
+    학습 수는 레코드에서 다시 센다(:func:`count_examples_by_kind`); `training_report`(학습 때의 보고서)를 주면 `training`을 그대로
+    옮기고 `evaluation`에 재평가임을 적는다(D1 리뷰 1 I1: 대조군 열을 바꾼 재평가는 재학습이 아니다)."""
+    if config.get("threads"):
+        torch.set_num_threads(int(config["threads"]))
+    data = config.get("data") or {}
+    train_splits = tuple(data.get("train_splits") or ("train",))
+    eval_splits = tuple(data.get("eval_splits") or ("dev",))
+    started = time.perf_counter()
+    model, _ = load_checkpoint(checkpoint, config=config)
+    sources: list[dict[str, Any]] = []
+    eval_records: dict[tuple[str, str], list[dict]] = {}
+    total_by_kind: dict[str, int] = {}
+    for entry in data.get("manifests") or ():
+        domain = str(entry.get("domain") or "robot")
+        train_records = load_records(entry["path"], splits=train_splits, files=entry.get("files"))
+        by_kind = count_examples_by_kind(train_records, robot_tick_stride=int(data.get("robot_tick_stride", 1)))
+        for kind, count in by_kind.items():
+            total_by_kind[kind] = total_by_kind.get(kind, 0) + count
+        sources.append({"path": str(entry["path"]), "domain": domain, "train_records": len(train_records), "train_examples": sum(by_kind.values()), "train_examples_by_kind": by_kind})
+        for split in eval_splits:
+            eval_records[(domain, split)] = load_records(entry["path"], splits=(split,), files=entry.get("files"))
+    if log is not None:
+        print(f"tiny scorer (eval only): {model.parameter_count():,} parameters from {checkpoint}, train examples {sum(total_by_kind.values())} ({total_by_kind})", file=log, flush=True)
+    tables = _evaluate_tables(model, eval_records, config=config, data=data, log=log)
+    report: dict[str, Any] = {
         "version": SCORER_VERSION, "config": copy.deepcopy(config), "parameters": model.parameter_count(), "sources": sources,
-        "train_examples": len(train_examples), "training": training, "tables": tables, "wall_s": round(time.perf_counter() - started, 1),
+        "train_examples": sum(total_by_kind.values()), "train_examples_by_kind": dict(sorted(total_by_kind.items())),
+        "training": copy.deepcopy((training_report or {}).get("training")),
+        "evaluation": {"checkpoint": str(checkpoint), "eval_only": True, "training_wall_s": (training_report or {}).get("wall_s"), "evaluated_at": time.strftime("%Y-%m-%dT%H:%M:%S")},
+        "tables": tables, "wall_s": round(time.perf_counter() - started, 1),
     }
+    return report
 
 
 def _print_tables(report: dict[str, Any], out: Any) -> None:
     for name, table in report["tables"].items():
         print(f"\n[{name}] states {table['n_states']} ece {table['ece']['ece']}", file=out)
         rows = sorted(set(table["model"]) | set((table.get("rule_judge") or {})) | set((table.get("context_shuffle") or {})))
-        print(f"  {'question':<14}{'scorer':>8}{'shuffle':>9}{'rule':>8}{'nll':>8}{'change':>8}  pattern", file=out)
+        print(f"  {'question':<14}{'scorer':>8}{'state':>9}{'instr':>8}{'rule':>8}{'nll':>8}{'change':>8}  pattern", file=out)
         for key in rows:
             model = table["model"].get(key, {})
             shuffle = (table.get("context_shuffle") or {}).get(key, {})
+            instruction = (table.get("instruction_shuffle") or {}).get(key, {})
             rule = (table.get("rule_judge") or {}).get(key, {})
             change = ((table.get("answer_change") or {}).get("by_question") or {}).get(key)
             mark = table["pattern_solvable"].get(key, {})
             fmt = lambda value: f"{value:8.3f}" if isinstance(value, (int, float)) else f"{'-':>8}"  # noqa: E731
-            print(f"  {key:<14}{fmt(model.get('accuracy'))}{fmt(shuffle.get('accuracy')):>9}{fmt(rule.get('accuracy'))}{fmt(model.get('nll'))}{fmt(change)}  {'yes ' + ','.join(mark.get('reasons', [])) if mark.get('pattern_solvable') else ''}", file=out)
+            print(f"  {key:<14}{fmt(model.get('accuracy'))}{fmt(shuffle.get('accuracy')):>9}{fmt(instruction.get('accuracy'))}{fmt(rule.get('accuracy'))}{fmt(model.get('nll'))}{fmt(change)}  {'yes ' + ','.join(mark.get('reasons', [])) if mark.get('pattern_solvable') else ''}", file=out)
         if table.get("selective"):
             s = table["selective"]
             print(f"  selective: coverage {s['coverage']} abstention {s['abstention']} selective_acc {s['selective_accuracy']} wrong_target {s['wrong_target_rate']} unsafe {s['unsafe_action_rate']}", file=out)
@@ -603,7 +720,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="python -m robo_jev.baselines.tiny_scorer", description=__doc__.splitlines()[0])
     parser.add_argument("--config", type=Path, default=Path("configs/baselines/tiny_scorer.yaml"))
     parser.add_argument("--out", type=Path, default=Path("artifacts/reports/tiny-scorer.json"))
-    parser.add_argument("--checkpoint", type=Path, default=None)
+    parser.add_argument("--checkpoint", type=Path, default=None, help="학습한 모델을 저장할 경로")
+    parser.add_argument("--eval-checkpoint", type=Path, default=None, help="학습하지 않고 이 저장 모델의 표만 낸다 (평가 설정은 --config의 것)")
+    parser.add_argument("--training-report", type=Path, default=None, help="--eval-checkpoint와 함께: 학습 때의 보고서 — training 항목을 옮겨 적는다")
     parser.add_argument("--set", action="append", default=[], help="설정 덮어쓰기 KEY=YAML (점으로 중첩: train.epochs=1)")
     args = parser.parse_args(argv)
     config = load_config(args.config)
@@ -614,7 +733,11 @@ def main(argv: list[str] | None = None) -> int:
         for part in parts[:-1]:
             node = node.setdefault(part, {})
         node[parts[-1]] = yaml.safe_load(value)
-    report = train_tiny_scorer(config, log=sys.stdout, checkpoint=args.checkpoint)
+    if args.eval_checkpoint is not None:
+        previous = json.loads(args.training_report.read_text(encoding="utf-8")) if args.training_report is not None else None
+        report = evaluate_checkpoint(config, args.eval_checkpoint, log=sys.stdout, training_report=previous)
+    else:
+        report = train_tiny_scorer(config, log=sys.stdout, checkpoint=args.checkpoint)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(_jsonable(report), ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     _print_tables(report, sys.stdout)

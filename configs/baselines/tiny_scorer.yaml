@@ -1,5 +1,6 @@
 # Task 2c — 소형 scorer 기준군 (docs/06 Task 2c, docs/03 §6). CPU에서 처음부터 학습한다.
-#   uv run python -m robo_jev.baselines.tiny_scorer --config configs/baselines/tiny_scorer.yaml --out artifacts/reports/tiny-scorer.json
+#   uv run python -m robo_jev.baselines.tiny_scorer --config configs/baselines/tiny_scorer.yaml --out artifacts/reports/tiny-scorer.json --checkpoint artifacts/runs/tiny-scorer-d1/scorer.pt
+#   (학습 없이 저장 모델의 표만: --eval-checkpoint artifacts/runs/tiny-scorer-d1/scorer.pt --training-report artifacts/reports/tiny-scorer.json; D1 재평가 ≈ 10분 CPU)
 # 이 표가 backbone 실험의 해석 기준이다 — 인수 기준은 성능이 아니라 표가 있다는 것. 이 값이 높은 분할·질문은 의미 판단이
 # 아니라 패턴으로 풀린다는 표지이고, 그 분할은 backbone의 성과 주장에 쓰지 않는다.
 version: tiny-scorer-v0.1
@@ -41,10 +42,12 @@ train:
 
 eval:
   shuffle_seed: 1                             # 후보 순서 치환 (답 변경률)
-  context_shuffle: true                       # 문맥 섞기 대조군 (비로봇: 상태 굴림, 로봇: 지시·목표 텍스트 굴림 — evaluate.py)
+  context_shuffle: true                       # 문맥 섞기 대조군 = 상태 섞기 (비로봇: 상태 전체, 로봇 스트림: goal·물체·영역·장면을 다음 에피소드의 것으로, id는 이 틱의 것으로 재매핑 — evaluate.py)
+  instruction_shuffle: true                   # 로봇 스트림의 둘째 열: 지시·목표 텍스트만 굴림 (구조화 goal·상태·후보 유지; 표지를 정하지 않는다 — D1 리뷰 1 I1)
   rule_judge: true                            # 로봇 스트림의 규칙 기준군 열
   ece_bins: 10
-  pattern_solvable:                           # 표지 규칙: 소형 scorer 또는 문맥 섞기 대조군이 이 정확도 이상이거나, 둘의 차이가 gap 이하(문맥이 답에 기여하지 않는다)
-    accuracy: 0.85
+  pattern_solvable:                           # 표지 이유: scorer_high / shuffle_high (≥ accuracy), state_shuffle_irrelevant (scorer ≥ min_accuracy_for_gap이고 scorer − 상태 섞기 ≤ shuffle_gap),
+    accuracy: 0.85                            #   scorer_beats_rule_judge (규칙 기준군 열이 있고 scorer ≥ min_accuracy_for_gap이고 scorer − 규칙 ≥ rule_judge_margin — 0.9M byte 모델이 구조화 목표를 읽는 규칙보다 나으면 표면 규칙으로 닿는 수준)
     shuffle_gap: 0.05
     min_accuracy_for_gap: 0.7
+    rule_judge_margin: 0.0
