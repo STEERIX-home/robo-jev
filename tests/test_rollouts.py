@@ -1,8 +1,10 @@
 """키프레임 rollout 제작 파이프라인 검사 — 재생 충실도, 작업 순서, 출력 파일, 비용 산정 (Task 3c-2)."""
 
 import json
+from pathlib import Path
 
 import pytest
+import yaml
 
 from robo_jev.contracts import validate_record
 from robo_jev.data.robot_episodes import generate_episode, load_generator_config, write_episode
@@ -211,3 +213,36 @@ def test_costing_counts_outcomes_by_function():
     assert cost["by_function"]["push"] == {"rollouts": 2, "success": 0, "failure": 1, "censored": 1}
     assert cost["reasons"] == {"horizon": 1, "wall_time_limit": 1}
     assert cost["projections"]["d1_128k"]["cpu_hours"] == pytest.approx(128_000 * 1.0 / 3600, abs=0.01)
+
+
+def test_the_push_contact_ab_driver_runs_the_same_push_jobs_under_each_arms_harness_override(short_episode, tmp_path):
+    """D1-prep 리뷰 2 N3: 옛 A/B는 스크립트 없이 돌아 재현할 수 없었다. 드라이버는 배치의 밀기 job을 팔마다 override한 하네스
+    yaml(+ 그것을 가리키는 전문가 yaml)로 돌리고, 명령줄·override·설정 sha256·방향별/접촉 부위별 단계 표를 JSON에 적는다.
+    `null`은 키 삭제다(도달 표를 지운 팔은 h0.6의 구간, 스칼라 접촉 거리 팔은 옛 값)."""
+    from robo_jev.data.push_ab import apply_override, run as run_ab
+
+    config = load_harness_config()
+    assert apply_override(config, {"candidates": {"push_reach_mm": None}})["candidates"].get("push_reach_mm") is None
+    assert apply_override(config, {"candidates": {"push_contact_mm": 30}})["candidates"]["push_contact_mm"] == 30
+    assert apply_override(config, {})["candidates"] == config["candidates"]
+
+    out = tmp_path / "ab.json"
+    report = run_ab(
+        short_episode["out"], {"h0.6": {"candidates": {"push_reach_mm": None}}, "h0.7": {}}, workers=1, limit_keyframes=1,
+        out=out, scratch=tmp_path / "arms", events_override={"seeds": 1}, command=["scripts/push_contact_ab.py", "--smoke"],
+    )
+    assert out.is_file() and json.loads(out.read_text(encoding="utf-8"))["command"] == ["scripts/push_contact_ab.py", "--smoke"]
+    assert report["push_jobs"] >= 1 and report["seeds"] == 1
+    assert set(report["arms"]) == {"h0.6", "h0.7"}
+    old, new = report["arms"]["h0.6"], report["arms"]["h0.7"]
+    assert old["harness_sha256"] != new["harness_sha256"] and old["override"] == {"candidates": {"push_reach_mm": None}}
+    assert "push_reach_mm" not in yaml.safe_load(Path(old["harness_config"]).read_text(encoding="utf-8"))["candidates"]
+    assert yaml.safe_load(Path(new["harness_config"]).read_text(encoding="utf-8"))["candidates"]["push_reach_mm"] == config["candidates"]["push_reach_mm"]
+    assert yaml.safe_load(Path(new["expert_config"]).read_text(encoding="utf-8"))["harness_config"] == str(Path(new["harness_config"]).resolve())
+    for arm in (old, new):
+        assert sum(arm["outcomes"].values()) == report["push_jobs"]
+        assert sum(row["rollouts"] for row in arm["by_direction"].values()) == report["push_jobs"]
+        assert sum(row["rollouts"] for row in arm["by_class"].values()) == report["push_jobs"]
+        assert all(name.split(":")[0] in ("fingers", "hand") for name in arm["by_class"])
+    assert sum(report["jobs_by_direction"].values()) == report["push_jobs"]
+

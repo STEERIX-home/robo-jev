@@ -7,7 +7,7 @@
 # 실행기와 공유하는 수치(수명·속도 수준·힘 수준·그리퍼 폭·도달 범위)는 여기 **복사하지
 # 않는다**. 컨트롤러 설정이 그 단일 출처이고 하네스가 그것을 읽는다 — 두 곳에 적으면
 # 언젠가 어긋나고, 그때 하네스는 컨트롤러가 거절할 명령을 만든다.
-version: h0.6
+version: h0.7
 controller_config: configs/controller/osc_v0.yaml
 
 # 질문 세트 v0 (docs/08 §4). 세트는 하네스 버전으로 고정하고 후보만 틱마다 바뀐다.
@@ -120,13 +120,25 @@ candidates:
   # 쓴다. 옛 값 30은 ±y에서 손가락 여유 0·손몸통 겹침 최대 76mm였다. batch-0 전체 sweep(9,880) 실측: ±y 접근 중 충돌(contact_force)은
   # 손몸통이 윗면과 겹치는 물체에서만 났고(+y 134/688 vs 0/320, −y 111/544 vs 6/248) 겹침 ≤ 6mm(상자·낮은 원통)는 충돌 4~8 %·성공
   # 41~71 %, 겹침 > 6mm(키 큰 원통)는 충돌 19~42 %·성공 9~21 %다 — 그래서 겹침 6mm까지는 손가락 밀기를 두고 그 위만 손몸통 밀기다
-  # (같은 3,384 밀기 job의 A/B: ±y 접근 중 충돌 243 → 52).
+  # (batch-0의 같은 200 키프레임·3,368 밀기 job·paired seed의 A/B — `scripts/push_contact_ab.py`, 결과 `artifacts/reports/
+  # d1-robot-push-contact-ab.json`, 팔 old_30mm(스칼라 30) / h0.6 / h0.7: ±y 접근 중 충돌 251 → 59, 성공 1,645 → 1,679 → 1,676;
+  # +y 602 → 548 → 585, −y 263 → 390 → 369, +x 777 → 741 → 722).
   push_contact_mm:
     fingers: {"+x": 33, "-x": 52, "y": 48}
     hand: {"+x": 33, "-x": 52, "y": 111}
+  # 닫힌 그리퍼가 그 축으로 **실제로** 뻗은 길이(실측 `Environment.gripper_extent_mm`, 검사가 1mm 안에서 대조; h0.7). 접촉 거리와의
+  # 차이가 stand-off 여유(slack)다: 명령한 밀기 구간은 접촉점에서 시작하므로 손가락·손몸통은 slack만큼 간 뒤에야 물체에 닿고 물체는
+  # 구간에서 그만큼 덜 간다(y 손가락 18·손몸통 5, +x 손가락 21·−x 손가락 35, 손몸통 x 5mm — h0.6 batch-0 재실행에서 ±y 손가락 밀기의
+  # `push_horizon` 실패 116·180건의 변위 중앙값이 20·26mm였다, 리뷰 2 N7). 하네스는 명령 구간을 `push_segment_mm + slack`으로 늘리고
+  # 성공 기준(사건 `segment_fraction × push_segment_mm` = 40mm)·완료 판정(변위 ≥ `push_segment_mm`)은 절대값 그대로 둔다. 같은 3,368
+  # job의 A/B(h0.6 → h0.7): 겨냥한 +y 손가락 밀기는 horizon 실패 116 → 78, 성공 460 → 496(704 job); 다른 부위·축은 접촉 혼돈의 띠 안에서
+  # 움직였고(−y 손가락 238 → 213, +x 손가락 512 → 492, 손몸통 ±0~4; 옛 A/B에서 3mm 오프셋 변화가 +x를 777 → 741 움직였다) 전체 1,679 → 1,676.
+  push_reach_mm:
+    fingers: {"+x": 12, "-x": 17, "y": 30}
+    hand: {"+x": 28, "-x": 47, "y": 106}
   push_hand_bottom_mm: 22    # 손몸통 바닥의 말단 위 높이 (실측 21.9)
   push_hand_overlap_mm: 6    # 손몸통이 윗면과 이만큼까지 겹치는 물체는 손가락으로 민다
-  push_segment_mm: 80        # 밀기 한 구간의 길이 (완료 판정에도 쓴다)
+  push_segment_mm: 80        # 밀기 한 구간의 길이 = 물체가 가야 할 변위 (완료 판정에도 쓴다; 명령 구간은 여기에 slack을 더한다)
   # 밀기 높이 = max(물체 중간 높이, 작업면 + 이 값). 닫힌 손가락 끝은 그립 사이트 아래 4mm이고 하강 끝의 추종
   # 오차가 10mm쯤이라 그보다 낮으면 손가락이 작업면을 친다(3c-2 실측: 32mm 상자의 중간 높이에서 230N).
   push_height_min_mm: 25
@@ -168,8 +180,12 @@ compose:
   # 그동안 말단이 `place_progress_mm` 이상 내려가지 못하면(보이지 않는 받침·틀린 파지 오프셋·작업면에 눌린 하중) `place_stalled`로
   # 적고 commitment를 풀며 그 놓기점 둘레 `place_stall_exclusion_mm`의 격자점을 그 에피소드 동안 제외한다 — 다음 채택은 다른 자리로
   # 내려간다(반경은 보이지 않는 받침의 자국 + 든 물체의 자국 규모: 물체 자국 ≤ 40 + 여유). 옛 규칙(중심 고정)의 E1 seed 13은 96틱을
-  # 그 자리에서 기다렸다; 감시는 15틱 뒤 풀고 자리를 바꾼다(검사 `test_the_stall_guard_frees_seed_13_under_the_old_centre_rule`).
+  # 그 자리에서 기다렸다; 진행 장부는 15틱 뒤 풀고 자리를 바꾼다(검사 `test_the_stall_guard_frees_seed_13_under_the_old_centre_rule`) —
+  # 단, 접촉 중 OSC가 말단을 틱마다 0.1~0.4mm 가라앉히는 creep(seed 13 궤적 −8 → −17mm/24틱)은 진행 장부를 계속 새로 세게 해 실제
+  # 대기는 31틱이었고 0.13mm/틱 이상이면 영원히 미뤄진다(리뷰 2 N2). 그래서 h0.7은 진행과 무관한 **절대 상한** `m_place_total`
+  # (3 × m_place)을 둔다: 연속 readiness 대기 틱이 그 수에 이르면 `place_stalled`다(기록의 `cap`이 progress/total을 말한다).
   m_place: 15
+  m_place_total: 45
   place_progress_mm: 2
   place_stall_exclusion_mm: 60
 
