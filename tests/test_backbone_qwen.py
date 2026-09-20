@@ -45,9 +45,12 @@ pytest.importorskip("transformers")
 BF16_REL_READOUT = 0.053  # 실측 0.0264의 2배
 BF16_REL_MEDIAN = 0.031  # 실측 0.0152
 BF16_REL_MAX = 0.93  # 실측 0.4659 (공식 구현의 kernel 사이 차이 0.27~0.40)
-#: fp32는 프로세스에 따라 다르다 — 같은 조건의 단독 탐침 5회는 모두 0.0101, 전체 suite 안에서는 0.0243(리뷰 1의 측정도 0.0243):
-#: fla Triton kernel의 autotune이 프로세스마다 tiling을 고르고 fp32 누적 순서가 그에 따라 달라진다(bf16은 반올림이 지배해 값이 같다).
-#: 상수는 관측 최대의 2배.
+#: fp32는 프로세스에 따라 다르다 — 같은 조건의 단독 탐침 5회는 모두 0.0101, 전체 suite 안에서는 0.0243(리뷰 1의 측정도 0.0243).
+#: **원인은 autotune tiling이 아니라 기준 쪽의 kernel이 바뀌는 것이다**(G0b 리뷰 1 I4에서 진단, 그 보고서 §Fix round 1):
+#: suite 안에서는 transformers의 hub-kernels wrapper가 "`chunk_gated_delta_rule` is falling back to its reference PyTorch
+#: implementation"을 찍는다 — 즉 **공식 forward(기준)가 torch chunk 구현으로 내려가고** adapter는 fla의 fp32 kernel을 그대로 쓰므로
+#: 0.0243은 그 kernel 대 kernel의 fp32 차이다. 단독 탐침에서는 양쪽 다 fla라 0.0101이 된다. bf16은 반올림이 지배해 두 조건에서
+#: 거의 같다. 상수는 관측 최대의 2배.
 FP32_REL_MAX = 0.05  # 실측 0.0101(탐침) / 0.0243(suite)
 CPU_TOL = {"rtol": 1e-4, "atol": 1e-4}
 
@@ -62,7 +65,14 @@ def real_weights_present() -> bool:
     return torch.cuda.is_available()
 
 
-needs_real_2b = pytest.mark.skipif(not real_weights_present(), reason="Qwen3.5-2B 가중치(artifacts/models)와 CUDA가 있어야 한다")
+def needs_real_2b(func):
+    """실제 2B 가중치 + CUDA가 있어야 하는 검사 — 없으면 skip하고, **`real_2b` 표지를 붙인다**.
+
+    `_torch_kernels` fixture가 이 표지로 그 검사를 고른다(검사 **이름**에 `real_2b`가 들어 있는지 보던 것을 바꾼 것 —
+    G0b 리뷰 2 M-c): 이름을 바꿔도 kernel 선택이 조용히 뒤집히지 않는다.
+    """
+    marked = pytest.mark.real_2b(func)
+    return pytest.mark.skipif(not real_weights_present(), reason="Qwen3.5-2B 가중치(artifacts/models)와 CUDA가 있어야 한다")(marked)
 
 
 # --------------------------------------------------------------------------
@@ -87,9 +97,10 @@ def _gpu_guard():
 @pytest.fixture(autouse=True)
 def _torch_kernels(request):
     """CPU 검사는 공식 forward도 torch 참조 kernel로 돈다 (CUDA가 있는 venv에서 fla·causal_conv1d가 CPU tensor를 받지 않게).
-    실제 2B 검사(`real_2b`)는 **공식 kernel**(fla `chunk_gated_delta_rule`·causal_conv1d·flash)이 기준이다 — 허용 오차 상수도
-    그 조건에서 쟀다(모듈 설명; G0b 리뷰 1 I4)."""
-    if "real_2b" in request.node.name:
+    **`real_2b` 표지가 붙은 검사**는 공식 kernel(fla `chunk_gated_delta_rule`·causal_conv1d·flash)이 기준이다 — 허용 오차 상수도
+    그 조건에서 쟀다(모듈 설명; G0b 리뷰 1 I4). 이름이 아니라 표지로 고르는 이유는 검사 이름을 바꿨을 때 kernel 선택이
+    조용히 뒤집히지 않게 하려는 것이다(G0b 리뷰 2 M-c)."""
+    if request.node.get_closest_marker("real_2b") is not None:
         yield
         return
     with torch_reference_kernels():
