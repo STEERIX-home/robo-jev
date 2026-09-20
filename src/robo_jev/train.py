@@ -130,6 +130,7 @@ __all__ = [
     "run_stream_chunk",
     "tokenizer_block",
     "train",
+    "load_readout_checkpoint",
     "trainable_state_dict",
 ]
 
@@ -159,6 +160,7 @@ DEFAULT_SAMPLER = {
     "material_tag": "provenance.material",
     "tick_weights": dict(DEFAULT_TICK_WEIGHTS),
     "steady_min_held_ticks": 3,
+    "permute_candidates_seed": None,  # 후보 순서 치환 증강 (null = 끔; 정수면 레코드·seed로 정해진 순열로 직렬화)
 }
 
 #: 재개할 때 checkpoint의 설정과 달라도 되는 키 — 중단·예산·경로·이름뿐이다(run id는 checkpoint의 것을
@@ -207,7 +209,7 @@ DEFAULTS: dict[str, Any] = {
     "world_size": 1,
     "max_total_tokens": 8192,
     "max_state_tokens": 2048,
-    "activation_checkpointing": False,
+    "activation_checkpointing": False,  # 실제 backbone의 층 단위 activation checkpointing (LoRA·full 학습; tiny_hybrid에는 없다)
     "max_steps": None,
     "max_wall_hours": None,
     "seed": 17,
@@ -248,15 +250,17 @@ def _dataset_manifests(single: Any, many: Any) -> list[dict[str, Any]]:
         if isinstance(entry, str):
             entry = {"path": entry}
         _need(isinstance(entry, dict), f"dataset_manifests[{position}]: 경로 또는 {{path, domain, material}}여야 한다 (받은 값: {entry!r})")
-        unknown = [key for key in entry if key not in ("path", "domain", "material")]
-        _need(not unknown, f"dataset_manifests[{position}]: 알 수 없는 키 {unknown} (허용: ['path', 'domain', 'material'])")
+        unknown = [key for key in entry if key not in ("path", "domain", "material", "files")]
+        _need(not unknown, f"dataset_manifests[{position}]: 알 수 없는 키 {unknown} (허용: ['path', 'domain', 'material', 'files'])")
+        files = entry.get("files")
+        _need(files is None or (isinstance(files, list) and files and all(isinstance(f, str) for f in files)), f"dataset_manifests[{position}].files: manifest 파일 키의 fnmatch 패턴 목록이거나 null이어야 한다")
         path = entry.get("path")
         _need(isinstance(path, str) and bool(path), f"dataset_manifests[{position}].path: manifest 경로(문자열)가 필요하다")
         domain = entry.get("domain")
         _need(domain is None or domain in DOMAINS, f"dataset_manifests[{position}].domain: {list(DOMAINS)} 중 하나이거나 null이어야 한다 (받은 값: {domain!r})")
         material = entry.get("material")
         _need(material is None or material in MATERIALS, f"dataset_manifests[{position}].material: {list(MATERIALS)} 중 하나이거나 null이어야 한다 (받은 값: {material!r})")
-        out.append({"path": path, "domain": domain, "material": material})
+        out.append({"path": path, "domain": domain, "material": material, "files": None if files is None else list(files)})
     return out
 
 
@@ -315,7 +319,8 @@ def resolve_config(config: dict) -> dict:
     else:
         _need(out["lora"] is None, "lora: trainable이 lora_and_readout일 때만 준다")
     _need(out["optimizer"] in OPTIMIZERS, f"optimizer: {list(OPTIMIZERS)}만 구현했다 (받은 값: {out['optimizer']!r})")
-    _need(out["activation_checkpointing"] is False, "activation_checkpointing: CPU fixture 경로에는 없다 — 클라우드 단계에서 붙인다 (false여야 한다)")
+    _need(isinstance(out["activation_checkpointing"], bool), "activation_checkpointing: true/false여야 한다")
+    _need(out["activation_checkpointing"] is False or out["model_id"] != "tiny_hybrid", "activation_checkpointing: CPU fixture 경로에는 없다 — 실제 backbone(qwen3_5)의 층 단위 checkpointing만 있다 (tiny_hybrid에서는 false여야 한다)")
     _need(out["world_size"] == 1, f"world_size: 이 학습기는 단일 프로세스다 (1이어야 한다, 받은 값: {out['world_size']!r})")
     _need(isinstance(out["freeze_vision_encoder"], bool), "freeze_vision_encoder: true/false여야 한다")
     layout = out["layout"]
@@ -348,6 +353,7 @@ def resolve_config(config: dict) -> dict:
         out["run_id"] = f"{out['run_name']}-{time.strftime('%Y%m%d-%H%M%S')}"
     _need(isinstance(out["run_id"], str) and out["run_id"], "run_id: 비어 있지 않은 문자열이어야 한다")
     _need(_is_int(sampler["steady_min_held_ticks"]) and sampler["steady_min_held_ticks"] >= 1, "sampler.steady_min_held_ticks: 1 이상의 정수여야 한다")
+    _need(sampler["permute_candidates_seed"] is None or _is_int(sampler["permute_candidates_seed"]), "sampler.permute_candidates_seed: 정수이거나 null이어야 한다")
     weights = sampler["tick_weights"]
     _need(isinstance(weights, dict) and set(weights) == set(TICK_CLASSES), f"sampler.tick_weights: {list(TICK_CLASSES)} 네 종류의 가중치가 필요하다 (받은 값: {weights!r})")
     return out
@@ -390,6 +396,7 @@ def build_model(config: dict) -> Judge:
         backbone.model.requires_grad_(True)
     elif config["trainable"] == "lora_and_readout":
         attach_lora(backbone, config["lora"])
+    backbone.activation_checkpointing = bool(config["activation_checkpointing"])  # 층 단위 (gradient가 켜진 forward에서만 작동)
     rank = DEFAULT_REAL_READOUT_RANK if config["readout_rank"] is None else int(config["readout_rank"])
     seed = 1000 + (0 if config["model_seed"] is None else int(config["model_seed"]))
     return Judge(backbone, rank=rank, readout=READOUTS[config["readout"]], seed=seed, readout_dtype=READOUT_DTYPES[config["readout_dtype"]])
@@ -427,6 +434,26 @@ def load_trainable_state(model: Judge, saved: dict[str, Tensor]) -> None:
     missing = [name for name in result.missing_keys if name in trainable]
     if missing:
         raise ValueError(f"checkpoint: 학습 대상 파라미터가 저장되어 있지 않다: {missing[:5]}")
+
+
+def load_readout_checkpoint(model: Judge, path: str | Path, *, tokenizer_sha256: str | None = None) -> dict[str, Any]:
+    """서빙·평가용: checkpoint의 readout(과 LoRA)을 `model`에 싣는다 — 먼저 배포 계약 digest를 지금 체크아웃과 대조해 다르면 거절한다.
+
+    `tokenizer_sha256`이 없으면 checkpoint가 적은 tokenizer 해시로 digest를 만든다(코드·하네스 버전만 대조). 돌려주는 것은
+    checkpoint의 manifest.
+    """
+    state = load_checkpoint(path)
+    manifest = state.get("manifest") if isinstance(state.get("manifest"), dict) else {}
+    saved_tokenizer = (manifest.get("contract") or {}).get("tokenizer_sha256") or (manifest.get("tokenizer") or {}).get("sha256") or "whitespace"
+    current = contract_digest(saved_tokenizer if tokenizer_sha256 is None else tokenizer_sha256)
+    differences = contract_differences(manifest.get("contract"), current)
+    if differences:
+        raise ValueError(f"{path}: 배포 계약 digest가 지금 체크아웃과 다르다 (다른 조각: {differences}) — 이 checkpoint를 싣지 않는다")
+    saved_rank = (manifest.get("model") or {}).get("rank")
+    if saved_rank is not None and int(saved_rank) != model.rank:
+        raise ValueError(f"{path}: checkpoint의 readout rank {saved_rank}와 모델의 {model.rank}가 다르다")
+    load_trainable_state(model, state["model"])
+    return manifest
 
 
 def trainable_state_dict(model: Judge) -> dict[str, Tensor]:
@@ -798,7 +825,7 @@ def resume_config(config: dict) -> dict[str, Any]:
     뺀 것. `dataset_manifests`는 경로를 빼고 태그(domain·material)만 남긴다."""
     out = {key: value for key, value in config.items() if key not in RESUME_FREE_KEYS and key not in RESUME_PATH_KEYS}
     out["dataset_manifests"] = [
-        {"domain": entry.get("domain"), "material": entry.get("material")} for entry in config.get("dataset_manifests") or []
+        {"domain": entry.get("domain"), "material": entry.get("material"), "files": entry.get("files")} for entry in config.get("dataset_manifests") or []
     ]
     return out
 
@@ -927,7 +954,7 @@ class Trainer:
             layouts=self.config["layout"], window_ticks=self.config["stream_window_ticks"],
             max_state_tokens=self.config["max_state_tokens"], max_total_tokens=self.config["max_total_tokens"],
             stream_max_ticks=self.config["stream_max_ticks"], domain_tag=sampler_config["domain_tag"],
-            material_tag=sampler_config["material_tag"],
+            material_tag=sampler_config["material_tag"], permute_seed=sampler_config["permute_candidates_seed"],
         )  # fmt: skip
         if not self.items:
             raise ValueError(f"dataset_manifests: split {self.config['splits']}에 레코드가 없다")

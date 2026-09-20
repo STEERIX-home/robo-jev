@@ -229,7 +229,7 @@ def test_a_generated_robot_batch_and_the_d0_singles_train_together_from_two_mani
     resolved = resolve_config(config)
     assert resolved["dataset_manifest"] is None
     assert resolved["dataset_manifests"] == [
-        {"path": robot, "domain": None, "material": None}, {"path": singles, "domain": "non_robot", "material": None},
+        {"path": robot, "domain": None, "material": None, "files": None}, {"path": singles, "domain": "non_robot", "material": None, "files": None},
     ]
     # `dataset_manifest: x`는 `dataset_manifests: [x]`와 같은 run이다 (재개의 정체 비교).
     assert resolve_config(tiny_config(tmp_path, dataset_manifest=singles))["dataset_manifests"] == resolve_config(
@@ -438,6 +438,21 @@ def test_lr_factor_warms_up_linearly_then_decays_by_cosine():
     assert factors[5] == 1.0 and all(a > b for a, b in zip(factors[5:], factors[6:]))  # 그 뒤 cosine 단조 감소
     assert factors[-1] > 0 and factors[52] == pytest.approx(0.5 * (1 + math.cos(math.pi * 47 / 95)))
     assert lr_factor(0, max_steps=10, warmup_ratio=0.0) == 1.0
+
+
+def test_dataset_manifest_files_pattern_selects_only_matching_files(tmp_path):
+    """`dataset_manifests[].files`(fnmatch)로 manifest의 일부 파일만 읽는다 — 로봇 batch의 에피소드만, 대조 단일 요청은 빼는 용도."""
+    from robo_jev.sampler import load_items
+
+    tokenizer = WhitespaceTokenizer()
+    only_streams = load_items(D0_MANIFEST, tokenizer=tokenizer, splits=("train",), files=["d0_streams*"], stream_max_ticks=2)
+    assert only_streams and all(item.kind == "stream" for item in only_streams)
+    with pytest.raises(ValueError, match="files"):
+        load_items(D0_MANIFEST, tokenizer=tokenizer, files=["nothing/*"])
+    config = resolve_config(tiny_config(tmp_path, dataset_manifests=[{"path": str(D0_MANIFEST), "files": ["d0.jsonl"]}], dataset_manifest=None))
+    assert config["dataset_manifests"][0]["files"] == ["d0.jsonl"]
+    with pytest.raises(ValueError, match="files"):
+        resolve_config(tiny_config(tmp_path, dataset_manifests=[{"path": str(D0_MANIFEST), "files": "d0.jsonl"}], dataset_manifest=None))
 
 
 def test_config_rejects_what_the_cpu_path_does_not_implement(tmp_path):
