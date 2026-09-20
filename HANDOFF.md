@@ -40,4 +40,4 @@ Task 1·2·3a·3b·3c·4(CPU)·5(CPU) 전부 리뷰 통과·merge. Task 2b-G0a(S
 
 ## 5. 작업 규칙
 
-superpowers SDD 루프(브리프 파일 → 구현 에이전트 → 리뷰 패키지 → 리뷰 → 수정 → 재리뷰 → `progress.md` 한 줄). 커밋은 사용자 승인 하에, trailer `Co-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>`. `.superpowers/`·`.venv/`·`artifacts/`·`data/`·`.claude/worktrees/`는 커밋 금지. docs/08이 로봇 스트림 계약의 정본, README의 구현 상태 표가 태스크 상태의 정본. 외부 리뷰는 코드로 검증한 뒤 동의를 받아 반영(07·09·10·11 반영 완료).
+superpowers SDD 루프(브리프 파일 → 구현 에이전트 → 리뷰 패키지 → 리뷰 → 수정 → 재리뷰 → `progress.md` 한 줄). 커밋은 사용자 승인 하에, trailer `Co-Authored-By: <그 작업을 한 Claude 모델> <noreply@anthropic.com>`(2026-09-20까지는 Claude Fable 5.1, 2026-09-21부터 Claude Opus 5 (1M context)). `.superpowers/`·`.venv/`·`artifacts/`·`data/`·`.claude/worktrees/`는 커밋 금지. docs/08이 로봇 스트림 계약의 정본, README의 구현 상태 표가 태스크 상태의 정본. 외부 리뷰는 코드로 검증한 뒤 동의를 받아 반영(07·09·10·11 반영 완료).

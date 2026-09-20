@@ -448,6 +448,10 @@ def context_shuffle_records(records: list[dict], *, robot: str = "state") -> lis
 
     `robot`은 로봇 스트림에 무엇을 굴리는지다 — ``"state"``(표준: 구조화된 상태를 id 재매핑으로, 지시 텍스트도 함께) 또는
     ``"instruction"``(지시·목표 텍스트만; 구조화된 goal·물리 상태·후보는 그대로). 비로봇 단일 요청은 어느 쪽이든 상태 전체를 굴린다.
+
+    상태 섞기에서 **기증 틱의 물체가 더 적으면 이 틱의 남는 물체는 그대로 둔다** — 후보의 id가 모두 풀려야 하기 때문이다
+    (D1 dev 16.8 % · test 31.2 % · ood_dev 32.9 %의 틱; 굴린 `goal.target_ref`가 그 남은 물체를 가리킨 틱은 0). 즉 굴리기는
+    대다수 틱에서 완전하고 나머지에서는 부분적이다 (D1 리뷰 2 N3).
     """
     if robot not in _ROBOT_SHUFFLE_KINDS:
         raise ValueError(f"robot은 {_ROBOT_SHUFFLE_KINDS} 중 하나다: {robot!r}")
