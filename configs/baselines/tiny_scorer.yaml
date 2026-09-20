@@ -4,7 +4,7 @@
 # 아니라 패턴으로 풀린다는 표지이고, 그 분할은 backbone의 성과 주장에 쓰지 않는다.
 version: tiny-scorer-v0.1
 seed: 17
-threads: 16                                   # torch CPU 스레드 (rollout 작업과 같이 돌리지 않는다)
+threads: 8                                    # torch CPU 스레드 — 작은 행렬이라 8이 최적(D1 실측 16상태 step: 8 thread 1.14 s, 16 thread 3.35 s; rollout 작업과 같이 돌리지 않는다)
 
 data:
   manifests:                                  # 문맥/후보 byte 텍스트로 읽는 데이터 (sampler의 manifest 꼴; 라벨은 레코드의 것)
@@ -14,7 +14,7 @@ data:
       domain: non_robot
   train_splits: [train]
   eval_splits: [dev, test, ood_dev]           # ood_test는 봉인 — 여기서도 보지 않는다
-  robot_tick_stride: 3                        # 학습에 쓰는 로봇 틱은 3틱에 하나 (틱은 상관된 표본; 평가는 전부). 1 step(16상태) ≈ 1~5 s CPU
+  robot_tick_stride: 3                        # 학습에 쓰는 로봇 틱은 3틱에 하나 (틱은 상관된 표본; 평가는 stride 2). D1 train 예제 10,303(스트림 7,818 + 단일 2,485)
   eval_robot_tick_stride: 2                   # 평가에 쓰는 로봇 틱은 2틱에 하나 (dev·test·ood_dev 85편 ≈ 7.7K틱 × 3 pass; 규칙 기준군도 같은 틱)
   max_context_bytes: 1024                     # 문맥 byte 상한 (앞을 남긴다: goal·robot·exec·commitment·이력 → 물체 → 영역·장면)
   max_candidate_bytes: 64                     # 후보 줄·질문 머리 byte 상한
@@ -34,7 +34,7 @@ train:
   weight_decay: 0.01
   warmup_ratio: 0.05
   gradient_clip: 1.0
-  max_wall_minutes: 90                        # 예산을 넘으면 그 epoch에서 멈춘다 (표에 적는다). D1 train ≈ 10K 예제·4 epoch ≈ 40분(16 thread)
+  max_wall_minutes: 90                        # 예산을 넘으면 그 epoch에서 멈춘다 (표에 적는다). D1 실측: 644 step/epoch × 1.14 s(8 thread) ≈ 12분/epoch, 3 epoch ≈ 37분; 평가 32상태 0.76 s
   log_every: 50
 
 eval:

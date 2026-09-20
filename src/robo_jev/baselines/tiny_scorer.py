@@ -237,17 +237,10 @@ class TinyScorer(nn.Module):
         pooled = self.context_inject(self.context_pool_norm((context * keep_context).sum(1) / keep_context.sum(1).clamp_min(1.0)))
         x = self.dropout(self.embed(sequences) + self.pos_candidate(positions)[None] + pooled[owner][:, None, :])
         x = self.candidate_encoder(x, src_key_padding_mask=mask)
-        # 상태(문맥)마다 그 상태의 후보·질문 머리를 한 묶음으로 attention한다 — `context[owner]`로 M×Lc×d를 모으면(M ≈ 상태 × 70)
-        # 한 step에 수백 MB를 복사해 CPU에서 병목이다; 상태 수(B)만큼의 작은 호출이 훨씬 싸다.
-        queries = self.cross_norm(x)
-        attended = torch.empty_like(x)
-        for state_index in range(int(context.shape[0])):
-            members = (owner == state_index).nonzero(as_tuple=True)[0]
-            if members.numel() == 0:
-                continue
-            memory = context[state_index : state_index + 1].expand(int(members.numel()), -1, -1)
-            out, _ = self.cross(queries[members], memory, memory, key_padding_mask=context_mask[state_index : state_index + 1].expand(int(members.numel()), -1), need_weights=False)
-            attended[members] = out
+        # 모든 후보·질문 머리를 **한 번의** cross-attention으로 (memory = 소유 상태의 문맥, M×Lc×d gather ≈ 300 MB/step). 상태마다
+        # 작은 호출로 나누는 쪽이 복사는 적지만 Python·커널 호출이 지배해 2배 느렸다(D1 실측 5.2 s/step vs 2.3 s/step, 4~16 thread).
+        memory = context[owner]
+        attended, _ = self.cross(self.cross_norm(x), memory, memory, key_padding_mask=context_mask[owner], need_weights=False)
         x = x + self.dropout(attended)
         x = x + self.dropout(self.ff(self.ff_norm(x)))
         x = self.out_norm(x)
