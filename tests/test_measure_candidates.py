@@ -155,7 +155,7 @@ def test_warm_condition_feeds_prefix_plus_history_in_the_cache_before_the_first_
     assert result["episodes"][0]["cache_bytes_end"] == 2 * ticks[-1]["cache_after"]
     assert result["episodes"][0]["name"] == "stream-0"  # 직렬화 결과만 주면 에피소드 이름이 없다
     named = module.measure_latency(
-        "fake/model", [stream_record(12)], "stream_l1a", True, "native", runner=FakeRunner(), handle=None or runner.load({}),
+        "fake/model", [stream_record(12)], "stream_l1a", True, "native", runner=FakeRunner(), handle=runner.load({}),
         tokenizer=WhitespaceTokenizer(), history_ticks=4, warmup=2,
     )
     assert named["episodes"][0]["name"] == "ep-d0-001" and {tick["episode"] for tick in named["ticks"]} == {"ep-d0-001"}
@@ -208,15 +208,159 @@ def test_state_first_requests_are_forwarded_whole_without_a_cache():
     assert [tick["request_id"] for tick in result["ticks"]] == [record["request"]["request_id"] for record in records]
 
 
-def test_path_stream_is_rejected_as_stage_two(capsys):
+class FakeStreamRunner:
+    """stream 경로의 가짜 runner — 상태는 틱·토큰만 세는 객체, 시간은 결정적. `run_stream_path`·`screen_stream`의 bookkeeping을 본다."""
+
+    class State:
+        def __init__(self, window: int) -> None:
+            self.window = window
+            self.prefix = 0
+            self._ticks: list[tuple[int, int]] = []
+            self.tick = -1
+
+        @property
+        def cached_tokens(self) -> int:
+            return self.prefix + self.window_tokens
+
+        @property
+        def window_tokens(self) -> int:
+            return sum(count for _, count in self._ticks)
+
+        def kv_bytes(self) -> int:
+            return 2 * self.cached_tokens
+
+    def __init__(self, base_ms: float = 5.0, ms_per_token: float = 0.01) -> None:
+        self.base_ms, self.ms_per_token = base_ms, ms_per_token
+        self.loaded: list[dict] = []
+        self.unloaded = 0
+        self.ticks_seen: list[tuple[int, int]] = []
+
+    def load(self, config: dict):
+        self.loaded.append(config)
+        return {"config": config, "lever": dict(config.get("lever") or {})}
+
+    def begin_episode(self, handle, layout):
+        state = self.State(int(layout.get("window_ticks", 30)))
+        state.prefix = int(layout["prefix_end"])
+        return state
+
+    def tick(self, handle, state, layout, tick):
+        state.tick += 1
+        while state._ticks and state.tick - state._ticks[0][0] >= state.window:
+            state._ticks.pop(0)
+        body = int(tick["body_end"]) - int(tick["start"])
+        state._ticks.append((state.tick, body))
+        self.ticks_seen.append((int(tick["index"]), state.cached_tokens))
+        ms = self.base_ms + self.ms_per_token * state.cached_tokens
+        return state, {"model_ms": ms, "readout_ms": 0.5, "wall_ms": ms + 0.2}
+
+    def end_episode(self, handle, state) -> None:
+        return None
+
+    def reset_peak(self) -> None:
+        return None
+
+    def peak_allocated(self) -> int:
+        return 777
+
+    def allocated(self) -> int:
+        return 123
+
+    def memory(self) -> dict:
+        return {"peak_allocated_bytes": 777, "peak_reserved_bytes": 888, "allocated_bytes": 123, "num_alloc_retries": 0, "num_ooms": 0}
+
+    def describe(self, handle) -> dict:
+        return {"class": "FakeStream", "params": 1, "weight_bytes": 2, "dtype": "fake", "attention_backend": "fake (no mask)", "levers": handle["lever"], "compile_seconds": None}
+
+    def unload(self, handle) -> None:
+        self.unloaded += 1
+
+    def environment(self) -> dict:
+        return {"gpu": "fake", "kernels": {"fla": False, "causal_conv1d": False}}
+
+
+def test_stream_path_feeds_prefix_then_every_tick_and_keeps_the_cache_window_sized(tmp_path):
+    """stream 경로: prefix → 이력 30틱(틱마다 advance) → 예열 → 측정. cache는 prefix + 최근 30틱이라 윈도우가 찬 뒤 일정하다."""
     module = script()
-    with pytest.raises(ValueError, match="2단계"):
-        module.measure_latency("fake/model", [], "stream_l1a", True, "stream", runner=FakeRunner())
-    with pytest.raises(ValueError, match="native"):
+    record = stream_record(40)
+    runner = FakeStreamRunner()
+    out = serialize_request(record, WhitespaceTokenizer(), layout="stream_l1a")
+    result = module.measure_latency("fake/model", [out], "stream_l1a", True, "stream", runner=runner, handle=runner.load({"id": "fake"}), history_ticks=30, warmup=2)
+    ticks = result["ticks"]
+    assert result["condition"] == "stream_warm" and result["path"] == "stream" and [t["tick"] for t in ticks] == list(range(32, 40))
+    bodies = [int(t["body_end"]) - int(t["start"]) for t in out["ticks"]]
+    for t in ticks:
+        index = t["tick"]
+        assert t["cache_after"] == out["prefix_end"] + sum(bodies[index - 29 : index + 1]) and t["window_ticks_in_cache"] == 30
+        assert t["decisions"] == 10 and t["new_tokens"] == out["ticks"][index]["end"] - out["ticks"][index]["start"]
+    summary = result["summary"]
+    assert summary["cache_constant_after_window"] is True and summary["allocated_growth_bytes"] == 0
+    assert result["episodes"][0]["cache_bytes_end"] == 2 * ticks[-1]["cache_after"]
+    with pytest.raises(ValueError, match="cold"):
+        module.measure_latency("fake/model", [out], "stream_l1a", False, "stream", runner=runner, handle=runner.load({"id": "fake"}))
+    with pytest.raises(ValueError, match="path"):
         module.measure_latency("fake/model", [], "stream_l1a", True, "fast", runner=FakeRunner())
-    with pytest.raises(SystemExit) as excinfo:  # CLI도 같은 자리에서 거절한다 — 가중치·tokenizer를 읽기 전에
-        module.main(["--path", "stream"])
-    assert excinfo.value.code == 2 and "2단계" in capsys.readouterr().err
+
+
+def test_stream_verdicts_read_the_literal_p95_and_miss_rate_on_upper_and_batch0():
+    module = script()
+
+    def condition(ms: list[float], miss: list[float]) -> dict:
+        ticks = [
+            {"tick": i, "new_tokens": 400, "cache_before": 13000, "cache_after": 13000, "model_ms": m, "wall_ms": m + 0.2, "obs_apply_ms": o,
+             "window_tokens": 12500, "window_ticks_in_cache": 30, "allocated_bytes": 5}
+            for i, (m, o) in enumerate(zip(ms, miss))
+        ]
+        return {"stream_warm": {"ticks": ticks, "summary": module.summarize_ticks(ticks)}}
+
+    good = condition([60.0] * 19 + [79.0], [70.0] * 20)
+    slow = condition([60.0] * 18 + [90.0] * 2, [70.0] * 20)  # p95(20개) = round(0.95·19) = 19번째 값
+    missy = condition([60.0] * 20, [70.0] * 17 + [120.0] * 3)
+    verdict = module.stream_verdicts({"upper": good, "batch0": good}, max_miss_rate=0.05)
+    assert verdict["upper"]["passes_10hz"] and verdict["batch0"]["passes_10hz"] and verdict["overall"]["passes_10hz"] and verdict["overall"]["passes_5hz"]
+    assert "passes_10hz" in verdict["upper"]["text"] and verdict["upper"]["cache_constant"] is True and verdict["upper"]["shortfall_10hz_ms"] == 0
+    verdict = module.stream_verdicts({"upper": slow, "batch0": good}, max_miss_rate=0.05)
+    assert not verdict["upper"]["passes_10hz"] and verdict["upper"]["passes_5hz"] and not verdict["overall"]["passes_10hz"] and verdict["overall"]["passes_5hz"]
+    assert "fails_10hz (p95 10.0 ms over)" in verdict["upper"]["text"] and verdict["upper"]["shortfall_10hz_ms"] == 10.0
+    five = condition([140.0] * 20, [145.0] * 20)  # 5 Hz: 100 ms deadline은 전부 넘지만 200 ms는 안 넘는다 → passes_5hz
+    verdict = module.stream_verdicts({"upper": five, "batch0": five}, max_miss_rate=0.05)
+    assert not verdict["upper"]["passes_10hz"] and verdict["upper"]["passes_5hz"] and verdict["upper"]["deadline_miss_rate_200ms"] == 0.0 and verdict["upper"]["deadline_miss_rate_100ms"] == 1.0
+    verdict = module.stream_verdicts({"upper": missy, "batch0": good}, max_miss_rate=0.05)
+    assert not verdict["upper"]["passes_10hz"] and "miss rate" in verdict["upper"]["text"] and verdict["upper"]["deadline_miss_rate_100ms"] == pytest.approx(0.15)
+    partial = module.stream_verdicts({"upper": good}, max_miss_rate=0.05)
+    assert partial["batch0"]["passes_10hz"] is None and partial["overall"]["measured"] == ["upper"] and partial["overall"]["passes_10hz"]
+
+
+def test_screen_stream_records_levers_and_the_cli_accepts_the_stream_path(tmp_path, capsys):
+    module = script()
+    records = [stream_record(36)]
+    tokenizer = WhitespaceTokenizer()
+    profiles = module.build_profiles(tokenizer, ticks=36, names=("d0_streams",), d0_streams=records, episodes=records, include_state_first=False)
+    assert set(profiles) == {"d0_streams", "batch0"} and profiles["batch0"]["real"] is True
+    runner = FakeStreamRunner()
+    settings = module.Settings(ticks=36, warmup=1, path="stream", levers=["baseline", "graphs"])
+    entries = [{"id": "fake/model", "path": "/nowhere", "manifest": {"revision": "x"}, "layer_types": {"full_attention": 1, "linear_attention": 3}}]
+    report = module.screen(entries, profiles, runner, settings=settings, tokenizer_info={"id": "fake"}, checkpoint=tmp_path / "partial.json")
+    assert report["task"] == "2b-g0b" and report["path"] == "stream" and runner.unloaded == 2
+    candidate = report["candidates"]["fake/model"]
+    assert set(candidate["levers"]) == {"baseline", "graphs"} and candidate["baseline_lever"] == "baseline"
+    assert candidate["levers"]["graphs"]["settings"]["graphs"] is True and candidate["conditions"]["batch0"]["stream_warm"]["summary"]["ticks"] == 5
+    assert set(candidate["verdict"]) == {"upper", "batch0", "overall"} and candidate["verdict"]["upper"]["ticks"] == 0
+    assert candidate["lever_verdicts"]["graphs"]["batch0"]["passes_10hz"] is True
+    json.dumps(report)
+    module.print_table(report)
+    assert "stream path" in capsys.readouterr().out
+    # 다시 요약해도 판정이 같고 note 문구는 현재 것으로 바뀐다 (리뷰 2 M12)
+    report["notes"][0] = "old wording"
+    again = module.resummarise(json.loads(json.dumps(report)))
+    assert again["candidates"]["fake/model"]["verdict"] == candidate["verdict"] and again["notes"][0] == module.STREAM_NOTES[0]
+    assert again["candidates"]["fake/model"]["lever_verdicts"]["graphs"] == candidate["lever_verdicts"]["graphs"]
+    with pytest.raises(SystemExit) as excinfo:
+        module.main(["--path", "native", "--levers", "graphs"])
+    assert excinfo.value.code == 2 and "stream" in capsys.readouterr().err
+    with pytest.raises(SystemExit) as excinfo:
+        module.main(["--path", "stream", "--levers", "warp"])
+    assert excinfo.value.code == 2
 
 
 def test_summary_percentiles_miss_rate_and_over_budget_rates_on_a_known_vector():
@@ -321,10 +465,11 @@ def test_verdict_window_reading_fits_model_ms_on_cache_and_quotes_it_without_mov
     assert "p95 model 48.0 ms (window-sized: fit 41.0 ms at 1,550 tokens, first-5 mean 34.0 ms; cache 1,000…1,900) vs 80 ms" in verdict["text"]
     assert verdict["passes"] is True and verdict["p95_model_ms"] == 48.0  # flag는 p95(문자 그대로: 10개 중 round(0.95·9) = 최대)로
 
-    # 프로파일 정보가 없으면 측정 틱에서 되만든다 (min cache + 29 × 평균 새 토큰) — basis에 적힌다
-    bare = module.verdicts({"lower": {"stream_warm": result}}, max_miss_rate=0.05)["lower"]["window"]
-    assert bare["window_cache_tokens"] == 1000 + 29 * 50 and "min(cache_before)" in bare["window_cache_basis"]
-    assert bare["model_ms_at_window_cache"] == pytest.approx(10.0 + 0.02 * 2450)
+    # 프로파일 정보가 없으면 윈도우 크기 읽기를 만들지 않는다 (min cache는 이미 prefix + 이력 + 예열 — 2b-G0a 리뷰 2 M11)
+    bare = module.verdicts({"lower": {"stream_warm": result}}, max_miss_rate=0.05)["lower"]
+    assert bare["window"]["window_cache_tokens"] is None and "no profile info" in bare["window"]["window_cache_basis"]
+    assert bare["window"]["model_ms_at_window_cache"] is None and bare["passes_10hz_window"] is None and "fit n/a at n/a tokens" in bare["text"]
+    assert bare["window"]["fit_slope_ms_per_1k_cache"] == pytest.approx(20.0)  # 직선 자체는 남는다
 
     # 에피소드가 여럿이면 첫 5틱은 에피소드마다 센다; 잡음이 있으면 R² < 1
     two = [tick(i, 1000 + 100 * i, 30.0 + 0.02 * (1000 + 100 * i) + (1.0 if i % 2 else -1.0), "a") for i in range(6)] + [tick(i, 1000 + 100 * i, 30.0, "b") for i in range(6)]
@@ -492,3 +637,38 @@ def test_candidates_yaml_pins_four_candidates_with_required_keys_and_resolved_re
         if entry["role"] != "reference":  # 받은 후보는 header에서 센 파라미터 수가 있다
             assert isinstance(entry["params_total"], int) and 0 < entry["params_total"] <= entry["params_checkpoint"]
     assert data["tokenizer"] == "Qwen/Qwen3.8-27B"
+
+
+def test_tick_readout_matches_the_judge_pointer_logits_and_typed_outputs_on_the_fixture(tmp_path):
+    """stream 경로의 틱 readout(질문별 logits를 한 tensor로, D2H 한 번 뒤 typed 출력)은 Judge의 pointer readout과 같다."""
+    from robo_jev.model.judge import Judge, typed_outputs
+    from robo_jev.model.stream import StreamState
+
+    module = script()
+    tokenizer = WhitespaceTokenizer()
+    record = stream_record(2)
+    layout = serialize_request(record, tokenizer, layout="stream_l1a")
+    judge = Judge.from_config(seed=5, vocab_size=4096)
+    expected = judge({"layout": "stream_l1a", "stream": layout})
+    state = StreamState.initial(judge.backbone).extend_prefix(layout["tokens"][: layout["prefix_end"]])
+    for index, tick in enumerate(layout["ticks"]):
+        state = state.advance(layout["tokens"][tick["start"] : tick["body_end"]])
+        branches = state.branch_step(layout["tokens"][tick["body_end"] : tick["end"]])
+        flat, spans = module.tick_readout(judge, state, tick, branches, int(layout["prefix_end"]))
+        assert [qid for qid, _ in spans] == list(tick["decision_positions"]) and flat.shape[0] == sum(k for _, k in spans)
+        offset = 0
+        for qid, count in spans:
+            torch.testing.assert_close(flat[offset : offset + count], expected["logits"][index][qid], rtol=1e-4, atol=1e-4)
+            offset += count
+        typed = module.typed_from_flat(flat.detach().float().cpu(), spans, tick)
+        reference = typed_outputs({qid: expected["logits"][index][qid] for qid, _ in spans}, {qid: list(tick["candidate_mapping"][qid]) for qid, _ in spans}, module.QUESTION_SET_V0)
+        assert set(typed) == set(reference) and all(typed[qid]["choice"] == reference[qid]["choice"] for qid in typed)
+    # 실제 batch 디렉터리 읽기: manifest의 스트림 파일만, limit로 자른다
+    root = tmp_path / "batch"
+    (root / "episodes" / "e1").mkdir(parents=True)
+    (root / "episodes" / "e1" / "streams.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+    (root / "manifest.json").write_text(json.dumps({"files": {"episodes/e1/streams.jsonl": {"sha256": "x"}}}), encoding="utf-8")
+    episodes = module.read_episodes(root, limit=5)
+    assert len(episodes) == 1 and episodes[0]["episode_id"] == record["episode_id"]
+    with pytest.raises(FileNotFoundError):
+        module.read_episodes(tmp_path / "nowhere")

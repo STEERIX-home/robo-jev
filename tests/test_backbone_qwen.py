@@ -67,6 +67,15 @@ def tiny() -> QwenBackbone:
     return QwenBackbone.tiny(seed=1, vocab_size=1024)
 
 
+@pytest.fixture(autouse=True, scope="module")
+def _gpu_guard():
+    """실제 2B 검사는 GB10의 통합 메모리 울타리 안에서 (robo_jev.gpu; 첫 CUDA 할당 전에 건다)."""
+    if torch.cuda.is_available():
+        from robo_jev.gpu import limit_gpu_memory
+
+        limit_gpu_memory()
+
+
 @pytest.fixture(autouse=True)
 def _torch_kernels():
     """CPU 검사는 공식 forward도 torch 참조 kernel로 돈다 (CUDA가 있는 venv에서 fla·causal_conv1d가 CPU tensor를 받지 않게)."""
@@ -408,3 +417,123 @@ def test_real_2b_fp32_incremental_is_within_the_official_cache_path_noise():
     assert rel.max() <= FP32_REL_MAX
     del backbone
     torch.cuda.empty_cache()
+
+
+def test_lora_run_on_the_adapter_trains_only_lora_and_readout_and_checkpoints_them(tmp_path, monkeypatch):
+    """`trainable: lora_and_readout` — peft LoRA가 projection에 붙고(fp32, 학습 대상), 기본 가중치는 고정·불변, checkpoint는
+    LoRA + readout만. KV는 그래프를 유지하는 dynamic 모드라 분기 손실의 gradient가 LoRA에 닿는다."""
+    pytest.importorskip("peft")
+    from robo_jev import train as training
+    from test_train import tiny_config
+
+    fake = QwenBackbone.tiny(seed=3, vocab_size=SMALL_VOCAB)
+    base_before = fake.text.layers[0].mlp.gate_proj.weight.detach().clone()
+    monkeypatch.setattr(training.QwenBackbone, "load", classmethod(lambda cls, model_id, **kwargs: (setattr(fake, "kv_mode", kwargs.get("kv_mode", "static")) or fake)))
+    config = tiny_config(
+        tmp_path, max_steps=1, trainable="lora_and_readout", model_id=REAL_2B, readout_rank=4, stream_max_ticks=3,
+        lora={"r": 2, "alpha": 4, "targets": ["q_proj", "gate_proj", "in_proj_qkv"]},
+    )
+    with training.Trainer(config) as trainer:
+        assert trainer.model.backbone.kv_mode == "dynamic"
+        names = [n for n, p in trainer.model.named_parameters() if p.requires_grad]
+        assert all(("lora_" in n) or not n.startswith("backbone.") for n in names) and any("lora_A" in n for n in names)
+        assert trainer.manifest["model"]["trainable"] == "lora_and_readout" and trainer.manifest["model"]["lora"]["r"] == 2
+        metrics = trainer.run_step()
+        assert metrics is not None and metrics["grad_norm"] > 0
+        lora_grads = [n for n, p in trainer.model.named_parameters() if "lora_" in n and p.grad is not None]
+        state = trainer.checkpoint_state()["model"]
+        assert {"U.weight", "V.weight", "bias"} <= set(state) and any("lora_A" in key for key in state) and not any("base_layer.weight" in key for key in state)
+        layer0 = trainer.model.backbone.text.layers[0].mlp.gate_proj
+        assert torch.equal(layer0.base_layer.weight, base_before) and layer0.lora_A["default"].weight.dtype == torch.float32
+        assert trainer.optimizer.param_groups[0]["name"] == "backbone/decay" and lora_grads == []  # gradient는 step 뒤 지워진다 (set_to_none)
+
+
+def test_tiny_fused_advance_with_branches_equals_advance_then_branch_step(tiny):
+    layout = synthetic_stream(random.Random(9), prefix=6, ticks=[(5, 3), (4, 3), (6, 3)], window_ticks=2)
+    reference = tiny.forward_layout(layout)
+    state = QwenStreamState.initial(tiny, window_ticks=2).extend_prefix(layout["tokens"][: layout["prefix_end"]])
+    pieces = [state.prefix_hidden]
+    for tick in layout["ticks"]:
+        body = layout["tokens"][tick["start"] : tick["body_end"]]
+        decisions = layout["tokens"][tick["body_end"] : tick["end"]]
+        separate = state.clone().advance(body)
+        expected = separate.branch_step(decisions)
+        state, branches = state.advance_with_branches(body, decisions)
+        torch.testing.assert_close(branches, expected, **CPU_TOL)
+        torch.testing.assert_close(state.hidden, separate.hidden, **CPU_TOL)
+        for a, b in zip(state.delta, separate.delta):
+            torch.testing.assert_close(a["recurrent"], b["recurrent"], **CPU_TOL)
+        assert state.cache_ticks.tolist() == separate.cache_ticks.tolist() and state.position == separate.position
+        pieces.extend([state.hidden, branches])
+    torch.testing.assert_close(torch.cat(pieces), reference, **CPU_TOL)
+
+
+@needs_real_2b
+def test_real_2b_fused_forward_matches_the_separate_forwards_within_the_bf16_tolerance():
+    backbone = real_2b()
+    layout = d0_stream_layout(4)
+    state = QwenStreamState.initial(backbone).extend_prefix(layout["tokens"][: layout["prefix_end"]])
+    for tick in layout["ticks"]:
+        body = layout["tokens"][tick["start"] : tick["body_end"]]
+        decisions = layout["tokens"][tick["body_end"] : tick["end"]]
+        separate = state.clone().advance(body)
+        expected = separate.branch_step(decisions)
+        state, branches = state.advance_with_branches(body, decisions)
+        assert relative_l2(branches, expected).max() <= BF16_REL_READOUT and relative_l2(state.hidden, separate.hidden).max() <= BF16_REL_MAX
+        boundaries = [b - tick["start"] for qid in tick["candidate_boundaries"] for b in tick["candidate_boundaries"][qid] if b >= tick["start"]]
+        if boundaries:
+            assert relative_l2(state.hidden[boundaries], separate.hidden[boundaries]).max() <= BF16_REL_READOUT
+
+
+def test_tiny_activation_checkpointing_reproduces_hidden_and_gradients(tiny):
+    """층 단위 activation checkpointing(gradient가 켜진 dynamic 모드)은 hidden과 gradient를 바꾸지 않는다 (추론 경로는 건드리지 않는다)."""
+    layout = synthetic_stream(random.Random(7), prefix=5, ticks=[(4, 2), (3, 2), (4, 2)], window_ticks=30)
+    grads = {}
+    hiddens = {}
+    for checkpointing in (False, True):
+        trainable = QwenBackbone.tiny(seed=1, vocab_size=1024, layers=("linear_attention", "full_attention"))
+        trainable.model.requires_grad_(True)
+        trainable.kv_mode = "dynamic"
+        trainable.activation_checkpointing = checkpointing
+        with torch_reference_kernels():
+            hidden, state = incremental(trainable, layout)
+            loss = state.branch_step([65, 66]).pow(2).sum()
+            loss.backward()
+        hiddens[checkpointing] = hidden.detach()
+        grads[checkpointing] = {name: p.grad.detach().clone() for name, p in trainable.model.named_parameters() if p.grad is not None}
+    torch.testing.assert_close(hiddens[True], hiddens[False], **CPU_TOL)
+    assert grads[True].keys() == grads[False].keys() and grads[True]
+    for name, grad in grads[False].items():
+        torch.testing.assert_close(grads[True][name], grad, rtol=1e-4, atol=1e-5, msg=name)
+    # 추론(gradient 없음)에서는 checkpointing flag가 결과에 아무 영향이 없다
+    tiny.activation_checkpointing = True
+    try:
+        with torch.no_grad():
+            hidden_flagged, _ = incremental(tiny, layout)
+    finally:
+        tiny.activation_checkpointing = False
+    with torch.no_grad():
+        hidden_plain, _ = incremental(tiny, layout)
+    torch.testing.assert_close(hidden_flagged, hidden_plain, rtol=0, atol=0)
+
+
+def test_tiny_official_forward_with_activation_checkpointing_reproduces_hidden_and_gradients():
+    """P0 `state_first` 경로(공식 batched forward)도 checkpointing flag가 켜지면 HF 층 단위 checkpoint로 돌고 결과·gradient가 같다."""
+    tokens = torch.tensor([[3, 5, 7, 11, 13, 17, 19, 23], [2, 4, 6, 8, 10, 12, 14, 16]])
+    positions = torch.arange(8)[None].expand(2, 8)
+    grads = {}
+    hiddens = {}
+    for checkpointing in (False, True):
+        trainable = QwenBackbone.tiny(seed=1, vocab_size=1024, layers=("linear_attention", "full_attention"))
+        trainable.model.requires_grad_(True)
+        trainable.activation_checkpointing = checkpointing
+        with torch_reference_kernels():
+            hidden = trainable(tokens, positions)["hidden"]
+            hidden.pow(2).sum().backward()
+        hiddens[checkpointing] = hidden.detach()
+        grads[checkpointing] = {name: p.grad.detach().clone() for name, p in trainable.model.named_parameters() if p.grad is not None}
+        assert not trainable.text.training  # forward 뒤에는 eval 모드로 돌아온다
+    torch.testing.assert_close(hiddens[True], hiddens[False], **CPU_TOL)
+    assert grads[True].keys() == grads[False].keys() and grads[True]
+    for name, grad in grads[False].items():
+        torch.testing.assert_close(grads[True][name], grad, rtol=1e-4, atol=1e-5, msg=name)

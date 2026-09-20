@@ -35,6 +35,8 @@ autograd와 함께 쓸 수 없다.
 
 from __future__ import annotations
 
+import functools
+
 import math
 from collections import deque
 from dataclasses import dataclass
@@ -106,6 +108,8 @@ def _flash_part(q: Tensor, k: Tensor, v: Tensor, *, causal: bool, scale: float) 
     g = H // Hk
     if q.is_cuda and q.dtype not in (torch.float16, torch.bfloat16):
         return _math_part(q, k, v, causal=causal, scale=scale)  # fp32 CUDA는 검사용 — flash는 반정밀도뿐
+    if q.is_cuda and torch.is_grad_enabled() and (q.requires_grad or k.requires_grad or v.requires_grad):
+        return _flash_part_differentiable(q, k, v, causal=causal, scale=scale)
     if q.is_cuda:
         if causal:
             kk = k.repeat_interleave(g, dim=1) if g > 1 else k
@@ -137,6 +141,30 @@ def _flash_part(q: Tensor, k: Tensor, v: Tensor, *, causal: bool, scale: float) 
     return AttentionParts(out[0].transpose(0, 1), lse[0].transpose(0, 1))
 
 
+def _flash_part_differentiable(q: Tensor, k: Tensor, v: Tensor, *, causal: bool, scale: float) -> AttentionParts:
+    """학습(LoRA)용 조각: autograd 공식이 있는 `aten::_scaled_dot_product_flash_attention`(``[B, H, N, D]``, lse 반환)으로.
+
+    varlen op에는 backward가 없다. causal이 아니면 같은 접기(query head → 토큰 축)로 key 복제가 없고, causal이면 새 토큰의
+    key만 head 축으로 펼친다. mask tensor는 없다.
+    """
+    T, H, D = q.shape
+    N, Hk, _ = k.shape
+    g = H // Hk
+    if causal:
+        kk = (k.repeat_interleave(g, dim=1) if g > 1 else k).transpose(0, 1)[None]
+        vv = (v.repeat_interleave(g, dim=1) if g > 1 else v).transpose(0, 1)[None]
+        out, lse = torch.ops.aten._scaled_dot_product_flash_attention(q.transpose(0, 1)[None], kk, vv, 0.0, True, False, scale=scale)[:2]
+        return AttentionParts(out[0].transpose(0, 1), lse[0].transpose(0, 1))
+    folded = q.view(T, Hk, g, D).permute(1, 0, 2, 3).reshape(1, Hk, T * g, D) if g > 1 else q.transpose(0, 1)[None]
+    out, lse = torch.ops.aten._scaled_dot_product_flash_attention(folded, k.transpose(0, 1)[None], v.transpose(0, 1)[None], 0.0, False, False, scale=scale)[:2]
+    if g > 1:
+        out = out[0].view(Hk, T, g, D).permute(1, 0, 2, 3).reshape(T, H, D)
+        lse = lse[0].view(Hk, T, g).permute(1, 0, 2).reshape(T, H)
+    else:
+        out, lse = out[0].transpose(0, 1), lse[0].transpose(0, 1)
+    return AttentionParts(out, lse)
+
+
 def _math_part(q: Tensor, k: Tensor, v: Tensor, *, causal: bool, scale: float) -> AttentionParts:
     """fp32 참조 조각 (검사용; causal이면 삼각 mask를 물질화한다 — 서빙 경로가 아니다)."""
     T, H, D = q.shape
@@ -149,6 +177,121 @@ def _math_part(q: Tensor, k: Tensor, v: Tensor, *, causal: bool, scale: float) -
     lse = torch.logsumexp(scores, dim=-1)  # [H, T]
     out = torch.einsum("htn,nhd->thd", torch.exp(scores - lse[..., None]), vv.float())
     return AttentionParts(out.to(q.dtype), lse.transpose(0, 1))
+
+
+def _flash_part_static(
+    q: Tensor, k: Tensor, v: Tensor, cu_k: Tensor, scale: float, *, seqused: Tensor | None = None, capacity: int | None = None
+) -> AttentionParts:
+    """graph 캡처용 조각: key 버퍼 **전체**를 넘기고 유효 길이는 장치 tensor(`cu_k`·`seqused`)가 말한다 — 호출 안에서 tensor를 만들지 않는다."""
+    T, H, D = q.shape
+    N, Hk, _ = k.shape
+    g = H // Hk
+    folded = q.view(T, Hk, g, D).permute(0, 2, 1, 3).reshape(T * g, Hk, D) if g > 1 else q
+    cu_q = _CU_CACHE.get(q.device, T * g)
+    max_k = N if capacity is None else capacity
+    kwargs = {"scale": scale}
+    if seqused is not None:
+        kwargs["seqused_k"] = seqused
+    out, lse = torch.ops.aten._flash_attention_forward(folded, k, v, cu_q, cu_k, T * g, max_k, 0.0, False, False, **kwargs)[:2]
+    if g > 1:
+        out = out.view(T, g, Hk, D).permute(0, 2, 1, 3).reshape(T, H, D)
+        lse = lse.view(Hk, T, g).permute(1, 0, 2).reshape(T, H)
+    else:
+        lse = lse.transpose(0, 1)
+    return AttentionParts(out, lse)
+
+
+class _CuCache:
+    """`[0, n]` int32 장치 tensor를 미리 만들어 둔다 (graph 캡처 중에는 H2D 복사를 만들 수 없다)."""
+
+    def __init__(self) -> None:
+        self._cache: dict[tuple[str, int], Tensor] = {}
+
+    def get(self, device: torch.device, n: int) -> Tensor:
+        key = (str(device), n)
+        if key not in self._cache:
+            self._cache[key] = torch.tensor([0, n], device=device, dtype=torch.int32)
+        return self._cache[key]
+
+
+_CU_CACHE = _CuCache()
+
+
+@dataclass
+class _StaticWindow:
+    """graph 캡처용 윈도우 경계 — 장치 tensor라 재생 때 값만 바꾼다. 윈도우 버퍼 전체 위의 varlen 호출: 원소 0 = ``[0, start)``
+    (지난 틱의 낡은 key — 결과는 버린다), 원소 1 = ``[start, end)``(살아 있는 윈도우)."""
+
+    prefix_cu: Tensor  # [0, P]
+    window_cu: Tensor  # [0, end] (seqused가 유효 길이)
+    seqused: Tensor  # [end − start] … 아래 설명
+
+
+@dataclass
+class _BranchStatic:
+    ids: Tensor
+    position: Tensor
+    delta: list[dict[str, Tensor]]
+    windows: list[_StaticWindow]
+
+
+class _BranchGraph:
+    """결정 분기 배치 forward의 CUDA graph (지렛대 graphs).
+
+    캡처 조건: 분기 수 n, prefix 버퍼(주소·길이), 윈도우 버퍼 주소가 에피소드 동안 고정. 틱마다 바뀌는 것 — 결정 토큰 id,
+    position, DeltaNet 상태(fla가 틱마다 새 tensor를 내므로 정적 버퍼로 복사), 윈도우의 살아 있는 구간 — 은 재생 전에 정적
+    버퍼에 써 넣는다. 윈도우 조각은 버퍼 ``[0, end)`` 위의 varlen 호출에 ``seqused_k = end − start``를 주되 key 포인터를
+    ``start``에서 시작하게 하려면 주소가 바뀌므로, 대신 살아 있는 구간을 ``[0, live)``로 두는 **틱마다의 당김**(compaction)을
+    재생 직전에 한다 — 복사 한 번(윈도우 KV 크기)이 graph 재생과 함께 틱 비용에 든다(보고서에 따로 적는다).
+    """
+
+    def __init__(self, state: QwenStreamState, n: int) -> None:
+        bb = state.backbone
+        device = bb.device
+        self.n = n
+        self.prefix_ptr = state._kv[0].k_prefix.data_ptr()
+        self.ids = torch.zeros(n, dtype=torch.long, device=device)
+        self.position = torch.zeros(1, dtype=torch.long, device=device)
+        self.delta = [{k: torch.empty_like(v) for k, v in layer.items()} for layer in state.delta]
+        self.windows = [
+            _StaticWindow(
+                prefix_cu=torch.tensor([0, store.k_prefix.shape[0]], device=device, dtype=torch.int32),
+                window_cu=torch.tensor([0, store.capacity], device=device, dtype=torch.int32),
+                seqused=torch.tensor([max(store.end - store.start, 1)], device=device, dtype=torch.int32),
+            )
+            for store in state._kv
+        ]
+        self.static = _BranchStatic(self.ids, self.position, self.delta, self.windows)
+        self._stage(state, list(range(n)))
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(2):  # 예열 (Triton autotune·allocator)
+                state._branch_step_eager([0] * n, static=self.static)
+        torch.cuda.current_stream().wait_stream(stream)
+        self.graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(self.graph):
+            self.out = state._branch_step_eager([0] * n, static=self.static)
+
+    def _stage(self, state: QwenStreamState, tokens: list[int]) -> None:
+        """재생 전: 입력·상태·윈도우 경계를 정적 버퍼에 쓰고 윈도우를 앞으로 당긴다."""
+        self.ids.copy_(torch.tensor(tokens, dtype=torch.long), non_blocking=True)
+        self.position.fill_(state.position)
+        for target, source in zip(self.delta, state.delta):
+            for key in target:
+                target[key].copy_(source[key])
+        for store, window in zip(state._kv, self.windows):
+            live = store.end - store.start
+            if store.start:
+                store.k_win[:live].copy_(store.k_win[store.start : store.end].clone())
+                store.v_win[:live].copy_(store.v_win[store.start : store.end].clone())
+                store.start, store.end = 0, live
+            window.seqused.fill_(max(live, 1))
+
+    def replay(self, state: QwenStreamState, tokens: list[int]) -> Tensor:
+        self._stage(state, tokens)
+        self.graph.replay()
+        return self.out.clone()
 
 
 def merge_attention_parts(parts: list[AttentionParts]) -> Tensor:
@@ -229,6 +372,13 @@ class QwenBackbone(nn.Module):
         self.num_kv_heads = int(cfg.num_key_value_heads)
         self.attention_backend: str | None = None
         self.stream_state_class = QwenStreamState
+        #: 지렛대 (G0b S2.2): 결정 분기 배치 forward의 CUDA graph 재생, 층의 dense 부분 torch.compile.
+        self.use_branch_graph = False
+        self._branch_graph: _BranchGraph | None = None
+        self.compiled = False
+        #: 층 단위 activation checkpointing (gradient가 켜진 forward에서만; 틱 몸통의 층마다 입력 `[1, T, d]`만 남기고
+        #: backward 때 그 층을 다시 계산한다). 10초 구간(≈45K 토큰)의 full/LoRA 학습은 이것 없이는 GB10의 통합 메모리를 넘긴다.
+        self.activation_checkpointing = False
 
     # -- 만들기 --
 
@@ -322,7 +472,21 @@ class QwenBackbone(nn.Module):
         """오른쪽 padding한 배치의 plain causal forward → ``{"hidden": [B, T, d]}``. `mask`는 받지 않는다(causal뿐)."""
         if mask is not None:
             raise ValueError("QwenBackbone.forward: 명시적 mask는 reference_forward로 (여기는 causal 배치 경로뿐)")
-        with torch.set_grad_enabled(self.grad_enabled and torch.is_grad_enabled()):
+        grad = self.grad_enabled and torch.is_grad_enabled()
+        if grad and self.activation_checkpointing:
+            # 공식 forward(P0 `state_first` 경로: 질문 경로 Q개 × S+T_i 행)도 층 단위 checkpointing — LoRA에서 8K 토큰 단위가 ≈60K 행이 되어
+            # activation을 다 들고 있으면 ≈240 GB다. HF의 GradientCheckpointingLayer는 training 모드에서만 checkpoint하므로 forward 동안만
+            # train()으로 둔다(Qwen3.5는 dropout 0 — 결과가 바뀌지 않는다).
+            if not getattr(self.text, "gradient_checkpointing", False):
+                self.text.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
+            was_training = self.text.training
+            self.text.train()
+            try:
+                out = self.text(input_ids=tokens.to(self.device), position_ids=positions.to(self.device), use_cache=False)
+            finally:
+                self.text.train(was_training)
+            return {"hidden": out.last_hidden_state}
+        with torch.set_grad_enabled(grad):
             out = self.text(input_ids=tokens.to(self.device), position_ids=positions.to(self.device), use_cache=False)
         return {"hidden": out.last_hidden_state}
 
@@ -375,6 +539,46 @@ class QwenBackbone(nn.Module):
                 out = self.reference_forward(ids, pos, sub[None].expand(len(group), L + 1, L + 1))
                 hidden[torch.tensor(group, device=self.device)] = out[:, -1]
         return hidden
+
+    def kernel_names(self) -> dict[str, str | None]:
+        return kernel_names(self.device)
+
+    # -- 지렛대 --
+
+    def release_branch_graph(self) -> None:
+        """에피소드가 끝나면 캡처한 분기 graph를 버린다 (prefix 길이·버퍼 주소가 에피소드마다 다르다)."""
+        self._branch_graph = None
+
+    def compile_dense_parts(self) -> float | None:
+        """층의 dense 부분(MLP, RMSNorm들, gated norm)을 `torch.compile(dynamic=True)`로 감싸고 예열 forward로 컴파일 시간을 잰다.
+
+        fla·causal_conv1d·flash 호출은 그대로 둔다(Triton/CUDA 확장 kernel — compile 그래프 밖). 돌아오는 값은 예열에 든 초.
+        """
+        import time
+
+        if self.compiled:
+            return 0.0
+        text = self.text
+        for layer in text.layers:
+            layer.mlp = torch.compile(layer.mlp, dynamic=True)
+            layer.input_layernorm = torch.compile(layer.input_layernorm, dynamic=True)
+            layer.post_attention_layernorm = torch.compile(layer.post_attention_layernorm, dynamic=True)
+            if hasattr(layer, "linear_attn"):
+                layer.linear_attn.norm = torch.compile(layer.linear_attn.norm, dynamic=True)
+            else:
+                layer.self_attn.q_norm = torch.compile(layer.self_attn.q_norm, dynamic=True)
+                layer.self_attn.k_norm = torch.compile(layer.self_attn.k_norm, dynamic=True)
+        text.norm = torch.compile(text.norm, dynamic=True)
+        self.compiled = True
+        started = time.perf_counter()
+        state = QwenStreamState.initial(self, window_ticks=WINDOW_TICKS).extend_prefix(list(range(100, 164)))
+        for length in (37, 130, 517):
+            state = state.advance(list(range(200, 200 + length)))
+            state.branch_step(list(range(65, 75)))
+        if self.device.type == "cuda":
+            torch.cuda.synchronize()
+        self.release_branch_graph()
+        return round(time.perf_counter() - started, 1)
 
     # -- 층 조각 (스트림 경로가 쓴다) --
 
@@ -641,18 +845,19 @@ class QwenStreamState:
         cos, sin = bb.rotary(positions)
         new_delta: list[dict[str, Tensor]] = []
         new_kv: list[tuple[Tensor, Tensor]] = []
+        # 층 단위 activation checkpointing: gradient가 켜진 forward에서만 (추론 경로는 그대로)
+        checkpointing = bb.activation_checkpointing and bb.grad_enabled and torch.is_grad_enabled()
         for index, layer in enumerate(text.layers):
-            residual = x
-            h = layer.input_layernorm(x)
             if bb.layer_types[index] == "linear_attention":
-                y, state = _delta_body(layer.linear_attn, h, self.delta[len(new_delta)])
-                new_delta.append(state)
+                state = self.delta[len(new_delta)]
+                step = functools.partial(_delta_layer_step, layer, state["recurrent"], state["conv"])
+                x, recurrent, conv_state = _maybe_checkpoint(step, x, enabled=checkpointing)
+                new_delta.append({"recurrent": recurrent, "conv": conv_state})
             else:
-                store = kv[len(new_kv)]
-                y, k, v = _attention_body(layer.self_attn, h, cos, sin, store, bb)
+                # 조각(prefix·윈도우 KV)은 지금 시점의 것을 넘긴다 — checkpoint의 재계산은 backward 때라 저장소가 그새 자랐을 수 있다
+                step = functools.partial(_attention_layer_step, layer, cos, sin, kv[len(new_kv)].segments(), bb)
+                x, k, v = _maybe_checkpoint(step, x, enabled=checkpointing)
                 new_kv.append((k, v))
-            x = residual + y
-            x = x + layer.mlp(layer.post_attention_layernorm(x))
         hidden = text.norm(x)[0]
         if write:
             for store, (k, v) in zip(kv, new_kv):
@@ -710,10 +915,30 @@ class QwenStreamState:
         if not tokens:
             raise ValueError("tokens: 결정 토큰이 하나 이상 필요하다")
         bb = self.backbone
+        if bb.use_branch_graph and bb.device.type == "cuda" and bb.kv_mode == "static" and not bb.grad_enabled and self.prefix_len:
+            return self._branch_step_graphed(tokens)
+        return self._branch_step_eager(tokens)
+
+    def _branch_step_graphed(self, tokens: list[int]) -> Tensor:
+        """지렛대 graphs: 같은 (분기 수, prefix 버퍼)의 graph를 에피소드마다 한 번 캡처하고 틱마다 재생한다."""
+        bb = self.backbone
+        graph = bb._branch_graph
+        if graph is None or graph.n != len(tokens) or graph.prefix_ptr != self._kv[0].k_prefix.data_ptr():
+            graph = _BranchGraph(self, len(tokens))
+            bb._branch_graph = graph
+        return graph.replay(self, tokens)
+
+    def _branch_step_eager(self, tokens: list[int], *, static: _BranchStatic | None = None) -> Tensor:
+        bb = self.backbone
         text = bb.text
         n = len(tokens)
-        ids = torch.tensor(tokens, dtype=torch.long, device=bb.device)
-        position = torch.full((1,), self.position, dtype=torch.long, device=bb.device)
+        if static is None:
+            ids = torch.tensor(tokens, dtype=torch.long, device=bb.device)
+            position = torch.full((1,), self.position, dtype=torch.long, device=bb.device)
+            delta = self.delta
+            windows = None
+        else:  # graph 캡처/재생: 입력·상태·윈도우 경계가 정적 버퍼다
+            ids, position, delta, windows = static.ids, static.position, static.delta, static.windows
         with self._grad():
             x = text.embed_tokens(ids)[:, None]  # [n, 1, d]
             cos, sin = bb.rotary(position)
@@ -722,14 +947,75 @@ class QwenStreamState:
                 residual = x
                 h = layer.input_layernorm(x)
                 if bb.layer_types[index] == "linear_attention":
-                    y = _delta_branches(layer.linear_attn, h, self.delta[d_index])
+                    y = _delta_branches(layer.linear_attn, h, delta[d_index])
                     d_index += 1
                 else:
-                    y = _attention_branches(layer.self_attn, h, cos, sin, self._kv[a_index], bb)
+                    y = _attention_branches(layer.self_attn, h, cos, sin, self._kv[a_index], bb, window=None if windows is None else windows[a_index])
                     a_index += 1
                 x = residual + y
                 x = x + layer.mlp(layer.post_attention_layernorm(x))
             return text.norm(x)[:, 0]
+
+    def advance_with_branches(self, tokens: Any, decisions: Any) -> tuple[QwenStreamState, Tensor]:
+        """틱 몸통 T개와 결정 표지 n개를 **한 forward**로 (지렛대 `fused`) → (새 공통 상태, 분기 hidden ``[n, d]``).
+
+        `advance` 뒤 `branch_step`과 같은 계산이지만 층마다 projection·o_proj·MLP를 ``[T+n]`` 행 위에서 한 번 돌려 가중치를
+        한 번만 읽는다(작은 모델의 forward 절편은 가중치 읽기다 — S2.5 귀속). DeltaNet은 몸통을 chunk kernel로 돌려 새 상태를
+        만들고 분기는 그 상태의 transient 읽기, attention의 분기 query는 prefix·윈도우·몸통 전부와 자기 토큰을 본다. 분기는
+        어디에도 남지 않는다.
+        """
+        if self.is_branch:
+            raise ValueError("분기 상태에서는 다음 틱으로 이어갈 수 없다 — 다음 틱은 분기 이전 공통 상태에서 이어간다 (docs/08 §3.1)")
+        tokens = [int(t) for t in tokens]
+        decisions = [int(t) for t in decisions]
+        if not tokens or not decisions:
+            raise ValueError("tokens·decisions: 몸통 토큰과 결정 토큰이 하나 이상 필요하다")
+        bb = self.backbone
+        text = bb.text
+        T, n = len(tokens), len(decisions)
+        tick = self.tick + 1
+        ticks = deque(self._ticks)
+        evicted = 0
+        while ticks and tick - ticks[0][0] >= self.window_ticks:
+            evicted += ticks.popleft()[1]
+        kv = [layer.shallow() if layer.mode == "dynamic" else layer for layer in self._kv]
+        for store in kv:
+            store.evict(evicted)
+        with self._grad():
+            ids = torch.tensor(tokens + decisions, dtype=torch.long, device=bb.device)
+            positions = torch.cat([
+                torch.arange(self.position, self.position + T, device=bb.device),
+                torch.full((n,), self.position + T, dtype=torch.long, device=bb.device),
+            ])  # fmt: skip
+            x = text.embed_tokens(ids)[None]  # [1, T+n, d]
+            cos, sin = bb.rotary(positions)
+            new_delta: list[dict[str, Tensor]] = []
+            new_kv: list[tuple[Tensor, Tensor]] = []
+            for index, layer in enumerate(text.layers):
+                residual = x
+                h = layer.input_layernorm(x)
+                if bb.layer_types[index] == "linear_attention":
+                    raw, z, b, a = _delta_projections(layer.linear_attn, h)
+                    y_body, state = _delta_body_from(layer.linear_attn, raw[:, :T], z[:, :T], b[:, :T], a[:, :T], self.delta[len(new_delta)])
+                    branch_rows = lambda t: t[0, T:].unsqueeze(1)  # [n, 1, ·]  # noqa: E731
+                    y_branch = _delta_branches_from(layer.linear_attn, branch_rows(raw), branch_rows(z), branch_rows(b), branch_rows(a), state)
+                    new_delta.append(state)
+                    y = torch.cat([y_body, y_branch.transpose(0, 1)], dim=1)
+                else:
+                    store = kv[len(new_kv)]
+                    y, k, v = _attention_fused(layer.self_attn, h, cos, sin, store, bb, T)
+                    new_kv.append((k, v))
+                x = residual + y
+                x = x + layer.mlp(layer.post_attention_layernorm(x))
+            hidden = text.norm(x)[0]
+        for store, (k, v) in zip(kv, new_kv):
+            store.append(k, v)
+        ticks.append((tick, T))
+        state_out = QwenStreamState(
+            self.backbone, delta=new_delta, kv=kv, ticks=ticks, position=self.position + T, tick=tick,
+            window_ticks=self.window_ticks, prefix_hidden=self.prefix_hidden, hidden=hidden[:T], prefix_len=self.prefix_len,
+        )  # fmt: skip
+        return state_out, hidden[T:]
 
     def fork(self, n: int) -> list[_QwenBranch]:
         """fixture 호환 — 분기 n개. 각 분기의 ``step``은 그 토큰 하나의 배치 forward다(배치로 묶으려면 ``branch_step``)."""
@@ -910,6 +1196,33 @@ class torch_reference_kernels:
             cell.cell_contents = value
 
 
+def _maybe_checkpoint(step: Any, x: Tensor, *, enabled: bool) -> Any:
+    """`enabled`면 층 하나를 non-reentrant activation checkpoint로 (입력 `x`만 남기고 backward에서 다시 계산), 아니면 그대로 부른다."""
+    if not enabled:
+        return step(x)
+    from torch.utils.checkpoint import checkpoint
+
+    return checkpoint(step, x, use_reentrant=False)
+
+
+def _delta_layer_step(layer: Any, recurrent: Tensor, conv: Tensor, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+    """DeltaNet 층 하나: pre-norm → 몸통 → residual → MLP. ``x [1, T, d]`` → (x, 새 recurrent, 새 conv history)."""
+    y, new_state = _delta_body(layer.linear_attn, layer.input_layernorm(x), {"recurrent": recurrent, "conv": conv})
+    x = x + y
+    x = x + layer.mlp(layer.post_attention_layernorm(x))
+    return x, new_state["recurrent"], new_state["conv"]
+
+
+def _attention_layer_step(
+    layer: Any, cos: Tensor, sin: Tensor, segments: list[tuple[Tensor, Tensor]], bb: QwenBackbone, x: Tensor
+) -> tuple[Tensor, Tensor, Tensor]:
+    """full-attention 층 하나: pre-norm → 윈도우 attention(주어진 조각 위) → residual → MLP. ``x [1, T, d]`` → (x, k, v)."""
+    y, k, v = _attention_body_on(layer.self_attn, layer.input_layernorm(x), cos, sin, segments, bb)
+    x = x + y
+    x = x + layer.mlp(layer.post_attention_layernorm(x))
+    return x, k, v
+
+
 def _conv_body(layer: Any, raw: Tensor, conv_state: Tensor) -> tuple[Tensor, Tensor]:
     """depthwise causal conv: ``raw [1, T, C]`` + history ``[1, C, K−1]`` → 활성화 뒤 ``[1, T, C]``, 새 history."""
     K = layer.conv_kernel_size
@@ -925,14 +1238,22 @@ def _conv_body(layer: Any, raw: Tensor, conv_state: Tensor) -> tuple[Tensor, Ten
     return out.transpose(1, 2), seq[:, :, -(K - 1) :].contiguous()
 
 
+def _delta_projections(layer: Any, h: Tensor) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    """DeltaNet 층의 네 projection ``(raw qkv, z, b, a)`` — 몸통·분기를 합친 행 위에서 한 번에(가중치를 한 번 읽는다)."""
+    return layer.in_proj_qkv(h), layer.in_proj_z(h), layer.in_proj_b(h), layer.in_proj_a(h)
+
+
 def _delta_body(layer: Any, h: Tensor, state: dict[str, Tensor]) -> tuple[Tensor, dict[str, Tensor]]:
     """gated DeltaNet 몸통 — 공식 forward의 계산을 명시적 상태 입출력으로 (chunk kernel, `initial_state`/`output_final_state`)."""
-    B, T, _ = h.shape
-    raw = layer.in_proj_qkv(h)
+    return _delta_body_from(layer, *_delta_projections(layer, h), state)
+
+
+def _delta_body_from(layer: Any, raw: Tensor, z_raw: Tensor, b: Tensor, a: Tensor, state: dict[str, Tensor]) -> tuple[Tensor, dict[str, Tensor]]:
+    B, T, _ = raw.shape
     mixed, conv_state = _conv_body(layer, raw, state["conv"])
-    z = layer.in_proj_z(h).reshape(B, T, -1, layer.head_v_dim)
-    beta = layer.in_proj_b(h).sigmoid()
-    g = -layer.A_log.float().exp() * F.softplus(layer.in_proj_a(h).float() + layer.dt_bias)
+    z = z_raw.reshape(B, T, -1, layer.head_v_dim)
+    beta = b.sigmoid()
+    g = -layer.A_log.float().exp() * F.softplus(a.float() + layer.dt_bias)
     query, key, value = torch.split(mixed, [layer.key_dim, layer.key_dim, layer.value_dim], dim=-1)
     query = query.reshape(B, T, -1, layer.head_k_dim)
     key = key.reshape(B, T, -1, layer.head_k_dim)
@@ -959,9 +1280,13 @@ def _delta_branches(layer: Any, h: Tensor, state: dict[str, Tensor]) -> Tensor:
     ``S' = αS + β k (v − α Sᵀk)ᵀ``, ``o = S'ᵀ q = α (Sᵀq) + β (kᵀq)(v − α Sᵀk)`` — fp32에서 (kernel과 같은 정밀도).
     ``h [n, 1, d]`` → ``[n, 1, d]``.
     """
-    n = h.shape[0]
+    return _delta_branches_from(layer, *_delta_projections(layer, h), state)
+
+
+def _delta_branches_from(layer: Any, raw: Tensor, z_raw: Tensor, b: Tensor, a: Tensor, state: dict[str, Tensor]) -> Tensor:
+    """분기 계산 본체 — projection ``raw [n, 1, C]``·``z_raw``·``b``·``a``(모두 ``[n, 1, ·]``)를 받는다."""
+    n = raw.shape[0]
     K = layer.conv_kernel_size
-    raw = layer.in_proj_qkv(h)  # [n, 1, C]
     window = torch.cat([state["conv"].to(raw.dtype).expand(n, -1, -1), raw.transpose(1, 2)], dim=2)  # [n, C, K]
     weight = layer.conv1d.weight.squeeze(1)  # [C, K]
     mixed = (window.float() * weight.float()[None]).sum(-1)
@@ -978,16 +1303,16 @@ def _delta_branches(layer: Any, h: Tensor, state: dict[str, Tensor]) -> Tensor:
         key = key.repeat_interleave(rep, dim=1)
     query = _l2norm(query) * (layer.head_k_dim**-0.5)
     key = _l2norm(key)
-    beta = layer.in_proj_b(h)[:, 0].sigmoid().float()  # [n, Hv] — kernel처럼 bf16 sigmoid 뒤 fp32
-    g = -layer.A_log.float().exp() * F.softplus(layer.in_proj_a(h)[:, 0].float() + layer.dt_bias)
+    beta = b[:, 0].sigmoid().float()  # [n, Hv] — kernel처럼 bf16 sigmoid 뒤 fp32
+    g = -layer.A_log.float().exp() * F.softplus(a[:, 0].float() + layer.dt_bias)
     alpha = g.exp()[..., None]  # [n, Hv, 1]
     S = state["recurrent"][0].float()  # [Hv, dk, dv]
     Sq = torch.einsum("hkv,nhk->nhv", S, query)
     Sk = torch.einsum("hkv,nhk->nhv", S, key)
     kq = (key * query).sum(-1, keepdim=True)  # [n, Hv, 1]
     out = alpha * Sq + beta[..., None] * kq * (value - alpha * Sk)
-    z = layer.in_proj_z(h).reshape(-1, layer.head_v_dim)
-    out = layer.norm(out.to(h.dtype).reshape(-1, layer.head_v_dim), z).reshape(n, 1, -1)
+    z = z_raw.reshape(-1, layer.head_v_dim)
+    out = layer.norm(out.to(raw.dtype).reshape(-1, layer.head_v_dim), z).reshape(n, 1, -1)
     return layer.out_proj(out)
 
 
@@ -1004,23 +1329,62 @@ def _project_qkv(layer: Any, h: Tensor, cos: Tensor, sin: Tensor, bb: QwenBackbo
     return query.transpose(1, 2), gate, key.transpose(1, 2), value
 
 
+def _attention_fused(layer: Any, h: Tensor, cos: Tensor, sin: Tensor, store: _WindowKV, bb: QwenBackbone, T: int) -> tuple[Tensor, Tensor, Tensor]:
+    """몸통 T개 + 분기 n개의 attention을 한 projection으로: 몸통은 prefix·윈도우 + 자기 causal, 분기는 prefix·윈도우·몸통 전부 + 자기 토큰.
+    ``h [1, T+n, d]`` → (``[1, T+n, d]``, 몸통 k, 몸통 v)."""
+    query, gate, key, value = _project_qkv(layer, h, cos, sin, bb)
+    q_all, k_all, v_all = query[0], key[0], value[0]  # [T+n, H, D], [T+n, Hk, D]
+    q_body, k_body, v_body = q_all[:T], k_all[:T], v_all[:T]
+    q_branch, k_branch, v_branch = q_all[T:], k_all[T:], v_all[T:]
+    segments = [(k, v) for k, v in store.segments() if k.shape[0]]
+    out_body = windowed_attention(q_body, segments, (k_body, v_body), scale=layer.scaling)
+    parts = [_flash_part(q_branch, k, v, causal=False, scale=layer.scaling) for k, v in segments]
+    parts.append(_flash_part(q_branch, k_body, v_body, causal=False, scale=layer.scaling))  # 몸통 전부가 보인다
+    g = bb.num_heads // bb.num_kv_heads
+    k_own = k_branch.repeat_interleave(g, dim=1) if g > 1 else k_branch
+    v_own = v_branch.repeat_interleave(g, dim=1) if g > 1 else v_branch
+    own_score = (q_branch.float() * k_own.float()).sum(-1) * layer.scaling  # [n, H]
+    parts.append(AttentionParts(v_own, own_score))
+    out_branch = merge_attention_parts(parts)
+    out = torch.cat([out_body, out_branch]).reshape(1, q_all.shape[0], -1) * torch.sigmoid(gate)
+    if bb.attention_backend is None:
+        bb.attention_backend = kernel_names(q_all.device)["attention"]
+    return layer.o_proj(out), k_body, v_body
+
+
 def _attention_body(layer: Any, h: Tensor, cos: Tensor, sin: Tensor, store: _WindowKV, bb: QwenBackbone) -> tuple[Tensor, Tensor, Tensor]:
     """틱 몸통의 full attention: prefix·윈도우(전부) + 자기 틱(causal), mask 없이. ``h [1, T, d]`` → (``[1, T, d]``, k, v)."""
+    return _attention_body_on(layer, h, cos, sin, store.segments(), bb)
+
+
+def _attention_body_on(
+    layer: Any, h: Tensor, cos: Tensor, sin: Tensor, segments: list[tuple[Tensor, Tensor]], bb: QwenBackbone
+) -> tuple[Tensor, Tensor, Tensor]:
+    """:func:`_attention_body` 의 본체 — 보이는 KV 조각을 인자로 받는다 (checkpoint 재계산이 같은 조각을 쓰도록)."""
     query, gate, key, value = _project_qkv(layer, h, cos, sin, bb)
     q, k, v = query[0], key[0], value[0]  # [T, H, D], [T, Hk, D]
-    out = windowed_attention(q, store.segments(), (k, v), scale=layer.scaling)
+    out = windowed_attention(q, segments, (k, v), scale=layer.scaling)
     out = out.reshape(1, q.shape[0], -1) * torch.sigmoid(gate)
     if bb.attention_backend is None:
         bb.attention_backend = kernel_names(q.device)["attention"]
     return layer.o_proj(out), k, v
 
 
-def _attention_branches(layer: Any, h: Tensor, cos: Tensor, sin: Tensor, store: _WindowKV, bb: QwenBackbone) -> Tensor:
-    """분기 n개의 1토큰 attention: 공유 KV 위의 query n개를 한 flash 호출로, 자기 토큰은 logsumexp로 합친다. ``h [n, 1, d]``."""
+def _attention_branches(
+    layer: Any, h: Tensor, cos: Tensor, sin: Tensor, store: _WindowKV, bb: QwenBackbone, *, window: _StaticWindow | None = None
+) -> Tensor:
+    """분기 n개의 1토큰 attention: 공유 KV 위의 query n개를 한 flash 호출로, 자기 토큰은 logsumexp로 합친다. ``h [n, 1, d]``.
+
+    `window`(graph 캡처용)가 있으면 윈도우 조각을 정적 버퍼 전체 위의 varlen 호출(경계는 장치 tensor)로 돈다.
+    """
     n = h.shape[0]
     query, gate, key, value = _project_qkv(layer, h, cos.expand(n, -1, -1), sin.expand(n, -1, -1), bb)
     q = query[:, 0]  # [n, H, D] — 모두 같은 position; 분기 n개가 flash 호출의 query 토큰 n개다
-    parts = [_flash_part(q, k, v, causal=False, scale=layer.scaling) for k, v in store.segments() if k.shape[0]]
+    if window is None:
+        parts = [_flash_part(q, k, v, causal=False, scale=layer.scaling) for k, v in store.segments() if k.shape[0]]
+    else:
+        parts = [_flash_part_static(q, store.k_prefix, store.v_prefix, window.prefix_cu, layer.scaling)]
+        parts.append(_flash_part_static(q, store.k_win, store.v_win, window.window_cu, layer.scaling, seqused=window.seqused, capacity=store.capacity))
     g = bb.num_heads // bb.num_kv_heads
     k_own = key[:, 0].repeat_interleave(g, dim=1) if g > 1 else key[:, 0]  # [n, H, D]
     v_own = value[:, 0].repeat_interleave(g, dim=1) if g > 1 else value[:, 0]
