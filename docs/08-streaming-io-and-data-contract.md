@@ -197,7 +197,7 @@ command = {
 - 성공률 비교는 횟수 차이가 아니라 성공률과 신뢰구간으로 한다. censoring으로 유효 반복 수가 다르면 그 수로 계산하되, censoring이 선택적일 수 있으므로 사유를 보존하고 편향을 별도 검토한다. seed 8회는 초기 선별용이며 근소한 차이를 판정하는 표본 수로 취급하지 않는다.
 - **부가 질문 라벨의 조건.** `q_gripper`·`q_path`·`q_speed`·`q_force`의 라벨은 그 틱의 실제 commitment(`action_ref`·국면)에 조건화한 전문가 답이다. 전문가 에피소드에서는 전문가의 commitment, DAgger 에피소드에서는 모델이 채택한 commitment가 조건이다. 조건이 되는 commitment가 부적합하면 부가 답은 "안전한 기본값"(hold·저속·회피·현재 그리퍼 상태)으로 라벨하거나 마스킹한다.
 - **DAgger식 재라벨링.** 학습 버전이 나올 때마다 robojev를 시뮬레이션에서 200 에피소드 실행한다. 레코드에는 모델 raw 출력, 하네스 채택 결과, 실행 ACK를 **그대로 보존**하고, 그 상태에서 전문가가 지금 고를 답을 labels에만 기록한다. 입력의 실행 이력·commitment는 바꾸지 않는다. 새 에피소드에 정책 오류·복구 상황·commitment 변경이 얼마나 포함됐는지 집계한다. 혼합 비율 70/20/10은 기존 자료·오류 계열·새 의미 계열의 축이고, 로봇/비로봇 비중은 별도 sampler 축이다.
-- **Rollout 예산(시작값).** 에피소드당 키프레임 5틱(이벤트·전술 변경 시점 + 무작위, 사건 종류별 포함률 기록) × 400 에피소드 = 2,000 상태 × 결합 후보 8 × seed 8 = 128,000 rollout. 5초 구간이면 약 178 모의 시간. reset·snapshot 복원·후속 정책 비용은 첫 100개 실측으로 재산정.
+- **Rollout 예산(시작값).** 에피소드당 키프레임 5틱(이벤트·전술 변경 시점 + 무작위, 사건 종류별 포함률 기록) × 400 에피소드 = 2,000 상태 × 결합 후보 8 × seed 8 = 128,000 rollout. 5초 구간이면 약 178 모의 시간. reset·snapshot 복원·후속 정책 비용은 첫 100개 실측으로 재산정. **D1 실측(2026-09-20, Task D1):** 2,000 키프레임(random 1,312 · switch 458 · moved 155 · stop 39 · instruction 36) × 후보 4~8(놓기 국면 틱은 4) × seed 8 = **100,640** rollout; 성공 64.5 %, censored 0.90 %(전부 `candidate_unavailable`), 놓기 93.8 / 파지 50.9 / 밀기 48.9 %; 0.51 s/rollout ≈ 14 CPU-h(8 worker 2시간, 에피소드 8편 묶음 단위 재개 가능); 라벨 2,000(high 1,806 / low 194 — commitment_kept 1,423, performance_unique 345, all_failed 138, weak_evidence 56, allowed_set 31, gate 7)을 계보 버전 `d1-rollout-labels`에 붙였다(`robo_jev.data.lineage`, `versions.labels = labels-rollout-v1`).
 
 ## 8. 데이터 레코드 정의
 
