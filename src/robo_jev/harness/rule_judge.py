@@ -52,8 +52,8 @@ __all__ = [
 ]
 
 #: 규칙 버전. 레코드의 `versions.rules`에 들어간다. rj0.4 = 계약 v0.3(4조각 결합 키, 짧은 후보 기하 필드, 접촉 국면에는
-#: 관측 게이트 없음).
-RULE_JUDGE_VERSION = "rj0.4"
+#: 관측 게이트 없음). rj0.5 = 놓기 국면의 그리퍼 답은 내려가는 경로에만 `open`(e0.4와 같은 규칙, D1-prep 리뷰 1 I4).
+RULE_JUDGE_VERSION = "rj0.5"
 
 DEFAULT_CONFIG_PATH = "configs/harness/rule_judge_v0.yaml"
 
@@ -249,6 +249,7 @@ class RuleJudge:
         if phase not in PHASES:
             phase = "none"
 
+        path, path_kind = self._path(paths, values, commitment)
         return {
             "q_main": self._main(candidates, values, state, goal, model),
             "q_done": self._truth(self._goal_satisfied(state, goal)),
@@ -256,8 +257,8 @@ class RuleJudge:
             "q_observe": self._truth(self._needs_observation(state, goal, phase)),
             "q_retry": self._truth(self._retry_ok(model)),
             "q_stop": self._truth(self._must_stop(state, goal)),
-            "q_gripper": self._gripper(state, phase, commitment, values),
-            "q_path": self._path(paths, values, commitment),
+            "q_gripper": self._gripper(state, phase, commitment, values, path_kind=path_kind),
+            "q_path": path,
             "q_speed": self._speed(state, phase, commitment, values),
             "q_force": self._force(phase),
         }
@@ -494,12 +495,21 @@ class RuleJudge:
         return _normalise({option: mass if option == chosen else share for option in options})
 
     def _gripper(
-        self, state: dict[str, Any], phase: str, commitment: dict[str, Any] | None, values: dict[str, dict[str, Any]]
+        self,
+        state: dict[str, Any],
+        phase: str,
+        commitment: dict[str, Any] | None,
+        values: dict[str, dict[str, Any]],
+        *,
+        path_kind: str | None = "direct",
     ) -> dict[str, float]:
-        """국면 프로파일의 그리퍼 상태. 파지 국면에서는 말단이 파지점에 와야 닫는다."""
+        """국면 프로파일의 그리퍼 상태. 파지 국면에서는 말단이 파지점에 와야 닫는다. 놓기 국면의 `open`은 경로 답이 내려가는
+        경로(direct·via)일 때만이고 hold·retreat면 `closed`다 (rj0.5 — 전문가 e0.4의 `place_blocked`와 같은 규칙)."""
         desired = str(self.profiles["gripper_by_phase"][phase])
         if desired == "current":
             desired = "closed" if state["robot"].get("holding") else "open"
+        if phase == "place" and desired == "open" and path_kind not in ("direct", "via"):
+            desired = "closed"
         if phase == "grasp" and desired == "closed" and not state["robot"].get("holding"):
             value = values.get(str((commitment or {}).get("action_ref"))) if commitment else None
             point = (value or {}).get("action_mm")
@@ -514,14 +524,16 @@ class RuleJudge:
         paths: list[dict[str, Any]],
         values: dict[str, dict[str, Any]],
         commitment: dict[str, Any] | None,
-    ) -> dict[str, float]:
-        """직진이 기본이고 막혔으면 첫 번째 비어 있는 경유점이다 (docs/02 §9)."""
+    ) -> tuple[dict[str, float], str | None]:
+        """직진이 기본이고 막혔으면 첫 번째 비어 있는 경유점이다 (docs/02 §9). (분포, 고른 경로의 종류)를 돌려준다."""
         options = [entry["id"] for entry in paths]
         if not options:
-            return {}
+            return {}, None
         by_kind: dict[str, list[str]] = {}
+        kinds: dict[str, str] = {}
         for entry in paths:
             by_kind.setdefault(str(entry["kind"]), []).append(str(entry["id"]))
+            kinds[str(entry["id"])] = str(entry["kind"])
 
         value = values.get(str((commitment or {}).get("action_ref"))) if commitment else None
         if commitment is None or value is None or value["function"] is None:
@@ -532,7 +544,7 @@ class RuleJudge:
             chosen = by_kind["via"][0]
         else:
             chosen = (by_kind.get("retreat") or by_kind.get("hold") or options)[0]
-        return self._spread(chosen, options)
+        return self._spread(chosen, options), kinds.get(chosen)
 
     def _speed(
         self,

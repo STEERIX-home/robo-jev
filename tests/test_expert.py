@@ -541,7 +541,7 @@ def test_plan_cost_is_the_remaining_command_path_length():
     segments = math.ceil(remaining / HARNESS["candidates"]["push_segment_mm"])
     assert ex.plan_cost_mm(push, state, goal) == pytest.approx(
         push["distance_mm"] + segments * HARNESS["candidates"]["push_segment_mm"]
-        + (segments - 1) * (HARNESS["candidates"]["approach_clearance_mm"] + HARNESS["candidates"]["push_contact_mm"])
+        + (segments - 1) * (HARNESS["candidates"]["approach_clearance_mm"] + HARNESS["candidates"]["push_contact_mm"]["fingers"]["+x"])
     )
     assert ex.plan_cost_mm(candidate_values({"id": "x", "key": "hold"}), state, goal) == 0.0
 

@@ -7,7 +7,7 @@
 # 실행기와 공유하는 수치(수명·속도 수준·힘 수준·그리퍼 폭·도달 범위)는 여기 **복사하지
 # 않는다**. 컨트롤러 설정이 그 단일 출처이고 하네스가 그것을 읽는다 — 두 곳에 적으면
 # 언젠가 어긋나고, 그때 하네스는 컨트롤러가 거절할 명령을 만든다.
-version: h0.5
+version: h0.6
 controller_config: configs/controller/osc_v0.yaml
 
 # 질문 세트 v0 (docs/08 §4). 세트는 하네스 버전으로 고정하고 후보만 틱마다 바뀐다.
@@ -113,7 +113,19 @@ candidates:
   place_zone_inset_mm: 20    # 놓기점(물체 중심)이 영역 경계에서 떨어지는 최소 거리
   place_grid_mm: 10          # 빈 자리를 찾는 격자 간격
   place_height_slack_mm: 30  # 관측된 바닥으로 정한 놓기 높이가 공칭에서 벗어날 수 있는 최대치
-  push_contact_mm: 30        # 밀기 접촉점의 물체 표면 밖 거리
+  # 밀기 접촉점: 말단이 물체 표면에서 접근 축 방향으로 떨어지는 거리 = **닫힌 그리퍼가 그 축으로 뻗은 길이 + 여유** (h0.6, 리뷰 1 §d).
+  # 실측(`Environment.gripper_extent_mm`, 검사가 대조): 닫힌 손가락은 말단에서 +x 12·−x 17·±y 30mm, 손몸통(말단 위 22mm부터)은 +x 28·
+  # −x 47·±y 106mm 뻗어 있다. 물체 윗면이 손몸통 바닥(push 높이 + `push_hand_bottom_mm`)보다 `push_hand_overlap_mm`보다 더 높으면 손몸통이
+  # 먼저 닿으므로 `hand`의 값(손몸통 도달 + 5)을, 아니면 손가락이 미는 `fingers`의 값(손가락 도달 + 18; x축은 손몸통 도달 + 5도 넘긴다)을
+  # 쓴다. 옛 값 30은 ±y에서 손가락 여유 0·손몸통 겹침 최대 76mm였다. batch-0 전체 sweep(9,880) 실측: ±y 접근 중 충돌(contact_force)은
+  # 손몸통이 윗면과 겹치는 물체에서만 났고(+y 134/688 vs 0/320, −y 111/544 vs 6/248) 겹침 ≤ 6mm(상자·낮은 원통)는 충돌 4~8 %·성공
+  # 41~71 %, 겹침 > 6mm(키 큰 원통)는 충돌 19~42 %·성공 9~21 %다 — 그래서 겹침 6mm까지는 손가락 밀기를 두고 그 위만 손몸통 밀기다
+  # (같은 3,384 밀기 job의 A/B: ±y 접근 중 충돌 243 → 52).
+  push_contact_mm:
+    fingers: {"+x": 33, "-x": 52, "y": 48}
+    hand: {"+x": 33, "-x": 52, "y": 111}
+  push_hand_bottom_mm: 22    # 손몸통 바닥의 말단 위 높이 (실측 21.9)
+  push_hand_overlap_mm: 6    # 손몸통이 윗면과 이만큼까지 겹치는 물체는 손가락으로 민다
   push_segment_mm: 80        # 밀기 한 구간의 길이 (완료 판정에도 쓴다)
   # 밀기 높이 = max(물체 중간 높이, 작업면 + 이 값). 닫힌 손가락 끝은 그립 사이트 아래 4mm이고 하강 끝의 추종
   # 오차가 10mm쯤이라 그보다 낮으면 손가락이 작업면을 친다(3c-2 실측: 32mm 상자의 중간 높이에서 230N).
@@ -152,6 +164,14 @@ compose:
   forbidden_proximity_mm: 60 # 금지 물체가 이 안이면 힘 수준을 회피로 묶는다
   observe_ticks: 3           # 관측·보류 후보의 완료 판정 (무한 반복 방지)
   hold_ticks: 3
+  # 놓기 정체 감시 (h0.6, 리뷰 1 I6): 놓기 국면에서 실행기가 `gripper_wait: readiness`로 기다리는 틱이 연속 `m_place`에 이르고
+  # 그동안 말단이 `place_progress_mm` 이상 내려가지 못하면(보이지 않는 받침·틀린 파지 오프셋·작업면에 눌린 하중) `place_stalled`로
+  # 적고 commitment를 풀며 그 놓기점 둘레 `place_stall_exclusion_mm`의 격자점을 그 에피소드 동안 제외한다 — 다음 채택은 다른 자리로
+  # 내려간다(반경은 보이지 않는 받침의 자국 + 든 물체의 자국 규모: 물체 자국 ≤ 40 + 여유). 옛 규칙(중심 고정)의 E1 seed 13은 96틱을
+  # 그 자리에서 기다렸다; 감시는 15틱 뒤 풀고 자리를 바꾼다(검사 `test_the_stall_guard_frees_seed_13_under_the_old_centre_rule`).
+  m_place: 15
+  place_progress_mm: 2
+  place_stall_exclusion_mm: 60
 
 # 국면 판정과 국면별 목표점 (docs/08 §3.2 `commitment`의 국면, §5.6).
 #   approach → 접근점, grasp → 파지점, lift → 현재 XY에서 이동 높이까지 수직 상승,

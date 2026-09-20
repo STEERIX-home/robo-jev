@@ -31,7 +31,7 @@ from typing import Any
 import yaml
 
 from robo_jev.contracts import AUX_QUESTIONS, PHASES
-from robo_jev.harness.robot import CONTACT_PHASES, FIXED_KEYS, load_harness_config, parse_exec_history
+from robo_jev.harness.robot import CONTACT_PHASES, FIXED_KEYS, load_harness_config, parse_exec_history, push_contact_offset_mm
 from robo_jev.harness.rule_judge import Goal, candidate_values, normalise_distribution, read_goal
 from robo_jev.perception.pointworld import circumradius_mm, segment_point_distance_mm
 from robo_jev.sim.controller import load_controller_config, resolve_config_path
@@ -107,7 +107,9 @@ class Expert:
         self.grasp_depth_mm = float(harness["candidates"]["grasp_depth_mm"])
         self.approach_clearance_mm = float(harness["candidates"]["approach_clearance_mm"])
         self.push_segment_mm = float(harness["candidates"]["push_segment_mm"])
-        self.push_contact_mm = float(harness["candidates"]["push_contact_mm"])
+        self.candidates_spec = dict(harness["candidates"])
+        #: 재접근 비용의 공칭 접촉 거리 (x축 손가락 값; 축별 값은 `push_contact_offset_mm`).
+        self.push_contact_mm = push_contact_offset_mm(self.candidates_spec, "+x", [0, 0, 0], 0.0, 0.0)
         self.lift_height_mm = float(harness["phases"]["lift_height_mm"])
         self.planner_margin_mm = float(harness["planner"]["margin_mm"])
         self.forbidden_margin_mm = float(harness["planner"]["forbidden_margin_mm"])
@@ -599,23 +601,34 @@ class Expert:
         return str(value["approach"]) in {str(direction) for direction in allowed}
 
     def _contact_point_free(self, state: dict[str, Any], pushed: str, vector: tuple[float, float]) -> bool:
-        """밀기 접촉점(물체 표면 밖 `push_contact_mm`)이 다른 물체의 외접 구 + 여유 밖인가.
+        """밀기 접촉 구간 — 말단의 접촉점(표면 밖 축별 접촉 거리, `push_contact_offset_mm`)에서 물체 표면까지 — 이 다른 물체의
+        외접 구 + 여유 밖인가.
 
-        끝점이 다른 물체의 구 안이면 어떤 경로로도 닿을 수 없다 — 그 방향은 고르지 않는다.
+        구간 어딘가가 다른 물체의 **바닥 자국**(OBB xy 외접 반지름) + 여유 안이면 미는 면이 그 물체에 먼저 닿는다 — 그 방향은
+        고르지 않는다. (h0.6부터 ±y의 접촉 거리는 손몸통 도달까지 106mm라 말단 점 하나가 아니라 표면까지의 구간을 보고, 밀기
+        높이의 평면 검사이므로 3D 외접 구가 아니라 자국을 쓴다 — 60mm 곁의 이웃은 외접 구 + 여유(78)로는 언제나 걸린다.)
         """
         entry = next((item for item in state.get("objects") or () if str(item["id"]) == pushed), None)
         if entry is None:
             return False
         pose = [float(value) for value in entry["pose_mm"]]
         obb = [float(value) for value in entry["obb_mm"]]
-        reach = math.hypot(obb[0] / 2.0, obb[1] / 2.0) + self.push_contact_mm
-        contact = [pose[0] - vector[0] * reach, pose[1] - vector[1] * reach, pose[2]]
+        surface = float((state.get("scene") or {}).get("work_surface_mm", 0.0))
+        height = max(pose[2], surface + float(self.candidates_spec.get("push_height_min_mm", 0.0)))
+        direction = next((name for name, item in _PUSH_VECTORS.items() if item == tuple(vector)), "+x")
+        reach = math.hypot(obb[0] / 2.0, obb[1] / 2.0) + push_contact_offset_mm(
+            self.candidates_spec, direction, obb, float(entry.get("top_mm", pose[2] + obb[2] / 2.0)), height
+        )
+        contact = [pose[0] - vector[0] * reach, pose[1] - vector[1] * reach, height]
+        radius_xy = math.hypot(obb[0] / 2.0, obb[1] / 2.0)
+        surface_point = [pose[0] - vector[0] * radius_xy, pose[1] - vector[1] * radius_xy, height]
         holding = state["robot"].get("holding")
         for other in state.get("objects") or ():
             if str(other["id"]) in (pushed, holding):
                 continue
-            centre = [float(value) for value in other["pose_mm"]]
-            if math.dist(contact, centre) < circumradius_mm(other["obb_mm"]) + self.planner_margin_mm:
+            centre = [float(value) for value in other["pose_mm"][:2]] + [height]
+            footprint = math.hypot(float(other["obb_mm"][0]) / 2.0, float(other["obb_mm"][1]) / 2.0)
+            if segment_point_distance_mm(contact, surface_point, centre) < footprint + self.planner_margin_mm:
                 return False
         return True
 

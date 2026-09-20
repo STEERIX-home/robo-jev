@@ -356,6 +356,72 @@ def test_a_full_zone_holds_with_a_zone_full_record_instead_of_a_drop():
     assert out["command"]["gripper"] == "closed"
 
 
+def test_a_full_zone_marks_the_candidate_blocked_so_the_label_rules_answer_hold_and_closed():
+    """리뷰 1 M2: `zone_full`은 하네스 블록에만 있었다 — 후보 줄은 `path=ok`, 전문가·규칙 기준군은 direct·open을 답했는데 하네스는
+    hold + 하향을 명령했다. 빈 자리가 없으면 후보가 `path=blocked`(blocker `zone_full`)를 말해 경로 답이 hold, 그리퍼 답이 closed다."""
+    from robo_jev.sim.expert import Expert
+
+    x0, y0, x1, y1 = ZONE_L["bounds_mm"]
+    crowd = [
+        obj(f"o{index + 1}", (x, y, -80), colour="blue")
+        for index, (x, y) in enumerate((x, y) for x in range(x0 - 30, x1 + 31, 70) for y in range(y0 - 30, y1 + 31, 70))
+    ]
+    scene = carrying_scene(neighbours=crowd, ee=(30, 240, 60))
+    scene["goal"] = {"target_ref": "o0", "target_desc": "red 상자", "zone_ref": "zoneL", "forbidden_refs": [], "fragile_refs": [], "version": 1, "text": scene["instruction"]["text"]}
+    hrn = harness()
+    commitment = committed(hrn, PLACE, scene)
+    request = hrn.build_request(scene, None, commitment)
+    entry = candidate_for(request, PLACE)
+    assert entry["path"] == "blocked"
+    assert request["harness"]["candidates"][candidate_id(PLACE)]["blocker"] == "zone_full"
+    answers = Expert().act(request, commitment, scene)
+    kinds = {item["id"]: item["kind"] for item in request["request"]["candidates"]["q_path"]}
+    assert kinds[max(answers["q_path"], key=answers["q_path"].get)] == "hold"
+    assert max(answers["q_gripper"], key=answers["q_gripper"].get) == "closed"
+    out = hrn.compose(request, {question: answers[question] for question in QUESTION_SET_V0}, commitment, scene["sim_time_ms"])
+    assert out["adopted"]["path_kind"] == "hold" and out["command"]["gripper"] == "closed"
+    assert not any(record["kind"] == "gripper_downgraded" for record in out["records"])
+
+
+def test_a_stalled_place_releases_the_commitment_and_excludes_the_point():
+    """리뷰 1 I6: 놓기 국면에서 실행기가 `gripper_wait: readiness`로 `m_place`틱을 기다리고 말단이 `place_progress_mm` 이상
+    내려가지 못하면 `place_stalled`로 적고 commitment를 풀며, 다음 놓기점은 그 자리 둘레 `place_stall_exclusion_mm` 밖이다.
+    내려가는 동안(진행)은 세지 않는다."""
+    m_place = COMPOSE["m_place"]
+    hrn = harness()
+    scene = carrying_scene(ee=(30, 240, 20))
+    scene["exec"] = {"seq": 3, "executor": "MOVE_EE", "action_ref": candidate_id(PLACE), "phase": "place", "gripper": "closed", "gripper_wait": "readiness"}
+    commitment = committed(hrn, PLACE, scene)
+    commitment["phase"] = "place"
+    first_point = hrn.build_request(scene, None, commitment)["harness"]["candidates"][candidate_id(PLACE)]["place_mm"]
+    answer = answers(probabilities(**{PLACE.replace(":", "__"): 1.0}), q_gripper={"open": 1.0})
+    # 내려가는 동안은 정체가 아니다.
+    for step_index in range(m_place):
+        scene["robot"]["ee_pos_mm"] = [30, 240, 20 - 3 * step_index]
+        _, out = step(hrn, scene, answer, commitment)
+        commitment = out["commitment"]
+        assert commitment is not None and commitment["place_wait_ticks"] <= 1
+    # 같은 높이에서 m_place틱을 기다리면 푼다.
+    stalled_records = []
+    for _ in range(m_place + 1):
+        _, out = step(hrn, scene, answer, commitment)
+        stalled_records += [record for record in out["records"] if record["kind"] in ("place_stalled", "release")]
+        if out["commitment"] is None or out["commitment"]["action_ref"] != commitment["action_ref"] or out["switch"]:
+            break
+        commitment = out["commitment"]
+    kinds = [record["kind"] for record in stalled_records]
+    assert "place_stalled" in kinds and any(record.get("reason") == "place_stalled" for record in stalled_records)
+    stalled = next(record for record in stalled_records if record["kind"] == "place_stalled")
+    assert stalled["point_mm"][:2] == [int(round(first_point[0])), int(round(first_point[1]))] and stalled["ticks"] >= m_place
+    # 같은 틱에 다시 채택된 후보의 놓기점은 제외 반경 밖이다.
+    geometry = hrn.build_request(scene, None, None)["harness"]["candidates"][candidate_id(PLACE)]
+    assert math.dist(geometry["place_mm"][:2], first_point[:2]) > COMPOSE["place_stall_exclusion_mm"]
+    assert geometry["place"]["free"] is True
+    hrn.reset()
+    fresh = hrn.build_request(scene, None, None)["harness"]["candidates"][candidate_id(PLACE)]
+    assert fresh["place_mm"] == first_point
+
+
 def test_a_place_command_carries_the_place_point_as_its_own_field():
     """실행기의 open readiness는 명령의 `place_mm`에 댄다 — hold 명령도 같은 자리를 말한다(`target_mm`은 hold에서 무시된다)."""
     hrn = harness()
@@ -1425,7 +1491,8 @@ def test_the_push_phase_is_exempt_from_the_geometry_age_gate():
     hrn = harness()
     push = "push:o0:-x:none"
     scene, commitment = moved_target_scene(hrn, key=push)
-    scene["robot"]["ee_pos_mm"] = [390, 0, -80]  # 접촉점(340+30+30) 안 → push 국면
+    contact_x = hrn.build_request(scene, None, commitment)["harness"]["candidates"][candidate_id(push)]["approach_mm"][0]
+    scene["robot"]["ee_pos_mm"] = [contact_x - 20, 0, -80]  # 접촉점(−x: 외접 반지름 + 축별 접촉 거리) 안 → push 국면
     request = hrn.build_request(scene, None, commitment)
     geometry = request["harness"]["candidates"][candidate_id(push)]
     assert geometry["phase"] == "push" and geometry["moving"] is True and geometry["geometry_age_ms"] == 190
@@ -1436,7 +1503,7 @@ def test_the_push_phase_is_exempt_from_the_geometry_age_gate():
     assert out["command"]["phase"] == "push"
 
     ctrl = Controller.from_config_path(CONTROLLER_CONFIG)
-    ctrl.reset(ee_pos_mm=[390, 0, -80], ee_quat=[0.0, 0.0, 0.0, 1.0], gripper_mm=0, now_ms=0)
+    ctrl.reset(ee_pos_mm=[contact_x - 20, 0, -80], ee_quat=[0.0, 0.0, 0.0, 1.0], gripper_mm=0, now_ms=0)
     ctrl.observe({"holding": None, "target_distance_mm": None})
     ack = ctrl.apply(out["command"], now_ms=scene["sim_time_ms"] + 100)
     assert ack["applied"] is True and ack["request_observation"] is False and ack["executor"] == "PUSH_SEGMENT"
@@ -2106,7 +2173,7 @@ def test_versions_carry_a_digest_of_every_config_that_shapes_the_record(tmp_path
     versions = episode_module.default_versions()
     assert len(versions["config_digest"]) == 64
     assert versions["config_digest"] == episode_module.running_config_digest()
-    assert versions["harness"] == HARNESS_VERSION == "h0.5" and versions["controller"] == "c0.6"
+    assert versions["harness"] == HARNESS_VERSION == "h0.6" and versions["controller"] == "c0.6"
 
     hrn = harness()
     record = new_episode("ep-0005", "scene-family-031", instructions=[INSTRUCTION])
@@ -2260,6 +2327,89 @@ def test_an_episode_of_composed_ticks_passes_the_automatic_qa():
 # --------------------------------------------------------------------------
 # 실제 시뮬레이터와의 폐루프 (docs/08 §9의 제작 파이프라인 한 조각)
 # --------------------------------------------------------------------------
+
+
+def test_the_stall_guard_frees_seed_13_under_the_old_centre_rule():
+    """리뷰 1 I6의 재현: 놓기 자리의 자국·구간 검사를 끄고(옛 중심 규칙) E1 seed 13을 돌리면 든 원통이 중심 곁 낮은 상자에 얹혀
+    96틱을 `readiness`로 기다렸다. 정체 감시가 `m_place`틱 뒤 `place_stalled`로 commitment를 풀고 그 자리를 제외하므로 기다림은
+    `m_place`로 끝나고 다음 놓기점은 제외 반경 밖이다. (자리 검사를 끈 변형에서는 그 다음 자리도 같은 상자에 걸려 hold로 기다릴 수
+    있다 — 완료는 자리 검사가 있는 실제 규칙의 몫이며 E1 sweep 26/26이 그것을 본다.)"""
+    from robo_jev.data.robot_episodes import generate_episode, load_generator_config
+    from robo_jev.harness import robot as robot_module
+    from robo_jev.sim.expert import Expert
+
+    original = robot_module.RobotHarness._place_point_free
+    robot_module.RobotHarness._place_point_free = lambda self, *args, **kwargs: True  # 중심 규칙: 자리 검사 없음
+    try:
+        expert = Expert()
+        record = generate_episode("E1", 13, policy=expert, expert=expert, config=load_generator_config(), max_ticks=300)
+    finally:
+        robot_module.RobotHarness._place_point_free = original
+    outcome = record["provenance"]["outcome"]
+    stalls = sum((tick["usage"]["records"] or {}).get("place_stalled", 0) for tick in record["ticks"])
+    # 감시와 같은 규칙으로 센 정체 길이: 놓기 국면에서 readiness를 기다리며 시작 높이에서 `place_progress_mm` 이상 내려가지 못한 연속 틱.
+    longest = run = 0
+    start_z = None
+    for tick in record["ticks"]:
+        waiting = (tick["adopted"] or {}).get("phase") == "place" and tick["request"]["state"]["exec"].get("gripper_wait") == "readiness"
+        z = tick["request"]["state"]["robot"]["ee_pose_mm"][2]
+        if not waiting:
+            run, start_z = 0, None
+            continue
+        if start_z is None or start_z - z >= COMPOSE["place_progress_mm"]:
+            run, start_z = 1, z
+        else:
+            run += 1
+        longest = max(longest, run)
+    assert stalls >= 1, outcome
+    assert longest <= COMPOSE["m_place"] + 2, longest
+    stalled_tick = next(index for index, tick in enumerate(record["ticks"]) if (tick["usage"]["records"] or {}).get("place_stalled"))
+    before = record["ticks"][stalled_tick - 1]["adopted"]
+    assert before["phase"] == "place" and before["path_kind"] == "direct" and before["gripper"] == "open"
+    # 풀린 뒤에는 같은 자리에서 `open`을 기다리는 틱이 다시 `m_place`를 넘지 않는다 (자리가 바뀌었다).
+    resumed = [tick for tick in record["ticks"][stalled_tick + 1:] if (tick["adopted"] or {}).get("phase") == "place" and tick["request"]["state"]["exec"].get("gripper_wait") == "readiness"]
+    assert len(resumed) <= COMPOSE["m_place"] + 2, len(resumed)
+
+
+def test_the_configured_push_contact_offsets_match_the_simulators_closed_gripper():
+    """h0.6: 축별 밀기 접촉 거리는 닫힌 그리퍼의 실측 도달 + 여유다 — 손가락(x 12/17·y 30) + 18, 손몸통(+x 28·−x 47·y 106) + 5,
+    손몸통 바닥 22. 설정이 시뮬레이터에서 벗어나면 여기서 잡힌다."""
+    from robo_jev.sim.environment import Environment
+
+    env = Environment(config_path=str(SIM_CONFIG), profile="E0")
+    try:
+        scene = env.reset(seed=43)
+        command = {"seq": 1, "observed_at": 0, "issued_at": 0, "action_ref": "c1", "phase": "approach", "path": {"kind": "hold"},
+                   "speed_level": 0, "force_level": "avoid", "gripper": "closed", "stop": False}
+        for index in range(40):
+            scene = env.step(command if index == 0 else None)
+        assert scene["robot"]["gripper_mm"] < 10
+        extent = env.gripper_extent_mm()
+    finally:
+        env.close()
+    contact = CANDIDATES["push_contact_mm"]
+    fingers, hand = extent["fingers"], extent["hand"]
+    finger_gap, hand_gap = 15.0, 3.0
+    assert contact["fingers"]["+x"] >= fingers["x"][1] + finger_gap
+    assert contact["fingers"]["-x"] >= abs(fingers["x"][0]) + finger_gap
+    assert contact["fingers"]["y"] >= max(abs(fingers["y"][0]), fingers["y"][1]) + finger_gap
+    assert contact["hand"]["+x"] >= hand["x"][1] + hand_gap
+    assert contact["hand"]["-x"] >= abs(hand["x"][0]) + hand_gap
+    assert contact["hand"]["y"] >= max(abs(hand["y"][0]), hand["y"][1]) + hand_gap
+    assert abs(CANDIDATES["push_hand_bottom_mm"] - hand["z"][0]) <= 3.0
+    # 접촉점은 축별 규칙을 따른다: 손몸통이 윗면과 겹치는 키 큰 물체의 ±y 접촉은 손몸통 값, 낮은 상자는 손가락 값.
+    from robo_jev.harness.robot import push_contact_offset_mm
+
+    tall_top, push_z = -112 + 80, -112 + 40  # 겹침 18mm > push_hand_overlap_mm → 손몸통
+    assert push_contact_offset_mm(CANDIDATES, "+y", [40, 40, 80], tall_top, push_z) == contact["hand"]["y"]
+    assert push_contact_offset_mm(CANDIDATES, "+x", [40, 40, 80], tall_top, push_z) == contact["hand"]["+x"]
+    low_top, low_z = -112 + 32, -112 + 25  # 손몸통이 윗면 위 → 손가락
+    assert push_contact_offset_mm(CANDIDATES, "-y", [56, 56, 32], low_top, low_z) == contact["fingers"]["y"]
+    assert push_contact_offset_mm(CANDIDATES, "+x", [56, 56, 32], low_top, low_z) == contact["fingers"]["+x"]
+    assert push_contact_offset_mm(CANDIDATES, "-x", [56, 56, 32], low_top, low_z) == contact["fingers"]["-x"]
+    box_top, box_z = -112 + 48, -112 + 25  # 겹침 1mm ≤ 허용 → 손가락 (실측: 이 물체들은 손가락 밀기가 71 % 성공)
+    assert push_contact_offset_mm(CANDIDATES, "+y", [56, 56, 48], box_top, box_z) == contact["fingers"]["y"]
+    assert push_contact_offset_mm({"push_contact_mm": 30}, "+y", [1, 1, 1], 0, 0) == 30
 
 
 def test_the_harness_drives_a_real_e0_episode_and_records_it():

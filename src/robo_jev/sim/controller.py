@@ -243,6 +243,9 @@ class Controller:
         self.gripper_desired = "closed" if float(gripper_mm) <= self.gripper_closed_mm else "open"
         self.gripper_event_count = 0
         self.gripper_event_id: str | None = None
+        #: 마지막 명령의 그리퍼 답이 readiness 미충족·정지 틱으로 보류된 사유 (없으면 None). 실행기의 자기 보고 `exec.gripper_wait`
+        #: (docs/08 §3.2)로 나가 하네스의 놓기 정체 감시(h0.6)가 읽는다.
+        self.gripper_wait: str | None = None
 
         self.slip_active = False
         self.now_ms = now_ms
@@ -626,10 +629,12 @@ class Controller:
         걸렸다는 것을 기록에 남긴다(설정 `stop.hold_grasp`).
         """
         if desired is None or desired == self.gripper_desired:
+            self.gripper_wait = None
             return None
         holding = self.sensors.get("holding") is not None
         reason = "stop_holds_grasp" if self.hold_grasp_on_stop and holding else "stop_tick"
         self._record("gripper_wait", desired=desired, reason=reason)
+        self.gripper_wait = reason
         return reason
 
     def _set_gripper(
@@ -642,17 +647,20 @@ class Controller:
     ) -> tuple[str | None, str | None]:
         """원하는 상태가 바뀔 때만 이벤트 하나. 같은 상태가 반복돼도 다시 나지 않는다."""
         if desired is None or desired == self.gripper_desired:
+            self.gripper_wait = None
             return None, None
 
         reason = self._gripper_readiness(desired, phase, target, place_mm=place_mm)
         if reason is not None:
             self._record("gripper_wait", desired=desired, reason=reason)
+            self.gripper_wait = reason
             return None, reason
 
         self.gripper_event_count += 1
         event_id = f"{self.gripper_event_prefix}-{self.gripper_event_count:04d}"
         self.gripper_desired = desired
         self.gripper_event_id = event_id
+        self.gripper_wait = None
         self._record("gripper", id=event_id, desired=desired)
         return event_id, None
 
@@ -881,6 +889,7 @@ class Controller:
         "gripper_desired",
         "gripper_event_count",
         "gripper_event_id",
+        "gripper_wait",
         "slip_active",
         "now_ms",
         "last_advance_ms",
@@ -901,6 +910,7 @@ class Controller:
                 f"컨트롤러 버전이 다르다: {state.get('version')!r} != {self.version!r}"
             )
         for field in self._STATE_FIELDS:
-            setattr(self, field, copy.deepcopy(state[field]))
+            # `gripper_wait`는 h0.6에서 더해졌다 — 그 전의 snapshot에는 없으므로 None으로 읽는다.
+            setattr(self, field, copy.deepcopy(state[field] if field in state else None))
         self.sensors = copy.deepcopy(state["sensors"])
         self.events = copy.deepcopy(state["events"])
