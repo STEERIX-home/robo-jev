@@ -21,6 +21,8 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[1]
 REPORTS = REPO / "artifacts" / "reports"
 CANDIDATES = {"Qwen/Qwen3.5-2B": "2b", "Qwen/Qwen3.5-4B": "4b"}
+#: Task P1 파일럿(D1 규모, 같은 step·seed·고정 평가 집합) — `artifacts/reports/p1-{2b,4b}-{mode}.json`.
+PILOT_MODES = ("t0", "lora", "t1", "zero-shot")
 
 
 def _load(name: str) -> dict[str, Any] | None:
@@ -75,6 +77,7 @@ def build(selection_text: str | None) -> dict[str, Any]:
             "stream": "backbone-stream.json" if stream else None, "levers": "backbone-stream-levers.json" if levers else None,
             "attribution": "attribution.json" if attribution else None,
             "fused_40_episodes": "backbone-stream-fused.json" if fused else None,
+            "pilot_d1": "p1-{2b,4b}-{t0,lora,t1,zero-shot}.json (Task P1: D1 규모, 같은 step·seed, 고정 평가 집합 configs/eval/pilot.yaml)",
         },
         "candidates": {},
         "selection": selection_text,
@@ -126,6 +129,21 @@ def build(selection_text: str | None) -> dict[str, Any]:
                 "train_seconds": adapt.get("train_seconds"), "memory": adapt.get("memory"), "checkpoint": adapt.get("checkpoint"), "contract_sha256": (adapt.get("manifest") or {}).get("contract_sha256"),
                 "evaluation": _eval_summary(adapt.get("evaluation")),
             }
+        pilot: dict[str, Any] = {}
+        for mode in PILOT_MODES:
+            run = _load(f"p1-{short}-{mode}.json")
+            if run is None:
+                continue
+            evaluation = run.get("evaluation") or {}
+            pilot[mode] = {
+                "steps": run.get("steps"), "status": run.get("status"), "loss_first_last": run.get("loss_first_last"),
+                "step_seconds": run.get("step_seconds"), "train_seconds": run.get("train_seconds"), "tokens": run.get("tokens"),
+                "memory": run.get("memory"), "checkpoint": run.get("checkpoint"), "contract_sha256": (run.get("manifest") or {}).get("contract_sha256"),
+                "train_config": run.get("train_config"), "eval_config": run.get("eval_config"),
+                "eval_set_sha256": (evaluation.get("eval_set") or {}).get("sha256"),
+                "evaluation": _eval_summary(evaluation.get("splits")),
+            }
+        entry["pilot_d1"] = pilot or None
         zero = _load(f"zero-shot-{short}.json")
         entry["zero_shot"] = None if zero is None else {
             split: {"prompts": r.get("prompts"), "accuracy": r["table"]["_all"].get("accuracy"), "nll": r["table"]["_all"].get("nll"), "per_question": {q: {k: v for k, v in row.items() if k in ("n", "accuracy", "nll", "first_position_rate")} for q, row in r["table"].items() if q != "_all"}}
