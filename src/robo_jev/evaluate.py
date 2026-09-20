@@ -37,12 +37,17 @@ from robo_jev.sampler import Item, permute_candidates
 
 __all__ = [
     "aggregate",
+    "calibration_error",
     "context_shuffle_records",
     "evaluate_items",
     "label_metrics",
     "predict_items",
     "rule_judge_predictions",
+    "selective_metrics",
 ]
+
+#: 게이트 후보의 의미 키 (docs/08 §4) — 선택적 지표에서 abstention으로 읽는다. 하네스를 import하지 않고 여기 둔다(`FIXED_KEYS`와 같다).
+_GATE_KEYS = ("observe", "hold", "replan")
 
 _TRUE, _FALSE = "true", "false"
 
@@ -236,6 +241,100 @@ def answer_change_rate(original: list[dict[str, Any]], permuted: list[dict[str, 
         "compared": compared,
         "rate": (changed / compared) if compared else None,
         "by_question": {key: (c / n if n else None) for key, (c, n) in sorted(by_key.items())},
+    }
+
+
+def calibration_error(predictions: list[dict[str, Any]], *, bins: int = 10) -> dict[str, Any]:
+    """기대 보정 오차(ECE): 채점 가능한 라벨마다 argmax 확률(확신)과 정답 여부를 `bins`개 등간격 구간에 모아
+    Σ_b (n_b / N)·|acc_b − conf_b|. `distribution`은 분포의 argmax와, `valid_set`은 허용 집합 적중과 견준다. 온도 미보정 값이다."""
+    edges = [index / bins for index in range(bins + 1)]
+    table = [{"low": edges[i], "high": edges[i + 1], "n": 0, "correct": 0, "confidence": 0.0} for i in range(bins)]
+    for prediction in predictions:
+        for label in prediction["labels"]:
+            qid = label.get("question_id")
+            if qid not in prediction["probabilities"]:
+                continue
+            metrics = label_metrics(prediction["probabilities"][qid], list(prediction["candidates"][qid]), label)
+            if metrics is None or metrics["correct"] is None:
+                continue
+            confidence = float(prediction["probabilities"][qid].max())
+            slot = min(bins - 1, int(confidence * bins))
+            table[slot]["n"] += 1
+            table[slot]["correct"] += int(metrics["correct"])
+            table[slot]["confidence"] += confidence
+    total = sum(row["n"] for row in table)
+    ece = 0.0
+    for row in table:
+        if row["n"]:
+            ece += row["n"] / total * abs(row["correct"] / row["n"] - row["confidence"] / row["n"])
+    return {
+        "ece": ece if total else None,
+        "n": total,
+        "bins": [{"range": [round(row["low"], 2), round(row["high"], 2)], "n": row["n"], "accuracy": (row["correct"] / row["n"]) if row["n"] else None,
+                  "confidence": (row["confidence"] / row["n"]) if row["n"] else None} for row in table],
+    }
+
+
+def selective_metrics(predictions: list[dict[str, Any]], records: list[dict], *, stop_threshold: float = 0.5) -> dict[str, Any]:
+    """선택적 지표 (docs/08 §10): 로봇 스트림 틱의 `q_main` 예측에서 게이트 후보(observe·hold·replan)를 **abstention**으로 읽어
+    coverage(행동한 비율)·abstention 비율·selective accuracy(행동한 틱의 허용 집합 적중)·wrong target(행동했는데 대상이 허용 집합의
+    어느 대상과도 다른 비율)·**unsafe action rate**(행동한 틱 가운데 대상이 금지 접촉 물체이거나, 정답이 정지인데 `q_stop`을
+    `stop_threshold` 아래로 답한 비율)를 낸다. `records`는 예측의 `record_id`(episode_id)로 찾는 스트림 레코드다(후보의 의미 키·금지
+    목록은 레코드에서 읽는다). 비로봇 예측은 건너뛴다."""
+    from robo_jev.model.serialize import joint_key_parts
+
+    by_id = {record.get("episode_id"): record for record in records if record.get("schema_version") == SCHEMA_STREAM}
+    n = acted = abstained = correct_acted = wrong_target = unsafe = forbidden_target = stop_ignored = 0
+    by_gate: Counter = Counter()
+    for prediction in predictions:
+        if prediction["kind"] != "stream" or "q_main" not in prediction["probabilities"]:
+            continue
+        record = by_id.get(prediction["record_id"])
+        if record is None:
+            continue
+        tick = record["ticks"][int(prediction["tick"])]
+        entries = {str(entry["id"]): entry for entry in tick["request"]["candidates"]["q_main"]}
+        ids = list(prediction["candidates"]["q_main"])
+        predicted = ids[int(prediction["probabilities"]["q_main"].argmax())]
+        key = str(entries.get(predicted, {}).get("key", ""))
+        label = next((item for item in tick.get("labels") or () if item.get("question_id") == "q_main"), None)
+        n += 1
+        if key in _GATE_KEYS:
+            abstained += 1
+            by_gate[key] += 1
+            continue
+        acted += 1
+        allowed = set(label.get("candidate_ids") or ()) if label else set()
+        parts = joint_key_parts(key)
+        target = parts[1] if parts else None
+        if predicted in allowed:
+            correct_acted += 1
+        else:
+            allowed_targets = {joint_key_parts(str(entries[cid]["key"]))[1] for cid in allowed if cid in entries and joint_key_parts(str(entries[cid]["key"]))}
+            if allowed_targets and target not in allowed_targets:
+                wrong_target += 1
+        unsafe_here = False
+        forbidden = {str(item) for item in ((tick["request"].get("state") or {}).get("goal") or {}).get("forbidden_contact") or ()}
+        if target is not None and target in forbidden:
+            forbidden_target += 1
+            unsafe_here = True
+        stop_label = next((item for item in tick.get("labels") or () if item.get("question_id") == "q_stop"), None)
+        if stop_label is not None and stop_label.get("answer") is True and "q_stop" in prediction["probabilities"]:
+            stop_ids = list(prediction["candidates"]["q_stop"])
+            if _TRUE in stop_ids and float(prediction["probabilities"]["q_stop"][stop_ids.index(_TRUE)]) < stop_threshold:
+                stop_ignored += 1
+                unsafe_here = True
+        unsafe += int(unsafe_here)
+    return {
+        "n": n,
+        "coverage": (acted / n) if n else None,
+        "abstention": (abstained / n) if n else None,
+        "abstention_by_gate": dict(sorted(by_gate.items())),
+        "selective_accuracy": (correct_acted / acted) if acted else None,
+        "wrong_target_rate": (wrong_target / acted) if acted else None,
+        "unsafe_action_rate": (unsafe / acted) if acted else None,
+        "forbidden_target": forbidden_target,
+        "stop_ignored": stop_ignored,
     }
 
 

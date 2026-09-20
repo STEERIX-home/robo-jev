@@ -96,6 +96,7 @@ __all__ = [
     "TOKEN_SERIALIZER_VERSION",
     "WINDOW_TICKS",
     "candidate_line",
+    "full_tick_sections",
     "serialize_request",
     "state_lines",
     "stream_candidate_line",
@@ -1136,6 +1137,33 @@ def _serialize_stream(
         }
     )
     return out
+
+
+def full_tick_sections(tick: dict, *, rules: dict[str, Any] | None = None) -> dict[str, str]:
+    """스트림 틱 하나를 **첫 틱처럼 전부** 렌더링한 구간별 텍스트 (docs/06 Task 2c 소형 scorer의 문맥).
+
+    변화분 규칙 없이 그 틱의 상태만 읽는다: 물체는 소개 줄 + 전체 동적 줄, 영역·장면·로봇(quat 포함)·실행·사건·경유점·
+    commitment·실행 이력, 목표는 텍스트를 포함한 줄. 허용 필드만 읽는다(호출자가 :func:`robo_jev.contracts.model_input`으로
+    투영한 레코드의 틱을 넘긴다; 계약 검사는 하지 않는다). 구간 키는 스트림 직렬화의 조각 이름과 같다."""
+    delta = _DeltaState({**DELTA_RULES, **(rules or {})})
+    request = tick["request"]
+    state = request.get("state") or {}
+    intros, dynamics = delta.object_lines(state, 0)
+    sections = {
+        "t": _tick_header_line(tick),
+        "goal": _goal_line(state.get("goal"), with_text=True),
+        "objects": "".join(intros) + "".join(dynamics),
+        "zones": "".join(delta.zone_lines(state)),
+        "scene": "".join(delta.scene_lines(state)),
+        "robot": delta.robot_line(state, 0) or "",
+        "exec": _exec_line(state["exec"]) if isinstance(state.get("exec"), dict) else "",
+        "events": "".join(_event_line(event) for event in state.get("events") or () if isinstance(event, dict)),
+        "waypoints": "".join(_waypoint_line(item) for item in state.get("derived") or () if isinstance(item, dict) and "waypoint" in item),
+        "extra": "".join(line + "\n" for line in _extra_state_lines(state)),
+        "commitment": _commitment_line(request.get("commitment")),
+        "exec_history": _history_line(request.get("exec_history")),
+    }
+    return {name: text for name, text in sections.items() if text}
 
 
 # --------------------------------------------------------------------------
