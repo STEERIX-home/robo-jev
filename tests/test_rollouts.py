@@ -7,7 +7,7 @@ import pytest
 import yaml
 
 from robo_jev.contracts import validate_record
-from robo_jev.data.robot_episodes import generate_episode, load_generator_config, write_episode
+from robo_jev.data.robot_episodes import generate_episode, load_generator_config, read_episodes, write_episode
 from robo_jev.data.rollouts import build_jobs, costing, replay_to_keyframes, run
 from robo_jev.harness.robot import load_harness_config
 from robo_jev.sim.expert import Expert
@@ -246,3 +246,114 @@ def test_the_push_contact_ab_driver_runs_the_same_push_jobs_under_each_arms_harn
         assert all(name.split(":")[0] in ("fingers", "hand") for name in arm["by_class"])
     assert sum(report["jobs_by_direction"].values()) == report["push_jobs"]
 
+
+@pytest.fixture(scope="module")
+def two_episodes(tmp_path_factory):
+    """E0 seed 5·6을 20틱씩 돈 배치 (재개 검사용)."""
+    expert = Expert()
+    out = tmp_path_factory.mktemp("batch2")
+    records = []
+    for seed in (5, 6):
+        record = generate_episode("E0", seed, policy=expert, expert=expert, config=CONFIG, max_ticks=20)
+        write_episode(record, out)
+        records.append(record)
+    return {"records": records, "out": out}
+
+
+def test_the_rollout_run_is_resumable_per_episode_and_reproduces_a_fresh_run(two_episodes, tmp_path):
+    """D1 128k: 묶음마다 증분 파일에 덧붙이고 완료 에피소드에 표지를 적는다. `--limit`에 잘린 묶음은 표지가 없어 재개가 다시 돌리고,
+    표지가 있는 에피소드는 건너뛴다. 재개한 결과는 한 번에 돌린 것과 같다(같은 snapshot·seed는 같은 궤적)."""
+    from robo_jev.data.rollouts import KEYFRAMES_INCREMENTAL, PROGRESS_FILE, ConfigMismatch
+
+    dataset = two_episodes["out"]
+    small = {"seeds": 1}
+    common = dict(workers=1, per_episode=2, candidates_per_keyframe=2, chunk_episodes=1, events_override=small)
+    # 한 번에 (기준).
+    whole = run(dataset, limit=None, out=tmp_path / "whole", **common)
+    key = lambda result: (result["job"]["keyframe"], result["job"]["candidate"], result["job"]["seed"])  # noqa: E731
+    reference = {key(result): (result["outcome"], result["reason"]) for result in whole["results"]}
+    assert len(reference) == len(whole["results"]) >= 4
+    markers = [json.loads(line) for line in (tmp_path / "whole" / PROGRESS_FILE).read_text(encoding="utf-8").splitlines()]
+    assert [marker["episode_id"] for marker in markers] == [record["episode_id"] for record in two_episodes["records"]]
+    assert sum(marker["rollouts"] for marker in markers) == len(whole["results"])
+    # 잘린 첫 실행: 첫 에피소드는 완료, 둘째는 limit에 잘려 표지가 없다.
+    first_jobs = markers[0]["rollouts"]
+    partial = run(dataset, limit=first_jobs + 1, out=tmp_path / "resumed", **common)
+    assert len(partial["results"]) == first_jobs + 1
+    progress = [json.loads(line) for line in (tmp_path / "resumed" / PROGRESS_FILE).read_text(encoding="utf-8").splitlines()]
+    assert [marker["episode_id"] for marker in progress] == [markers[0]["episode_id"]]
+    assert len((tmp_path / "resumed" / "rollouts.jsonl").read_text(encoding="utf-8").splitlines()) == first_jobs + 1
+    # 재개: 첫 에피소드는 건너뛰고(결과 재사용) 둘째를 처음부터 돌린다; 부분 결과는 버린다.
+    resumed = run(dataset, limit=None, out=tmp_path / "resumed", resume=True, **common)
+    assert resumed["jobs"] == markers[1]["rollouts"]
+    got = {key(result): (result["outcome"], result["reason"]) for result in resumed["results"]}
+    assert got == reference
+    lines = (tmp_path / "resumed" / "rollouts.jsonl").read_text(encoding="utf-8").splitlines()
+    assert len(lines) == len(reference)
+    frames = [json.loads(line) for line in (tmp_path / "resumed" / KEYFRAMES_INCREMENTAL).read_text(encoding="utf-8").splitlines()]
+    assert len(frames) == len(json.loads((tmp_path / "resumed" / "keyframes.json").read_text(encoding="utf-8"))) == len(whole["keyframes"])
+    progress = [json.loads(line) for line in (tmp_path / "resumed" / PROGRESS_FILE).read_text(encoding="utf-8").splitlines()]
+    assert [marker["episode_id"] for marker in progress] == [marker["episode_id"] for marker in markers]
+    cost = json.loads((tmp_path / "resumed" / "costing.json").read_text(encoding="utf-8"))
+    assert cost["rollouts"] == len(reference) and cost["keyframes"]["resumed"] is True and cost["keyframes"]["episodes_done"] == 2
+    labels = [json.loads(line) for line in (tmp_path / "resumed" / "labels.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert len(labels) == len(whole["labels"])
+    # 재개는 아무것도 다시 돌리지 않는다; 표지의 버전이 다르면 거절한다.
+    again = run(dataset, limit=None, out=tmp_path / "resumed", resume=True, **common)
+    assert again["jobs"] == 0 and len(again["results"]) == len(reference)
+    poisoned = tmp_path / "resumed" / PROGRESS_FILE
+    rows = [json.loads(line) for line in poisoned.read_text(encoding="utf-8").splitlines()]
+    rows[0]["running_versions"]["harness"] = "h0.0"
+    poisoned.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    with pytest.raises(ConfigMismatch):
+        run(dataset, limit=None, out=tmp_path / "resumed", resume=True, **common)
+
+
+def test_rollout_labels_are_attached_in_a_successor_dataset_version_that_keeps_the_lineage(two_episodes, tmp_path):
+    """docs/04 §6: 키프레임 rollout 라벨은 계보를 유지한 후속 버전에 붙는다 — 라벨한 틱의 `q_main`만 rollout 라벨로 바뀌고(전문가
+    라벨은 `expert`에 남는다), 다른 것은 그대로이며 `versions.labels`·`provenance.lineage`·manifest의 `lineage`·`rollout_labels`가
+    계보와 집계를 말한다. QA를 지난다. rollout의 버전이 레코드와 다르면 거절한다."""
+    from robo_jev.data.lineage import LABELS_VERSION, attach_rollout_labels
+    from robo_jev.data.robot_episodes import build_manifest
+    from robo_jev.data.rollouts import ConfigMismatch
+    from robo_jev.data.validate import validate_dataset
+
+    dataset = two_episodes["out"]
+    build_manifest(dataset, CONFIG)
+    rollouts = tmp_path / "rollouts"
+    run(dataset, limit=None, out=rollouts, workers=1, per_episode=2, candidates_per_keyframe=2, chunk_episodes=8, events_override={"seeds": 1})
+    labels = [json.loads(line) for line in (rollouts / "labels.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert labels
+    out = tmp_path / "successor"
+    manifest = attach_rollout_labels(dataset, rollouts, out)
+    assert manifest["lineage"]["labels_version"] == LABELS_VERSION and manifest["lineage"]["parent_dataset"] == str(dataset)
+    assert manifest["rollout_labels"]["ticks_labelled"] == len(labels) and manifest["rollout_labels"]["episodes_with_labels"] >= 1
+    assert sum(manifest["rollout_labels"]["confidence"].values()) == len(labels)
+    assert manifest["versions"]["labels"] == [LABELS_VERSION] and manifest["episodes"] == 2
+    successors = {record["episode_id"]: record for _, record in read_episodes(out)}
+    parents = {record["episode_id"]: record for record in two_episodes["records"]}
+    labelled = {(entry["episode_id"], entry["index"]) for entry in labels}
+    for episode_id, parent in parents.items():
+        child = successors[episode_id]
+        assert child["versions"]["labels"] == LABELS_VERSION and child["split"] == parent["split"]
+        assert child["provenance"]["lineage"]["rollout_label_ticks"] == sorted(index for (eid, index) in labelled if eid == episode_id)
+        for index, (old_tick, new_tick) in enumerate(zip(parent["ticks"], child["ticks"])):
+            assert {k: v for k, v in old_tick.items() if k != "labels"} == {k: v for k, v in new_tick.items() if k != "labels"}
+            old_main = next(l for l in old_tick["labels"] if l["question_id"] == "q_main")
+            new_main = next(l for l in new_tick["labels"] if l["question_id"] == "q_main")
+            others_old = [l for l in old_tick["labels"] if l["question_id"] != "q_main"]
+            others_new = [l for l in new_tick["labels"] if l["question_id"] != "q_main"]
+            assert others_old == others_new
+            if (episode_id, index) in labelled:
+                assert new_main["source"] == "rollout_v0" and new_main["expert"]["candidate_ids"] == old_main["candidate_ids"] and "event_results" in new_main
+            else:
+                assert new_main == old_main
+    report = validate_dataset([record for _, record in read_episodes(out)])
+    assert report["invalid_records"] == 0 and not report.get("errors")
+    # 버전이 다른 rollout은 거절한다.
+    cost_path = rollouts / "costing.json"
+    cost = json.loads(cost_path.read_text(encoding="utf-8"))
+    cost["versions"]["harness"] = "h0.0"
+    cost_path.write_text(json.dumps(cost), encoding="utf-8")
+    with pytest.raises(ConfigMismatch):
+        attach_rollout_labels(dataset, rollouts, tmp_path / "rejected")

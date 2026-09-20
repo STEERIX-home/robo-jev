@@ -7,7 +7,14 @@
 조합 규칙에 다시 먹여 그 틱까지 **재생**(:func:`replay_to_keyframes`)하고 키프레임 틱의 snapshot을 얻는다 →
 :func:`choose_rollout_candidates`로 후보 8개 → 후보 × paired seed의 :func:`rollout_event` → 후보별 집계 →
 :func:`label_main_decision`. 결과는 `<dataset>/rollouts/`에 `keyframes.json`·`rollouts.jsonl`·`labels.jsonl`·
-`costing.json`으로 쓴다. 레코드 자체는 바꾸지 않는다(라벨은 계보를 유지한 후속 버전에 붙는다, docs/04 §6).
+`costing.json`으로 쓴다. 레코드 자체는 바꾸지 않는다(라벨은 계보를 유지한 후속 버전에 붙는다, docs/04 §6 —
+:func:`robo_jev.data.lineage.attach_rollout_labels`).
+
+**재개(D1 128k).** 에피소드를 `chunk_episodes`개씩 묶어 재생·rollout하고, 묶음이 끝날 때마다 결과를 `rollouts.jsonl`·
+`keyframes.jsonl`에 **덧붙이고** 완료한 에피소드마다 `progress.jsonl`에 표지(버전·rollout 수·벽시계)를 적는다. worker 풀은 한 번
+만들어 묶음 사이에 다시 쓴다. `--resume`은 표지가 있는 에피소드를 건너뛰고(표지가 없는 부분 결과는 버린다 — `--limit`에
+잘린 묶음은 표지를 쓰지 않는다) 남은 것만 돌린 뒤 전체에서 라벨·비용을 다시 만든다. 표지의 버전이 지금 것과 다르면
+:class:`ConfigMismatch`다.
 
 재생의 전제는 레코드를 만든 코드·설정과 지금 것이 같다는 것이다. 그래서 먼저 레코드의 `versions`(하네스·
 컨트롤러·전문가 버전과 설정 묶음의 `config_digest`)를 지금 돌아가는 것과 맞대 보고, 다르면 무엇이 다른지 말하는
@@ -19,6 +26,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import copy
 import json
 import math
@@ -51,13 +59,20 @@ __all__ = [
     "VERSION_KEYS",
     "build_jobs",
     "costing",
+    "job_pool",
     "main",
     "replay_to_keyframes",
     "run",
+    "run_jobs",
     "running_versions_for",
     "summarise_sweep",
     "write_outputs",
 ]
+
+#: 재개용 증분 파일 (출력 디렉터리 안).
+PROGRESS_FILE = "progress.jsonl"
+KEYFRAMES_INCREMENTAL = "keyframes.jsonl"
+ROLLOUTS_FILE = "rollouts.jsonl"
 
 ROLLOUTS_VERSION = "rollouts-v0.1"
 _QUESTIONS = tuple(QUESTION_SET_V0)
@@ -358,8 +373,31 @@ def _worker_run(job: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def run_jobs(jobs: list[dict[str, Any]], *, sim_config: str, expert_config: str, workers: int = 1, log: Any = None) -> list[dict[str, Any]]:
+@contextlib.contextmanager
+def job_pool(workers: int, *, sim_config: str, expert_config: str):
+    """worker 풀(spawn, worker마다 환경 하나)을 한 번 만들어 여러 :func:`run_jobs` 호출에 다시 쓴다. `workers <= 1`이면 `None`(직렬)."""
     if workers <= 1:
+        yield None
+        return
+    import multiprocessing
+
+    context = multiprocessing.get_context("spawn")
+    pool = context.Pool(workers, initializer=_worker_init, initargs=(sim_config, expert_config))
+    try:
+        yield pool
+    finally:
+        pool.close()
+        pool.join()
+
+
+def run_jobs(
+    jobs: list[dict[str, Any]], *, sim_config: str, expert_config: str, workers: int = 1, log: Any = None, pool: Any = None
+) -> list[dict[str, Any]]:
+    """job 목록을 돌린다. `pool`(:func:`job_pool`)을 주면 그 풀로, 없으면 `workers`에 따라 직렬 또는 이 호출만의 풀로."""
+    if pool is None and workers > 1:
+        with job_pool(workers, sim_config=sim_config, expert_config=expert_config) as own:
+            return run_jobs(jobs, sim_config=sim_config, expert_config=expert_config, workers=workers, log=log, pool=own)
+    if pool is None:
         _worker_init(sim_config, expert_config)
         results = []
         try:
@@ -374,15 +412,11 @@ def run_jobs(jobs: list[dict[str, Any]], *, sim_config: str, expert_config: str,
             _WORKER.clear()
         return results
 
-    import multiprocessing
-
-    context = multiprocessing.get_context("spawn")
     results = []
-    with context.Pool(workers, initializer=_worker_init, initargs=(sim_config, expert_config)) as pool:
-        for number, result in enumerate(pool.imap(_worker_run, jobs, chunksize=1), start=1):
-            results.append(result)
-            if log is not None and (number % 10 == 0 or number == len(jobs)):
-                print(f"  rollout {number}/{len(jobs)} {result['job']['key']} seed={result['job']['seed']} → {result['outcome']} ({result['evidence']['wall_s']}s)", file=log, flush=True)
+    for number, result in enumerate(pool.imap(_worker_run, jobs, chunksize=1), start=1):
+        results.append(result)
+        if log is not None and (number % 10 == 0 or number == len(jobs)):
+            print(f"  rollout {number}/{len(jobs)} {result['job']['key']} seed={result['job']['seed']} → {result['outcome']} ({result['evidence']['wall_s']}s)", file=log, flush=True)
     return results
 
 
@@ -660,18 +694,20 @@ def summarise_sweep(out: Path) -> dict[str, Any]:
     return summary
 
 
-def write_outputs(out: Path, *, keyframes: list[dict[str, Any]], results: list[dict[str, Any]], labels: list[dict[str, Any]], cost: dict[str, Any]) -> dict[str, Path]:
+def write_outputs(out: Path, *, keyframes: list[dict[str, Any]], results: list[dict[str, Any]] | None, labels: list[dict[str, Any]], cost: dict[str, Any]) -> dict[str, Path]:
+    """`results=None`이면 `rollouts.jsonl`은 이미 증분으로 써진 것으로 보고 다시 쓰지 않는다."""
     out.mkdir(parents=True, exist_ok=True)
     paths = {
         "keyframes": out / "keyframes.json",
-        "rollouts": out / "rollouts.jsonl",
+        "rollouts": out / ROLLOUTS_FILE,
         "labels": out / "labels.jsonl",
         "costing": out / "costing.json",
     }
     paths["keyframes"].write_text(json.dumps(keyframes, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    with paths["rollouts"].open("w", encoding="utf-8") as handle:
-        for result in results:
-            handle.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n")
+    if results is not None:
+        with paths["rollouts"].open("w", encoding="utf-8") as handle:
+            for result in results:
+                handle.write(json.dumps(result, ensure_ascii=False, separators=(",", ":")) + "\n")
     with paths["labels"].open("w", encoding="utf-8") as handle:
         for entry in labels:
             handle.write(json.dumps(entry, ensure_ascii=False, separators=(",", ":")) + "\n")
@@ -684,6 +720,49 @@ def write_outputs(out: Path, *, keyframes: list[dict[str, Any]], results: list[d
 # --------------------------------------------------------------------------
 
 
+def _read_jsonl(path: Path) -> list[dict[str, Any]]:
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _append_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    with path.open("a", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def _write_jsonl(path: Path, rows: list[dict[str, Any]]) -> None:
+    with path.open("w", encoding="utf-8") as handle:
+        for row in rows:
+            handle.write(json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n")
+
+
+def _load_progress(out: Path, running: dict[str, str]) -> dict[str, Any]:
+    """재개: `progress.jsonl`의 표지(완료 에피소드)를 읽고 증분 파일에서 그 에피소드의 결과·키프레임만 남긴다(부분 결과는 버리고
+    파일을 압축해 다시 쓴다). 표지의 버전이 지금 것과 다르면 :class:`ConfigMismatch`."""
+    markers = _read_jsonl(out / PROGRESS_FILE)
+    done: dict[str, dict[str, Any]] = {}
+    for marker in markers:
+        recorded = marker.get("running_versions") or {}
+        differences = [f"{key}: 표지 {recorded.get(key)} ≠ 지금 {running[key]}" for key in VERSION_KEYS if str(recorded.get(key)) != running[key]]
+        if differences:
+            raise ConfigMismatch(f"{out / PROGRESS_FILE}: 앞선 실행의 버전이 지금과 다르다 — " + "; ".join(differences))
+        done[str(marker["episode_id"])] = marker
+    keyframes = [frame for frame in _read_jsonl(out / KEYFRAMES_INCREMENTAL) if frame["episode_id"] in done]
+    results = [result for result in _read_jsonl(out / ROLLOUTS_FILE) if result["job"]["episode_id"] in done]
+    _write_jsonl(out / KEYFRAMES_INCREMENTAL, keyframes)
+    _write_jsonl(out / ROLLOUTS_FILE, results)
+    return {
+        "done": done,
+        "keyframes": keyframes,
+        "results": results,
+        "wall_s": sum(float(marker.get("wall_s", 0.0)) for marker in done.values()),
+        "replay_s": sum(float(marker.get("replay_s", 0.0)) for marker in done.values()),
+        "skipped_fidelity": sum(int(marker.get("skipped_fidelity", 0)) for marker in done.values()),
+    }
+
+
 def run(
     dataset: Path,
     *,
@@ -693,34 +772,104 @@ def run(
     sim_config: str = "configs/sim/tidy_clutter.yaml",
     out: Path | None = None,
     per_episode: int | None = None,
+    candidates_per_keyframe: int = 8,
     log: Any = None,
     generator_config: str | Path = "configs/data/d1_robot.yaml",
+    resume: bool = False,
+    chunk_episodes: int = 8,
+    events_override: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """배치의 키프레임 rollout 전부(`limit=None`) 또는 앞 `limit`개를 돌려 `out`(기본 `<dataset>/rollouts`)에 쓴다 — 에피소드
+    `chunk_episodes`개 묶음마다 증분 파일에 덧붙이고 표지를 적어 `resume=True`로 이어 돌릴 수 있다(모듈 docstring)."""
     started = time.perf_counter()
-    events = {**load_events_config(events_path), "_path": str(events_path)}
+    events = {**load_events_config(events_path), "_path": str(events_path), **(events_override or {})}
     harness_config = load_harness_config(events["followup"]["harness_config"])
     control_steps = int(events["followup"]["control_steps_per_tick"])
     records = [record for _, record in read_episodes(dataset)]
     if not records:
         raise FileNotFoundError(f"에피소드가 없다: {dataset}")
-    jobs, keyframes, summary = build_jobs(
-        records, events, limit=limit, per_episode=per_episode, sim_config=sim_config, harness_config=harness_config,
-        control_steps=control_steps, log=log, generator_config=generator_config,
-    )
-    results = run_jobs(jobs, sim_config=sim_config, expert_config=events["followup"]["expert_config"], workers=workers, log=log)
+    out = out or (dataset / "rollouts")
+    out.mkdir(parents=True, exist_ok=True)
+    running = running_versions_for(sim_config=sim_config, events=events, generator_config=generator_config)
+    for record in records:
+        check_record_versions(record, running)
+
+    if resume:
+        prior = _load_progress(out, running)
+    else:
+        for name in (PROGRESS_FILE, KEYFRAMES_INCREMENTAL, ROLLOUTS_FILE):
+            (out / name).unlink(missing_ok=True)
+        prior = {"done": {}, "keyframes": [], "results": [], "wall_s": 0.0, "replay_s": 0.0, "skipped_fidelity": 0}
+    keyframes: list[dict[str, Any]] = list(prior["keyframes"])
+    results: list[dict[str, Any]] = list(prior["results"])
+    replay_s_total = float(prior["replay_s"])
+    skipped_fidelity = int(prior["skipped_fidelity"])
+    pending = [record for record in records if record["episode_id"] not in prior["done"]]
+    if log is not None:
+        print(f"rollouts: {len(records)} episodes, {len(prior['done'])} done before, {len(pending)} pending, {len(results)} results kept", file=log, flush=True)
+
+    with job_pool(workers, sim_config=sim_config, expert_config=events["followup"]["expert_config"]) as pool:
+        for start in range(0, len(pending), max(1, int(chunk_episodes))):
+            chunk = pending[start : start + max(1, int(chunk_episodes))]
+            remaining = None if limit is None else int(limit) - len(results)
+            if remaining is not None and remaining <= 0:
+                break
+            chunk_started = time.perf_counter()
+            jobs, frames, summary = build_jobs(
+                chunk, events, limit=remaining, per_episode=per_episode, candidates_per_keyframe=candidates_per_keyframe, sim_config=sim_config,
+                harness_config=harness_config, control_steps=control_steps, log=log, running=running, generator_config=generator_config,
+            )
+            chunk_results = run_jobs(jobs, sim_config=sim_config, expert_config=events["followup"]["expert_config"], workers=workers, log=log, pool=pool)
+            replay_s_total += float(summary["replay_s_total"])
+            skipped_fidelity += int(summary["skipped_fidelity"])
+            keyframes.extend(frames)
+            results.extend(chunk_results)
+            _append_jsonl(out / KEYFRAMES_INCREMENTAL, frames)
+            _append_jsonl(out / ROLLOUTS_FILE, chunk_results)
+            cut = remaining is not None and len(jobs) >= remaining  # `limit`에 잘린 묶음: 완료 표지를 쓰지 않는다
+            if not cut:
+                wall = time.perf_counter() - chunk_started
+                _append_jsonl(
+                    out / PROGRESS_FILE,
+                    [
+                        {
+                            "episode_id": record["episode_id"],
+                            "keyframes": sum(1 for frame in frames if frame["episode_id"] == record["episode_id"]),
+                            "rollouts": sum(1 for result in chunk_results if result["job"]["episode_id"] == record["episode_id"]),
+                            "wall_s": round(wall / len(chunk), 3),
+                            "replay_s": round(float(summary["replay_s_total"]) / len(chunk), 3),
+                            "skipped_fidelity": sum(1 for frame in frames if frame["episode_id"] == record["episode_id"] and not frame.get("exact")),
+                            "running_versions": dict(running),
+                            "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        }
+                        for record in chunk
+                    ],
+                )
+            if log is not None:
+                print(f"chunk {start // max(1, int(chunk_episodes)) + 1}: {len(chunk)} episodes, {len(jobs)} jobs, {len(results)} results so far ({time.perf_counter() - chunk_started:.0f}s){' [limit]' if cut else ''}", file=log, flush=True)
+            if cut:
+                break
+
     labels = label_keyframes(records, keyframes, results, events)
-    cost = costing(results, batch_wall_s=time.perf_counter() - started, replay_s_total=summary["replay_s_total"], workers=workers)
-    cost["keyframes"] = {**summary, "labelled": len(labels), "events_version": events["version"]}
-    cost["versions"] = summary["running_versions"]
-    paths = write_outputs(out or (dataset / "rollouts"), keyframes=keyframes, results=results, labels=labels, cost=cost)
-    return {"jobs": len(jobs), "results": results, "labels": labels, "costing": cost, "paths": paths, "keyframes": keyframes}
+    batch_wall_s = (time.perf_counter() - started) + float(prior["wall_s"])  # 재개면 앞선 실행의 묶음 벽시계를 더한다
+    cost = costing(results, batch_wall_s=batch_wall_s, replay_s_total=replay_s_total, workers=workers)
+    cost["keyframes"] = {
+        "keyframes": len(keyframes), "skipped_fidelity": skipped_fidelity, "replay_s_total": round(replay_s_total, 3), "running_versions": dict(running),
+        "labelled": len(labels), "events_version": events["version"], "episodes": len(records), "episodes_done": len(_read_jsonl(out / PROGRESS_FILE)),
+        "resumed": bool(resume), "chunk_episodes": int(chunk_episodes),
+    }
+    cost["versions"] = dict(running)
+    paths = write_outputs(out, keyframes=keyframes, results=None, labels=labels, cost=cost)
+    return {"jobs": len(results) - len(prior["results"]), "results": results, "labels": labels, "costing": cost, "paths": paths, "keyframes": keyframes}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="scripts/rollout_keyframes.py", description="키프레임 rollout을 돌리고 라벨·비용을 적는다 (docs/04 §4).")
     parser.add_argument("--dataset", type=Path, default=Path("artifacts/datasets/d1-robot/batch-0"))
-    parser.add_argument("--limit", type=int, default=100, help="돌릴 rollout 수 (비용 산정용 첫 묶음)")
+    parser.add_argument("--limit", type=int, default=100, help="돌릴 rollout 수 (비용 산정용 첫 묶음); 0이면 전부")
     parser.add_argument("--workers", type=int, default=1)
+    parser.add_argument("--resume", action="store_true", help="출력 디렉터리의 progress.jsonl에 표지가 있는 에피소드는 건너뛴다")
+    parser.add_argument("--chunk-episodes", type=int, default=8, help="증분 저장·표지의 단위(에피소드 수)")
     parser.add_argument("--events", default="configs/sim/events.yaml")
     parser.add_argument("--out", type=Path, default=None, help="기본 <dataset>/rollouts")
     parser.add_argument("--generator-config", default="configs/data/d1_robot.yaml", help="레코드를 만든 생성 설정 (episode.* 손잡이가 지문에 든다)")
@@ -732,8 +881,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"→ {Path(args.summarise) / 'sweep-summary.json'}")
         return 0
     outcome = run(
-        args.dataset, limit=args.limit, workers=args.workers, events_path=args.events, out=args.out, log=sys.stdout,
-        generator_config=args.generator_config,
+        args.dataset, limit=(None if args.limit <= 0 else args.limit), workers=args.workers, events_path=args.events, out=args.out, log=sys.stdout,
+        generator_config=args.generator_config, resume=args.resume, chunk_episodes=args.chunk_episodes,
     )
     cost = outcome["costing"]
     print(json.dumps({key: cost[key] for key in ("rollouts", "outcomes", "wall_s_per_rollout", "restore_s_per_rollout", "env_rebuild_s", "bytes_per_rollout", "throughput", "projections", "keyframes")}, ensure_ascii=False, indent=2))
