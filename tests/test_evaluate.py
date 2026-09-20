@@ -310,3 +310,44 @@ def test_contrast_pair_check_separates_sensitivity_from_noise():
     assert result["instruction"]["both_correct"] == pytest.approx(0.5)
     assert result["forbidden"]["label_changed"] == 0 and result["forbidden"]["false_change"] == pytest.approx(1.0)
     assert result["_all"]["pairs"] == 3 and result["_all"]["model_changed"] == 2
+
+
+def test_holding_twin_preference_counts_which_key_the_model_picks_while_holding():
+    """놓기 국면 쌍둥이 키(D1 리뷰 1 I2): 들고 있는 틱에서 grasp 줄과 place 줄 가운데 무엇을 고르는지와, 그 틱들의 라벨 분포."""
+    from robo_jev.evaluate import holding_twin_preference
+
+    def tick(label_ids):
+        return {
+            "t": 0, "sim_ms": 0,
+            "request": {
+                "state": {"robot": {"holding": "o7"}},
+                "exec_history": "",
+                "commitment": None,
+                "candidates": {"q_main": [
+                    {"id": "g", "key": "grasp:o7:top:zoneL"},
+                    {"id": "p", "key": "place:o7:release:zoneL"},
+                    {"id": "h", "key": "hold"},
+                ]},
+            },
+            "labels": [{"question_id": "q_main", "kind": "valid_set", "candidate_ids": list(label_ids)}],
+        }
+
+    record = {"schema_version": "stream-v0", "episode_id": "ep-1", "prefix": {"instructions": []},
+              "ticks": [tick(["g"]), tick(["p"]), tick(["g", "p"])]}
+    free = {"t": 0, "sim_ms": 0, "request": {"state": {"robot": {"holding": None}}, "exec_history": "", "commitment": None,
+                                             "candidates": {"q_main": [{"id": "g", "key": "grasp:o7:top:zoneL"}]}},
+            "labels": []}
+    record["ticks"].append(free)  # 들고 있지 않은 틱은 세지 않는다
+
+    def prediction(index, best):
+        probabilities = {"g": torch.tensor([0.8, 0.1, 0.1]), "p": torch.tensor([0.1, 0.8, 0.1]), "h": torch.tensor([0.1, 0.1, 0.8])}[best]
+        return {"record_id": "ep-1", "tick": index, "kind": "stream", "probabilities": {"q_main": probabilities},
+                "candidates": {"q_main": ["g", "p", "h"]}, "labels": [], "question_types": {"q_main": "choice"}}
+
+    result = holding_twin_preference([prediction(0, "g"), prediction(1, "g"), prediction(2, "p"), prediction(3, "g")], [record])
+    assert result["ticks"] == 3 and result["ticks_with_both_keys"] == 3
+    assert (result["predicted_grasp"], result["predicted_place"], result["predicted_other"]) == (2, 1, 0)
+    assert result["grasp_share_of_keyed"] == pytest.approx(2 / 3)
+    assert (result["label_grasp"], result["label_place"], result["label_mixed"]) == (1, 1, 1)
+    assert result["label_grasp_share"] == pytest.approx(0.5)
+    assert result["predicted_held_object"] == 3 and result["held_object_share"] == pytest.approx(1.0)

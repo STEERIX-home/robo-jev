@@ -311,6 +311,9 @@ def run_zero_shot(config: dict[str, Any], *, eval_config: str | Path = DEFAULT_E
         records = [item.record for item in subset]
         result = zero_shot_label_scores(model_id, records, backbone=backbone, tokenizer=tokenizer, shuffle_seed=shuffle_seed, tick_stride=tick_stride, batch=batch)
         result["seconds"] = round(time.perf_counter() - started, 1)
+        # 학습한 run의 표와 같은 자리에 오게 `model` 별칭을 둔다 (요약·선정이 한 꼴로 읽는다). 대조군·규칙 열은 없다 — 무학습이다.
+        result["model"] = result["table"]
+        result["n_states"] = result.get("prompts")
         out["evaluation"]["splits"][key] = result
         print(f"[p1] zero-shot {key}: {result['prompts']} prompts, acc {result['table']['_all']['accuracy']}, nll {result['table']['_all']['nll']:.3f} ({result['seconds']} s)", file=sys.stderr, flush=True)
     out["memory"] = _memory()
@@ -453,8 +456,13 @@ def main(argv: list[str] | None = None) -> int:
         result = run_chunk_memory(resolve_config(config), modes=tuple(m.strip() for m in args.chunk_modes.split(",") if m.strip()))
     result["wall_seconds"] = round(time.perf_counter() - started, 1)
     result["dataset"] = args.dataset
-    result["eval_config"] = str(Path(args.eval_config).relative_to(REPO)) if str(Path(args.eval_config).resolve()).startswith(str(REPO)) else str(args.eval_config)
-    result["train_config"] = str(Path(args.config).relative_to(REPO)) if str(Path(args.config).resolve()).startswith(str(REPO)) else str(args.config)
+    def _relative(path: str) -> str:
+        """저장소 안이면 저장소 기준 상대 경로로 (worktree 절대 경로를 보고서에 남기지 않는다)."""
+        resolved = Path(path).resolve()
+        return str(resolved.relative_to(REPO)) if resolved.is_relative_to(REPO) else str(path)
+
+    result["eval_config"] = _relative(args.eval_config)
+    result["train_config"] = _relative(args.config)
     result["gpu"] = {"guard": guard, "memory_at_start": memory_start, "memory_at_end": memory_report()}
     print(f"[p1] memory at end {result['gpu']['memory_at_end']}", file=sys.stderr, flush=True)
     result["generated_at"] = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")

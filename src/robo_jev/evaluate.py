@@ -51,6 +51,7 @@ __all__ = [
     "evaluate_items",
     "evaluate_suite",
     "eval_suite_identity",
+    "holding_twin_preference",
     "label_metrics",
     "load_eval_suite",
     "load_suite_items",
@@ -427,6 +428,59 @@ def _label_answer(label: dict | None) -> Any:
         probabilities = label.get("probabilities") or {}
         return max(probabilities, key=lambda key: probabilities[key]) if probabilities else None
     return (label.get("successes"), label.get("failures"))
+
+
+def holding_twin_preference(predictions: list[dict[str, Any]], records: list[dict]) -> dict[str, Any]:
+    """놓기 국면 쌍둥이 키 진단 (D1 리뷰 1 I2, docs/08 §7): **들고 있는 틱**에서 모델이 `grasp:` 줄과 `place:` 줄 가운데
+    무엇을 고르는가.
+
+    들고 있는 동안 q_main 후보는 정확히 {``grasp:<held>:top:<zone>``, ``place:<held>:release:<zone>``} × 영역이고 두 키는 같은
+    물리 행동(`place-release-v0`)을 실행한다 — D1의 rollout에서 둘의 성패가 한 방향으로 갈렸다(비커밋 영역에서 grasp 키 성공 /
+    place 키 실패 1,201 : 0). 라벨의 commitment 키는 grasp 942 / place 11 / none 6(959 키프레임)이었다. 이 함수는 같은 편향이
+    **학습된 모델의 선택**에도 있는지를 재고, 그 옆에 그 틱들의 **라벨** 분포를 적는다 — 하네스가 키를 하나로 내야 하는지의 근거다.
+    """
+    from robo_jev.model.serialize import joint_key_parts
+
+    by_id = {record.get("episode_id"): record for record in records if record.get("schema_version") == SCHEMA_STREAM}
+    counts = {"ticks": 0, "ticks_with_both_keys": 0, "predicted_grasp": 0, "predicted_place": 0, "predicted_other": 0,
+              "label_grasp": 0, "label_place": 0, "label_mixed": 0, "label_other": 0, "predicted_held_object": 0}
+    for prediction in predictions:
+        if prediction["kind"] != "stream" or "q_main" not in prediction["probabilities"]:
+            continue
+        record = by_id.get(prediction["record_id"])
+        if record is None:
+            continue
+        tick = record["ticks"][int(prediction["tick"])]
+        held = ((tick["request"].get("state") or {}).get("robot") or {}).get("holding")
+        if not held:
+            continue
+        entries = {str(entry["id"]): str(entry.get("key") or "") for entry in tick["request"]["candidates"]["q_main"]}
+        verbs = {cid: (joint_key_parts(key) or ("", "", "", ""))[0] for cid, key in entries.items()}
+        counts["ticks"] += 1
+        counts["ticks_with_both_keys"] += int({"grasp", "place"} <= set(verbs.values()))
+        ids = list(prediction["candidates"]["q_main"])
+        predicted = ids[int(prediction["probabilities"]["q_main"].argmax())]
+        verb = verbs.get(predicted, "")
+        counts["predicted_grasp" if verb == "grasp" else "predicted_place" if verb == "place" else "predicted_other"] += 1
+        parts = joint_key_parts(entries.get(predicted, ""))
+        counts["predicted_held_object"] += int(bool(parts) and parts[1] == str(held))
+        label = next((item for item in tick.get("labels") or () if item.get("question_id") == "q_main"), None)
+        allowed = {verbs.get(str(cid), "") for cid in (label or {}).get("candidate_ids") or ()}
+        if allowed == {"grasp"}:
+            counts["label_grasp"] += 1
+        elif allowed == {"place"}:
+            counts["label_place"] += 1
+        elif {"grasp", "place"} <= allowed:
+            counts["label_mixed"] += 1
+        else:
+            counts["label_other"] += 1
+    keyed = counts["predicted_grasp"] + counts["predicted_place"]
+    return {
+        **counts,
+        "grasp_share_of_keyed": (counts["predicted_grasp"] / keyed) if keyed else None,
+        "label_grasp_share": (counts["label_grasp"] / (counts["label_grasp"] + counts["label_place"])) if (counts["label_grasp"] + counts["label_place"]) else None,
+        "held_object_share": (counts["predicted_held_object"] / counts["ticks"]) if counts["ticks"] else None,
+    }
 
 
 # --------------------------------------------------------------------------
@@ -807,9 +861,13 @@ def evaluate_suite(
         if any((item.record.get("provenance") or {}).get("contrast") for item in subset):
             table["contrast_pairs"] = contrast_pair_check(predictions, [item.record for item in subset])
         if columns["selective"] and any(item.kind == "stream" for item in subset):
-            table["selective"] = {"model": selective_metrics(predictions, [item.record for item in subset])}
+            records = [item.record for item in subset]
+            table["selective"] = {"model": selective_metrics(predictions, records)}
+            table["holding_twins"] = holding_twin_preference(predictions, records)  # D1 리뷰 1 I2 진단
             if columns["rule_judge"]:
-                table["selective"]["rule_judge"] = selective_metrics(rule_judge_predictions(subset), [item.record for item in subset])
+                rule_predictions = rule_judge_predictions(subset)
+                table["selective"]["rule_judge"] = selective_metrics(rule_predictions, records)
+                table["holding_twins_rule_judge"] = holding_twin_preference(rule_predictions, records)
         table["selection"] = bool(entry.get("selection", True))
         table["seconds"] = round(time.perf_counter() - started, 1)
         result["splits"][name] = table
