@@ -13,12 +13,14 @@
   no_correct_candidate·stale_observation·boundary_level 변형 / `contrast`: 대조 sibling)를 기록하고 있으면 `hard`·`contrast`를 각각
   `per_stratum // 6` 이상 넣는다.
 * 봉인(`ood_test`) — 위 층에서는 `ood_test`를 뽑지 않는다(봉인). 대신 `sealed` 층 하나(`per_stratum`개, 로봇·비로봇 반반)를 따로 두어
-  **모델 개발에 관여하지 않는 검수자**가 본다(규약).
+  **모델 개발에 관여하지 않는 검수자**가 본다(규약). 봉인 문항은 개발자용 `sample.jsonl`/`sample.md`에 들어가지 않고 **별도 파일**
+  `sealed.jsonl`/`sealed.md`로 나간다(D1 리뷰 1 I3) — 검수자 분리를 파일 분리로 지킨다.
 
 표본의 문맥·후보 텍스트는 소형 scorer의 예제 구성(:func:`robo_jev.baselines.tiny_scorer.build_examples` — 허용 필드만, 직렬화의 후보
 순서)이고, 라벨은 따로 붙는다. 같은 틱에서는 층마다 질문 하나, 같은 에피소드·기본 레코드에서는 층마다 `per_source_cap`개까지만 뽑아
-표본이 몇 에피소드에 몰리지 않게 한다. 무작위성은 `seed`의 `random.Random` 하나다. 산출물: `sample.jsonl`(질문마다 한 줄),
-`sample.md`(사람이 읽는 시트, 판정 칸 비움), `strata.json`(층별 모집단·표본 수), `protocol.md`(규약).
+표본이 몇 에피소드에 몰리지 않게 한다. 무작위성은 `seed`의 `random.Random` 하나다. 산출물: `sample.jsonl`(공개 분할의 질문마다 한 줄),
+`sample.md`(사람이 읽는 시트, 판정 칸 비움), `sealed.jsonl`/`sealed.md`(봉인 문항만, 같은 꼴), `strata.json`(층별 모집단·표본 수,
+`open`/`sealed` 수와 파일), `protocol.md`(규약).
 """
 
 from __future__ import annotations
@@ -255,7 +257,10 @@ def build_sample(
     rows.sort(key=lambda item: item["sample_id"])
     table = {
         "version": REVIEW_SAMPLE_VERSION, "seed": seed, "per_stratum": per_stratum, "per_source_cap": per_source_cap,
-        "questions": len(rows), "double_review": sum(1 for row in rows if row.get("double_review")), "sealed": len(sealed_rows),
+        "questions": len(rows), "open": len(rows) - len(sealed_rows), "sealed": len(sealed_rows),
+        "double_review": sum(1 for row in rows if row.get("double_review")),
+        "double_review_open": sum(1 for row in rows if row.get("double_review") and not row["sealed"]),
+        "files": {"open": ["sample.jsonl", "sample.md"], "sealed": ["sealed.jsonl", "sealed.md"]},
         "strata": strata, "core_strata": len([name for name in strata if not name.startswith("sealed/")]),
         "short_strata": {name: entry["short"] for name, entry in strata.items() if entry["short"]},
         "by_domain": dict(Counter(row["stratum"].split("/")[0] for row in rows)),
@@ -299,8 +304,14 @@ def _row(entry: dict[str, Any], stratum: str, *, sealed: bool) -> dict[str, Any]
     }
 
 
-def render_sheet(rows: list[dict[str, Any]], table: dict[str, Any]) -> str:
-    lines = [f"# D1 검수 시트 ({table['questions']}문항, 이중 검수 {table['double_review']}, 봉인 {table['sealed']}; seed {table['seed']})", "",
+def render_sheet(rows: list[dict[str, Any]], table: dict[str, Any], *, sealed: bool = False) -> str:
+    """사람이 읽는 시트. `sealed=True`면 봉인 시트(ood_test 문항만; 모델 개발에 관여하지 않는 검수자 몫)의 머리를 단다."""
+    doubled = sum(1 for row in rows if row.get("double_review"))
+    if sealed:
+        head = f"# D1 봉인 검수 시트 (ood_test {len(rows)}문항, 이중 검수 {doubled}; seed {table['seed']}) — 모델 개발에 관여하지 않는 검수자만 본다"
+    else:
+        head = f"# D1 검수 시트 ({len(rows)}문항, 이중 검수 {doubled}; seed {table['seed']}; 봉인 {table['sealed']}문항은 sealed.md에 따로)"
+    lines = [head, "",
              "판정 칸: `correct` (예/아니오), `severity` (major/minor/none), `note`. 규약은 protocol.md. 라벨은 문항 아래 `LABEL`에 있다 — 먼저 답을 정한 뒤 라벨과 대조한다.", ""]
     for row in rows:
         flags = " ".join(flag for flag, on in (("[이중]", row.get("double_review")), ("[봉인]", row.get("sealed"))) if on)
@@ -343,22 +354,29 @@ PROTOCOL = """# D1 검수 규약 (docs/04 §6)
 
 **이중 검수.** `[이중]` 표시 문항(≥ 100)은 두 사람이 독립 판정한 뒤 일치율·Cohen κ를 보고하고, 불일치는 셋째 판정으로 푼다.
 
-**봉인.** `[봉인]` 문항은 `ood_test`에서 뽑았다. **모델 개발에 관여하지 않는 검수자**만 보고, 그 오류를 생성기·규칙·홀드아웃 수정에 쓰면
-그 `ood_test` 버전을 은퇴시키고 새 봉인 세트를 만든다(docs/04 §5 은퇴 규칙). 봉인 문항의 결과는 별도 표로 보고한다.
+**봉인.** `[봉인]` 문항은 `ood_test`에서 뽑았고 **`sealed.jsonl` / `sealed.md`에만** 있다 — `sample.*`에는 `ood_test` 문항이 없다.
+봉인 파일은 **모델 개발에 관여하지 않는 검수자**만 열고, 개발자(구현자·학습을 돌리는 사람)에게 건네지 않는다. 그 오류를 생성기·규칙·
+홀드아웃 수정에 쓰면 그 `ood_test` 버전을 은퇴시키고 새 봉인 세트를 만든다(docs/04 §5 은퇴 규칙). 봉인 문항의 결과는 별도 표로 보고한다.
 
-**보고.** `sample.jsonl`의 `verdict`를 채워 돌려준다. 집계: 전체·층별 major 비율과 Wilson 95 % 구간, minor 비율, 모호 비율, 이중 검수
-일치율, 정보 경계 위반 목록(계열 id), 누출 의심 목록. 통과: major < 2 %(점추정)이고 정보 경계 위반 0.
+**보고.** `sample.jsonl`(봉인 검수자는 `sealed.jsonl`)의 `verdict`를 채워 돌려준다. 집계: 전체·층별 major 비율과 Wilson 95 % 구간, minor
+비율, 모호 비율, 이중 검수 일치율, 정보 경계 위반 목록(계열 id), 누출 의심 목록. 통과: major < 2 %(점추정)이고 정보 경계 위반 0.
 """
 
 
 def write_sample(out: Path, rows: list[dict[str, Any]], table: dict[str, Any]) -> dict[str, Path]:
+    """공개 문항은 `sample.jsonl`/`sample.md`, 봉인 문항(`sealed`·`ood_test`)은 `sealed.jsonl`/`sealed.md`에 따로 쓴다 (D1 리뷰 1 I3)."""
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
-    paths = {"sample": out / "sample.jsonl", "sheet": out / "sample.md", "strata": out / "strata.json", "protocol": out / "protocol.md"}
-    with paths["sample"].open("w", encoding="utf-8") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
-    paths["sheet"].write_text(render_sheet(rows, table), encoding="utf-8")
+    open_rows = [row for row in rows if not row.get("sealed") and row.get("split") != "ood_test"]
+    sealed_rows = [row for row in rows if row.get("sealed") or row.get("split") == "ood_test"]
+    paths = {"sample": out / "sample.jsonl", "sheet": out / "sample.md", "sealed": out / "sealed.jsonl", "sealed_sheet": out / "sealed.md",
+             "strata": out / "strata.json", "protocol": out / "protocol.md"}
+    for path, subset in ((paths["sample"], open_rows), (paths["sealed"], sealed_rows)):
+        with path.open("w", encoding="utf-8") as handle:
+            for row in subset:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+    paths["sheet"].write_text(render_sheet(open_rows, table), encoding="utf-8")
+    paths["sealed_sheet"].write_text(render_sheet(sealed_rows, table, sealed=True), encoding="utf-8")
     paths["strata"].write_text(json.dumps(table, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     paths["protocol"].write_text(PROTOCOL, encoding="utf-8")
     return paths
@@ -380,10 +398,10 @@ def main(argv: list[str] | None = None) -> int:
     rows, table = build_sample(robot, single, per_stratum=args.per_stratum, double_review=args.double_review, seed=args.seed, sealed_robot=robot, sealed_single=single)
     table["sources"] = {"robot": str(args.robot), "single": str(args.single), "robot_records": len(robot), "single_records": len(single)}
     paths = write_sample(args.out, rows, table)
-    print(json.dumps({key: table[key] for key in ("questions", "double_review", "sealed", "core_strata", "short_strata", "by_domain", "by_split", "by_question_type")}, ensure_ascii=False, indent=1))
+    print(json.dumps({key: table[key] for key in ("questions", "open", "sealed", "double_review", "double_review_open", "core_strata", "short_strata", "by_domain", "by_split", "by_question_type", "files")}, ensure_ascii=False, indent=1))
     for name, entry in table["strata"].items():
         print(f"  {name:<40} population {entry['population']:>7} sampled {entry['sampled']:>3} {entry['difficulty']}")
-    print(f"→ {paths['sheet']} ({time.perf_counter() - started:.0f}s)")
+    print(f"→ {paths['sheet']} (+ {paths['sealed_sheet'].name} for the sealed reviewer) ({time.perf_counter() - started:.0f}s)")
     return 0
 
 

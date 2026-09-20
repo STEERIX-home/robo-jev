@@ -42,9 +42,18 @@ def test_the_review_sample_is_stratified_with_quotas_double_review_and_no_sealed
     assert max(seen.values()) <= 2
     paths = write_sample(tmp_path / "sample", rows, table)
     assert all(path.is_file() for path in paths.values())
+    # 봉인 문항은 개발자용 sample.*에 없고 sealed.*에만 있다 (D1 리뷰 1 I3).
+    open_rows = [json.loads(line) for line in paths["sample"].read_text(encoding="utf-8").splitlines()]
+    sealed_rows = [json.loads(line) for line in paths["sealed"].read_text(encoding="utf-8").splitlines()]
+    assert len(open_rows) + len(sealed_rows) == len(rows) == table["questions"] and len(open_rows) == table["open"] and len(sealed_rows) == table["sealed"] > 0
+    assert all(row["split"] != "ood_test" and not row["sealed"] for row in open_rows) and all(row["split"] == "ood_test" and row["sealed"] for row in sealed_rows)
     sheet = paths["sheet"].read_text(encoding="utf-8")
-    assert sheet.count("LABEL:") == len(rows) and "[이중]" in sheet and "[봉인]" in sheet and "protocol.md" in sheet
-    assert "중대한 오라벨 2 %" in paths["protocol"].read_text(encoding="utf-8")
+    assert sheet.count("LABEL:") == len(open_rows) and "[이중]" in sheet and "[봉인]" not in sheet and "ood_test" not in sheet and "protocol.md" in sheet
+    sealed_sheet = paths["sealed_sheet"].read_text(encoding="utf-8")
+    assert sealed_sheet.count("LABEL:") == len(sealed_rows) and sealed_sheet.count("[봉인]") == len(sealed_rows) and sealed_sheet.startswith("# D1 봉인 검수 시트")
+    assert table["files"] == {"open": ["sample.jsonl", "sample.md"], "sealed": ["sealed.jsonl", "sealed.md"]} and table["double_review_open"] <= table["double_review"]
+    protocol = paths["protocol"].read_text(encoding="utf-8")
+    assert "중대한 오라벨 2 %" in protocol and "sealed.jsonl" in protocol
     again, _ = build_sample(streams, singles, per_stratum=4, double_review=10, seed=1, sealed_robot=sealed_streams, sealed_single=[])
     assert [(row["sample_id"], row["source"], row["question_id"]) for row in again] == [(row["sample_id"], row["source"], row["question_id"]) for row in rows]
-    assert render_sheet(rows[:1], table).startswith("# D1 검수 시트")
+    assert render_sheet(rows[:1], table).startswith("# D1 검수 시트") and render_sheet(rows[:1], table, sealed=True).startswith("# D1 봉인 검수 시트")
