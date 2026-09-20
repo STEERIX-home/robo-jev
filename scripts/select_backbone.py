@@ -1,6 +1,7 @@
 """Task 2b G0b S3.3 — `artifacts/reports/backbone-selection.json`: 후보별 stream 지연(판정)·T0/LoRA 품질·무학습 품질·구간 메모리·귀속을 모아 선정을 적는다.
 
-입력(모두 `artifacts/reports/`): `backbone-stream.json`(baseline, 40편 batch-0), `backbone-stream-levers.json`(지렛대),
+입력(모두 `artifacts/reports/`): `backbone-stream.json`(baseline, 40편 batch-0), `backbone-stream-levers.json`(지렛대, 앞 8편),
+`backbone-stream-fused.json`(fused·all, 40편 batch-0 — 판정의 근거),
 `chunk-memory-{2b,4b}.json`, `adapt-{2b,4b}-t0.json`, `adapt-{2b,4b}-lora.json`, `zero-shot-{2b,4b}.json`, `attribution.json`.
 없는 파일은 `null`로 적는다(어느 것이 빠졌는지 보인다). 선정 문장은 `--selection-text`(파일)로 준다 — 수치는 JSON이 말하고
 사람이 읽는 판단은 보고서·문서에 적는다.
@@ -49,6 +50,7 @@ def _eval_summary(evaluation: dict[str, Any] | None) -> dict[str, Any] | None:
 def build(selection_text: str | None) -> dict[str, Any]:
     stream = _load("backbone-stream.json")
     levers = _load("backbone-stream-levers.json")
+    fused = _load("backbone-stream-fused.json")  # 40편 batch-0에서 fused·all (리뷰 1 I1)
     attribution = _load("attribution.json")
     out: dict[str, Any] = {
         "task": "2b-g0b-selection",
@@ -57,6 +59,7 @@ def build(selection_text: str | None) -> dict[str, Any]:
         "sources": {
             "stream": "backbone-stream.json" if stream else None, "levers": "backbone-stream-levers.json" if levers else None,
             "attribution": "attribution.json" if attribution else None,
+            "fused_40_episodes": "backbone-stream-fused.json" if fused else None,
         },
         "candidates": {},
         "selection": selection_text,
@@ -82,6 +85,20 @@ def build(selection_text: str | None) -> dict[str, Any]:
                     "verdict": {k: {"p50_model_ms": v.get("p50_model_ms"), "p95_model_ms": v.get("p95_model_ms"), "deadline_miss_rate_100ms": v.get("deadline_miss_rate_100ms"), "passes_10hz": v.get("passes_10hz"), "passes_5hz": v.get("passes_5hz")} for k, v in block["verdict"].items() if k != "overall"},
                     "overall": block["verdict"].get("overall"),
                     "compile_seconds": block["loaded"].get("compile_seconds"),
+                }
+                for lever, block in candidate["levers"].items()
+            }
+        if fused and model_id in fused["candidates"]:
+            candidate = fused["candidates"][model_id]
+            entry["stream_fused_40_episodes"] = {
+                lever: {
+                    "settings": block["settings"],
+                    "profiles": {
+                        profile: {k: v for k, v in conds["stream_warm"]["summary"].items() if k in ("ticks", "model_ms", "obs_apply_ms", "deadline_miss_rate_100ms", "deadline_miss_rate_200ms", "cache_length", "cache_constant_after_window", "allocated_growth_bytes")}
+                        for profile, conds in block["conditions"].items()
+                    },
+                    "verdict": {k: {"p50_model_ms": v.get("p50_model_ms"), "p95_model_ms": v.get("p95_model_ms"), "deadline_miss_rate_100ms": v.get("deadline_miss_rate_100ms"), "passes_10hz": v.get("passes_10hz"), "passes_5hz": v.get("passes_5hz")} for k, v in block["verdict"].items() if k != "overall"},
+                    "overall": block["verdict"].get("overall"),
                 }
                 for lever, block in candidate["levers"].items()
             }

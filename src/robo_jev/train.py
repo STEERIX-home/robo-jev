@@ -436,16 +436,21 @@ def load_trainable_state(model: Judge, saved: dict[str, Tensor]) -> None:
         raise ValueError(f"checkpoint: 학습 대상 파라미터가 저장되어 있지 않다: {missing[:5]}")
 
 
-def load_readout_checkpoint(model: Judge, path: str | Path, *, tokenizer_sha256: str | None = None) -> dict[str, Any]:
-    """서빙·평가용: checkpoint의 readout(과 LoRA)을 `model`에 싣는다 — 먼저 배포 계약 digest를 지금 체크아웃과 대조해 다르면 거절한다.
+def load_readout_checkpoint(model: Judge, path: str | Path, *, tokenizer_sha256: str | None, trust_checkpoint_tokenizer: bool = False) -> dict[str, Any]:
+    """서빙·평가용: checkpoint의 readout(과 LoRA)을 `model`에 싣는다 — 먼저 배포 계약 digest(직렬화·계약 소스, 하네스 버전,
+    **tokenizer 파일 해시**)를 지금 체크아웃과 대조해 다르면 거절한다(다른 조각 이름을 말한다).
 
-    `tokenizer_sha256`이 없으면 checkpoint가 적은 tokenizer 해시로 digest를 만든다(코드·하네스 버전만 대조). 돌려주는 것은
-    checkpoint의 manifest.
+    `tokenizer_sha256`은 지금 체크아웃의 tokenizer 파일 해시(`tokenizer_block(name)["sha256"]`)다. `None`은
+    `trust_checkpoint_tokenizer=True`와 함께일 때만 허용되며(checkpoint가 적은 해시로 digest를 만들어 코드·하네스 버전만 대조 —
+    tokenizer가 없는 검사용), 그 밖에는 ValueError. 돌려주는 것은 checkpoint의 manifest.
     """
     state = load_checkpoint(path)
     manifest = state.get("manifest") if isinstance(state.get("manifest"), dict) else {}
-    saved_tokenizer = (manifest.get("contract") or {}).get("tokenizer_sha256") or (manifest.get("tokenizer") or {}).get("sha256") or "whitespace"
-    current = contract_digest(saved_tokenizer if tokenizer_sha256 is None else tokenizer_sha256)
+    if tokenizer_sha256 is None:
+        if not trust_checkpoint_tokenizer:
+            raise ValueError(f"{path}: tokenizer_sha256이 없다 — 지금 체크아웃의 tokenizer 해시를 주거나 trust_checkpoint_tokenizer=True를 명시한다")
+        tokenizer_sha256 = (manifest.get("contract") or {}).get("tokenizer_sha256") or (manifest.get("tokenizer") or {}).get("sha256") or "whitespace"
+    current = contract_digest(tokenizer_sha256)
     differences = contract_differences(manifest.get("contract"), current)
     if differences:
         raise ValueError(f"{path}: 배포 계약 digest가 지금 체크아웃과 다르다 (다른 조각: {differences}) — 이 checkpoint를 싣지 않는다")

@@ -5,10 +5,12 @@ CPU 검사는 **소형 난수 Qwen3.5**(transformers의 구조, torch 참조 ker
 학습 loop 연결, 배포 계약 digest. GPU 검사는 **실제 Qwen3.5-2B**(가중치가 있을 때만; 없으면 skip)로 BF16 허용 오차를
 실측해 고정한 상수와 대조한다 — 증분 == 처음부터, 윈도우 절단 뒤 cache 길이 불변, 분기 격리, native == stream(단일 요청).
 
-BF16 허용 오차(2026-09-19 GB10 실측, D0 스트림 6틱·1,525토큰, `.superpowers/sdd/task-g0b-report.md` S1.3):
-결정 위치·후보 경계 hidden의 토큰별 상대 L2 오차 최대 0.020(중앙값 0.015), 전 토큰 최대 0.47(outlier 차원의 bf16 반올림,
-hidden 절대 최대 104). 공식 구현 자체의 kernel 사이 차이(mask 있음/없음, DynamicCache 틱별/한 번)가 같은 자릿수
-(상대 L2 최대 0.27~0.40, 중앙값 0.014)이고 fp32에서는 증분 경로가 0.018(공식 캐시 경로 0.027) 안이라 bf16 잡음이다.
+BF16 허용 오차(D0 스트림 6틱·1,525토큰, `.superpowers/sdd/task-g0b-report.md` S1.3·Fix round 1): GPU 검사의 기준은
+**공식 forward + 공식 kernel**(fla `chunk_gated_delta_rule`, causal_conv1d, varlen flash — 배포가 도는 것과 같다; CPU 검사만
+torch 참조 kernel)이며, 그 조건에서 2026-09-20에 5회 재측정한 값이 결정 위치·후보 경계 hidden의 토큰별 상대 L2 0.0264
+(중앙값 0.0152), 전 토큰 최대 0.466(outlier 차원의 bf16 반올림, hidden 절대 최대 104), fp32 0.0101이다 — 상수는 그 2배.
+공식 구현 자체의 kernel 사이 차이(mask 있음/없음, DynamicCache 틱별/한 번)가 같은 자릿수(상대 L2 최대 0.27~0.40,
+중앙값 0.014)라 bf16 잡음이다. (2026-09-19의 첫 측정 0.020 / 0.015 / 0.47 / 0.018은 참조 kernel이 섞인 조건이었다.)
 """
 
 import copy
@@ -37,10 +39,13 @@ from test_stream import synthetic_stream
 pytest.importorskip("transformers")
 
 #: 실측으로 고정한 BF16 허용 오차 (모듈 설명): readout이 읽는 위치의 토큰별 상대 L2, 전 토큰 중앙값, 전 토큰 최대.
-BF16_REL_READOUT = 0.04  # 실측 0.020의 2배
-BF16_REL_MEDIAN = 0.03  # 실측 0.015
-BF16_REL_MAX = 0.6  # 실측 0.47 (공식 구현의 kernel 사이 차이 0.27~0.40)
-FP32_REL_MAX = 0.03  # 실측 0.018 (공식 DynamicCache 틱별 경로 0.027)
+#: 2026-09-20 GB10, **이 테스트와 같은 조건**(공식 forward + 공식 kernel: fla chunk_gated_delta_rule·causal_conv1d·varlen flash)에서
+#: 5회 반복 — 다섯 번 모두 같은 값(결정적): readout 0.0264 / 중앙값 0.0152 / 전체 최대 0.4659, 절단 마지막 틱 결정 0.0233·
+#: 경계 0.0166, 분기 부분집합 vs 배치 0.0126, fp32 최대 0.0101. 상수 = 실측의 2배 (G0b 리뷰 1 I4).
+BF16_REL_READOUT = 0.053  # 실측 0.0264의 2배
+BF16_REL_MEDIAN = 0.031  # 실측 0.0152
+BF16_REL_MAX = 0.93  # 실측 0.4659 (공식 구현의 kernel 사이 차이 0.27~0.40)
+FP32_REL_MAX = 0.021  # 실측 0.0101
 CPU_TOL = {"rtol": 1e-4, "atol": 1e-4}
 
 REAL_2B = "Qwen/Qwen3.5-2B"
@@ -77,8 +82,13 @@ def _gpu_guard():
 
 
 @pytest.fixture(autouse=True)
-def _torch_kernels():
-    """CPU 검사는 공식 forward도 torch 참조 kernel로 돈다 (CUDA가 있는 venv에서 fla·causal_conv1d가 CPU tensor를 받지 않게)."""
+def _torch_kernels(request):
+    """CPU 검사는 공식 forward도 torch 참조 kernel로 돈다 (CUDA가 있는 venv에서 fla·causal_conv1d가 CPU tensor를 받지 않게).
+    실제 2B 검사(`real_2b`)는 **공식 kernel**(fla `chunk_gated_delta_rule`·causal_conv1d·flash)이 기준이다 — 허용 오차 상수도
+    그 조건에서 쟀다(모듈 설명; G0b 리뷰 1 I4)."""
+    if "real_2b" in request.node.name:
+        yield
+        return
     with torch_reference_kernels():
         yield
 
@@ -295,6 +305,34 @@ def test_readout_only_run_on_the_adapter_saves_only_the_readout_and_resumes(tmp_
     with training.Trainer(config, resume=path) as resumed:
         assert resumed.step == 1 and torch.equal(resumed.model.U.weight, readout_after)
         assert all(not p.requires_grad for n, p in resumed.model.named_parameters() if n.startswith("backbone."))
+
+
+def test_load_readout_checkpoint_checks_the_tokenizer_hash_and_requires_it(tmp_path, monkeypatch):
+    """서빙·평가용 적재는 배포 계약 digest의 네 조각을 지금 체크아웃 기준으로 대조한다 — tokenizer 파일 해시가 다르면 그 조각 이름을
+    들어 거절하고, 해시를 안 주면 `trust_checkpoint_tokenizer=True`를 명시할 때만 checkpoint의 해시로 대신한다 (리뷰 1 I2)."""
+    from robo_jev import train as training
+    from test_train import tiny_config
+
+    fake = QwenBackbone.tiny(seed=2, vocab_size=SMALL_VOCAB)
+    fake.manifest = {"revision": "deadbeef" * 5, "digest": "cafe" * 16}
+    monkeypatch.setattr(training.QwenBackbone, "load", classmethod(lambda cls, model_id, **kwargs: fake))
+    config = tiny_config(tmp_path, max_steps=1, trainable="readout_only", model_id=REAL_2B, readout_rank=4, stream_max_ticks=3)
+    with training.Trainer(config) as trainer:
+        trainer.run_step()
+        path = trainer.save(tmp_path / "ckpt.pt")
+        saved = trainer.model.U.weight.detach().clone()
+        saved_hash = trainer.manifest["contract"]["tokenizer_sha256"]
+    judge = Judge(fake, rank=4, readout="pointer", seed=99, readout_dtype=torch.float32)
+    assert not torch.equal(judge.U.weight, saved)
+    with pytest.raises(ValueError, match="tokenizer_sha256"):
+        training.load_readout_checkpoint(judge, path, tokenizer_sha256="11" * 32)
+    with pytest.raises(ValueError, match="tokenizer_sha256"):
+        training.load_readout_checkpoint(judge, path, tokenizer_sha256=None)
+    manifest = training.load_readout_checkpoint(judge, path, tokenizer_sha256=saved_hash)
+    assert torch.equal(judge.U.weight, saved) and manifest["contract"]["tokenizer_sha256"] == saved_hash
+    trusting = Judge(fake, rank=4, readout="pointer", seed=98, readout_dtype=torch.float32)
+    training.load_readout_checkpoint(trusting, path, tokenizer_sha256=None, trust_checkpoint_tokenizer=True)
+    assert torch.equal(trusting.U.weight, saved)
 
 
 # --------------------------------------------------------------------------

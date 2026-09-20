@@ -11,9 +11,12 @@
   `distribution` Σ(p−q)², `event` (p_true − s/(s+f))².
 * 위치 편향 (analysis-nimble §3-3, docs/03 §3): 후보가 둘 이상인 `choice` 질문에서 **선택한 위치의 분포**(첫 위치 비율·
   위치별 수)와, `shuffle_seed`로 후보 순서를 치환한 레코드를 다시 평가했을 때의 **답 변경률**(예측 id가 바뀐 비율).
-* 문맥 섞기 대조군 (docs/03 §6): 분할 안에서 문맥을 한 칸 굴린 레코드 — 비로봇은 `request.state`를 다음 레코드의 것으로,
-  로봇은 지시 텍스트(`prefix.instructions[*].text`·`state.goal.text`)를 다음 에피소드의 것으로 바꾼 뒤 **원래 라벨**로
-  정확도를 잰다. 이 값이 높은 분할·질문은 후보만으로 답이 나오는(단축 경로) 것이다.
+* 문맥 섞기 대조군 (docs/03 §6): 분할 안에서 문맥을 한 칸 굴린 레코드 — 비로봇은 `request.state`를 다음 레코드의 것으로
+  (**상태 섞기**: 남는 것은 후보뿐이라 높으면 후보만으로 답이 나오는 단축 경로다), 로봇 스트림은 지시 텍스트
+  (`prefix.instructions[*].text`·`state.goal.text`)만 다음 에피소드의 것으로 바꾸고 **물리 상태·후보는 그대로 둔다**
+  (**지시 섞기**: 상태에 달린 답(경로·그리퍼·속도·힘·완료·정지)은 대조군에서도 맞는 것이 정상이고, 이 값이 모델과 같으면
+  모델이 지시·목표를 읽지 않는다는 뜻이다 — q_main이 그 잣대). 결과의 `context_shuffle_kind`가 어느 쪽인지 말한다.
+  상태 블록을 굴리고 후보 id를 다시 매핑하는 로봇 상태 섞기 대조군은 D1 dev 검사로 미룬다(G0b 리뷰 1 I3).
 * 규칙 기준군 (docs/02, `robo_jev.harness.rule_judge`): 로봇 틱마다 규칙 판단기의 10개 답을 같은 후보 목록 위의 확률로
   바꿔 같은 지표를 낸다 — 하네스만으로 풀리는 범위의 기준. 이 함수만 하네스를 import하므로 :mod:`robo_jev.train` 은
   이 모듈을 import하지 않는다(docs/06 §1의 경계는 학습 코드 쪽에 둔다).
@@ -285,7 +288,8 @@ def evaluate_items(
     rule_judge: bool = True,
     window_ticks: int = 30,
 ) -> dict[str, Any]:
-    """분할 하나의 표: 모델(``model``), 치환한 순서(``permuted`` + ``answer_change``), 문맥 섞기(``context_shuffle``), 규칙 기준군(``rule_judge``)."""
+    """분할 하나의 표: 모델(``model``), 치환한 순서(``permuted`` + ``answer_change``), 문맥 섞기(``context_shuffle`` +
+    ``context_shuffle_kind``: 비로봇 ``state`` / 로봇 스트림 ``instruction`` — 모듈 설명), 규칙 기준군(``rule_judge``)."""
     from robo_jev.model.serialize import serialize_request
 
     predictions = predict_items(judge, items)
@@ -309,6 +313,8 @@ def evaluate_items(
     if context_shuffle:
         shuffled = context_shuffle_records([item.record for item in items])
         result["context_shuffle"] = aggregate(predict_items(judge, reserialised(shuffled)))
+        kinds = {"instruction" if item.kind == "stream" else "state" for item in items}
+        result["context_shuffle_kind"] = "+".join(sorted(kinds))  # state(비로봇: 상태 굴림) / instruction(로봇: 지시·목표 텍스트만 굴림)
     if rule_judge and any(item.kind == "stream" for item in items):
         result["rule_judge"] = aggregate(rule_judge_predictions(items))
     return result

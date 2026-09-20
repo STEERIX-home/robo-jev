@@ -235,6 +235,14 @@ class _BranchStatic:
     windows: list[_StaticWindow]
 
 
+def _kv_buffer_key(state: QwenStreamState) -> tuple[tuple[int, int, int, int, int], ...]:
+    """graph 재캡처 판정용: 층마다 (prefix K·V 주소, 윈도우 K·V 주소, 윈도우 용량)."""
+    return tuple(
+        (store.k_prefix.data_ptr(), store.v_prefix.data_ptr(), store.k_win.data_ptr() if store.k_win is not None else 0, store.v_win.data_ptr() if store.v_win is not None else 0, store.capacity)
+        for store in state._kv
+    )
+
+
 class _BranchGraph:
     """결정 분기 배치 forward의 CUDA graph (지렛대 graphs).
 
@@ -249,7 +257,8 @@ class _BranchGraph:
         bb = state.backbone
         device = bb.device
         self.n = n
-        self.prefix_ptr = state._kv[0].k_prefix.data_ptr()
+        #: 캡처한 버퍼들의 주소·용량 (층마다 prefix·윈도우 K/V) — 하나라도 바뀌면 재캡처 (allocator가 새 prefix에 옛 주소를 줄 수 있다)
+        self.buffer_key = _kv_buffer_key(state)
         self.ids = torch.zeros(n, dtype=torch.long, device=device)
         self.position = torch.zeros(1, dtype=torch.long, device=device)
         self.delta = [{k: torch.empty_like(v) for k, v in layer.items()} for layer in state.delta]
@@ -923,7 +932,7 @@ class QwenStreamState:
         """지렛대 graphs: 같은 (분기 수, prefix 버퍼)의 graph를 에피소드마다 한 번 캡처하고 틱마다 재생한다."""
         bb = self.backbone
         graph = bb._branch_graph
-        if graph is None or graph.n != len(tokens) or graph.prefix_ptr != self._kv[0].k_prefix.data_ptr():
+        if graph is None or graph.n != len(tokens) or graph.buffer_key != _kv_buffer_key(self):
             graph = _BranchGraph(self, len(tokens))
             bb._branch_graph = graph
         return graph.replay(self, tokens)

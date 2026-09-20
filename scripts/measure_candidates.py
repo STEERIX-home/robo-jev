@@ -11,9 +11,12 @@
   readout + 질문별 typed 출력 + D2H이고, 모델 시간은 두 forward와 readout을 감싼 CUDA event다. warm(prefix + 30틱을 틱마다
   `advance`로 읽은 뒤 예열 5틱)만 잰다 — 상태 경로에 cold는 뜻이 없다. cache 길이는 30틱 뒤 **구성상** 일정하고(틱마다 적는다),
   메모리는 측정 틱 동안 자라면 안 된다(`allocated_growth_bytes`, `num_alloc_retries`). 지렛대(``--levers``)는 따로·함께 잰다:
-  ``baseline``(정적 버퍼 + mask 없는 sdpa), ``graphs``(분기 배치 forward의 CUDA graph 재생), ``compile``(층의 dense 부분
-  `torch.compile`), ``readout_bf16``(readout을 fp32 대신 bf16으로). 판정(docs/03 §7-6): `upper`와 batch-0에서 p95 모델 시간
-  ≤ 80 ms **이고** obs→apply 100 ms 초과율 ≤ 0.05이면 `passes_10hz`(5 Hz는 150 ms) — 외삽 없음.
+  ``baseline``(정적 버퍼 + mask 없는 sdpa; 몸통과 분기가 두 forward), ``fused``(틱 몸통과 10개 결정 분기를 **한 forward**로 —
+  가중치를 틱마다 한 번 읽는다; G0b가 고른 서빙 구성), ``graphs``(분기 배치 forward의 CUDA graph 재생), ``compile``(층의 dense
+  부분 `torch.compile`), ``readout_bf16``(readout을 fp32 대신 bf16으로), ``all``(fused + compile + readout_bf16 — stream 경로의
+  기본 서빙 구성; 추론 전용이고 학습은 합치지 않은 stream 경로·공식 P0 forward를 쓴다). ``--levers``를 안 주면 stream 경로는
+  ``all``, native 경로는 ``baseline``이다. 판정(docs/03 §7-6): `upper`와 batch-0에서 p95 모델 시간 ≤ 80 ms **이고** obs→apply
+  100 ms 초과율 ≤ 0.05이면 `passes_10hz`(5 Hz는 150 ms) — 외삽 없음.
 
 **native cache는 30틱 윈도우 없이 자란다.** 모델 자체의 hybrid cache(linear 층의 recurrent/conv state + full 층의 KV)에
 틱의 새 토큰만 이어 넣는데, docs/08 §3.1의 "정적 prefix + 최근 30틱" 윈도우는 2단계 경로의 속성이라 여기 없다. 그래서
@@ -63,7 +66,7 @@ runner는 주입할 수 있다(:class:`Runner`; 기본 :class:`TransformersRunne
        [--dtype bf16] [--max-miss-rate 0.05] [--cold-ticks N] [--verify-full]`
       `uv run python scripts/measure_candidates.py --path stream --candidates Qwen/Qwen3.5-2B,Qwen/Qwen3.5-4B
        --profiles lower,upper,instruction_change --episodes artifacts/datasets/d1-robot/batch-0 --ticks 70
-       --levers baseline,graphs,compile,readout_bf16,all --report artifacts/reports/backbone-stream.json`
+       --levers baseline,fused,all --report artifacts/reports/backbone-stream.json`
 가중치가 없으면 `scripts/fetch_backbone.py`를 가리키는 오류로 멈춘다.
 """
 
@@ -71,6 +74,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+from collections import Counter
 import dataclasses
 import datetime as dt
 import importlib.util
@@ -106,6 +110,8 @@ EPISODES_PROFILE = "batch0"
 STREAM_CONDITIONS = ("stream_warm", "stream_cold")
 #: stream 경로의 지렛대 (`--levers`). `all`은 셋을 함께.
 LEVERS = ("baseline", "graphs", "compile", "readout_bf16", "fused", "all")
+#: stream 경로의 기본 서빙 구성 (G0b 리뷰 1 권고 d): fused + dense compile + bf16 readout — 추론 전용.
+DEFAULT_SERVING_LEVER = "all"
 LEVER_SETTINGS = {
     "baseline": {"graphs": False, "compile": False, "readout_dtype": "float32", "fused": False},
     "graphs": {"graphs": True, "compile": False, "readout_dtype": "float32", "fused": False},
@@ -1081,7 +1087,7 @@ def screen_stream(
             lever_settings = dict(LEVER_SETTINGS[lever])
             print(f"[G0b] {model_id}: loading ({entry.get('path')}) lever={lever} {lever_settings}", file=sys.stderr, flush=True)
             started = time.perf_counter()
-            handle = runner.load({**{key: value for key, value in entry.items() if key != "manifest"}, "dtype": settings.dtype, "lever": lever_settings, "readout_rank": settings.readout_rank, "checkpoint": settings.checkpoint})
+            handle = runner.load({**{key: value for key, value in entry.items() if key != "manifest"}, "dtype": settings.dtype, "lever": lever_settings, "readout_rank": settings.readout_rank, "checkpoint": settings.checkpoint, "tokenizer_sha256": tokenizer_info.get("sha256")})
             loaded = {**runner.describe(handle), "load_seconds": round(time.perf_counter() - started, 1)}
             if report["environment"].get("attention_implementation") is None:
                 report["environment"]["attention_implementation"] = loaded.get("attention_backend")
@@ -1426,7 +1432,8 @@ class StreamRunner:
         if config.get("checkpoint"):
             from robo_jev.train import load_readout_checkpoint
 
-            load_readout_checkpoint(judge, config["checkpoint"], tokenizer_sha256=None)
+            # 배포 계약 digest의 네 조각(tokenizer 파일 해시 포함)을 지금 체크아웃 기준으로 대조한다 (리뷰 1 I2)
+            load_readout_checkpoint(judge, config["checkpoint"], tokenizer_sha256=config.get("tokenizer_sha256"))
         return {"backbone": backbone, "judge": judge, "config": config, "lever": lever, "compile_seconds": compile_seconds}
 
     # -- 에피소드·틱 --
@@ -1496,7 +1503,7 @@ class StreamRunner:
             "dtype": str(params[0].dtype),
             "attention_backend": backbone.attention_backend,
             "kernels": backbone.kernel_names(),
-            "layer_types": dict(__import__("collections").Counter(backbone.layer_types)),
+            "layer_types": dict(Counter(backbone.layer_types)),
             "levers": handle["lever"],
             "compile_seconds": handle.get("compile_seconds"),
             "readout_rank": handle["judge"].rank,
@@ -1674,8 +1681,6 @@ class TransformersRunner:
         }
 
     def describe(self, handle: Any) -> dict[str, Any]:
-        from collections import Counter
-
         model = handle["model"]
         params = list(model.parameters())
         tied = getattr(model, "lm_head", None) is not None and model.lm_head.weight.data_ptr() == model.model.embed_tokens.weight.data_ptr()
@@ -1751,7 +1756,7 @@ def main(argv: list[str] | None = None, *, runner: Runner | None = None) -> int:
     parser.add_argument("--report", default=None, help=f"보고서 JSON (기본: native {DEFAULT_REPORT.relative_to(REPO)}, stream {DEFAULT_STREAM_REPORT.relative_to(REPO)})")
     parser.add_argument("--episodes", default=None, help="실제 로봇 에피소드 batch 디렉터리 (manifest.json) — `batch0` 프로파일")
     parser.add_argument("--episodes-limit", dest="episodes_limit", type=int, default=None, help="batch에서 쓸 에피소드 수 (기본: 전부)")
-    parser.add_argument("--levers", default="baseline", help=f"stream 경로의 지렛대, 쉼표로 ({', '.join(LEVERS)}; 첫 것이 판정의 기준)")
+    parser.add_argument("--levers", default=None, help=f"stream 경로의 지렛대, 쉼표로 ({', '.join(LEVERS)}; 첫 것이 판정의 기준; 기본 = stream `{DEFAULT_SERVING_LEVER}`(서빙 구성), native `baseline`)")
     parser.add_argument("--readout-rank", dest="readout_rank", type=int, default=64, help="stream 경로 pointer readout의 rank")
     parser.add_argument("--checkpoint", default=None, help="stream 경로에 실을 readout checkpoint (없으면 seed 초기값 — 지연은 값에 무관)")
     parser.add_argument("--dtype", default="bf16", choices=sorted(DTYPES))
@@ -1773,6 +1778,8 @@ def main(argv: list[str] | None = None, *, runner: Runner | None = None) -> int:
 
     if not 0.0 <= args.max_miss_rate <= 1.0:
         parser.error("--max-miss-rate는 0~1")
+    if args.levers is None:
+        args.levers = DEFAULT_SERVING_LEVER if args.path == "stream" else "baseline"
     levers = tuple(item.strip() for item in args.levers.split(",") if item.strip())
     unknown_levers = sorted(set(levers) - set(LEVERS))
     if unknown_levers:

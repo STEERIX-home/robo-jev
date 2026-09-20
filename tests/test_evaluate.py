@@ -72,6 +72,7 @@ def test_evaluate_items_reports_tables_controls_and_position_bias_on_the_fixture
     assert result["answer_change"]["shuffle_seed"] == 2 and result["answer_change"]["compared"] > 0 and 0.0 <= result["answer_change"]["rate"] <= 1.0
     assert "q_main" in result["answer_change"]["by_question"] and "permuted" in result
     assert "context_shuffle" in result and 0.0 <= result["context_shuffle"]["_all"]["accuracy"] <= 1.0
+    assert result["context_shuffle_kind"] == "instruction+state"  # 로봇 스트림 = 지시 섞기(상태 유지), 비로봇 = 상태 섞기 (리뷰 1 I3)
     rule = result["rule_judge"]
     assert set(rule) - {"_all"} <= set(model) and rule["q_main"]["n"] == model["q_main"]["n"] and 0.0 <= rule["q_main"]["accuracy"] <= 1.0
     assert "choice" not in rule  # 규칙 기준군은 로봇 틱만

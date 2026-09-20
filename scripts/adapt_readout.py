@@ -143,8 +143,11 @@ def run_training(model_id: str, *, mode: str, steps: int, seed: int = 17, eval_a
         ]
         memory = _memory()
         seconds = [m["seconds"] for m in result["metrics"]["steps"]]
+        checkpoint = result["checkpoint"]
+        if checkpoint and str(checkpoint).startswith(str(REPO)):
+            checkpoint = str(Path(checkpoint).relative_to(REPO))  # 저장소 기준 상대 경로 (worktree 절대 경로를 남기지 않는다 — 리뷰 1 M8)
         out = {
-            "model_id": model_id, "mode": mode, "steps": int(steps), "run_id": result["run_id"], "checkpoint": result["checkpoint"], "status": result["status"],
+            "model_id": model_id, "mode": mode, "steps": int(steps), "run_id": result["run_id"], "checkpoint": checkpoint, "status": result["status"],
             "config": {key: value for key, value in trainer.config.items() if key != "dataset_manifests"},
             "manifest": {key: trainer.manifest[key] for key in ("model", "contract_sha256", "serializer_version", "tokenizer")},
             "items": {"total": len(trainer.items), "stream": sum(i.kind == "stream" for i in trainer.items), "single": sum(i.kind == "single" for i in trainer.items)},
@@ -163,7 +166,7 @@ def evaluate_checkpoint(model_id: str, *, mode: str, checkpoint: str, steps: int
     않으려고. 곡선·step 시간은 run 디렉터리의 `metrics.json`에서 읽는다; `memory`는 평가 프로세스의 peak다(학습 peak가 아니다)."""
     import torch
 
-    from robo_jev.train import build_model, build_tokenizer, load_readout_checkpoint, resolve_config
+    from robo_jev.train import build_model, build_tokenizer, load_readout_checkpoint, resolve_config, tokenizer_block
 
     path = Path(checkpoint)
     run_dir = path.parent
@@ -173,7 +176,8 @@ def evaluate_checkpoint(model_id: str, *, mode: str, checkpoint: str, steps: int
     config = resolve_config(train_config(model_id, mode=mode, steps=steps, run_id=run_dir.name, seed=seed, lr=lr))
     judge = build_model(config)
     tokenizer = build_tokenizer(config["tokenizer"])
-    manifest = load_readout_checkpoint(judge, path)
+    # 배포 계약 digest의 네 조각(직렬화·계약 소스, 하네스 버전, tokenizer 파일 해시)을 지금 체크아웃 기준으로 대조한다
+    manifest = load_readout_checkpoint(judge, path, tokenizer_sha256=tokenizer_block(config["tokenizer"])["sha256"])
     judge.eval()
     load_seconds = round(time.perf_counter() - started, 1)
     steps_done = metrics.get("steps") or []
@@ -303,6 +307,7 @@ def run_chunk_memory(model_id: str, *, modes: tuple[str, ...] = ("readout", "ful
                     print(f"[G0b] chunk-memory {model_id}: skip {mode} {seconds}s — headroom {headroom:.0%}", file=sys.stderr, flush=True)
                     break
             torch.cuda.reset_peak_memory_stats()
+            torch.cuda.reset_accumulated_memory_stats()  # num_alloc_retries·num_ooms는 프로세스 누적이라 실행마다 0에서 (리뷰 1 M2)
             backbone = QwenBackbone.load(model_id, kv_mode="static" if mode == "readout" else "dynamic")
             if mode != "readout":
                 backbone.model.requires_grad_(True)
