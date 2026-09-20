@@ -60,7 +60,7 @@ from robo_jev.data.split import CONCEPT_TAG, OOD_SPLITS, TEMPLATE_TAG, SplitPoli
 
 __all__ = ["REPORT_VERSION", "leaf_diff", "main", "validate_dataset"]
 
-REPORT_VERSION = "qa-v0"
+REPORT_VERSION = "qa-v1"
 
 #: 정규화에서 걷어낼 **표현** 키. 남는 것이 사실이다.
 WORDING_KEYS = (
@@ -190,14 +190,14 @@ def _contrast_report(records: Sequence[dict], errors: list[dict]) -> dict:
         if parent.get("split") != record.get("split") or parent.get("origin_group") != record.get("origin_group"):
             errors.append(_error(index, "split", "대조 sibling이 부모와 다른 계열·split에 있다"))
 
-        # 1. 정확히 한 자리만 다른가 (로봇 틱은 초점 사실과 그 파생값 — 대상의 relative_mm·같은 사실의 두 표현 — 만).
+        # 1. 정확히 한 자리만 다른가 (로봇 틱은 초점 사실과 그 파생값 — 대상의 relative_mm·같은 사실의 두 표현 — 의 **정확한 집합**).
         diff = leaf_diff(_strip_wording(parent["request"]["state"]), _strip_wording(record["request"]["state"]))
         robot = provenance.get("domain") == "robot"
         if robot:
             from robo_jev.data.robot_contrast import allowed_diff_paths
 
-            allowed = allowed_diff_paths(str(provenance.get("kind")), str(contrast.get("focus_field")))
-            bad = [path for path in diff if not path.startswith(allowed)]
+            allowed = allowed_diff_paths(str(provenance.get("kind")), str(contrast.get("focus_field")), parent["request"]["state"])
+            bad = sorted(set(diff) - allowed)
             if not diff or bad:
                 field_failures += 1
                 errors.append(_error(index, "request.state", f"로봇 대조 sibling은 초점 사실({contrast.get('focus_field')})만 달라야 한다 (다른 곳: {bad[:4] or diff[:4]})"))
@@ -234,6 +234,12 @@ def _contrast_report(records: Sequence[dict], errors: list[dict]) -> dict:
                 continue
             if robot_expert is None:
                 robot_expert = Expert()
+            recorded_version = (contrast.get("deletion") or {}).get("expert_version") or (provenance.get("versions") or {}).get("expert")
+            if recorded_version is not None and str(recorded_version) != str(robot_expert.version):
+                # 삭제 analogue는 레코드를 만든 전문가 버전으로만 다시 돌린다 (리뷰 1 M6) — 다른 버전의 답으로 판정하지 않는다.
+                deletion_failures += 1
+                errors.append(_error(index, "provenance.contrast.deletion", f"삭제 analogue를 다시 돌릴 전문가 버전이 다르다: 레코드 {recorded_version!r} ≠ 지금 {robot_expert.version!r}"))
+                continue
             outcome = robot_deletion(record["request"]["state"], tick_request, str(provenance.get("kind")), robot_expert)
             if outcome is None:
                 deletion_failures += 1
@@ -263,6 +269,7 @@ def _contrast_report(records: Sequence[dict], errors: list[dict]) -> dict:
 
     return {
         **contrast_counts([record for record in records if isinstance(record, dict) and isinstance(record.get("provenance"), dict)]),
+        "expert_version": None if robot_expert is None else str(robot_expert.version),
         "checked": checked,
         "unpaired_bases": unpaired,
         "one_field_failures": field_failures,

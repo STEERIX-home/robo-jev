@@ -669,6 +669,15 @@ def test_the_qa_reports_contrast_pairs_and_flags_a_broken_pair(batch, report):
     )
 
 
+def test_contrast_siblings_never_change_their_familys_sealing_in_either_direction(batch):
+    """리뷰 1 M3: sibling 자신의 봉인 근거(문구 변형·개념)는 기본 레코드의 것과 같다 — 봉인 개념을 새로 다루는 sibling도, OOD
+    계열 안에서 봉인 개념을 잃는 sibling도 만들지 않는다."""
+    policy = SplitPolicy.from_config(DEFAULT_CONFIG["split"])
+    for base, sibling in _pairs(batch):
+        tags = lambda record: sorted({TEMPLATE_TAG + p for p in record["provenance"]["phrasing"]} | {CONCEPT_TAG + c for c in record["provenance"]["concepts"]})
+        assert policy.holdout_reasons(base["origin_group"], tags(base)) == policy.holdout_reasons(sibling["origin_group"], tags(sibling))
+
+
 def test_leaf_diff_names_exactly_the_changed_leaves():
     from robo_jev.data.validate import leaf_diff
 

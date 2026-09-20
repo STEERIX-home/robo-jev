@@ -5,31 +5,38 @@
 * ``forbidden`` — 지시 대상의 금지 접촉 표지 토글(구조화된 목표의 `forbidden_contact`와 물체의 `attributes`, 같은 사실의 두
   표현). `q_main`의 `semantic_admissible`이 바뀐다 — 대상→영역 파지가 부적합해지고 지시가 모순이 된다(`q_instr` 거짓).
 * ``zone_boundary`` — 완료 틱에서 놓인 대상을 영역 경계 너머 1cm로 옮긴다. `q_done`이 뒤집힌다.
-* ``instruction`` — 지시를 계획의 다음 버전(v2)으로 올린다. 주 결정(`q_main`)이 바뀐다.
-* ``holding`` — 대상을 들고 옮기는 틱(들기·이동·놓기 국면)에서 든 물체 표지를 지운다(들고 있음 → 빈손). 주 결정(`q_main`)이
-  놓기에서 파지로 뒤집힌다 — "들고 있지 않으면 먼저 집어야 한다". 그리퍼 답은 commitment의 국면 프로파일이라(commitment 없는
-  틱은 마스크) 이 뒤집기의 겨냥 질문이 아니다; 함께 뒤집히면 `flipped_questions`에 적힌다.
+* ``instruction`` — 지시를 계획의 다음 버전(v2)으로 올린다. 주 결정(`q_main`)이 바뀐다. 후보 목록은 틱의 것이므로(아래) v2의
+  대상×영역 조합이 **이미 목록에 있는** 틱이나 로봇이 **다른 물체를 들고 있는** 틱(`release_held_object` 경로)만 뽑는다 —
+  그 밖의 틱에서는 하네스가 v2 조합을 예약해 목록에 넣었을 것이라 틱의 목록이 새 목표에 맞지 않는다(리뷰 1 I3).
+
+`q_gripper`를 겨냥하는 뒤집기는 없다: 부가 질문의 라벨은 commitment의 국면 프로파일에 조건화되고(commitment 없는 틱은 마스크)
+든 물체 표지를 바꿔도 답이 바뀌지 않는다. 든 물체 표지를 지우는 뒤집기(`holding`)는 실현할 수 없는 상태(공중의 물체)를 만들고
+`q_done`만 뒤집어 `zone_boundary`와 겹치므로 두지 않는다(리뷰 1 I2).
 
 쌍의 한쪽인 **기본 틱**도 같은 `judgment-v0` 형태로 낸다(`state_first`, L0) — 스트림 틱이 아니라 별도 레코드다. 후보 목록은
 틱의 것을 그대로 쓰되(하네스가 그 틱의 관측에서 만든 것; 바뀐 상태로 다시 열거하지 않는다 — 질문은 "이 상태와 이 후보에서의
-답"이다) 순서는 레코드 seed로 섞는다(정답 위치 편향 방지, docs/04 §3). 에피소드마다 종류별 ≤ 1, 합쳐 ≤ `per_episode`이며
-같은 origin_group·split·holdout 근거를 승계한다.
+답"이다) 순서는 레코드 seed로 섞는다(정답 위치 편향 방지, docs/04 §3). 기본 틱이나 sibling의 `q_main` 이유가 퇴화
+(:data:`DEGENERATE_REASONS` — hold∉A 틱)면 쌍을 만들지 않는다. 에피소드마다 종류별 ≤ 1, 합쳐 ≤ `per_episode`이며 같은
+origin_group·split·holdout 근거를 승계한다.
 
-**삭제 analogue.** 초점 사실을 지우면(대상을 관측에서 지운다 / 지시의 대상을 비운다) 전문가는 판단하지 않고 게이트로 간다 —
-관측(`observe_target`)·재계획(`instruction_incomplete`). 그것이 로봇 라벨의 "모른다"이며 만들 때 검사하고(못 지나면 쌍을
-버린다) QA(:func:`deletion_outcome`)가 다시 돌린다.
+**삭제 analogue.** 비로봇의 삭제 검사("초점 사실을 지우면 라벨이 마스크·해당 없음")의 로봇 대응은 **대상 삭제**다: 대상을
+관측에서 지우거나(`forbidden`·`zone_boundary`) 지시의 대상을 비우면(`instruction`) 전문가는 판단하지 않고 게이트로 가야 한다 —
+관측(`observe_target`)·재계획(`instruction_incomplete`). 뒤집힌 질문 자체가 "모른다"가 되는 것은 아니다(boolean에는 마스크가 없고
+대상이 없는 `q_done`은 거짓이다); 검사하는 것은 사실이 없을 때 결정이 게이트로 물러난다는 것이다. 만들 때 검사하고(못 지나면
+쌍을 버린다) QA(:func:`deletion_outcome`)가 레코드에 적힌 전문가 버전으로 다시 돌린다.
 """
 
 from __future__ import annotations
 
 import copy
 import random
+import re
 from collections.abc import Sequence
 from typing import Any
 
 from robo_jev.contracts import QUESTION_SET_V0, SCHEMA_SINGLE_REQUEST, validate_record
-from robo_jev.harness.robot import load_harness_config
-from robo_jev.sim.expert import GATE_REASONS, Expert
+from robo_jev.harness.robot import joint_key_parts, load_harness_config
+from robo_jev.sim.expert import DEGENERATE_REASONS, GATE_REASONS, Expert
 
 __all__ = [
     "GENERATOR_VERSION",
@@ -45,14 +52,13 @@ __all__ = [
     "single_request_from_tick",
 ]
 
-GENERATOR_VERSION = "gen-robot-contrast-v0.1"
+GENERATOR_VERSION = "gen-robot-contrast-v0.2"
 
 #: 뒤집기 종류와 그것이 겨냥하는 질문.
 KINDS: dict[str, str] = {
     "forbidden": "q_main",
     "zone_boundary": "q_done",
     "instruction": "q_main",
-    "holding": "q_main",
 }
 
 #: 경계 너머로 옮기는 거리(mm) — "±1cm".
@@ -220,17 +226,11 @@ def flip(state: dict[str, Any], kind: str, *, plan: dict[str, Any] | None = None
             }
         )
         return out, "goal"
-    if kind == "holding":
-        if target is None or out["robot"].get("holding") != target["id"]:
-            return None
-        out["robot"]["holding"] = None
-        return out, "robot.holding"
     raise ValueError(f"모르는 뒤집기 종류다: {kind!r}")
 
 
 def forget(state: dict[str, Any], kind: str) -> dict[str, Any]:
-    """초점 사실을 지운 상태: 대상 물체를 관측에서 지우거나(`forbidden`·`zone_boundary`·`holding`), 지시의 대상을 비운다
-    (`instruction`)."""
+    """대상 삭제: 대상 물체를 관측에서 지우거나(`forbidden`·`zone_boundary`), 지시의 대상을 비운다(`instruction`)."""
     out = copy.deepcopy(state)
     if kind == "instruction":
         out["goal"].update({"target_ref": None, "target_desc": None})
@@ -271,17 +271,30 @@ def flipped_answer(record: dict[str, Any], question_id: str) -> Any:
     return tuple(sorted(label["candidate_ids"]))
 
 
-def allowed_diff_paths(kind: str, focus_field: str) -> tuple[str, ...]:
-    """QA의 한 자리 검사가 로봇 sibling에 허용하는 잎 경로의 접두: 초점 사실과 그 파생값(대상의 relative_mm)뿐이다."""
-    if kind == "forbidden":
-        return ("state.goal.forbidden_contact", "state.objects[", )
-    if kind == "zone_boundary":
-        return ("state.objects[", "state.derived[")
+def allowed_diff_paths(kind: str, focus_field: str, parent_state: dict[str, Any]) -> frozenset[str]:
+    """QA의 한 자리 검사가 로봇 sibling에 허용하는 **정확한** 잎 경로 집합 (리뷰 1 I1): 초점 사실과 그 파생값뿐이며 부모 상태의
+    대상 색인으로 계산한다 — `zone_boundary`는 `state.objects[i].pose_mm[axis]`와 `state.derived[j].relative_mm[axis]`,
+    `forbidden`은 `state.goal.forbidden_contact`와 `state.objects[i].attributes`(목록 길이가 바뀌므로 목록 경로),
+    `instruction`은 `state.goal.{text, version, t_ms, target_ref, target_desc, target_zone}`. 다른 잎이 하나라도 다르면 위반이다."""
     if kind == "instruction":
-        return ("state.goal",)
-    if kind == "holding":
-        return ("state.robot.holding",)
-    return (f"state.{focus_field}",)
+        return frozenset(f"state.goal.{name}" for name in ("text", "version", "t_ms", "target_ref", "target_desc", "target_zone"))
+    match = re.match(r"(?:goal\.forbidden_contact|objects)\[(?P<id>[^\]]+)\](?:\.pose_mm\[(?P<axis>\d)\])?$", focus_field)
+    if match is None:
+        return frozenset()
+    object_id = match.group("id")
+    index = next((i for i, entry in enumerate(parent_state.get("objects") or ()) if str(entry.get("id")) == object_id), None)
+    if index is None:
+        return frozenset()
+    if kind == "forbidden":
+        return frozenset({"state.goal.forbidden_contact", f"state.objects[{index}].attributes"})
+    if kind == "zone_boundary":
+        axis = match.group("axis")
+        allowed = {f"state.objects[{index}].pose_mm[{axis}]"}
+        derived = next((j for j, item in enumerate(parent_state.get("derived") or ()) if item.get("object") == object_id), None)
+        if derived is not None:
+            allowed.add(f"state.derived[{derived}].relative_mm[{axis}]")
+        return frozenset(allowed)
+    return frozenset()
 
 
 # --------------------------------------------------------------------------
@@ -289,8 +302,26 @@ def allowed_diff_paths(kind: str, focus_field: str) -> tuple[str, ...]:
 # --------------------------------------------------------------------------
 
 
-def _eligible_ticks(episode: dict[str, Any], kind: str) -> list[int]:
-    """종류별로 뒤집기가 뜻이 있는 틱(에피소드 안 순번). 라벨은 읽되 결과는 보지 않는다 — 어느 틱이 어떤 상황인지만."""
+def _next_step(plan: dict[str, Any] | None, version: int) -> dict[str, Any] | None:
+    for item in (plan or {}).get("instructions") or ():
+        if int(item.get("version", 0)) == version + 1:
+            return item
+    return None
+
+
+def _combination_listed(tick: dict[str, Any], target: str, zone: str) -> bool:
+    """틱의 후보 목록에 `target → zone`의 파지·놓기가 있는가 (하네스의 지시 조합 예약이 넣었을 후보)."""
+    for entry in tick["request"]["candidates"]["q_main"]:
+        parts = joint_key_parts(entry.get("key", ""))
+        if parts is not None and parts[0] in ("grasp", "place") and parts[1] == target and parts[3] == zone:
+            return True
+    return False
+
+
+def _eligible_ticks(episode: dict[str, Any], kind: str, plan: dict[str, Any] | None = None) -> list[int]:
+    """종류별로 뒤집기가 뜻이 있는 틱(에피소드 안 순번). 라벨은 읽되 결과는 보지 않는다 — 어느 틱이 어떤 상황인지만.
+
+    `instruction`은 v2의 대상×영역 조합이 틱의 목록에 있거나 로봇이 다른 물체를 들고 있는 틱만이다(리뷰 1 I3)."""
     found: list[int] = []
     for index, tick in enumerate(episode["ticks"]):
         state = tick["request"]["state"]
@@ -308,10 +339,16 @@ def _eligible_ticks(episode: dict[str, Any], kind: str) -> list[int]:
             if gate is None and holding is None and phase in ("approach", "grasp", "none"):
                 found.append(index)
         elif kind == "instruction":
-            if gate is None and int(state["goal"].get("version", 1)) == 1 and phase in ("approach", "grasp", "lift", "transport"):
-                found.append(index)
-        elif kind == "holding":
-            if gate is None and holding == target["id"] and phase in ("lift", "transport", "place"):
+            if gate is not None or int(state["goal"].get("version", 1)) != 1 or phase not in ("approach", "grasp", "lift", "transport"):
+                continue
+            step = _next_step(plan, int(state["goal"].get("version", 1)))
+            if step is None or str(step.get("target")) == str(state["goal"].get("target_ref")):
+                continue
+            objects = {str(entry["id"]) for entry in state.get("objects") or ()}
+            if str(step.get("target")) not in objects:
+                continue
+            holds_other = holding is not None and holding != str(step.get("target"))
+            if holds_other or _combination_listed(tick, str(step.get("target")), str(step.get("zone"))):
                 found.append(index)
     return found
 
@@ -341,7 +378,7 @@ def build_pairs(
         if made >= per_episode:
             reasons["rate_limited"] = reasons.get("rate_limited", 0) + 1
             continue
-        ticks = _eligible_ticks(episode, kind)
+        ticks = _eligible_ticks(episode, kind, plan)
         if not ticks:
             reasons[f"{kind}:no_tick"] = reasons.get(f"{kind}:no_tick", 0) + 1
             continue
@@ -355,12 +392,17 @@ def build_pairs(
         new_state, focus_field = flipped
         base_id = f"{episode['episode_id']}@{tick['t']}-{kind}-base"
         sibling_id = f"{episode['episode_id']}@{tick['t']}-{kind}"
-        base, _ = single_request_from_tick(
+        base, base_answers = single_request_from_tick(
             episode, tick, state, request_id=base_id, expert=expert, question_texts=texts, shuffle_seed=f"{sibling_id}:s"
         )
-        sibling, _ = single_request_from_tick(
+        sibling, sibling_answers = single_request_from_tick(
             episode, tick, new_state, request_id=sibling_id, expert=expert, question_texts=texts, shuffle_seed=f"{sibling_id}:s"
         )
+        reasons_main = (str(base_answers["expert_meta"]["main"]["reason"]), str(sibling_answers["expert_meta"]["main"]["reason"]))
+        if any(reason in DEGENERATE_REASONS for reason in reasons_main):
+            # hold∉A 틱: 실행기 사정으로 물러난 답이라 대조가 아니다 (리뷰 1 I3).
+            reasons[f"{kind}:degenerate"] = reasons.get(f"{kind}:degenerate", 0) + 1
+            continue
         question_id = KINDS[kind]
         before, after = flipped_answer(base, question_id), flipped_answer(sibling, question_id)
         if before is None or after is None or before == after:
@@ -403,13 +445,14 @@ def build_pairs(
                 "flipped_questions": [
                     qid for qid in QUESTION_SET_V0 if flipped_answer(base, qid) != flipped_answer(sibling, qid)
                 ],
-                "deletion": {"field": focus_field, "outcome": outcome},
+                "deletion": {"field": focus_field, "outcome": outcome, "expert_version": str(expert.version)},
             },
         }
         sibling["evidence"] = {
             "tick_index": index,
             "contrast": {
                 "kind": kind,
+                "main_reasons": {"base": reasons_main[0], "sibling": reasons_main[1]},
                 "base_answer": _jsonable(before),
                 "sibling_answer": _jsonable(after),
                 "tick_request": {

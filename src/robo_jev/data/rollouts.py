@@ -23,6 +23,7 @@ import copy
 import json
 import math
 import os
+import random
 import statistics
 import sys
 import time
@@ -207,8 +208,9 @@ def build_jobs(
 
     먼저 모든 레코드의 `versions`를 지금 것(`running`, 없으면 여기서 계산)과 맞대 보고 하나라도 다르면
     :class:`ConfigMismatch`로 멈춘다. 작업 순서는 (에피소드를 돌아가며 키프레임) → seed → 후보다. 그래서
-    `limit`가 작아도 첫 키프레임은 모든 후보의 paired seed를 갖고, 기능(파지·놓기·밀기)이 섞인다. 재생이
-    레코드와 어긋난 키프레임은 건넌다(`skipped_fidelity`).
+    `limit`가 작아도 첫 키프레임은 모든 후보의 paired seed를 갖는다. 에피소드 안의 키프레임 순서는 에피소드 id로 seed한
+    난수로 섞는다(리뷰 1 M1) — 정렬한 순서(t 오름차순)면 부분 sweep이 모든 에피소드의 t=0 `switch` 키프레임만 보게 된다;
+    섞으면 부분 sweep의 종류 혼합이 전체의 표본이 된다. 재생이 레코드와 어긋난 키프레임은 건넌다(`skipped_fidelity`).
     """
     from robo_jev.sim.environment import Environment
 
@@ -220,7 +222,9 @@ def build_jobs(
     config = {"keyframes": {"per_episode": per_episode or int((events.get("keyframes") or {}).get("per_episode", 5))}}
     selected: list[dict[str, Any]] = []
     for record in records:
-        for frame in select_keyframes(record, config):
+        frames = select_keyframes(record, config)
+        random.Random(f"jobs:{record.get('episode_id')}").shuffle(frames)  # 에피소드 안 순서는 seed한 무작위 (M1)
+        for frame in frames:
             frame["record"] = record
             selected.append(frame)
     # 에피소드를 돌아가며: (에피소드 안 순번, 에피소드 순서)
@@ -230,7 +234,7 @@ def build_jobs(
         rank = order.get(frame["episode_id"], 0)
         order[frame["episode_id"]] = rank + 1
         ranked.append((rank, records.index(frame["record"]), frame))
-    ranked.sort(key=lambda item: (item[0], item[1], item[2]["index"]))
+    ranked.sort(key=lambda item: (item[0], item[1]))
 
     jobs: list[dict[str, Any]] = []
     keyframes_out: list[dict[str, Any]] = []
@@ -550,6 +554,8 @@ def summarise_sweep(out: Path) -> dict[str, Any]:
     holding_of = {f"{frame['episode_id']}@{frame['t']}": frame.get("holding") for frame in keyframes}
     by_event: dict[str, dict[str, int]] = {}
     push_by_approach: dict[str, dict[str, int]] = {}
+    push_reasons_by_approach: dict[str, dict[str, int]] = {}
+    push_stage_by_direction: dict[str, dict[str, int]] = {}
     push_by_distance: dict[str, dict[str, int]] = {}
     push_by_direction: dict[str, dict[str, int]] = {}
     push_by_kind: dict[str, dict[str, int]] = {}
@@ -584,6 +590,12 @@ def summarise_sweep(out: Path) -> dict[str, Any]:
         if event == "push":
             approach = evidence.get("approach_s")
             bump(push_by_approach, _bucket(approach, _APPROACH_EDGES_S), outcome)
+            # 실패 이유를 접근 구간마다, 그리고 방향마다 단계(접근 중 충돌 / 밀기 중 충돌 / horizon)로 가른다 (리뷰 1 I5):
+            # `approach_s`가 없는 rollout은 접촉점에 닿기 전에 끝난 것이고, 그 대부분은 내려가다 물체를 친 `contact_force`다.
+            stage = "approach" if evidence.get("first_action_tick") is None else "push"
+            label = outcome if outcome != "failure" else f"{stage}_{result.get('reason')}"
+            bump(push_reasons_by_approach, _bucket(approach, _APPROACH_EDGES_S), label)
+            bump(push_stage_by_direction, parts[2], label)
             bump(push_by_distance, _bucket(distance, _DISTANCE_EDGES_MM), outcome)
             bump(push_by_direction, parts[2], outcome)
             bump(push_by_kind, kind, outcome)
@@ -621,6 +633,8 @@ def summarise_sweep(out: Path) -> dict[str, Any]:
         "reasons": dict(sorted(reasons.items(), key=lambda item: (-item[1], item[0]))),
         "censoring": dict(sorted(censoring.items())),
         "push_by_approach_s": _rate_table(push_by_approach),
+        "push_reasons_by_approach_s": {name: dict(sorted(counts.items())) for name, counts in sorted(push_reasons_by_approach.items())},
+        "push_stage_by_direction": {name: dict(sorted(counts.items())) for name, counts in sorted(push_stage_by_direction.items())},
         "push_by_start_distance_mm": _rate_table(push_by_distance),
         "push_by_direction": _rate_table(push_by_direction),
         "push_by_keyframe_kind": _rate_table(push_by_kind),

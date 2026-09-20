@@ -72,7 +72,7 @@ __all__ = [
 ]
 
 GENERATOR_VERSION = "gen-robot-v0.1"
-MANIFEST_VERSION = "manifest-robot-v0"
+MANIFEST_VERSION = "manifest-robot-v1"
 DEFAULT_CONFIG_PATH = "configs/data/d1_robot.yaml"
 
 #: 정책이 내야 하는 답. 이 밖의 키(`phase`·`expert_meta`)는 모델 출력에 넣지 않는다.

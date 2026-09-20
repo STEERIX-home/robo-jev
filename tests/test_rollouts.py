@@ -100,6 +100,20 @@ def test_jobs_cover_every_candidate_with_paired_seeds_before_the_next_keyframe(s
     assert len(jobs) == 20 and summary["skipped_fidelity"] == 0
     first = jobs[0]["keyframe"]
     assert all(job["keyframe"] == first for job in jobs)
+    # 리뷰 1 M1: 에피소드 안의 키프레임 순서는 에피소드 id로 seed한 무작위다 — 첫 키프레임이 언제나 t=0 `switch`가 아니고,
+    # 같은 레코드는 같은 순서다.
+    import random
+
+    from robo_jev.sim.label import select_keyframes
+
+    expected = select_keyframes(record, {"keyframes": {"per_episode": 5}})
+    random.Random(f"jobs:{record['episode_id']}").shuffle(expected)
+    again, _, _ = build_jobs(
+        [record], EVENTS, limit=20, sim_config=CONFIG["sim_config"], harness_config=load_harness_config(),
+        control_steps=CONFIG["episode"]["control_steps_per_tick"],
+    )
+    assert keyframes[0]["index"] == expected[0]["index"] and again[0]["keyframe"] == first
+    assert [frame["index"] for frame in expected] != sorted(frame["index"] for frame in expected) or len(expected) < 3
     candidates = keyframes[0]["candidates"]
     assert len(candidates) == 8
     assert [job["action"]["id"] for job in jobs[:8]] == candidates and [job["seed"] for job in jobs[:8]] == [0] * 8
@@ -177,6 +191,12 @@ def test_summarise_sweep_conditions_push_success_on_approach_time_and_start_dist
             assert row["wilson"][0] <= (row["rate"] if row["rate"] is not None else 1.0) <= row["wilson"][1] + 1e-9
     pushes = sum(row["rollouts"] for row in summary["push_by_direction"].values())
     assert pushes == summary["by_event"].get("push", {}).get("success", 0) + summary["by_event"].get("push", {}).get("failure", 0) + summary["by_event"].get("push", {}).get("censored", 0)
+    # 리뷰 1 I5: 접근 구간마다·방향마다 실패 이유를 단계(접근 중 충돌·밀기 중 충돌·horizon)로 가른다.
+    assert sum(sum(counts.values()) for counts in summary["push_reasons_by_approach_s"].values()) == pushes
+    assert sum(sum(counts.values()) for counts in summary["push_stage_by_direction"].values()) == pushes
+    allowed = {"success", "censored", "approach_contact_force", "push_contact_force", "approach_horizon", "push_horizon", "push_None", "approach_None"}
+    assert all(set(counts) <= allowed for counts in summary["push_stage_by_direction"].values()), summary["push_stage_by_direction"]
+    assert all(set(counts) <= allowed for counts in summary["push_reasons_by_approach_s"].values())
     assert summary["projections"]["d1_128k"]["cpu_hours"] > 0 and summary["wall_s_per_rollout"]["mean"] > 0
 
 

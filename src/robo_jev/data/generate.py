@@ -47,7 +47,7 @@ __all__ = [
     "write_dataset",
 ]
 
-GENERATOR_VERSION = "gen-single-v0.1.0"
+GENERATOR_VERSION = "gen-single-v0.2.0"
 MANIFEST_VERSION = "manifest-v0"
 
 #: 함께 배포하는 설정 파일. `load_config(PILOT_CONFIG) == DEFAULT_CONFIG`이어야 한다.
@@ -441,8 +441,9 @@ def _contrast_sibling(
 
     분야의 :meth:`contrasts`가 낸 후보를 차례로 그려, 겨냥 질문의 라벨이 (마스크가 아닌 두 라벨 사이에서) 실제로 뒤집히고
     :func:`deletion_outcome`을 지나는 첫 쌍을 택한다. 같은 wording·shuffle seed로 그리므로 sibling은 문구·후보 배열이 기본
-    레코드와 같고 사실 하나만 다르다. 바뀐 사실이 계열의 봉인 여부를 바꾸는 sibling(기본 레코드에 없는 봉인 개념을 다루게
-    되는 것)은 만들지 않는다 — 대조 쌍은 계열의 split을 따르지, 계열을 OOD로 끌고 가지 않는다(docs/04 §5의 몫을 지킨다).
+    레코드와 같고 사실 하나만 다르다. 바뀐 사실이 **sibling 자신의** 봉인 근거를 기본 레코드의 것과 다르게 하는 sibling — 봉인
+    개념을 새로 다루게 되거나(계열이 OOD로 끌려간다) 잃는 것(OOD 계열 안의 분포 내 내용, 리뷰 1 M3) — 은 만들지 않는다: 대조
+    쌍은 계열의 split을 따르되 봉인 측정을 흐리지 않는다(docs/04 §5의 몫을 지킨다).
     """
     language = base["provenance"]["language"]
     base_id = base["request"]["request_id"]
@@ -459,8 +460,8 @@ def _contrast_sibling(
             language=language, seed=seed, family_index=family_index, wording_seed=wording_seed, shuffle_seed=shuffle_seed,
             config=config, derived_from=base_id, derivation="contrast",
         )
-        if policy.holdout_reasons(group, _holdout_tags([base, sibling])) != base_reasons:
-            sealed = True
+        if policy.holdout_reasons(group, _holdout_tags([sibling])) != base_reasons:
+            sealed = True  # 대칭 규칙: 봉인 개념을 더하는 sibling도, 잃는 sibling도 아니다
             continue
         answers = semantic_answers(sibling)
         flipped = [qid for qid in by_id if qid in base_answers and qid in answers and base_answers[qid] != answers[qid]]

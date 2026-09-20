@@ -462,16 +462,19 @@ def test_aggregate_counts_gates_stops_and_switches_per_episode(smoke):
 
 def test_tick_contrast_pairs_flip_the_named_question_and_pass_the_deletion_analogue(smoke):
     """에피소드마다 종류별 ≤ 1의 대조 쌍: 기본 틱과 sibling이 같은 계열·split의 `judgment-v0` 레코드이고, 겨냥 질문의 라벨이
-    실제로 다르며, 초점 사실을 지우면 전문가가 관측·재계획 게이트로 간다(삭제 analogue). E0에는 금지 토글·경계 이동, E1(지시
-    변경)에는 지시 다음 버전도 있다."""
+    실제로 다르며, 대상을 지우면 전문가가 관측·재계획 게이트로 간다(삭제 analogue). 세 종류뿐이다(`holding` 없음, 리뷰 1 I2);
+    퇴화(hold∉A) 답이 나오는 쌍은 없고(I3), `instruction` sibling의 v2 조합은 목록에 있거나 로봇이 다른 물체를 들고 있다(I3)."""
     from robo_jev.data.robot_contrast import KINDS, build_pairs, deletion_outcome, flipped_answer
+    from robo_jev.harness.robot import joint_key_parts
+    from robo_jev.sim.expert import DEGENERATE_REASONS
 
+    assert set(KINDS) == {"forbidden", "zone_boundary", "instruction"}
     expert = smoke["expert"]
     kinds_seen = set()
     for (profile, seed), record in smoke["records"].items():
         pairs, reasons = build_pairs(record, expert=expert)
         assert pairs, reasons
-        assert len(pairs) % 2 == 0 and len(pairs) // 2 <= 4
+        assert len(pairs) % 2 == 0 and len(pairs) // 2 <= 3
         by_id = {row["request"]["request_id"]: row for row in pairs}
         for row in pairs:
             validate_record(row)
@@ -498,7 +501,19 @@ def test_tick_contrast_pairs_flip_the_named_question_and_pass_the_deletion_analo
             assert sorted(c["id"] for c in base_main["criteria"]) == sorted(c["id"] for c in sibling_main["criteria"])
             tick = record["ticks"][sibling["evidence"]["tick_index"]]
             assert sorted(c["id"] for c in base_main["criteria"]) == sorted(entry["id"] for entry in tick["request"]["candidates"]["q_main"])
-    assert {"forbidden", "zone_boundary", "instruction"} <= kinds_seen, kinds_seen
+            main_reasons = sibling["evidence"]["contrast"]["main_reasons"]
+            assert main_reasons["base"] not in DEGENERATE_REASONS and main_reasons["sibling"] not in DEGENERATE_REASONS
+            assert sibling["provenance"]["contrast"]["deletion"]["expert_version"] == expert.version
+            if kind == "instruction":
+                goal = sibling["request"]["state"]["goal"]
+                holding = sibling["request"]["state"]["robot"].get("holding")
+                listed = any(
+                    (parts := joint_key_parts(entry.get("key", ""))) is not None and parts[0] in ("grasp", "place")
+                    and parts[1] == goal["target_ref"] and parts[3] == goal["target_zone"]
+                    for entry in tick["request"]["candidates"]["q_main"]
+                )
+                assert listed or (holding is not None and holding != goal["target_ref"])
+    assert {"forbidden", "zone_boundary"} <= kinds_seen, kinds_seen
 
 
 def test_the_zone_boundary_flip_moves_the_placed_target_one_centimetre_out_and_forgetting_it_gates_to_observe(smoke):
@@ -538,7 +553,7 @@ def test_the_batch_writes_the_contrast_file_into_the_manifest_and_the_qa_recount
     records = list(smoke["records"].values())
     summary = write_contrast(records, out, CONFIG, expert=smoke["expert"])
     assert summary["pairs"] >= 3 and summary["records"] == 2 * summary["pairs"]
-    assert set(summary["by_kind"]) >= {"forbidden", "zone_boundary", "instruction"}
+    assert set(summary["by_kind"]) >= {"forbidden", "zone_boundary"} and "holding" not in summary["by_kind"]
     assert set(summary["deletion_outcomes"]) <= {"observe_gate", "replan_gate"}
     manifest = build_manifest(out, CONFIG, batch_wall_s=1.0)
     entry = manifest["files"][CONTRAST_PATH]
@@ -558,6 +573,17 @@ def test_the_batch_writes_the_contrast_file_into_the_manifest_and_the_qa_recount
     target = next(row for row in poisoned if row.get("request", {}).get("request_id") == sibling["request"]["request_id"])
     target["request"]["state"]["robot"]["gripper_mm"] += 5  # 초점 사실이 아닌 곳이 달라졌다
     assert any(error["path"] == "request.state" for error in validate_dataset(poisoned, holdouts=CONFIG["split"])["errors"])
+    # 리뷰 1 I1: 초점 물체가 아닌 **다른 물체**가 40mm 움직인 sibling도 잡는다 (접두 검사는 놓쳤다) — 두 종류 모두.
+    for kind in ("forbidden", "zone_boundary"):
+        sibling = next(row for row in rows if (row.get("provenance") or {}).get("derivation") == "contrast" and row["provenance"]["kind"] == kind)
+        focus = sibling["request"]["state"]["goal"]["target_ref"]
+        poisoned = copy.deepcopy(rows)
+        target = next(row for row in poisoned if row.get("request", {}).get("request_id") == sibling["request"]["request_id"])
+        other = next(entry for entry in target["request"]["state"]["objects"] if entry["id"] != focus)
+        other["pose_mm"][1] += 40
+        report_poisoned = validate_dataset(poisoned, holdouts=CONFIG["split"])
+        assert report_poisoned["contrast"]["one_field_failures"] >= 1, kind
+        assert any(error["path"] == "request.state" for error in report_poisoned["errors"]), kind
     poisoned = copy.deepcopy(rows)
     target = next(row for row in poisoned if row.get("request", {}).get("request_id") == sibling["request"]["request_id"])
     target["provenance"]["contrast"]["deletion"]["outcome"] = "replan_gate" if sibling["provenance"]["contrast"]["deletion"]["outcome"] == "observe_gate" else "observe_gate"
