@@ -45,7 +45,10 @@ pytest.importorskip("transformers")
 BF16_REL_READOUT = 0.053  # 실측 0.0264의 2배
 BF16_REL_MEDIAN = 0.031  # 실측 0.0152
 BF16_REL_MAX = 0.93  # 실측 0.4659 (공식 구현의 kernel 사이 차이 0.27~0.40)
-FP32_REL_MAX = 0.021  # 실측 0.0101
+#: fp32는 프로세스에 따라 다르다 — 같은 조건의 단독 탐침 5회는 모두 0.0101, 전체 suite 안에서는 0.0243(리뷰 1의 측정도 0.0243):
+#: fla Triton kernel의 autotune이 프로세스마다 tiling을 고르고 fp32 누적 순서가 그에 따라 달라진다(bf16은 반올림이 지배해 값이 같다).
+#: 상수는 관측 최대의 2배.
+FP32_REL_MAX = 0.05  # 실측 0.0101(탐침) / 0.0243(suite)
 CPU_TOL = {"rtol": 1e-4, "atol": 1e-4}
 
 REAL_2B = "Qwen/Qwen3.5-2B"
@@ -346,6 +349,12 @@ def real_2b() -> QwenBackbone:
 
 
 @functools.lru_cache(maxsize=1)
+def real_2b_fp32() -> QwenBackbone:
+    """fp32 2B — 의미 검사(native == stream)와 fp32 잡음 검사가 같이 쓴다 (bf16 잡음이 아닌 것을 보려면 fp32여야 한다)."""
+    return QwenBackbone.load(REAL_2B, dtype=torch.float32)
+
+
+@functools.lru_cache(maxsize=1)
 def real_tokenizer():
     return load_tokenizer(available_tokenizer()[0])
 
@@ -423,37 +432,50 @@ def test_real_2b_branches_are_isolated_and_the_next_tick_continues_from_the_comm
 
 @needs_real_2b
 def test_real_2b_native_and_stream_paths_agree_on_a_single_request():
-    """native(공식 배치 forward, P0 경로)와 stream(prefix로 읽고 결정 표지 분기)이 같은 단일 요청에서 같은 hidden을 낸다."""
-    backbone = real_2b()
+    """native(공식 배치 forward, P0 경로)와 stream(prefix로 읽고 결정 표지 분기)이 같은 단일 요청에서 같은 hidden을 낸다 —
+    **fp32**로 본다: bf16에서는 난수 readout의 확률 차이가 kernel 잡음만으로 0.07~0.11까지 벌어져(S1.3 탐침) 의미 검사가 되지 않는다."""
+    backbone = real_2b_fp32()
     record = next(r for r in read_jsonl(D0) if len(r["request"]["questions"]) >= 2)
     layout = serialize_request(record, real_tokenizer())
     judge = Judge(backbone, rank=16, readout="pointer", seed=1, readout_dtype=torch.float32)
-    native = judge({"layout": "state_first", "states": [layout]})["logits"][0]
+    native = judge({"layout": "state_first", "states": [layout]})["logits"][0]  # P0: 질문 경로마다 독립 forward
     S = int(layout["state_end"])
+    worst = 0.0
+    worst_rel = 0.0
     for branch, qid in enumerate(layout["question_ids"]):
         decision = int(layout["decision_positions"][qid])
         owned = [i for i, q in enumerate(layout["question"]) if q == branch]
         path = layout["tokens"][:S] + layout["tokens"][owned[0] : decision]
+        # 기준 hidden: **이 질문 경로만**(상태 + 자기 경로 + 결정 표지)의 공식 forward — P0 의미. 레이아웃 전체를 한 causal 시퀀스로
+        # 돌리면 뒤 질문 경로가 앞 경로를 보게 되어 첫 질문 말고는 기준이 아니다 (fix round 1에서 그렇게 잘못 대조해 0.87이 나왔다).
+        with torch.no_grad():
+            native_hidden = backbone(torch.tensor([path + [layout["tokens"][decision]]]), torch.tensor([layout["position"][:S] + layout["position"][owned[0] : decision + 1]]))["hidden"][0]
         state = QwenStreamState.initial(backbone).extend_prefix(path)  # 질문 경로 전체를 prefix처럼 읽고
         state.position = int(layout["position"][decision])
         hidden = state.branch_step([layout["tokens"][decision]])[0]  # 결정 표지를 1토큰 분기로
         boundaries = [S + (b - owned[0]) for b in layout["candidate_boundaries"][qid]]
+        rel_decision = float(relative_l2(hidden[None], native_hidden[len(path)][None]).max())
+        rel_boundaries = float(relative_l2(state.prefix_hidden[boundaries], native_hidden[boundaries]).max())
+        worst_rel = max(worst_rel, rel_decision, rel_boundaries)
+        assert rel_decision <= FP32_REL_MAX and rel_boundaries <= FP32_REL_MAX, (qid, rel_decision, rel_boundaries)
         logits = judge.pointer_logits(hidden, state.prefix_hidden[boundaries])
-        probs_native, probs_stream = torch.softmax(native[qid].float(), 0), torch.softmax(logits.float(), 0)
+        probs_native, probs_stream = torch.softmax(native[qid].detach().float(), 0), torch.softmax(logits.detach().float(), 0)
+        worst = max(worst, float((probs_native - probs_stream).abs().max()))
         assert (probs_native - probs_stream).abs().max() <= 0.05, (qid, probs_native, probs_stream)
+    print(f"real 2B fp32 native vs stream: hidden rel L2 max {worst_rel:.4f} (decision + boundary positions), readout prob abs diff max {worst:.4f}")
 
 
 @needs_real_2b
 def test_real_2b_fp32_incremental_is_within_the_official_cache_path_noise():
     """fp32에서는 증분 경로가 공식 구현의 캐시 경로 잡음 안 — bf16 허용 오차가 버그가 아니라 반정밀도 잡음임을 보인다."""
-    backbone = QwenBackbone.load(REAL_2B, dtype=torch.float32)
+    backbone = real_2b_fp32()
     layout = d0_stream_layout(4)
     reference = backbone.forward_layout(layout)
     hidden, _ = incremental(backbone, layout)
     rel = relative_l2(hidden, reference)
     print(f"real 2B fp32 incremental vs reference: rel L2 max {rel.max():.4f} median {rel.median():.5f}")
     assert rel.max() <= FP32_REL_MAX
-    del backbone
+    real_2b_fp32.cache_clear()
     torch.cuda.empty_cache()
 
 

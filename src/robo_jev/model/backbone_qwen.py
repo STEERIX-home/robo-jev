@@ -388,6 +388,8 @@ class QwenBackbone(nn.Module):
         #: 층 단위 activation checkpointing (gradient가 켜진 forward에서만; 틱 몸통의 층마다 입력 `[1, T, d]`만 남기고
         #: backward 때 그 층을 다시 계산한다). 10초 구간(≈45K 토큰)의 full/LoRA 학습은 이것 없이는 GB10의 통합 메모리를 넘긴다.
         self.activation_checkpointing = False
+        #: 진단용: list를 두면 틱 몸통(`_run_body`)과 분기(`_branch_step_eager`)가 층마다의 출력(`[T, d]` / `[n, d]`, detach)을 덧붙인다.
+        self.layer_trace: list[Tensor] | None = None
 
     # -- 만들기 --
 
@@ -867,6 +869,8 @@ class QwenStreamState:
                 step = functools.partial(_attention_layer_step, layer, cos, sin, kv[len(new_kv)].segments(), bb)
                 x, k, v = _maybe_checkpoint(step, x, enabled=checkpointing)
                 new_kv.append((k, v))
+            if bb.layer_trace is not None:
+                bb.layer_trace.append(x[0].detach())
         hidden = text.norm(x)[0]
         if write:
             for store, (k, v) in zip(kv, new_kv):
@@ -963,6 +967,8 @@ class QwenStreamState:
                     a_index += 1
                 x = residual + y
                 x = x + layer.mlp(layer.post_attention_layernorm(x))
+                if bb.layer_trace is not None:
+                    bb.layer_trace.append(x[:, 0].detach())
             return text.norm(x)[:, 0]
 
     def advance_with_branches(self, tokens: Any, decisions: Any) -> tuple[QwenStreamState, Tensor]:
