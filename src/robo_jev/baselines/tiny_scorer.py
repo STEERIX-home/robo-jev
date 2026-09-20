@@ -405,23 +405,30 @@ def train(model: TinyScorer, examples: list[Example], config: dict[str, Any], *,
 # --------------------------------------------------------------------------
 
 
-def _items_for_rule_judge(records: list[dict], examples: list[Example]) -> list[Item]:
-    """규칙 기준군 열용 최소 Item(스트림만): layout은 틱별 `candidate_mapping`만 든다 — 예제와 같은 후보 순서."""
+def rule_judge_predictions_for(records: list[dict], examples: list[Example]) -> list[dict[str, Any]]:
+    """규칙 기준군 열(스트림만) — 예제가 있는 틱에 대해서만, 예제와 같은 후보 순서로. 평가 stride로 솎은 틱 집합이면 그 틱만 평가하고
+    예측의 `tick`은 원래 틱 색인으로 되돌린다(선택적 지표가 레코드의 틱을 찾는다)."""
     by_id: dict[str, list[Example]] = {}
     for example in examples:
         if example.kind == "stream":
             by_id.setdefault(example.record_id, []).append(example)
-    items = []
+    items: list[Item] = []
+    original_index: dict[str, list[int]] = {}
     for index, record in enumerate(records):
         if record.get("schema_version") != SCHEMA_STREAM:
             continue
         ticks = sorted(by_id.get(str(record.get("episode_id")), []), key=lambda example: example.tick)
-        if len(ticks) != len(record["ticks"]):
-            continue  # 학습용 stride 예제로는 만들지 않는다
+        if not ticks:
+            continue
+        subset = {**record, "ticks": [record["ticks"][example.tick] for example in ticks]}
+        original_index[str(record.get("episode_id"))] = [int(example.tick) for example in ticks]
         layout = {"ticks": [{"candidate_mapping": example.candidate_mapping} for example in ticks]}
         items.append(Item(index=index, kind="stream", record_id=str(record.get("episode_id")), split=str(record.get("split")), domain="robot", material="existing",
-                          record=record, layout=layout, tokens=0, question_types=ticks[0].question_types))
-    return items
+                          record=subset, layout=layout, tokens=0, question_types=ticks[0].question_types))
+    predictions = rule_judge_predictions(items)
+    for prediction in predictions:
+        prediction["tick"] = original_index[prediction["record_id"]][int(prediction["tick"])]
+    return predictions
 
 
 def _mark_pattern_solvable(model_table: dict[str, Any], shuffle_table: dict[str, Any] | None, rule: dict[str, Any]) -> dict[str, dict[str, Any]]:
@@ -448,11 +455,13 @@ def _mark_pattern_solvable(model_table: dict[str, Any], shuffle_table: dict[str,
 def evaluate_split(model: TinyScorer, records: list[dict], *, domain: str, config: dict[str, Any], data: dict[str, Any]) -> dict[str, Any]:
     """분할·분야 하나의 표: 소형 scorer, 치환 답 변경률, 문맥 섞기 대조군, 규칙 기준군(로봇 스트림), ECE, 선택적 지표, 표지."""
     max_context, max_candidate = int(data.get("max_context_bytes", 1024)), int(data.get("max_candidate_bytes", 64))
-    build = lambda recs: build_examples(recs, domain=domain, max_context=max_context, max_candidate=max_candidate)  # noqa: E731
+    stride = max(1, int(data.get("eval_robot_tick_stride", 1)))  # 평가 틱 솎기 (틱은 상관된 표본; 1이면 전부)
+    build = lambda recs: build_examples(recs, domain=domain, max_context=max_context, max_candidate=max_candidate, robot_tick_stride=stride)  # noqa: E731
     examples = build(records)
     predictions = predict(model, examples)
     result: dict[str, Any] = {
         "n_records": len(records), "n_states": len(predictions), "kinds": dict(sorted(_count(example.kind for example in examples).items())),
+        "eval_robot_tick_stride": stride,
         "model": aggregate(predictions), "ece": calibration_error(predictions, bins=int(config.get("ece_bins", 10))),
     }
     shuffle_seed = config.get("shuffle_seed", 1)
@@ -470,7 +479,7 @@ def evaluate_split(model: TinyScorer, records: list[dict], *, domain: str, confi
     if streams:
         result["selective"] = selective_metrics(predictions, streams)
         if config.get("rule_judge", True):
-            rule_predictions = rule_judge_predictions(_items_for_rule_judge(records, examples))
+            rule_predictions = rule_judge_predictions_for(records, examples)
             result["rule_judge"] = aggregate(rule_predictions)
             result["rule_judge_selective"] = selective_metrics(rule_predictions, streams)
     result["pattern_solvable"] = _mark_pattern_solvable(result["model"], result.get("context_shuffle"), config.get("pattern_solvable") or {})

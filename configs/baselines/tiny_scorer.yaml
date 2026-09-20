@@ -15,6 +15,7 @@ data:
   train_splits: [train]
   eval_splits: [dev, test, ood_dev]           # ood_test는 봉인 — 여기서도 보지 않는다
   robot_tick_stride: 3                        # 학습에 쓰는 로봇 틱은 3틱에 하나 (틱은 상관된 표본; 평가는 전부). 1 step(16상태) ≈ 1~5 s CPU
+  eval_robot_tick_stride: 2                   # 평가에 쓰는 로봇 틱은 2틱에 하나 (dev·test·ood_dev 85편 ≈ 7.7K틱 × 3 pass; 규칙 기준군도 같은 틱)
   max_context_bytes: 1024                     # 문맥 byte 상한 (앞을 남긴다: goal·robot·exec·commitment·이력 → 물체 → 영역·장면)
   max_candidate_bytes: 64                     # 후보 줄·질문 머리 byte 상한
 
@@ -27,7 +28,7 @@ model:                                        # byte 임베딩 → 문맥 Transf
   dropout: 0.1
 
 train:
-  epochs: 4
+  epochs: 3
   batch_states: 16                            # 상태(틱·단일 요청) 수 — 문맥은 상태마다 한 번 인코딩하고 그 질문·후보가 모두 붙는다
   lr: 0.001
   weight_decay: 0.01
