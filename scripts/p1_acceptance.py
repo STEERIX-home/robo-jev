@@ -128,10 +128,14 @@ def check_frozen(*, steps: int = 1, config_path: Path = DEFAULT_CONFIG) -> dict[
 
 def check_trains(mode: str, *, steps: int = 3, sample: int = 8, config_path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
     """`mode`(lora | t1)로 `steps` step 돌리고 gradient·parameter 이동·비용을 잰다."""
+    import gc
+
     import torch
 
     from robo_jev.train import Trainer
 
+    gc.collect()  # 앞 모드(LoRA)의 모델·optimizer가 아직 allocator에 잡혀 있으면 다음 모드가 울타리를 넘는다
+    torch.cuda.empty_cache()
     torch.cuda.reset_peak_memory_stats()
     torch.cuda.reset_accumulated_memory_stats()
     require_free(60 * 2**30, what=f"acceptance {mode}")
@@ -167,14 +171,15 @@ def check_trains(mode: str, *, steps: int = 3, sample: int = 8, config_path: Pat
         metrics = trainer.history
         seconds = [m["seconds"] for m in metrics]
         tokens = [m["tokens"]["total"] for m in metrics]
-        delta = {
-            name: {
-                "max_abs": float((parameter.detach().float() - before[name]).abs().max()),
-                "l2": float((parameter.detach().float() - before[name]).norm()),
-                "relative_l2": float((parameter.detach().float() - before[name]).norm() / before[name].norm().clamp_min(1e-12)),
-            }
-            for name, parameter in picked
-        }
+        def _delta(name: str, parameter: Any) -> dict[str, Any]:
+            difference = parameter.detach().float() - before[name]
+            reference = float(before[name].norm())
+            # LoRA의 `lora_B`는 0으로 시작하므로 상대 L2의 기준이 0이다 — 그 칸은 None으로 둔다(나눗셈으로 만든 큰 수를 적지 않는다).
+            return {"max_abs": float(difference.abs().max()), "l2": float(difference.norm()),
+                    "relative_l2": (float(difference.norm()) / reference) if reference > 0 else None,
+                    "reference_l2": reference}
+
+        delta = {name: _delta(name, parameter) for name, parameter in picked}
         readout_delta = {
             name: float((parameter.detach() - readout_before[name]).abs().max())
             for name, parameter in model.named_parameters() if not name.startswith("backbone.")
@@ -197,6 +202,8 @@ def check_trains(mode: str, *, steps: int = 3, sample: int = 8, config_path: Pat
             "memory": _memory(),
         }
     out["passed"] = bool(out["backbone_moved"] and out["readout_moved"] and out["gradient"]["tensors_nonzero"] > 0)
+    gc.collect()
+    torch.cuda.empty_cache()
     return out
 
 

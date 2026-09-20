@@ -45,10 +45,14 @@ def test_modes_change_only_the_three_things_that_differ_between_t0_lora_and_t1()
     assert (lora["trainable"], lora["stream_chunk_seconds"], lora["activation_checkpointing"]) == ("lora_and_readout", 5, True)
     assert lora["lora"]["r"] == 16 and lora["lora"]["alpha"] == 32
     assert (t1["trainable"], t1["stream_chunk_seconds"], t1["activation_checkpointing"], t1["lora"]) == ("text_backbone_and_readout", 10, True, None)
-    shared = ("readout_lr", "backbone_lr", "weight_decay", "gradient_clip", "warmup_ratio", "gradient_accumulation",
+    shared = ("readout_lr", "weight_decay", "gradient_clip", "warmup_ratio", "gradient_accumulation",
               "robot_loss_share", "nonrobot_tokens_per_unit", "stream_window_ticks", "seed", "sampler", "dataset_manifests", "model_id")
     for key in shared:
         assert t0[key] == lora[key] == t1[key], key
+    # backbone_lr만 T1에서 다르다 — 5e-5(LoRA)는 2B 전체 학습에서 3 step 만에 발산했고(P1 stage C2: 손실 2.63 → 28.93),
+    # T1은 docs/03 §5의 계획값 1e-5를 쓴다. 설정 파일이 그 이유를 적는다.
+    assert t0["backbone_lr"] == lora["backbone_lr"] == pytest.approx(5e-5) and t1["backbone_lr"] == pytest.approx(1e-5)
+    assert "28.93" in TRAIN_2B.read_text(encoding="utf-8")
 
 
 def test_the_pilot_config_carries_the_measured_values_not_the_planned_ones():

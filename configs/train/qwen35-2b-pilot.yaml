@@ -89,3 +89,10 @@ modes:
     trainable: text_backbone_and_readout
     stream_chunk_seconds: 10
     activation_checkpointing: true
+    # **T1만 계획값 1e-5를 쓴다** (docs/03 §5). 5e-5(LoRA 값)는 2B 전체 학습에서 3 step 만에 손실 2.63 → 28.93으로
+    # 발산했다(P1 stage C2 실측; gradient는 320/320 tensor에 0이 아니게 닿았고 표본 파라미터는 정확히 bf16 격자 한 칸
+    # 2^-13 = 1.22e-4씩 움직였다). LoRA는 16M 파라미터만 움직여 같은 lr로 안정적이다 — 그래서 값이 다르다.
+    # 함께 적어 둘 것: backbone이 BF16 master weight라 |p| ≈ 0.03의 가중치에서 bf16 눈금이 ≈1.2e-4다. lr이 그 절반보다
+    # 작으면 갱신이 반올림으로 사라지고(`dt_bias`처럼 |p|가 큰 tensor는 5e-5에서도 0 이동), 크면 발산한다. 진짜 T1은
+    # fp32 master weight(혼합 정밀도)가 있어야 한다 — 이 학습기에는 없다(P1 보고서 §C2, 다음 브리프).
+    backbone_lr: 0.00001
