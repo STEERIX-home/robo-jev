@@ -211,6 +211,7 @@ class Judge(nn.Module):
                 initial=batch.get("initial"),
                 state=batch.get("state"),
                 start_tick=int(batch.get("start_tick", 0)),
+                fused=bool(batch.get("fused", False)),
             )
         raise ValueError(f"layout: state_first 또는 stream_l1a여야 한다 (받은 값: {layout!r})")
 
@@ -304,6 +305,7 @@ class Judge(nn.Module):
         initial: list[dict] | None,
         state: Any,
         start_tick: int,
+        fused: bool = False,
     ) -> dict[str, Any]:
         if layout.get("layout") != "stream_l1a":
             raise ValueError(f"stream: layout이 stream_l1a가 아니다 ({layout.get('layout')!r})")
@@ -312,6 +314,8 @@ class Judge(nn.Module):
         if self.readout != "pointer" and not isinstance(self.backbone, TinyHybrid):
             raise ValueError("candidate_branch: 참고군 R의 스트림 경로는 fixture에서만 실행한다 (실제 backbone은 pointer readout)")
         if from_scratch:
+            if fused:
+                raise ValueError("from_scratch: 몸통+분기 한 forward(fused)는 증분 재생에서만 쓴다")
             if state is not None or start_tick or initial is not None:
                 raise ValueError("from_scratch: 이어 붙이기(state·start_tick·initial)와 함께 쓸 수 없다")
             if self.readout != "pointer":
@@ -320,7 +324,7 @@ class Judge(nn.Module):
         else:
             replay = replay_layout(
                 layout, backbone=self.backbone, window_ticks=window_ticks, initial=initial, state=state,
-                start_tick=start_tick,
+                start_tick=start_tick, fused=fused,
             )  # fmt: skip
             hidden, tick_states, final = replay["hidden"], replay["tick_states"], replay["final"]
 

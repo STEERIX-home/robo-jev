@@ -988,6 +988,9 @@ class Trainer:
         self.history: list[dict[str, Any]] = []
         self.status = "running"
         self._plans: dict[int, EpisodePlan] = {}
+        #: step마다 ``hook(trainer, metrics)``로 불린다 (:meth:`run`). 학습에는 영향이 없다 — 측정·로그용
+        #: (RSS·GPU peak를 step 1과 step 10에서 재는 것이 docs/06 Task 5 선결 조건 1의 확인이다).
+        self.step_hook: Any = None
         if resume is not None:
             self.load(resume)
 
@@ -1234,7 +1237,9 @@ class Trainer:
         while self.step < max_steps:
             if not self.accumulate():
                 break
-            self.apply()
+            metrics = self.apply()
+            if self.step_hook is not None:
+                self.step_hook(self, metrics)
             if stop is not None and "unit" not in stop and stop["step"] == self.step:
                 self.status = "interrupted"
                 break

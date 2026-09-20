@@ -208,3 +208,105 @@ def test_zero_shot_prompts_use_single_token_codes_and_score_on_the_tiny_qwen(sin
     assert result["prompts"] == 3 + len(posed[0]["candidate_mapping"]) + len(posed[2]["candidate_mapping"])  # 틱 0·2 (stride 2)
     assert {"choice", "boolean", "q_main", "_all"} <= set(result["table"])
     assert 0.0 <= result["table"]["_all"]["accuracy"] <= 1.0 and result["table"]["_all"]["nll"] > 0
+
+
+# --------------------------------------------------------------------------
+# 고정 평가 집합 (configs/eval/pilot.yaml; G0b OQ8)
+# --------------------------------------------------------------------------
+
+
+def _suite_file(tmp_path, **overrides) -> str:
+    import yaml
+
+    config = {
+        "version": "test-suite-v0", "window_ticks": 30, "shuffle_seed": 2, "fused": False,
+        "columns": {"permuted": True, "state_shuffle": True, "instruction_shuffle": True, "rule_judge": True, "selective": True, "calibration": True},
+        "splits": [
+            {"name": "d0/dev", "manifest": str(D0_MANIFEST), "domain": "robot", "split": "dev", "files": ["d0_streams.jsonl"], "max_ticks": 3, "selection": True},
+            {"name": "d0/dev_singles", "manifest": str(D0_MANIFEST), "domain": "non_robot", "split": "dev", "files": ["d0.jsonl"], "limit": 3, "selection": False},
+        ],
+    }
+    config.update(overrides)
+    path = tmp_path / "suite.yaml"
+    path.write_text(yaml.safe_dump(config, allow_unicode=True, sort_keys=False), encoding="utf-8")
+    return str(path)
+
+
+def test_the_eval_suite_config_picks_fixed_records_and_its_identity_moves_with_them(tmp_path):
+    """평가 집합은 설정이다 — 어떤 레코드를 몇 틱까지 읽는지가 파일에 있고, 실제로 읽힌 id·상태 수의 해시가 보고서에 들어간다."""
+    from robo_jev.evaluate import eval_suite_identity, load_eval_suite, load_suite_items
+
+    tokenizer = WhitespaceTokenizer()
+    suite = load_eval_suite(_suite_file(tmp_path))
+    items = load_suite_items(suite, tokenizer=tokenizer)
+    assert set(items) == {"d0/dev", "d0/dev_singles"} and len(items["d0/dev_singles"]) == 3
+    assert all(len(item.record["ticks"]) <= 3 for item in items["d0/dev"])
+    identity = eval_suite_identity(suite, items)
+    assert identity["splits"]["d0/dev_singles"]["selection"] is False and identity["splits"]["d0/dev"]["max_ticks"] == 3
+    assert identity["splits"]["d0/dev"]["records"] == [item.record_id for item in items["d0/dev"]]
+    assert len(identity["sha256"]) == 64
+
+    smaller = load_eval_suite(_suite_file(tmp_path, splits=[
+        {"name": "d0/dev", "manifest": str(D0_MANIFEST), "domain": "robot", "split": "dev", "files": ["d0_streams.jsonl"], "max_ticks": 2},
+        {"name": "d0/dev_singles", "manifest": str(D0_MANIFEST), "domain": "non_robot", "split": "dev", "files": ["d0.jsonl"], "limit": 3, "selection": False},
+    ]))
+    assert eval_suite_identity(smaller, load_suite_items(smaller, tokenizer=tokenizer))["sha256"] != identity["sha256"]
+
+    with pytest.raises(ValueError, match="알 수 없는 키"):
+        load_eval_suite(_suite_file(tmp_path, kind="oops"))
+    with pytest.raises(ValueError, match="이름이 중복"):
+        load_eval_suite(_suite_file(tmp_path, splits=[
+            {"name": "same", "manifest": str(D0_MANIFEST), "domain": "robot", "split": "dev"},
+            {"name": "same", "manifest": str(D0_MANIFEST), "domain": "non_robot", "split": "dev"},
+        ]))
+    chosen = load_eval_suite(_suite_file(tmp_path, splits=[{"name": "d0/dev", "manifest": str(D0_MANIFEST), "domain": "robot", "split": "dev", "files": ["d0_streams.jsonl"], "records": ["없는-에피소드"]}]))
+    with pytest.raises(ValueError, match="설정이 고른 레코드가"):
+        load_suite_items(chosen, tokenizer=tokenizer)
+
+
+def test_evaluate_suite_runs_every_split_with_the_standard_columns_and_marks_what_is_for_selection(tmp_path):
+    from robo_jev.evaluate import evaluate_suite, load_eval_suite
+
+    tokenizer = WhitespaceTokenizer()
+    suite = load_eval_suite(_suite_file(tmp_path))
+    judge = Judge.from_config(seed=5, vocab_size=SMALL_VOCAB)
+    result = evaluate_suite(judge, suite, tokenizer=tokenizer)
+    assert set(result["splits"]) == {"d0/dev", "d0/dev_singles"} and result["tiny_scorer"] is None
+    stream_table = result["splits"]["d0/dev"]
+    assert stream_table["selection"] is True and result["splits"]["d0/dev_singles"]["selection"] is False
+    assert stream_table["context_shuffle_kind"] == "state" and stream_table["instruction_shuffle_kind"] == "instruction"
+    assert "rule_judge" in stream_table and stream_table["ece"]["n"] > 0
+    assert set(stream_table["selective"]) == {"model", "rule_judge"} and 0.0 <= stream_table["selective"]["model"]["coverage"] <= 1.0
+    assert "_predictions" not in stream_table and stream_table["seconds"] >= 0
+    assert "selective" not in result["splits"]["d0/dev_singles"]  # 스트림이 없는 분할
+    assert result["eval_set"]["sha256"] and result["eval_set"]["config"] == suite["path"]
+
+
+def test_contrast_pair_check_separates_sensitivity_from_noise():
+    """한 필드만 바뀐 쌍에서 라벨이 바뀐 쪽과 모델이 바뀐 쪽을 따로 센다 — 민감도와 헛흔들림은 다른 수다."""
+    from robo_jev.evaluate import contrast_pair_check
+
+    def record(request_id, role, sibling, answer, kind):
+        return {"schema_version": "judgment-v0", "request": {"request_id": request_id},
+                "labels": [{"question_id": "q_main", "kind": "valid_set", "candidate_ids": [answer]}],
+                "provenance": {"kind": kind, "contrast": {"role": role, "sibling_id": sibling, "flipped_question": "q_main"}}}
+
+    def prediction(request_id, best):
+        probabilities = torch.tensor([0.8, 0.2]) if best == "a" else torch.tensor([0.2, 0.8])
+        return {"record_id": request_id, "tick": None, "kind": "single", "probabilities": {"q_main": probabilities},
+                "candidates": {"q_main": ["a", "b"]}, "labels": [], "question_types": {"q_main": "choice"}}
+
+    records = [
+        record("p1-base", "base", "p1-sib", "a", "instruction"), record("p1-sib", "sibling", "p1-base", "b", "instruction"),
+        record("p2-base", "base", "p2-sib", "a", "instruction"), record("p2-sib", "sibling", "p2-base", "b", "instruction"),
+        record("p3-base", "base", "p3-sib", "a", "forbidden"), record("p3-sib", "sibling", "p3-base", "a", "forbidden"),
+    ]
+    predictions = [prediction("p1-base", "a"), prediction("p1-sib", "b"),   # 라벨이 바뀌고 모델도 바뀐다
+                   prediction("p2-base", "a"), prediction("p2-sib", "a"),   # 라벨은 바뀌었는데 모델은 그대로
+                   prediction("p3-base", "a"), prediction("p3-sib", "b")]   # 라벨은 같은데 모델이 바뀐다
+    result = contrast_pair_check(predictions, records)
+    assert result["instruction"]["pairs"] == 2 and result["instruction"]["label_changed"] == 2
+    assert result["instruction"]["sensitivity"] == pytest.approx(0.5) and result["instruction"]["false_change"] is None
+    assert result["instruction"]["both_correct"] == pytest.approx(0.5)
+    assert result["forbidden"]["label_changed"] == 0 and result["forbidden"]["false_change"] == pytest.approx(1.0)
+    assert result["_all"]["pairs"] == 3 and result["_all"]["model_changed"] == 2

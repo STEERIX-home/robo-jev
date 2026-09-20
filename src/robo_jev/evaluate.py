@@ -30,8 +30,11 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
+import time
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -44,11 +47,17 @@ __all__ = [
     "aggregate",
     "calibration_error",
     "context_shuffle_records",
+    "contrast_pair_check",
     "evaluate_items",
+    "evaluate_suite",
+    "eval_suite_identity",
     "label_metrics",
+    "load_eval_suite",
+    "load_suite_items",
     "predict_items",
     "rule_judge_predictions",
     "selective_metrics",
+    "tiny_scorer_column",
 ]
 
 #: 게이트 후보의 의미 키 (docs/08 §4) — 선택적 지표에서 abstention으로 읽는다. 하네스를 import하지 않고 여기 둔다(`FIXED_KEYS`와 같다).
@@ -62,9 +71,12 @@ _TRUE, _FALSE = "true", "false"
 # --------------------------------------------------------------------------
 
 
-def predict_items(judge: Any, items: list[Item], *, tokens_per_batch: int = 8192) -> list[dict[str, Any]]:
+def predict_items(judge: Any, items: list[Item], *, tokens_per_batch: int = 8192, fused: bool = False) -> list[dict[str, Any]]:
     """상태(틱)마다 ``{"record_id", "tick", "kind", "probabilities": {qid: Tensor[K]}, "candidates": {qid: [id…]}, "labels": […],
-    "question_types": {qid: type}}``. 단일 요청은 토큰 예산까지 묶은 microbatch로, 스트림은 에피소드마다 재생한다."""
+    "question_types": {qid: type}}``. 단일 요청은 토큰 예산까지 묶은 microbatch로, 스트림은 에피소드마다 재생한다.
+
+    ``fused``는 스트림 재생에서 틱 몸통과 결정 분기를 한 forward로 돌린다(실제 backbone의 서빙 기본 구성; BF16 허용 오차
+    안에서 같은 값, 층마다 가중치를 한 번만 읽는다 — :func:`robo_jev.model.stream.replay_layout`)."""
     out: list[dict[str, Any]] = []
     singles = [item for item in items if item.kind == "single"]
     streams = [item for item in items if item.kind == "stream"]
@@ -89,7 +101,7 @@ def predict_items(judge: Any, items: list[Item], *, tokens_per_batch: int = 8192
                     )
             batch, budget = ([item], item.tokens) if item is not None else ([], 0)
         for item in streams:
-            result = judge({"layout": "stream_l1a", "stream": item.layout})
+            result = judge({"layout": "stream_l1a", "stream": item.layout, "fused": fused})
             for index, (logits, candidates) in enumerate(zip(result["logits"], result["candidates"])):
                 out.append(
                     {
@@ -343,6 +355,80 @@ def selective_metrics(predictions: list[dict[str, Any]], records: list[dict], *,
     }
 
 
+def contrast_pair_check(predictions: list[dict[str, Any]], records: list[dict]) -> dict[str, Any]:
+    """대조 쌍 검사 (docs/08 §10, docs/06 Task 6): 한 필드만 바뀐 base↔sibling 쌍에서 **모델의 답도 바뀌는가**.
+
+    쌍은 레코드의 `provenance.contrast`(`role` base/sibling, `sibling_id`, `flipped_question`)로 맺는다. 종류(`provenance.kind`:
+    로봇의 forbidden / zone_boundary / instruction; 비로봇은 `provenance.domain`)마다 적는다:
+
+    * ``pairs`` — 양쪽의 예측이 다 있는 쌍 수, ``label_changed`` — 뒤집힌 질문의 **라벨**이 실제로 달라진 쌍 수,
+    * ``model_changed`` — 모델의 argmax가 달라진 쌍 수, ``sensitivity`` = 라벨이 달라진 쌍 가운데 모델도 달라진 비율,
+    * ``false_change`` = 라벨이 같은데 모델이 달라진 비율(민감도의 대가), ``both_correct`` = 양쪽 다 맞힌 비율.
+
+    `sensitivity`가 낮으면 모델이 바뀐 필드를 읽지 않는 것이고, `false_change`가 높으면 그냥 흔들리는 것이다.
+    """
+    by_id = {str(record.get("request_id") or (record.get("request") or {}).get("request_id")): record for record in records}
+    prediction_by_id = {prediction["record_id"]: prediction for prediction in predictions if prediction["kind"] == "single"}
+    rows: dict[str, dict[str, int]] = {}
+    total = {"pairs": 0, "label_changed": 0, "model_changed": 0, "model_changed_with_label": 0, "model_changed_without_label": 0, "label_same": 0, "both_correct": 0}
+    for record_id, record in by_id.items():
+        contrast = (record.get("provenance") or {}).get("contrast") or {}
+        if contrast.get("role") != "base":
+            continue
+        sibling_id = str(contrast.get("sibling_id") or "")
+        question = str(contrast.get("flipped_question") or "")
+        base, sibling = prediction_by_id.get(record_id), prediction_by_id.get(sibling_id)
+        if base is None or sibling is None or question not in base["probabilities"] or question not in sibling["probabilities"]:
+            continue
+        kind = str((record.get("provenance") or {}).get("kind") or (record.get("provenance") or {}).get("robojev_domain") or (record.get("provenance") or {}).get("domain") or "unknown")
+        row = rows.setdefault(kind, {key: 0 for key in total})
+        answers = []
+        correct = []
+        for prediction, other in ((base, by_id.get(record_id)), (sibling, by_id.get(sibling_id))):
+            ids = list(prediction["candidates"][question])
+            answers.append(ids[int(prediction["probabilities"][question].argmax())])
+            label = next((item for item in (other or {}).get("labels") or () if item.get("question_id") == question), None)
+            metrics = label_metrics(prediction["probabilities"][question], ids, label) if label else None
+            correct.append(bool(metrics and metrics["correct"]))
+        label_base = next((item for item in record.get("labels") or () if item.get("question_id") == question), None)
+        label_sibling = next((item for item in (by_id.get(sibling_id) or {}).get("labels") or () if item.get("question_id") == question), None)
+        changed_label = _label_answer(label_base) != _label_answer(label_sibling)
+        changed_model = answers[0] != answers[1]
+        for target in (row, total):
+            target["pairs"] += 1
+            target["label_changed"] += int(changed_label)
+            target["label_same"] += int(not changed_label)
+            target["model_changed"] += int(changed_model)
+            target["model_changed_with_label"] += int(changed_label and changed_model)
+            target["model_changed_without_label"] += int((not changed_label) and changed_model)
+            target["both_correct"] += int(correct[0] and correct[1])
+
+    def summarise(row: dict[str, int]) -> dict[str, Any]:
+        return {
+            "pairs": row["pairs"], "label_changed": row["label_changed"], "model_changed": row["model_changed"],
+            "sensitivity": (row["model_changed_with_label"] / row["label_changed"]) if row["label_changed"] else None,
+            "false_change": (row["model_changed_without_label"] / row["label_same"]) if row["label_same"] else None,
+            "both_correct": (row["both_correct"] / row["pairs"]) if row["pairs"] else None,
+        }
+
+    return {"_all": summarise(total), **{kind: summarise(row) for kind, row in sorted(rows.items())}}
+
+
+def _label_answer(label: dict | None) -> Any:
+    """라벨이 가리키는 답 — 비교 가능한 값으로 (허용 집합은 정렬한 tuple, 참/거짓은 그대로)."""
+    if label is None:
+        return None
+    kind = label.get("kind")
+    if kind == "valid_set":
+        return tuple(sorted(str(cid) for cid in label.get("candidate_ids") or ()))
+    if kind == "single":
+        return label.get("answer")
+    if kind == "distribution":
+        probabilities = label.get("probabilities") or {}
+        return max(probabilities, key=lambda key: probabilities[key]) if probabilities else None
+    return (label.get("successes"), label.get("failures"))
+
+
 # --------------------------------------------------------------------------
 # 대조군
 # --------------------------------------------------------------------------
@@ -502,14 +588,19 @@ def evaluate_items(
     instruction_shuffle: bool = False,
     rule_judge: bool = True,
     window_ticks: int = 30,
+    tokens_per_batch: int = 8192,
+    fused: bool = False,
+    return_predictions: bool = False,
 ) -> dict[str, Any]:
     """분할 하나의 표: 모델(``model``), 치환한 순서(``permuted`` + ``answer_change``), 문맥 섞기(``context_shuffle`` +
     ``context_shuffle_kind = "state"``: 비로봇은 상태 전체, 로봇 스트림은 id를 재매핑한 구조화 상태 — 모듈 설명), 로봇 스트림만의
     지시 텍스트 섞기(``instruction_shuffle`` + ``instruction_shuffle_kind``; `instruction_shuffle=True`일 때), 규칙 기준군(``rule_judge``)."""
     from robo_jev.model.serialize import serialize_request
 
-    predictions = predict_items(judge, items)
+    predictions = predict_items(judge, items, tokens_per_batch=tokens_per_batch, fused=fused)
     result: dict[str, Any] = {"n_items": len(items), "n_states": len(predictions), "model": aggregate(predictions)}
+    if return_predictions:
+        result["_predictions"] = predictions  # 호출자가 선택적 지표·ECE에 다시 쓴다 (한 번 더 forward하지 않는다)
 
     def reserialised(subset: list[Item], records: list[dict]) -> list[Item]:
         out: list[Item] = []
@@ -523,18 +614,207 @@ def evaluate_items(
         return out
 
     if shuffle_seed is not None:
-        permuted = predict_items(judge, reserialised(items, [permute_candidates(item.record, int(shuffle_seed)) for item in items]))
+        permuted = predict_items(judge, reserialised(items, [permute_candidates(item.record, int(shuffle_seed)) for item in items]), tokens_per_batch=tokens_per_batch, fused=fused)
         result["permuted"] = aggregate(permuted)
         result["answer_change"] = {"shuffle_seed": int(shuffle_seed), **answer_change_rate(predictions, permuted)}
     if context_shuffle:
         shuffled = context_shuffle_records([item.record for item in items], robot="state")
-        result["context_shuffle"] = aggregate(predict_items(judge, reserialised(items, shuffled)))
+        result["context_shuffle"] = aggregate(predict_items(judge, reserialised(items, shuffled), tokens_per_batch=tokens_per_batch, fused=fused))
         result["context_shuffle_kind"] = "state"  # 비로봇: 상태 전체, 로봇 스트림: id를 재매핑한 구조화 상태 (모듈 설명)
     if instruction_shuffle and any(item.kind == "stream" for item in items):
         streams = [item for item in items if item.kind == "stream"]
         rolled = context_shuffle_records([item.record for item in streams], robot="instruction")
-        result["instruction_shuffle"] = aggregate(predict_items(judge, reserialised(streams, rolled)))
+        result["instruction_shuffle"] = aggregate(predict_items(judge, reserialised(streams, rolled), tokens_per_batch=tokens_per_batch, fused=fused))
         result["instruction_shuffle_kind"] = "instruction"  # 로봇 스트림: 지시·목표 텍스트만 굴림, 구조화 goal·상태·후보 유지
     if rule_judge and any(item.kind == "stream" for item in items):
         result["rule_judge"] = aggregate(rule_judge_predictions(items))
+    return result
+
+
+# --------------------------------------------------------------------------
+# 고정 평가 집합 (docs/06 Task 6 `configs/eval/pilot.yaml`; G0b OQ8)
+# --------------------------------------------------------------------------
+
+
+#: 평가 집합 설정의 최상위 키.
+_SUITE_KEYS = ("version", "window_ticks", "shuffle_seed", "tokens_per_batch", "fused", "columns", "tiny_scorer_report", "splits", "note")
+#: 분할 하나의 키.
+_SUITE_SPLIT_KEYS = ("name", "manifest", "domain", "split", "files", "records", "limit", "max_ticks", "selection", "note")
+#: 열 선택 키 — 모델 열은 언제나 있다.
+_SUITE_COLUMNS = ("permuted", "state_shuffle", "instruction_shuffle", "rule_judge", "selective", "calibration")
+
+
+def load_eval_suite(path: Any) -> dict[str, Any]:
+    """`configs/eval/*.yaml`을 읽고 검사한다 — 모르는 키·분할 이름 중복·빈 목록은 `ValueError`.
+
+    평가 집합은 **설정**이다(누군가 기억해서 붙이는 플래그가 아니다): 어떤 manifest의 어떤 split에서 어떤 레코드를
+    (`records` 고정 목록 또는 `limit`개) 몇 틱까지(`max_ticks`) 읽는지가 여기 적혀 있어야 run들이 같은 입력 위에서
+    비교된다. `selection: false`인 분할(=`test`)은 계산하되 checkpoint 선택에 쓰지 않는다(docs/03:224).
+    """
+    import yaml
+
+    path = Path(path)
+    config = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    unknown = [key for key in config if key not in _SUITE_KEYS]
+    if unknown:
+        raise ValueError(f"{path}: 알 수 없는 키 {unknown} (허용: {list(_SUITE_KEYS)})")
+    columns = dict(config.get("columns") or {})
+    unknown = [key for key in columns if key not in _SUITE_COLUMNS]
+    if unknown:
+        raise ValueError(f"{path}: columns의 알 수 없는 키 {unknown} (허용: {list(_SUITE_COLUMNS)})")
+    splits = config.get("splits")
+    if not isinstance(splits, list) or not splits:
+        raise ValueError(f"{path}: splits는 비어 있지 않은 목록이어야 한다")
+    seen: set[str] = set()
+    for index, entry in enumerate(splits):
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path}: splits[{index}]는 dict여야 한다")
+        unknown = [key for key in entry if key not in _SUITE_SPLIT_KEYS]
+        if unknown:
+            raise ValueError(f"{path}: splits[{index}]의 알 수 없는 키 {unknown} (허용: {list(_SUITE_SPLIT_KEYS)})")
+        for key in ("name", "manifest", "domain", "split"):
+            if not entry.get(key):
+                raise ValueError(f"{path}: splits[{index}].{key}가 필요하다")
+        if entry["name"] in seen:
+            raise ValueError(f"{path}: splits의 이름이 중복됐다: {entry['name']!r}")
+        seen.add(entry["name"])
+    return {
+        "path": str(path), "version": config.get("version"), "window_ticks": int(config.get("window_ticks", 30)),
+        "shuffle_seed": config.get("shuffle_seed", 1), "tokens_per_batch": int(config.get("tokens_per_batch", 8192)),
+        "fused": bool(config.get("fused", False)),
+        "columns": {key: bool(columns.get(key, True)) for key in _SUITE_COLUMNS},
+        "tiny_scorer_report": config.get("tiny_scorer_report"), "splits": [dict(entry) for entry in splits],
+        "note": config.get("note"),
+    }
+
+
+def load_suite_items(suite: dict[str, Any], *, tokenizer: Any, root: Any = None, domain_tag: str = "provenance.robojev_domain") -> dict[str, list[Item]]:
+    """평가 집합의 분할마다 :class:`~robo_jev.sampler.Item` 목록 — 설정이 고른 레코드만, 설정이 정한 틱 수까지."""
+    from robo_jev.sampler import load_items
+
+    root = Path(root) if root is not None else Path.cwd()
+    out: dict[str, list[Item]] = {}
+    for entry in suite["splits"]:
+        manifest = Path(entry["manifest"])
+        if not manifest.is_absolute():
+            manifest = root / manifest
+        items = load_items(
+            manifest, tokenizer=tokenizer, splits=(entry["split"],), window_ticks=suite["window_ticks"],
+            domain=entry["domain"], domain_tag=domain_tag, files=entry.get("files"),
+            stream_max_ticks=entry.get("max_ticks"),
+        )  # fmt: skip
+        wanted = entry.get("records")
+        if wanted:
+            by_id = {item.record_id: item for item in items}
+            missing = [record_id for record_id in wanted if record_id not in by_id]
+            if missing:
+                raise ValueError(f"{entry['name']}: 설정이 고른 레코드가 {entry['split']} 분할에 없다: {missing[:5]}")
+            items = [by_id[record_id] for record_id in wanted]
+        if entry.get("limit") is not None:
+            items = items[: int(entry["limit"])]
+        if not items:
+            raise ValueError(f"{entry['name']}: 레코드가 하나도 없다 (manifest {entry['manifest']}, split {entry['split']})")
+        out[entry["name"]] = items
+    return out
+
+
+def eval_suite_identity(suite: dict[str, Any], items: dict[str, list[Item]]) -> dict[str, Any]:
+    """평가 집합의 정체 — 설정과 **실제로 읽힌 레코드 id·상태 수**의 sha256. run 사이에 같은 입력이었는지는 이 해시로 본다."""
+    import hashlib
+
+    per_split = {}
+    for entry in suite["splits"]:
+        chosen = items[entry["name"]]
+        per_split[entry["name"]] = {
+            "manifest": entry["manifest"], "split": entry["split"], "domain": entry["domain"],
+            "files": entry.get("files"), "max_ticks": entry.get("max_ticks"), "selection": bool(entry.get("selection", True)),
+            "records": [item.record_id for item in chosen],
+            "states": sum(len(item.record["ticks"]) if item.kind == "stream" else 1 for item in chosen),
+        }
+    payload = {"version": suite["version"], "window_ticks": suite["window_ticks"], "shuffle_seed": suite["shuffle_seed"],
+               "columns": suite["columns"], "fused": suite["fused"], "splits": per_split}
+    digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+    return {"config": suite["path"], "sha256": digest, **payload}
+
+
+def tiny_scorer_column(report_path: Any, *, root: Any = None) -> dict[str, Any] | None:
+    """Task 2c 소형 scorer 표(`artifacts/reports/tiny-scorer.json`)에서 분할·질문별 (scorer, 상태 섞기, 패턴 표지)를 뽑는다.
+
+    **같은 틱 부분집합이 아니다**: 소형 scorer는 자기 설정의 분할 전부를 stride로 솎아 쟀다. 여기서는 그 값을 *표지*로만
+    옆에 둔다 — 어느 칸이 패턴으로 풀리는지(그래서 backbone 주장에 쓰지 않는지)를 표에서 바로 보이게 하는 것이 목적이다.
+    """
+    path = Path(report_path)
+    if not path.is_absolute() and root is not None:
+        path = Path(root) / path
+    if not path.is_file():
+        return None
+    report = json.loads(path.read_text(encoding="utf-8"))
+    out: dict[str, Any] = {"report": str(report_path), "version": report.get("version"),
+                           "eval_robot_tick_stride": ((report.get("config") or {}).get("data") or {}).get("eval_robot_tick_stride"),
+                           "note": "소형 scorer의 분할 전체 값 (이 평가 집합과 같은 틱 부분집합이 아니다) — 패턴 표지로만 읽는다",
+                           "tables": {}}
+    for name, table in (report.get("tables") or {}).items():
+        marks = table.get("pattern_solvable") or {}
+        rows = {}
+        for question, row in (table.get("model") or {}).items():
+            mark = marks.get(question) or {}
+            rows[question] = {
+                "scorer_accuracy": row.get("accuracy"),
+                "state_shuffle_accuracy": ((table.get("context_shuffle") or {}).get(question) or {}).get("accuracy"),
+                "rule_judge_accuracy": ((table.get("rule_judge") or {}).get(question) or {}).get("accuracy"),
+                "pattern_solvable": bool(mark.get("pattern_solvable")),
+                "reasons": list(mark.get("reasons") or ()),
+            }
+        out["tables"][name] = rows
+    return out
+
+
+def evaluate_suite(
+    judge: Any,
+    suite: dict[str, Any],
+    *,
+    tokenizer: Any,
+    items: dict[str, list[Item]] | None = None,
+    root: Any = None,
+    log: Any = None,
+) -> dict[str, Any]:
+    """평가 집합 전체의 표 — 분할마다 :func:`evaluate_items` + 선택적 지표 + ECE, 그리고 집합의 정체와 소형 scorer 열.
+
+    돌려주는 것: ``{"eval_set": …, "tiny_scorer": …, "splits": {이름: 표}}``. 각 표는 `evaluate_items`의 것에
+    `seconds`·`selection`(선택에 써도 되는 분할인가)·`selective`·`ece`가 더해진 것이다.
+    """
+    chosen = load_suite_items(suite, tokenizer=tokenizer, root=root) if items is None else items
+    columns = suite["columns"]
+    result: dict[str, Any] = {
+        "eval_set": eval_suite_identity(suite, chosen),
+        "tiny_scorer": tiny_scorer_column(suite["tiny_scorer_report"], root=root) if suite.get("tiny_scorer_report") else None,
+        "splits": {},
+    }
+    for entry in suite["splits"]:
+        name = entry["name"]
+        subset = chosen[name]
+        started = time.perf_counter()
+        table = evaluate_items(
+            judge, subset, tokenizer=tokenizer,
+            shuffle_seed=suite["shuffle_seed"] if columns["permuted"] else None,
+            context_shuffle=columns["state_shuffle"], instruction_shuffle=columns["instruction_shuffle"],
+            rule_judge=columns["rule_judge"], window_ticks=suite["window_ticks"],
+            tokens_per_batch=suite["tokens_per_batch"], fused=suite["fused"], return_predictions=True,
+        )  # fmt: skip
+        predictions = table.pop("_predictions")
+        if columns["calibration"]:
+            table["ece"] = calibration_error(predictions)
+        if any((item.record.get("provenance") or {}).get("contrast") for item in subset):
+            table["contrast_pairs"] = contrast_pair_check(predictions, [item.record for item in subset])
+        if columns["selective"] and any(item.kind == "stream" for item in subset):
+            table["selective"] = {"model": selective_metrics(predictions, [item.record for item in subset])}
+            if columns["rule_judge"]:
+                table["selective"]["rule_judge"] = selective_metrics(rule_judge_predictions(subset), [item.record for item in subset])
+        table["selection"] = bool(entry.get("selection", True))
+        table["seconds"] = round(time.perf_counter() - started, 1)
+        result["splits"][name] = table
+        if log is not None:
+            accuracy = table["model"]["_all"]["accuracy"]
+            control = (table.get("context_shuffle") or {}).get("_all", {}).get("accuracy")
+            print(f"[p1] eval {name}: {table['n_states']} states, acc {accuracy}, state-shuffle {control}, {table['seconds']} s", file=log, flush=True)
     return result

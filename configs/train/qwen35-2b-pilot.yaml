@@ -1,0 +1,91 @@
+# Task P1 파일럿 학습 설정 — Qwen3.5-2B(확정 backbone, G0b), D1 데이터, DGX Spark 한 장 (docs/06 Task 5, docs/03 §5).
+#
+#   uv run python scripts/adapt_readout.py --config configs/train/qwen35-2b-pilot.yaml --mode t0   --steps 200 --out artifacts/reports/p1-2b-t0.json
+#   uv run python scripts/adapt_readout.py --config configs/train/qwen35-2b-pilot.yaml --mode lora --steps 60  --out artifacts/reports/p1-2b-lora.json
+#   uv run python scripts/adapt_readout.py --config configs/train/qwen35-2b-pilot.yaml --mode t1   --steps 60  --out artifacts/reports/p1-2b-t1.json
+#
+# `modes:`는 학습 설정이 아니라 **이 파일 안의 선택지**다 — 실행기가 `--mode`의 블록을 아래 기본값 위에 얹고 `modes` 키는
+# 버린 뒤 `robo_jev.train.resolve_config`에 넘긴다. 4B 형제 설정은 `qwen35-4b-pilot.yaml`(`extends:`로 이 파일을 잇는다).
+#
+# **여기 값은 이 상자에서 잰 것이고 docs/03 §5의 계획값과 다르다.** 계획(§5 "첫 full finetuning 설정")은 8 GPU T1 목표값
+# — backbone_lr 1e-5, readout_lr 1e-4, gradient_accumulation 4, effective batch 32 상태 — 이고, 아래는 G0b가 이 GB10에서
+# 실측한 값이다: readout_lr **3e-4**(1e-3은 2B에서 한 step 만에 손실 2.03 → 8.35로 튀었고, 3e-4·1e-4 두 탐침 모두 발산 없이
+# 내려가 3e-4를 썼다 — G0b §S3.1), backbone_lr **5e-5**(LoRA·T1; LoRA r=16의 짧은 run에서 쓴 값), gradient_accumulation **2**
+# (한 step에 로봇 스트림 단위 1 + 비로봇 묶음 1 — 한 장에서 effective batch는 에피소드 1편 + 비로봇 8,192토큰이다).
+# 계획값으로 되돌리는 것은 8 GPU 학습을 시작할 때의 결정이고, 여기서 조용히 바꾸지 않는다.
+
+run_name: p1-2b
+model_id: Qwen/Qwen3.5-2B
+device: cuda
+dtype: bfloat16                # backbone BF16 (G0b 실측 허용 오차 상수가 이 조건의 것이다)
+readout: decision_pointer
+readout_rank: 64
+readout_dtype: float32         # readout(U·V·b)은 fp32 (docs/03 §5 "BF16 연산·FP32 loss")
+execution_backend: independent_paths
+layout:
+  single: state_first
+  stream: stream_l1a
+
+# 데이터 — 로봇은 **rollout 라벨판**(labels-rollout-v1: 2,000 키프레임 틱의 q_main이 rollout 라벨)이 학습 대상이다.
+# 대조 쌍 990개(`contrast/records.jsonl`)는 이 파일럿에서 **학습에 넣지 않고**(G0b와 같은 모양) 평가 표로만 쓴다
+# (`configs/eval/pilot.yaml`의 robot_contrast/*). 열린 선택지: "대조 단일도 학습에 넣는다" — 넣으면 지시 대조 쌍이
+# 학습 분포에 들어가므로 그 표의 해석이 바뀐다(대조 쌍은 평가용이라는 전제가 깨진다). 다음 과제의 결정.
+dataset_manifests:
+  - path: artifacts/datasets/d1-robot/d1-rollout-labels/manifest.json
+    domain: robot
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/d1/single/manifest.json
+    domain: non_robot
+splits: [train]
+tokenizer: auto                # `artifacts/tokenizers`에 받아 둔 것 (Qwen3.5 계열은 Qwen3.8-27B와 같은 파일 — 해시 일치; 계약 digest가 이 파일 해시를 포함한다)
+
+# 스트림 truncated BPTT·윈도우 (docs/03 §5, docs/08 §8)
+stream_chunk_seconds: 10       # T0 기본; LoRA는 modes에서 5초 (G0b 구간 메모리: 2B full 10초 47.3 GiB, LoRA 5초 26.9 GiB)
+stream_window_ticks: 30
+
+# optimizer·일정
+optimizer: adamw
+trainable: readout_only        # modes가 덮어쓴다
+backbone_lr: 0.00005           # 5e-5 — LoRA·T1에서만 쓰인다 (readout_only는 backbone group이 없다)
+readout_lr: 0.0003             # 3e-4
+weight_decay: 0.01
+gradient_clip: 1.0
+warmup_ratio: 0.05
+gradient_accumulation: 2
+microbatch_states_per_rank: 1
+robot_loss_share: 0.6          # docs/04 §2의 0.6/0.4 혼합
+nonrobot_tokens_per_unit: 8192
+max_total_tokens: 8192
+max_state_tokens: 2048
+activation_checkpointing: false  # modes가 덮어쓴다 (LoRA·T1은 true)
+world_size: 1
+seed: 17
+torch_threads: 8
+max_steps: 200                 # `--steps`가 덮어쓴다
+artifacts_dir: artifacts/runs
+
+sampler:
+  domain_tag: provenance.robojev_domain   # pilot 레코드의 `provenance.domain`은 분야 이름(spatial·dom·…)이라 축 태그로 못 쓴다
+  material_tag: provenance.material
+  permute_candidates_seed: 17             # 후보 순서 치환 증강 (docs/03 §3; 평가의 답 변경률과 짝)
+  steady_min_held_ticks: 3
+  tick_weights:                           # 정상 유지 틱 하향·이벤트/목표 변경 틱 상향 (docs/04 §2)
+    steady: 0.25
+    event: 2.0
+    goal_change: 2.0
+    other: 1.0
+
+modes:
+  t0:                                     # readout(U·V·b)만 — backbone 고정, 정적 윈도우 KV
+    trainable: readout_only
+    stream_chunk_seconds: 10
+    activation_checkpointing: false
+  lora:                                   # 진단 조건 (docs/03 §5: T1을 조용히 대체하지 않는다)
+    trainable: lora_and_readout
+    stream_chunk_seconds: 5
+    activation_checkpointing: true
+    lora: {r: 16, alpha: 32, dropout: 0.0}
+  t1:                                     # text backbone 전체 + readout — 정직한 기준
+    trainable: text_backbone_and_readout
+    stream_chunk_seconds: 10
+    activation_checkpointing: true

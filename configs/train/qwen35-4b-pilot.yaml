@@ -1,0 +1,26 @@
+# Task P1 — Qwen3.5-4B 형제 설정 (like-for-like 비교의 다른 한 행; 10 Hz 게이트는 못 넘고 5 Hz 대비다 — G0b).
+# `extends:`가 가리키는 파일의 값을 먼저 읽고 여기 적은 것만 덮어쓴다 (실행기가 처리한다; `robo_jev.train`에는 이 키가 없다).
+#
+#   uv run python scripts/adapt_readout.py --config configs/train/qwen35-4b-pilot.yaml --mode t0 --steps 200 --out artifacts/reports/p1-4b-t0.json
+#
+# 차이는 둘뿐이다: 모델 id와, **LoRA·T1 구간을 5초로** 내린 것(G0b 구간 메모리: 4B full 10초는 73 GiB 울타리를
+# 넘어 OOM, 5초 58.2 GiB). step·seed·데이터·평가 집합은 2B와 같아야 한다 — 그것이 이 비교의 전부다.
+extends: qwen35-2b-pilot.yaml
+
+run_name: p1-4b
+model_id: Qwen/Qwen3.5-4B
+
+modes:
+  t0:
+    trainable: readout_only
+    stream_chunk_seconds: 10
+    activation_checkpointing: false
+  lora:
+    trainable: lora_and_readout
+    stream_chunk_seconds: 5
+    activation_checkpointing: true
+    lora: {r: 16, alpha: 32, dropout: 0.0}
+  t1:                                     # 이 상자에서는 돌리지 않는다 (4B full 5초 58.2 GiB + optimizer 상태 — 예산 밖)
+    trainable: text_backbone_and_readout
+    stream_chunk_seconds: 5
+    activation_checkpointing: true

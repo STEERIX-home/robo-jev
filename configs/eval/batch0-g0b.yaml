@@ -1,0 +1,56 @@
+# G0b(2단계 backbone 선정)가 쓴 평가 분할 — `--dataset batch0`와 짝. **재현용**이고 이 과제의 판정에는 쓰지 않는다.
+# 로봇 dev 5편 / ood_dev 1편은 작다(G0b가 그렇게 적었다): 그 수는 smoke 신호지 측정이 아니다.
+#
+#   uv run python scripts/adapt_readout.py --dataset batch0 --eval-config configs/eval/batch0-g0b.yaml \
+#       --config configs/train/qwen35-2b-pilot.yaml --mode t0 --steps 120 --out artifacts/reports/p1-batch0-2b-t0.json
+#
+# **G0b의 수와 한 열이 다르다**: 그때 `context_shuffle`은 로봇 스트림에서 *지시 텍스트* 대조군이었고, 지금은 id를
+# 재매핑한 **상태 섞기**가 표준 열이며 텍스트 대조군은 `instruction_shuffle`이다 (D1 리뷰 1 I1 / 리뷰 2 N4).
+# G0b의 `adapt-*.json`·`zero-shot-*.json`에는 `context_shuffle_kind`가 없어 그 열이 텍스트였다는 것이 파일에 적혀
+# 있지 않다 — `scripts/select_backbone.py`가 그 사실을 이름으로 붙인다.
+
+version: eval-batch0-g0b-v0.1
+window_ticks: 30
+shuffle_seed: 1
+tokens_per_batch: 8192
+fused: true
+
+columns:
+  permuted: true
+  state_shuffle: true
+  instruction_shuffle: true
+  rule_judge: true
+  selective: true
+  calibration: true
+
+tiny_scorer_report: artifacts/reports/tiny-scorer.json
+
+splits:
+  - name: batch0/dev
+    manifest: artifacts/datasets/d1-robot/batch-0/manifest.json
+    domain: robot
+    split: dev
+    files: ["episodes/*/streams.jsonl"]
+    selection: true
+    note: "5편 345틱 (G0b와 같다)"
+  - name: batch0/ood_dev
+    manifest: artifacts/datasets/d1-robot/batch-0/manifest.json
+    domain: robot
+    split: ood_dev
+    files: ["episodes/*/streams.jsonl"]
+    selection: true
+    note: "1편 94틱 — 한 편이다"
+  - name: pilot/dev
+    manifest: artifacts/datasets/pilot/manifest.json
+    domain: non_robot
+    split: dev
+    selection: true
+  - name: pilot/ood_dev
+    manifest: artifacts/datasets/pilot/manifest.json
+    domain: non_robot
+    split: ood_dev
+    selection: true
+
+note: >
+  G0b는 D0 dev(9건)도 쟀다 — 여기서는 뺐다(레코드 종류가 섞여 있어 분야 태그가 하나가 아니고, 우연 수준 통과를
+  기준으로 쓰지 않는다는 docs/06 Task 2b의 규칙 때문에 해석에 쓰이지 않는다).
