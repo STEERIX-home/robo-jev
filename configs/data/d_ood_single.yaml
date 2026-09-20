@@ -1,0 +1,48 @@
+# D-OOD 비로봇 5,000상태 — D1에 없는 계열 (docs/04 §6 D-OOD 행; Task D1 stage D의 stub, 생성은 아직 하지 않았다).
+#
+#   uv run python -m robo_jev.data.generate --config configs/data/d_ood_single.yaml --count 10500 --seed 9001 --output artifacts/datasets/d-ood/single
+#   uv run python -m robo_jev.data.validate --dataset artifacts/datasets/d-ood/single --report artifacts/reports/d-ood-single-qa.json
+#
+# `--count`는 레코드 수(기본 + sibling + 번역·재배열본)라 5,000 **기본 상태**는 ≈ 10,500 (pilot 951/2,000 = 47.6 %; docs/04 §5 M8).
+# 무엇이 "새 계열"인가. 비로봇 계열은 seed가 정하는 장면이다: D1과 다른 seed(9001)의 장면은 새 장면이고, `origin_prefix: dood`가
+# group을 `dood/<분야>/<장면>/<번호>`, 요청 id를 `dood-<분야>-<번호>-k`로 만들어 D1의 이름과 겹치지 않게 한다(계보 분리).
+# 새 **의미** 계열(새 개념·새 문구 표)은 어휘 추가가 필요하다 — `robo_jev.data.domains`의 CONCEPT_VOCABULARY·phrasing 표에 분야마다
+# 개념 하나·문구 표 하나를 더하는 일이며 이 stub의 범위 밖이다(그 전까지 D-OOD 비로봇은 "새 장면·같은 어휘"다).
+# 봉인/개발 분리: `holdout_prefixes: ["dood/"]`로 전부 OOD, group 해시로 ood_dev/ood_test 반분.
+version: d-ood-single-v0.1
+
+domains:
+  spatial: 25
+  dom: 25
+  workflow: 25
+  rules: 25
+question_types:
+  choice: 60
+  boolean: 25
+  ordinal: 15
+questions_per_state:
+  1: 10
+  4: 20
+  8: 50
+  16: 20
+languages:
+  ko: 70
+  en: 30
+derivations:
+  paraphrase: 20
+  reorder: 10
+  contrast: 100
+sealed_phrasing_share: 10
+origin_prefix: dood
+
+split:
+  weights:
+    train: 70
+    dev: 10
+    calibration: 10
+    test: 10
+  holdout_groups: []
+  holdout_prefixes: ["dood/"]
+  holdout_domains: []
+  holdout_templates: []
+  holdout_concepts: []

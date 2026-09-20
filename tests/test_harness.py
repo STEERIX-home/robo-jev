@@ -381,6 +381,15 @@ def test_a_full_zone_marks_the_candidate_blocked_so_the_label_rules_answer_hold_
     out = hrn.compose(request, {question: answers[question] for question in QUESTION_SET_V0}, commitment, scene["sim_time_ms"])
     assert out["adopted"]["path_kind"] == "hold" and out["command"]["gripper"] == "closed"
     assert not any(record["kind"] == "gripper_downgraded" for record in out["records"])
+    # h0.7 (리뷰 2 N4): 경로 답이 hold여도 `conflict{zone_full}`이 적힌다 — 빈 자리 없음의 유일한 기록이 후보 줄의 blocker가 아니다.
+    assert [record for record in out["records"] if record["kind"] == "conflict" and record["reason"] == "zone_full"] == [
+        {"kind": "conflict", "reason": "zone_full", "target_ref": "o0", "destination": "zoneL"}
+    ]
+    # retreat 답은 retreat로 실행하되 기록은 같다.
+    retreat = {**{question: answers[question] for question in QUESTION_SET_V0}, "q_path": {"pr": 1.0}}
+    out = hrn.compose(request, retreat, commitment, scene["sim_time_ms"])
+    assert out["adopted"]["path_kind"] == "retreat" and out["command"]["gripper"] == "closed"
+    assert sum(1 for record in out["records"] if record["kind"] == "conflict" and record["reason"] == "zone_full") == 1
 
 
 def test_a_stalled_place_releases_the_commitment_and_excludes_the_point():
@@ -420,6 +429,44 @@ def test_a_stalled_place_releases_the_commitment_and_excludes_the_point():
     hrn.reset()
     fresh = hrn.build_request(scene, None, None)["harness"]["candidates"][candidate_id(PLACE)]
     assert fresh["place_mm"] == first_point
+
+
+def test_contact_creep_cannot_defer_the_place_stall_guard_past_the_absolute_cap():
+    """D1-prep 리뷰 2 N2: 접촉 중 OSC가 말단을 틱마다 0.1~0.4mm씩 가라앉히면(seed 13 궤적: −8 → −17mm/24틱) 진행 기준
+    (`place_progress_mm` 2)의 장부가 몇 틱마다 새로 세어 `m_place`에 닿지 않는다 — 0.13mm/틱 이상이면 영원히. h0.7은 진행과
+    무관한 절대 상한 `m_place_total`(3 × `m_place`)을 둔다: 연속 readiness 대기 틱이 그 수에 이르면 `place_stalled`다."""
+    m_place, cap = COMPOSE["m_place"], COMPOSE["m_place_total"]
+    assert cap == 3 * m_place
+    creep_per_tick = 0.4
+
+    def run(config: dict) -> tuple[list[dict], int]:
+        hrn = RobotHarness(config)
+        scene = carrying_scene(ee=(30, 240, 20))
+        scene["exec"] = {"seq": 3, "executor": "MOVE_EE", "action_ref": candidate_id(PLACE), "phase": "place", "gripper": "closed", "gripper_wait": "readiness"}
+        commitment = committed(hrn, PLACE, scene)
+        commitment["phase"] = "place"
+        answer = answers(probabilities(**{PLACE.replace(":", "__"): 1.0}), q_gripper={"open": 1.0})
+        stalled = []
+        for index in range(cap + 5):
+            scene["robot"]["ee_pos_mm"] = [30, 240, 20 - creep_per_tick * index]
+            _, out = step(hrn, scene, answer, commitment)
+            stalled += [record for record in out["records"] if record["kind"] == "place_stalled"]
+            if stalled:
+                return stalled, index + 1
+            commitment = out["commitment"]
+            assert commitment is not None and commitment["action_ref"] == candidate_id(PLACE)
+            assert commitment["place_wait_ticks"] < m_place  # 진행 장부는 creep에 계속 새로 센다
+        return stalled, cap + 5
+
+    # 상한 없이는(옛 h0.6 규칙) creep이 감시를 영원히 미룬다.
+    without_cap = copy.deepcopy(CONFIG)
+    del without_cap["compose"]["m_place_total"]
+    stalled, ticks = run(without_cap)
+    assert stalled == [] and ticks == cap + 5
+    # 상한이 있으면 creep과 무관하게 `m_place_total`틱째에 푼다. 기록은 두 장부를 다 말한다.
+    stalled, ticks = run(copy.deepcopy(CONFIG))
+    assert ticks == cap and len(stalled) == 1
+    assert stalled[0]["total_ticks"] == cap and stalled[0]["ticks"] < m_place and stalled[0]["cap"] == "total"
 
 
 def test_a_place_command_carries_the_place_point_as_its_own_field():
@@ -2173,7 +2220,7 @@ def test_versions_carry_a_digest_of_every_config_that_shapes_the_record(tmp_path
     versions = episode_module.default_versions()
     assert len(versions["config_digest"]) == 64
     assert versions["config_digest"] == episode_module.running_config_digest()
-    assert versions["harness"] == HARNESS_VERSION == "h0.6" and versions["controller"] == "c0.6"
+    assert versions["harness"] == HARNESS_VERSION == "h0.7" and versions["controller"] == "c0.6"
 
     hrn = harness()
     record = new_episode("ep-0005", "scene-family-031", instructions=[INSTRUCTION])
@@ -2410,6 +2457,71 @@ def test_the_configured_push_contact_offsets_match_the_simulators_closed_gripper
     box_top, box_z = -112 + 48, -112 + 25  # 겹침 1mm ≤ 허용 → 손가락 (실측: 이 물체들은 손가락 밀기가 71 % 성공)
     assert push_contact_offset_mm(CANDIDATES, "+y", [56, 56, 48], box_top, box_z) == contact["fingers"]["y"]
     assert push_contact_offset_mm({"push_contact_mm": 30}, "+y", [1, 1, 1], 0, 0) == 30
+
+
+def test_the_push_reach_pins_the_measured_closed_gripper_and_the_segment_is_extended_by_the_slack():
+    """h0.7 (D1-prep 리뷰 2 N7): 접촉 거리(`push_contact_mm`)와 그 축으로 실제로 뻗은 길이(`push_reach_mm`, 실측)의 차이가
+    stand-off 여유(slack)다 — 명령한 구간은 접촉 거리에서 시작하므로 손가락·손몸통이 물체에 닿는 것은 slack만큼 간 뒤이고, 그만큼
+    물체가 덜 간다(±y 손가락 밀기 80 − 18 = 62mm; 성공 기준 40mm에 빠듯했다). 명령 구간은 `push_segment_mm + slack`으로 늘리되
+    성공 기준(사건의 `segment_fraction × push_segment_mm` = 40mm)과 완료 판정(물체 변위 ≥ `push_segment_mm`)은 그대로 절대값이다."""
+    from robo_jev.harness.robot import push_contact_offset_mm, push_standoff_slack_mm
+    from robo_jev.sim.environment import Environment
+
+    env = Environment(config_path=str(SIM_CONFIG), profile="E0")
+    try:
+        env.reset(seed=43)
+        command = {"seq": 1, "observed_at": 0, "issued_at": 0, "action_ref": "c1", "phase": "approach", "path": {"kind": "hold"},
+                   "speed_level": 0, "force_level": "avoid", "gripper": "closed", "stop": False}
+        for index in range(40):
+            env.step(command if index == 0 else None)
+        extent = env.gripper_extent_mm()
+    finally:
+        env.close()
+    reach = CANDIDATES["push_reach_mm"]
+    fingers, hand = extent["fingers"], extent["hand"]
+    assert abs(reach["fingers"]["+x"] - fingers["x"][1]) <= 1.0
+    assert abs(reach["fingers"]["-x"] - abs(fingers["x"][0])) <= 1.0
+    assert abs(reach["fingers"]["y"] - max(abs(fingers["y"][0]), fingers["y"][1])) <= 1.0
+    assert abs(reach["hand"]["+x"] - hand["x"][1]) <= 1.0
+    assert abs(reach["hand"]["-x"] - abs(hand["x"][0])) <= 1.0
+    assert abs(reach["hand"]["y"] - max(abs(hand["y"][0]), hand["y"][1])) <= 1.0
+
+    contact = CANDIDATES["push_contact_mm"]
+    low_top, low_z = -112 + 32, -112 + 25  # 손가락 밀기
+    tall_top, push_z = -112 + 80, -112 + 40  # 손몸통 밀기
+    for direction, axis in (("+x", "+x"), ("-x", "-x"), ("+y", "y"), ("-y", "y")):
+        assert push_standoff_slack_mm(CANDIDATES, direction, [56, 56, 32], low_top, low_z) == contact["fingers"][axis] - reach["fingers"][axis]
+        assert push_standoff_slack_mm(CANDIDATES, direction, [40, 40, 80], tall_top, push_z) == contact["hand"][axis] - reach["hand"][axis]
+    assert push_standoff_slack_mm(CANDIDATES, "+y", [56, 56, 32], low_top, low_z) == 18
+    assert push_standoff_slack_mm(CANDIDATES, "+y", [40, 40, 80], tall_top, push_z) == 5
+    assert push_standoff_slack_mm({"push_contact_mm": 30}, "+y", [1, 1, 1], 0, 0) == 0  # 옛 스칼라 설정: slack 없음
+    no_reach = {key: value for key, value in CANDIDATES.items() if key != "push_reach_mm"}
+    assert push_standoff_slack_mm(no_reach, "+y", [56, 56, 32], low_top, low_z) == 0  # h0.6 설정(도달 표 없음): slack 없음
+    assert push_contact_offset_mm(no_reach, "+y", [56, 56, 32], low_top, low_z) == contact["fingers"]["y"]
+
+    # 하네스 기하: 낮은 상자를 +y로(zoneL 쪽) 미는 후보의 명령 구간은 접촉점에서 `push_segment_mm + slack`이다.
+    low = obj("o0", (0, 0, -112 + 16), obb_mm=[56, 56, 32])
+    scene = observation(objects=[low, obj("o7", (300, -250, -80), colour="green")])
+    hrn = harness()
+    request = hrn.build_request(scene, None, None)
+    geometry = request["harness"]["candidates"][candidate_id("push:o0:+y:none")]
+    segment = CANDIDATES["push_segment_mm"]
+    assert geometry["action_mm"][1] - geometry["approach_mm"][1] == pytest.approx(segment + 18)
+    assert geometry["approach_mm"][1] == pytest.approx(-(math.hypot(28, 28) + contact["fingers"]["y"]), abs=1.0)  # 기하 블록은 정수
+    assert geometry["target_mm"] == geometry["approach_mm"] or geometry["phase"] == "approach"
+    # 도달 표가 없는 설정(h0.6)에서는 구간이 `push_segment_mm` 그대로다.
+    old = copy.deepcopy(CONFIG)
+    del old["candidates"]["push_reach_mm"]
+    geometry_old = RobotHarness(old).build_request(scene, None, None)["harness"]["candidates"][candidate_id("push:o0:+y:none")]
+    assert geometry_old["action_mm"][1] - geometry_old["approach_mm"][1] == pytest.approx(segment)
+    assert geometry_old["approach_mm"] == geometry["approach_mm"]
+    # 완료 판정은 물체 변위 ≥ `push_segment_mm`(절대값) 그대로다.
+    commitment = committed(hrn, "push:o0:+y:none", scene)
+    moved = copy.deepcopy(scene)
+    moved["objects"][0]["pos_mm"][1] += segment - 1
+    assert not hrn._completed(commitment, harness().build_request(moved, None, commitment)["request"]["state"])  # 새 어댑터: 기하 주기 없이 지금 자세
+    moved["objects"][0]["pos_mm"][1] += 1
+    assert hrn._completed(commitment, harness().build_request(moved, None, commitment)["request"]["state"])
 
 
 def test_the_harness_drives_a_real_e0_episode_and_records_it():

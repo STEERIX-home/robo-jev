@@ -11,7 +11,7 @@ from robo_jev.evaluate import aggregate, answer_change_rate, context_shuffle_rec
 from robo_jev.model.judge import Judge
 from robo_jev.model.serialize import serialize_request
 from robo_jev.model.tokenizer import WhitespaceTokenizer, available_tokenizer, load_tokenizer
-from robo_jev.sampler import load_items, permute_candidates
+from robo_jev.sampler import Item, load_items, permute_candidates
 
 
 @pytest.fixture(scope="module")
@@ -62,7 +62,7 @@ def test_label_metrics_follow_the_documented_definitions():
 def test_evaluate_items_reports_tables_controls_and_position_bias_on_the_fixture(items):
     loaded, tokenizer = items
     judge = Judge.from_config(seed=5, vocab_size=SMALL_VOCAB)
-    result = evaluate_items(judge, loaded, tokenizer=tokenizer, shuffle_seed=2)
+    result = evaluate_items(judge, loaded, tokenizer=tokenizer, shuffle_seed=2, instruction_shuffle=True)
     assert result["n_items"] == len(loaded) and result["n_states"] > len(loaded)
     model = result["model"]
     assert {"q_main", "q_done", "choice", "boolean", "_all"} <= set(model)
@@ -72,13 +72,16 @@ def test_evaluate_items_reports_tables_controls_and_position_bias_on_the_fixture
     assert result["answer_change"]["shuffle_seed"] == 2 and result["answer_change"]["compared"] > 0 and 0.0 <= result["answer_change"]["rate"] <= 1.0
     assert "q_main" in result["answer_change"]["by_question"] and "permuted" in result
     assert "context_shuffle" in result and 0.0 <= result["context_shuffle"]["_all"]["accuracy"] <= 1.0
-    assert result["context_shuffle_kind"] == "instruction+state"  # 로봇 스트림 = 지시 섞기(상태 유지), 비로봇 = 상태 섞기 (리뷰 1 I3)
+    assert result["context_shuffle_kind"] == "state"  # 표준 열 = 상태 섞기: 비로봇은 상태 전체, 로봇 스트림은 id를 재매핑한 구조화 상태 (D1 리뷰 1 I1)
+    assert result["instruction_shuffle_kind"] == "instruction" and "q_main" in result["instruction_shuffle"] and "choice" not in result["instruction_shuffle"]
+    assert result["instruction_shuffle"]["q_main"]["n"] == model["q_main"]["n"]  # 지시 섞기 열은 로봇 스트림만, 같은 틱 수
+    assert "instruction_shuffle" not in evaluate_items(judge, loaded, tokenizer=tokenizer, shuffle_seed=None, rule_judge=False)
     rule = result["rule_judge"]
     assert set(rule) - {"_all"} <= set(model) and rule["q_main"]["n"] == model["q_main"]["n"] and 0.0 <= rule["q_main"]["accuracy"] <= 1.0
     assert "choice" not in rule  # 규칙 기준군은 로봇 틱만
 
 
-def test_context_shuffle_rolls_state_for_singles_and_instruction_text_for_streams(singles, streams):
+def test_context_shuffle_rolls_state_for_singles_and_text_or_remapped_state_for_streams(singles, streams):
     rolled = context_shuffle_records(singles[:3])
     assert rolled[0]["request"]["state"] == singles[1]["request"]["state"] and rolled[2]["request"]["state"] == singles[0]["request"]["state"]
     assert rolled[0]["labels"] == singles[0]["labels"] and rolled[0]["request"]["questions"] == singles[0]["request"]["questions"]
@@ -87,12 +90,80 @@ def test_context_shuffle_rolls_state_for_singles_and_instruction_text_for_stream
     episodes = [copy.deepcopy(r) for r in streams[:2]]
     for episode in episodes:
         episode["ticks"] = episode["ticks"][:2]
-    swapped = context_shuffle_records(episodes)
+    # 지시 섞기: 텍스트만 굴리고 구조화 goal·물리 상태·후보는 그대로.
+    swapped = context_shuffle_records(episodes, robot="instruction")
     assert swapped[0]["prefix"]["instructions"][0]["text"] == episodes[1]["prefix"]["instructions"][0]["text"]
     assert swapped[0]["ticks"][0]["request"]["candidates"] == episodes[0]["ticks"][0]["request"]["candidates"]
+    own, rolled_state = episodes[0]["ticks"][0]["request"]["state"], swapped[0]["ticks"][0]["request"]["state"]
+    assert rolled_state["objects"] == own["objects"] and {k: v for k, v in rolled_state["goal"].items() if k != "text"} == {k: v for k, v in own["goal"].items() if k != "text"}
     for record in swapped:
         validate_record(record)
-    assert context_shuffle_records(singles[:1])[0] == singles[0]
+    assert context_shuffle_records(singles[:1])[0] == singles[0] and context_shuffle_records(streams[:1])[0] == streams[0]
+    with pytest.raises(ValueError, match="robot"):
+        context_shuffle_records(episodes, robot="objects")
+
+
+def test_the_robot_state_shuffle_remaps_donor_ids_onto_the_ticks_ids_and_keeps_the_ticks_own_execution(streams):
+    """D1 리뷰 1 I1: 기증 에피소드의 goal·물체·영역·장면·파생 값이 이 틱의 id 공간으로 재매핑되어 들어오고(D0 fixture는 에피소드마다 물체 id가
+    다르다: o7·o3·o4 / o7·o3·o5 / o4·o3·o7), 후보·commitment·실행 이력·robot·exec·t는 이 틱의 것이다."""
+    rolled = context_shuffle_records(streams, robot="state")
+    assert len(rolled) == len(streams) >= 3
+    changed_objects = 0
+    for position, (original, new) in enumerate(zip(streams, rolled)):
+        donor = streams[(position + 1) % len(streams)]
+        assert new["prefix"]["instructions"][0]["text"] == donor["prefix"]["instructions"][0]["text"]
+        validate_record(new)
+        for index, (tick, shuffled) in enumerate(zip(original["ticks"], new["ticks"])):
+            own, state = tick["request"]["state"], shuffled["request"]["state"]
+            donor_state = donor["ticks"][min(index, len(donor["ticks"]) - 1)]["request"]["state"]
+            own_ids, donor_ids = [o["id"] for o in own["objects"]], [o["id"] for o in donor_state["objects"]]
+            # id 공간은 이 틱의 것, 내용(설명·자세)은 기증 틱의 것 (자리 순서 재매핑).
+            assert [o["id"] for o in state["objects"]] == own_ids
+            assert [o["desc"] for o in state["objects"]][: len(donor_ids)] == [o["desc"] for o in donor_state["objects"]][: len(own_ids)]
+            remap = dict(zip(donor_ids, own_ids))
+            assert state["goal"]["text"] == donor_state["goal"]["text"]
+            assert state["goal"].get("forbidden_contact") == [remap.get(i, i) for i in donor_state["goal"].get("forbidden_contact", [])]
+            assert set(state["goal"].get("forbidden_contact", [])) <= set(own_ids)
+            assert [z["id"] for z in state["zones"]] == [z["id"] for z in own["zones"]]
+            assert state["scene"] == donor_state["scene"]
+            # 이 틱의 것: 후보·commitment·실행 이력·robot·exec·t.
+            assert shuffled["request"]["candidates"] == tick["request"]["candidates"] and shuffled["request"].get("commitment") == tick["request"].get("commitment")
+            assert shuffled["request"].get("exec_history") == tick["request"].get("exec_history")
+            for key in ("robot", "exec", "t", "events"):
+                assert state.get(key) == own.get(key), key
+            assert shuffled["labels"] == tick["labels"]
+            changed_objects += int([o["desc"] for o in state["objects"]] != [o["desc"] for o in own["objects"]])
+    assert changed_objects > 0
+
+
+def test_the_robot_state_shuffle_moves_the_rule_judges_main_answer_where_the_text_shuffle_does_not():
+    """구조화된 goal(D1 서식)에서 규칙 기준군은 텍스트를 읽지 않으므로 지시 섞기는 답을 바꾸지 못하고, 상태 섞기(목표·물체·영역이 기증
+    에피소드의 것)는 바꾼다 — 대조군이 무엇을 재는지의 fixture 수준 증거 (D1 리뷰 1 I1)."""
+    from robo_jev.data.robot_episodes import generate_episode, load_generator_config
+    from robo_jev.sim.expert import Expert
+
+    config, expert = load_generator_config(), Expert()
+    episodes = [generate_episode("E0", seed, policy=expert, expert=expert, config=config, max_ticks=20) for seed in (5, 7)]  # 대상 o0→zoneL vs o1→zoneR
+    goals = [episode["ticks"][0]["request"]["state"]["goal"] for episode in episodes]
+    assert (goals[0]["target_ref"], goals[0]["target_zone"]) != (goals[1]["target_ref"], goals[1]["target_zone"]) and all("target_desc" in goal for goal in goals)
+    tokenizer = WhitespaceTokenizer()
+
+    def items(records):
+        out = []
+        for index, record in enumerate(records):
+            layout = serialize_request(record, tokenizer, layout="stream_l1a")
+            out.append(Item(index=index, kind="stream", record_id=record["episode_id"], split=record["split"], domain="robot", material="existing", record=record, layout=layout, tokens=len(layout["tokens"]), question_types={q: "choice" for q in layout["ticks"][0]["candidate_mapping"]}))
+        return out
+
+    def main_answers(records):
+        return [(p["record_id"], p["tick"], p["candidates"]["q_main"][int(p["probabilities"]["q_main"].argmax())]) for p in rule_judge_predictions(items(records))]
+
+    base = main_answers(episodes)
+    text = main_answers(context_shuffle_records(episodes, robot="instruction"))
+    state = main_answers(context_shuffle_records(episodes, robot="state"))
+    assert len(base) == 40 and text == base
+    moved = sum(1 for a, b in zip(base, state) if a != b)
+    assert moved >= len(base) // 2, (moved, len(base))
 
 
 def test_rule_judge_predictions_cover_every_posed_question_with_a_distribution(items):

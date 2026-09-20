@@ -542,6 +542,15 @@ def build_manifest(
 # --------------------------------------------------------------------------
 
 
+def excluded_groups(config: dict[str, Any]) -> set[str]:
+    """D-OOD용 (docs/04 §6): `exclude_groups_from`(manifest 경로 목록)의 `families` 키 = 이미 쓴 origin group. 그 계열의 seed는 건넌다."""
+    groups: set[str] = set()
+    for path in config.get("exclude_groups_from") or ():
+        manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+        groups.update(str(name) for name in (manifest.get("families") or {}))
+    return groups
+
+
 def run(
     config: dict[str, Any],
     count: int,
@@ -550,17 +559,30 @@ def run(
     resume: bool = False,
     log: Any = None,
 ) -> dict[str, Any]:
-    """seed 일정대로 에피소드를 만들고 manifest를 쓴다. `resume`이면 이미 있는 seed는 건넌다."""
+    """seed 일정대로 에피소드를 만들고 manifest를 쓴다. `resume`이면 이미 있는 seed는 건넌다.
+
+    `exclude_groups_from`(D-OOD)이 있으면 origin group이 그 manifest들의 계열에 있는 seed는 건너뛰고(`excluded`로 센다) 일정을
+    앞으로 늘려 `count`편을 채운다 — D1과 겹치지 않는 장면·목표 계열만 남는다.
+    """
     from robo_jev.sim.environment import Environment
 
     started = time.perf_counter()
     paths = config_paths(config)
     expert = Expert(load_expert_config(paths["expert_config"]))
-    schedule = seed_schedule(config, count)
+    exclude = excluded_groups(config)
+    sim_settings = yaml.safe_load(resolve_config_path(paths["sim_config"]).read_text(encoding="utf-8")) if exclude else None
+    schedule = seed_schedule(config, count if not exclude else count * int(config.get("exclude_schedule_factor", 8)))
     envs: dict[str, Any] = {}
-    produced = skipped = 0
+    produced = skipped = excluded = 0
     try:
         for profile, seed in schedule:
+            if produced + skipped >= count:
+                break
+            if exclude:
+                group = origin_group(profile, build_plan(sim_settings, int(seed), profile))
+                if group in exclude:
+                    excluded += 1
+                    continue
             path = episode_path(out, episode_id(profile, seed))
             if resume and path.is_file():
                 skipped += 1
@@ -586,7 +608,7 @@ def run(
     contrast = write_contrast([record for _, record in read_episodes(out)], out, config, expert=expert, log=log)
     manifest = build_manifest(out, config, batch_wall_s=time.perf_counter() - started)
     manifest["contrast"] = contrast
-    manifest["run"] = {"requested": int(count), "produced": produced, "skipped": skipped, "resume": bool(resume)}
+    manifest["run"] = {"requested": int(count), "produced": produced, "skipped": skipped, "excluded": excluded, "resume": bool(resume)}
     (out / "manifest.json").write_bytes(
         (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=False) + "\n").encode("utf-8")
     )

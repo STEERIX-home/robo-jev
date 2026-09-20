@@ -16,6 +16,7 @@ import json
 import os
 import random
 import subprocess
+from pathlib import Path
 import sys
 from collections import Counter, defaultdict
 
@@ -32,7 +33,7 @@ from robo_jev.data.generate import (
 )
 from robo_jev.data.generate import main as generate_main
 from robo_jev.data.split import CONCEPT_TAG, DEFAULT_WEIGHTS, OOD_SPLITS, TEMPLATE_TAG, SplitPolicy, assign_split, ood_split
-from robo_jev.data.validate import POSITION_BIAS_MIN_SAMPLES, validate_dataset
+from robo_jev.data.validate import POSITION_BIAS_MIN_SAMPLES, POSITION_BIAS_TOLERANCE, validate_dataset
 from robo_jev.data.validate import main as validate_main
 
 BATCH_COUNT = 500
@@ -880,6 +881,31 @@ def test_report_summarises_answer_positions(batch, report):
     assert summary["questions"] > 0
     for size, entry in summary["by_candidate_count"].items():
         assert abs(sum(entry["shares"]) - 1.0) < 1e-6, size
+    # 후보 수를 합친 통계 (리뷰 1 M6): 첫 자리 비율 vs Σ n_K/K / N, 정규화 위치 평균 vs 0.5 — 균등한 배치에서는 둘 다 허용 오차 안이다.
+    pooled = summary["pooled"]
+    assert pooled["questions"] == summary["questions"] and pooled["checked"] is (summary["questions"] >= POSITION_BIAS_MIN_SAMPLES)
+    expected_first = sum(entry["questions"] / int(size) for size, entry in summary["by_candidate_count"].items()) / summary["questions"]
+    assert pooled["expected_first_position_rate"] == pytest.approx(expected_first)
+    assert pooled["first_position_rate"] == pytest.approx(sum(entry["counts"][0] for entry in summary["by_candidate_count"].values()) / summary["questions"])
+    assert abs(pooled["first_position_excess"]) <= 0.15 and abs(pooled["normalised_position_deviation"]) <= 0.15
+    assert not any(error["path"].startswith("answer_position.pooled") for error in report["errors"])
+
+
+def test_pooled_position_summary_catches_a_first_position_prior_spread_over_candidate_counts_below_the_per_size_floor():
+    """K별 표본이 200 아래(D1의 K=7·9·11)라 K별 검사가 판정하지 못하는 층도 합쳐서는 검사된다 (리뷰 1 M6)."""
+    from robo_jev.data.validate import pooled_position_summary
+
+    biased = {7: Counter({0: 90}), 9: Counter({0: 70}), 11: Counter({0: 60})}
+    pooled = pooled_position_summary(biased)
+    assert pooled["questions"] == 220 and pooled["checked"] and pooled["first_position_rate"] == 1.0
+    assert pooled["expected_first_position_rate"] == pytest.approx((90 / 7 + 70 / 9 + 60 / 11) / 220)
+    assert pooled["first_position_excess"] > POSITION_BIAS_TOLERANCE and pooled["normalised_position_mean"] == 0.0 and pooled["normalised_position_deviation"] == -0.5
+    uniform = {7: Counter({p: 10 for p in range(7)}), 9: Counter({p: 8 for p in range(9)}), 11: Counter({p: 6 for p in range(11)})}
+    pooled = pooled_position_summary(uniform)
+    assert pooled["checked"] and pooled["first_position_excess"] == pytest.approx(0.0) and pooled["normalised_position_deviation"] == pytest.approx(0.0)
+    small = pooled_position_summary({3: Counter({0: 50})})
+    assert small["questions"] == 50 and not small["checked"] and small["first_position_rate"] == 1.0
+    assert pooled_position_summary({})["checked"] is False and pooled_position_summary({})["questions"] == 0
 
 
 def test_model_input_of_every_generated_record_hides_the_labels(batch):
@@ -1142,3 +1168,28 @@ def test_generate_module_runs_as_a_script(tmp_path):
     )
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "tiny" / "records.jsonl").exists()
+
+
+def test_origin_prefix_renames_groups_and_request_ids_for_a_disjoint_dataset_lineage():
+    """D-OOD (`configs/data/d_ood_single.yaml`): 다른 seed의 계열은 새 장면이지만 이름 `<분야>/<장면>/<번호>`는 D1과 겹친다 — `origin_prefix`가
+    group과 요청 id에 접두사를 붙여 계보를 가른다. 접두사 없이는(기본 "") 레코드가 그대로다."""
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    plain = generate_records(count=60, seed=9001, config=config)
+    config["origin_prefix"] = "dood"
+    prefixed = generate_records(count=60, seed=9001, config=config)
+    assert len(plain) == len(prefixed) == 60
+    for a, b in zip(plain, prefixed):
+        assert b["origin_group"] == "dood/" + a["origin_group"] and b["provenance"]["origin_group"] == b["origin_group"]
+        assert b["request"]["request_id"] == "dood-" + a["request"]["request_id"]
+        derived = b["provenance"].get("derived_from")
+        if derived is not None:
+            assert derived.startswith("dood-") and derived == "dood-" + a["provenance"]["derived_from"]
+        # 문구·후보 배열의 seed 문자열에 group이 들어가므로 후보 id·문장은 달라진다; 장면 계열(분야·장면·번호·언어·질문 종류)은 같다.
+        for key in ("domain", "template", "family", "language", "derivation"):
+            assert b["provenance"].get(key) == a["provenance"].get(key)
+        assert [q["type"] for q in b["request"]["questions"]] == [q["type"] for q in a["request"]["questions"]]
+        validate_record(b)
+    assert generate_records(count=20, seed=9001, config={**DEFAULT_CONFIG, "origin_prefix": ""}) == plain[:20]
+    assert DEFAULT_CONFIG["origin_prefix"] == "" and load_config(Path(__file__).resolve().parent.parent / "configs" / "data" / "pilot.yaml")["origin_prefix"] == ""
+    ood = generate_records(count=40, seed=9001, config={**config, "split": {**config["split"], "holdout_prefixes": ["dood/"]}})
+    assert {record["split"] for record in ood} <= {"ood_dev", "ood_test"} and len({record["split"] for record in ood}) == 2

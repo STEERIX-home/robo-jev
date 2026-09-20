@@ -69,6 +69,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # 변형이 고르게). 봉인 변형을 고르게 뽑으면 계열의 13~19 %가 템플릿 holdout에 걸려 OOD가 목표(≈10~15 %)를 넘는다 —
     # 봉인 id(한국어)는 그대로 두고 비중으로 맞춘다 (docs/04 §5).
     "sealed_phrasing_share": 10,
+    # 계열 id·요청 id의 접두사 (D-OOD: D1과 다른 seed로 만든 계열이 같은 `<분야>/<장면>/<번호>` 이름을 다시 쓰지 않게 한다 —
+    # `dood`면 group `dood/dom/checkout-form/0000`, 요청 id `dood-dom-0000-0`). 기본은 없음.
+    "origin_prefix": "",
     "split": {
         "weights": {"train": 70, "dev": 10, "calibration": 10, "test": 10},
         "holdout_groups": [],
@@ -300,7 +303,9 @@ def _build_family(
     # 장면 종류의 비중(`template_weights`)이 있는 분야는 그 비중으로 — 봉인 개념의 근원이 되는 장면을 드물게 둔다 (docs/04 §5).
     weights = getattr(domain, "template_weights", None)
     template = _weighted(family_rng, dict(zip(domain.templates, weights))) if weights else family_rng.choice(domain.templates)
-    group = f"{domain_name}/{template}/{family_index:04d}"
+    prefix = str(config.get("origin_prefix") or "").strip("/")
+    group = f"{prefix + '/' if prefix else ''}{domain_name}/{template}/{family_index:04d}"
+    stem = f"{prefix.replace('/', '-') + '-' if prefix else ''}{domain_name}-{family_index:04d}"
     split = policy.assign(group)  # 생성 전 배정. 파생본은 이 값을 그대로 쓴다.
 
     scene = domain.make_scene(family_rng, template)
@@ -308,7 +313,7 @@ def _build_family(
     specs = _select_specs(domain.pool(scene), question_count, config["question_types"], family_rng)
     language = _weighted(family_rng, config["languages"])
 
-    base_id = f"{domain_name}-{family_index:04d}-0"
+    base_id = f"{stem}-0"
     shared = {
         "domain": domain,
         "scene": scene,
@@ -334,7 +339,7 @@ def _build_family(
         # 번역본: 같은 사실·같은 명세를 다른 언어로 다시 그린다. 라벨은 다시 계산된다.
         records.append(
             _render_record(
-                request_id=f"{domain_name}-{family_index:04d}-1",
+                request_id=f"{stem}-1",
                 language="en" if language == "ko" else "ko",
                 wording_seed=f"{seed}:{group}:w1",
                 shuffle_seed=f"{seed}:{group}:s1",
@@ -347,7 +352,7 @@ def _build_family(
         # 재배열본: 문장은 그대로, 후보 순서와 id만 바뀐다.
         records.append(
             _render_record(
-                request_id=f"{domain_name}-{family_index:04d}-2",
+                request_id=f"{stem}-2",
                 language=language,
                 wording_seed=f"{seed}:{group}:w0",
                 shuffle_seed=f"{seed}:{group}:s2",
@@ -361,7 +366,7 @@ def _build_family(
         # 배열(같은 wording·shuffle seed)이라 쌍의 차이는 그 사실뿐이다. 삭제 검사(사실을 지우면 라벨이 마스크·"해당 없음")를
         # 지나는 쌍만 남기고, 못 찾으면 기본 레코드에 이유를 적는다.
         sibling, reason = _contrast_sibling(
-            records[0], request_id=f"{domain_name}-{family_index:04d}-3", wording_seed=f"{seed}:{group}:w0",
+            records[0], request_id=f"{stem}-3", wording_seed=f"{seed}:{group}:w0",
             shuffle_seed=f"{seed}:{group}:s0", policy=policy, **shared,
         )
         if sibling is not None:

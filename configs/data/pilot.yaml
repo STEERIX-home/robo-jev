@@ -47,6 +47,9 @@ derivations:
 # `_GOAL_ZONE_WEIGHTS`·`template_weights`)이 맞춘다.
 sealed_phrasing_share: 10
 
+# 계열 id·요청 id의 접두사 (D-OOD 전용: D1과 다른 seed의 계열이 같은 이름을 다시 쓰지 않게 `dood` 같은 값을 준다). D1은 없음.
+origin_prefix: ""
+
 split:
   # 해시 분할 비중 (docs/04 §5). ood는 여기 넣지 않는다 — holdout 목록으로만 만든다.
   weights:

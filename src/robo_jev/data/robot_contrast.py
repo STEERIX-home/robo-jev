@@ -52,7 +52,7 @@ __all__ = [
     "single_request_from_tick",
 ]
 
-GENERATOR_VERSION = "gen-robot-contrast-v0.2"
+GENERATOR_VERSION = "gen-robot-contrast-v0.3"
 
 #: 뒤집기 종류와 그것이 겨냥하는 질문.
 KINDS: dict[str, str] = {
@@ -110,7 +110,10 @@ def single_request_from_tick(
             criteria = [
                 {"id": str(entry["id"]), "description": _candidate_text(entry)} for entry in entries
             ]
-            if question_id == "q_main":
+            if question_id in ("q_main", "q_path"):
+                # 동적 후보(주 결정·경로)의 순서는 레코드마다 섞는다 (docs/04 §3 "정답 위치의 편향을 없앤다"). 경로 후보를 하네스의
+                # 정식 순서(direct·via·retreat·hold)로 두면 정답(거의 언제나 direct)이 첫 자리에 몰려 QA의 정답 위치 검사가
+                # D1 규모(표본 ≥ 200)에서 걸린다 — 스트림 틱의 순서는 그대로이고 학습 증강(`permute_candidates`)이 섞는다.
                 rng.shuffle(criteria)
         else:
             continue

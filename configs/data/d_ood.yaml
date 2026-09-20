@@ -1,0 +1,53 @@
+# D-OOD 로봇 100편 — D1에 없는 장면·지시 계열 (docs/04 §6 D-OOD 행; Task D1 stage D의 stub, 생성은 아직 하지 않았다).
+#
+#   uv run python scripts/generate_episodes.py --config configs/data/d_ood.yaml --count 100 --out artifacts/datasets/d-ood/robot
+#   uv run python -m robo_jev.data.validate --dataset artifacts/datasets/d-ood/robot --report artifacts/reports/d-ood-robot-qa.json
+#
+# 무엇이 "새 계열"인가. origin group = `robot/<profile>/<계열>/goal-<영역>`(계열 = 물체 수·형상 다중집합·영역 집합의 구조 서명)이다.
+# (1) D1(400편)이 쓴 group은 `exclude_groups_from`의 manifest `families`로 통째로 건너뛴다 — 남는 것은 D1에 없는 구조 서명 × 목표 영역
+#     조합이다(seed 일정은 건너뛴 만큼 앞으로 늘어난다; manifest `run.excluded`가 센다).
+# (2) 지시 계열: `configs/sim/tidy_clutter.yaml`의 `instruction.v1_templates`/`v2_templates`에 **새 변형 v1#3·v2#3**(D1의 봉인 변형 v1#2·v2#2와
+#     다른 문장; 예: "…을 …으로 치워 둬라", "…은 …에 놓아라")을 더하고 `template_weights`를 [0, 0, 0, 100]으로 두면 D-OOD의 모든 지시가
+#     새 문구 계열이 된다 — 문장은 사용자가 정한다(설계 밖: 문구 추가는 코드 변경 없이 yaml만이다). 그 전까지는 (1)만 적용된다.
+# (3) 봉인/개발 분리: `split.holdout_prefixes: ["robot/"]`로 전부 OOD로 보내고 group 해시로 `ood_dev`/`ood_test`에 반분한다(docs/04 §5의
+#     같은 규칙). D1의 `ood_dev`/`ood_test`와는 다른 계열이므로 겹치지 않는다.
+# seed는 D1(100~299)·DAgger(100,100~)와 겹치지 않는 900,000부터.
+version: d-ood-robot-v0.1
+
+sim_config: configs/sim/tidy_clutter.yaml
+harness_config: configs/harness/robot.yaml
+expert_config: configs/sim/expert_v0.yaml
+events_config: configs/sim/events.yaml
+
+profiles: [E0, E1]
+seeds:
+  base: 900000
+  dagger_cycle_offset: 100000
+
+episode:
+  control_steps_per_tick: 5
+  tail_ticks_after_done: 10
+
+target_episodes: 100
+
+# D1이 쓴 계열(origin group)은 건너뛴다. 일정은 count × exclude_schedule_factor까지 앞으로 늘린다.
+exclude_groups_from:
+  - artifacts/datasets/d1-robot/d1/manifest.json
+exclude_schedule_factor: 8
+
+contrast:
+  per_episode: 3
+  kinds: [forbidden, zone_boundary, instruction]
+
+split:
+  weights:
+    train: 70
+    dev: 10
+    calibration: 10
+    test: 10
+  holdout_groups: []
+  # 전부 OOD: group 해시로 ood_dev/ood_test 반분. D1의 봉인 목록(zoneF·v1#2·v2#2·E1 계열)은 D1의 것이라 여기서는 의미가 없다.
+  holdout_prefixes: ["robot/"]
+  holdout_domains: []
+  holdout_templates: []
+  holdout_concepts: []
