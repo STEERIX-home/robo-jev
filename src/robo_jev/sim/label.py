@@ -30,7 +30,7 @@ import numpy as np
 import yaml
 
 from robo_jev.contracts import QUESTION_SET_V0
-from robo_jev.harness.robot import FIXED_KEYS, RobotHarness, candidate_id, joint_key_parts, load_harness_config
+from robo_jev.harness.robot import FIXED_KEYS, RobotHarness, candidate_id, joint_key_parts, load_harness_config, push_contact_offset_mm
 from robo_jev.sim.controller import resolve_config_path
 from robo_jev.sim.expert import DEGENERATE_REASONS, GATE_REASONS, Expert, load_expert_config
 
@@ -558,7 +558,11 @@ def _approach_point(key: str, state: dict[str, Any], harness_config: dict[str, A
     if function == "push":
         vector = _PUSH_VECTORS.get(approach, (0.0, 0.0))
         obb = [float(value) for value in entry["obb_mm"]]
-        reach = math.hypot(obb[0] / 2.0, obb[1] / 2.0) + float(spec["push_contact_mm"])
+        surface = float((state.get("scene") or {}).get("work_surface_mm", 0.0))
+        height = max(pose[2], surface + float(spec.get("push_height_min_mm", 0.0)))
+        reach = math.hypot(obb[0] / 2.0, obb[1] / 2.0) + push_contact_offset_mm(
+            spec, approach, obb, float(entry.get("top_mm", pose[2] + obb[2] / 2.0)), height
+        )
         return [pose[0] - vector[0] * reach, pose[1] - vector[1] * reach, pose[2]]
     return [pose[0], pose[1], float(entry.get("top_mm", pose[2])) + float(spec["approach_clearance_mm"])]
 

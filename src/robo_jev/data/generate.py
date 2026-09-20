@@ -31,20 +31,23 @@ from pathlib import Path
 from typing import Any
 
 from robo_jev.contracts import SCHEMA_SINGLE_REQUEST
-from robo_jev.data.domains import DOMAINS, QuestionSpec, Rendered, begin_phrasing, concepts_for, take_phrasing
+from robo_jev.data.domains import DOMAINS, NONE_ID, QuestionSpec, Rendered, begin_phrasing, concepts_for, take_phrasing
 from robo_jev.data.split import CONCEPT_TAG, TEMPLATE_TAG, SplitPolicy, ood_split
 
 __all__ = [
     "DEFAULT_CONFIG",
     "GENERATOR_VERSION",
     "PILOT_CONFIG",
+    "contrast_counts",
+    "deletion_outcome",
     "generate_records",
     "load_config",
     "main",
+    "semantic_answers",
     "write_dataset",
 ]
 
-GENERATOR_VERSION = "gen-single-v0.1.0"
+GENERATOR_VERSION = "gen-single-v0.2.0"
 MANIFEST_VERSION = "manifest-v0"
 
 #: 함께 배포하는 설정 파일. `load_config(PILOT_CONFIG) == DEFAULT_CONFIG`이어야 한다.
@@ -59,8 +62,9 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "question_types": {"choice": 60, "boolean": 25, "ordinal": 15},
     "questions_per_state": {1: 10, 4: 20, 8: 50, 16: 20},
     "languages": {"ko": 70, "en": 30},
-    # 파생본 비율(%). 번역본과 후보 재배열본은 부모의 group·split을 승계한다.
-    "derivations": {"paraphrase": 20, "reorder": 10},
+    # 파생본 비율(%). 번역본과 후보 재배열본은 부모의 group·split을 승계한다. `contrast`는 사실 하나만 바꿔 질문 하나의
+    # 라벨을 뒤집는 대조 sibling(docs/04 §3; 삭제 검사를 지난 쌍만 남긴다)이며 기본 레코드마다 하나(100 %)다.
+    "derivations": {"paraphrase": 20, "reorder": 10, "contrast": 100},
     # 봉인 문구 변형(`split.holdout_templates`)의 추첨 몫(%): 그 변형이 든 표에서 봉인 변형을 이 몫만큼만 뽑는다(나머지는 다른
     # 변형이 고르게). 봉인 변형을 고르게 뽑으면 계열의 13~19 %가 템플릿 holdout에 걸려 OOD가 목표(≈10~15 %)를 넘는다 —
     # 봉인 id(한국어)는 그대로 두고 비중으로 맞춘다 (docs/04 §5).
@@ -220,6 +224,8 @@ def _render_record(
     config: Mapping[str, Any],
     derived_from: str | None = None,
     derivation: str | None = None,
+    contrast: dict | None = None,
+    contrast_evidence: dict | None = None,
 ) -> dict:
     wording_rng = random.Random(wording_seed)
     # 봉인 변형은 드물게 뽑는다(`sealed_phrasing_share`) — 계열이 통째로 OOD로 가는 몫을 비중으로 맞춘다 (docs/04 §5).
@@ -263,12 +269,16 @@ def _render_record(
             "holdout": [],
             "rules": sorted({label["source"] for label in labels}),
             **({"derived_from": derived_from, "derivation": derivation} if derived_from else {}),
+            # 대조 쌍 (docs/04 §3): sibling에는 `{role: sibling, sibling_id: 기본 레코드, focus_field, flipped_question, deletion}`,
+            # 기본 레코드에는 `{role: base, sibling_id: sibling}`(없으면 `sibling_id: None`과 이유). 생성 뒤 채운다.
+            "contrast": copy.deepcopy(contrast),
         },
         "evidence": {
             "rule_trace": [item.trace for item in rendered],
             "masked": masked,
             # 규칙이 읽은 사실 원본. 계열 안의 레코드가 같은 객체를 나눠 갖지 않도록 복사한다.
             "scene": copy.deepcopy(scene),
+            **({"contrast": copy.deepcopy(contrast_evidence)} if contrast_evidence else {}),
         },
         "usage": {"questions_used": [question["id"] for question in questions], "commands": []},
     }
@@ -346,18 +356,194 @@ def _build_family(
                 **shared,
             )
         )
+    if family_rng.random() < derivations.get("contrast", 0) / 100:
+        # 대조 sibling: 사실 하나만 바꿔 질문 하나의 라벨을 뒤집는다 (docs/04 §3, analysis-nimble §3-2). 같은 문구·같은 후보
+        # 배열(같은 wording·shuffle seed)이라 쌍의 차이는 그 사실뿐이다. 삭제 검사(사실을 지우면 라벨이 마스크·"해당 없음")를
+        # 지나는 쌍만 남기고, 못 찾으면 기본 레코드에 이유를 적는다.
+        sibling, reason = _contrast_sibling(
+            records[0], request_id=f"{domain_name}-{family_index:04d}-3", wording_seed=f"{seed}:{group}:w0",
+            shuffle_seed=f"{seed}:{group}:s0", policy=policy, **shared,
+        )
+        if sibling is not None:
+            records.append(sibling)
+            records[0]["provenance"]["contrast"] = {
+                "role": "base",
+                "sibling_id": sibling["request"]["request_id"],
+                "focus_field": sibling["provenance"]["contrast"]["focus_field"],
+                "flipped_question": sibling["provenance"]["contrast"]["flipped_question"],
+            }
+        else:
+            records[0]["provenance"]["contrast"] = {"role": "base", "sibling_id": None, "missing": reason}
     # 템플릿 변형·개념 holdout은 렌더링 뒤에야 안다. 계열의 레코드 중 하나라도 걸리면 계열 전체가 OOD다 — 한 group이
     # 두 split에 걸치지 않는다(docs/04 §5). group·prefix·domain holdout은 이미 `split`에 반영돼 있다.
-    tags = sorted(
-        {TEMPLATE_TAG + item for record in records for item in record["provenance"]["phrasing"]}
-        | {CONCEPT_TAG + item for record in records for item in record["provenance"]["concepts"]}
-    )
-    reasons = policy.holdout_reasons(group, tags)
+    reasons = policy.holdout_reasons(group, _holdout_tags(records))
     if reasons:
         for record in records:
             record["split"] = ood_split(group)
             record["provenance"]["holdout"] = list(reasons)
     return records
+
+
+# --------------------------------------------------------------------------
+# 대조 sibling (docs/04 §3, analysis-nimble §3-2)
+# --------------------------------------------------------------------------
+
+
+def semantic_answers(record: dict) -> dict[str, Any]:
+    """질문 id → 표현·후보 배열과 무관한 정답 값. choice는 후보의 `ref`(없으면 "해당 없음"), boolean은 참/거짓, ordinal은
+    수준 id. 라벨이 없는(마스크) 질문은 빠진다."""
+    labels = {label["question_id"]: label for label in record["labels"]}
+    out: dict[str, Any] = {}
+    for question in record["request"]["questions"]:
+        label = labels.get(question["id"])
+        if label is None:
+            continue
+        if question["type"] == "boolean":
+            out[question["id"]] = bool(label["answer"])
+            continue
+        keys = {criterion["id"]: criterion.get("ref", "<none>") for criterion in question["criteria"]}
+        chosen = label.get("candidate_ids") or [label["answer"]]
+        out[question["id"]] = tuple(sorted(keys[candidate] for candidate in chosen))
+    return out
+
+
+def deletion_outcome(domain: Any, deleted: dict, spec: QuestionSpec, language: str) -> str | None:
+    """초점 사실을 지운 장면에서 그 질문을 다시 그리면 라벨이 어떻게 되는가: `"masked"`(근거 없음), `"none_candidate"`("해당
+    없음·정보 부족"이 정답), 아니면 `None`(라벨이 남는다 — 삭제 검사 실패). 문구 난수는 라벨과 무관하다."""
+    rendered = domain.render(deleted, spec, random.Random(f"deletion:{spec.id}"), language)
+    take_phrasing()  # 삭제 검사의 문구 변형은 레코드의 것이 아니다
+    if rendered.label is None:
+        return "masked"
+    label = rendered.label
+    chosen = label.get("candidate_ids") or ([label["answer"]] if isinstance(label.get("answer"), str) else [])
+    if chosen == [NONE_ID]:
+        return "none_candidate"
+    return None
+
+
+def _contrast_sibling(
+    base: dict,
+    *,
+    domain: Any,
+    scene: dict,
+    specs: Sequence[QuestionSpec],
+    group: str,
+    split: str,
+    request_id: str,
+    seed: int,
+    family_index: int,
+    wording_seed: str,
+    shuffle_seed: str,
+    config: Mapping[str, Any],
+    policy: SplitPolicy,
+) -> tuple[dict | None, str]:
+    """기본 레코드의 대조 sibling과, 없으면 그 이유(`no_contrast`·`no_flip`·`deletion_failed`·`sealed_concept`).
+
+    분야의 :meth:`contrasts`가 낸 후보를 차례로 그려, 겨냥 질문의 라벨이 (마스크가 아닌 두 라벨 사이에서) 실제로 뒤집히고
+    :func:`deletion_outcome`을 지나는 첫 쌍을 택한다. 같은 wording·shuffle seed로 그리므로 sibling은 문구·후보 배열이 기본
+    레코드와 같고 사실 하나만 다르다. 바뀐 사실이 **sibling 자신의** 봉인 근거를 기본 레코드의 것과 다르게 하는 sibling — 봉인
+    개념을 새로 다루게 되거나(계열이 OOD로 끌려간다) 잃는 것(OOD 계열 안의 분포 내 내용, 리뷰 1 M3) — 은 만들지 않는다: 대조
+    쌍은 계열의 split을 따르되 봉인 측정을 흐리지 않는다(docs/04 §5의 몫을 지킨다).
+    """
+    language = base["provenance"]["language"]
+    base_id = base["request"]["request_id"]
+    base_answers = semantic_answers(base)
+    by_id = {spec.id: spec for spec in specs}
+    candidates = domain.contrasts(scene, list(specs))
+    if not candidates:
+        return None, "no_contrast"
+    base_reasons = policy.holdout_reasons(group, _holdout_tags([base]))
+    deletion_failed = sealed = False
+    for contrast in candidates:
+        sibling = _render_record(
+            domain=domain, scene=contrast.flipped, specs=specs, group=group, split=split, request_id=request_id,
+            language=language, seed=seed, family_index=family_index, wording_seed=wording_seed, shuffle_seed=shuffle_seed,
+            config=config, derived_from=base_id, derivation="contrast",
+        )
+        if policy.holdout_reasons(group, _holdout_tags([sibling])) != base_reasons:
+            sealed = True  # 대칭 규칙: 봉인 개념을 더하는 sibling도, 잃는 sibling도 아니다
+            continue
+        answers = semantic_answers(sibling)
+        flipped = [qid for qid in by_id if qid in base_answers and qid in answers and base_answers[qid] != answers[qid]]
+        for question_id in contrast.question_ids:
+            if question_id not in flipped:
+                continue
+            outcome = deletion_outcome(domain, contrast.deleted, by_id[question_id], language)
+            if outcome is None:
+                deletion_failed = True
+                continue
+            spec = by_id[question_id]
+            provenance = {
+                "role": "sibling",
+                "sibling_id": base_id,
+                "focus_field": contrast.focus_field,
+                "flipped_question": question_id,
+                "flipped_questions": flipped,
+                "deletion": {"field": contrast.focus_field, "outcome": outcome},
+            }
+            evidence = {
+                "spec": {"id": spec.id, "type": spec.type, "kind": spec.kind, "params": copy.deepcopy(spec.params)},
+                "base_answer": _json_answer(base_answers[question_id]),
+                "sibling_answer": _json_answer(answers[question_id]),
+            }
+            sibling["provenance"]["contrast"] = provenance
+            sibling["evidence"]["contrast"] = evidence
+            return sibling, "paired"
+    if deletion_failed:
+        return None, "deletion_failed"
+    return None, "sealed_concept" if sealed else "no_flip"
+
+
+def _holdout_tags(records: Sequence[dict]) -> list[str]:
+    """레코드들의 holdout 태그 (문구 템플릿 변형·개념) — `_build_family`의 계열 판정과 같은 문자열."""
+    return sorted(
+        {TEMPLATE_TAG + item for record in records for item in record["provenance"]["phrasing"]}
+        | {CONCEPT_TAG + item for record in records for item in record["provenance"]["concepts"]}
+    )
+
+
+def _json_answer(value: Any) -> Any:
+    return list(value) if isinstance(value, tuple) else value
+
+
+def _question_kind(question_id: str) -> str:
+    """`q_target_3` → `q_target` (번호 접미만 뗀다); 로봇의 `q_main`은 그대로."""
+    head, _, tail = question_id.rpartition("_")
+    return head if head and tail.isdigit() else question_id
+
+
+def contrast_counts(records: Sequence[dict]) -> dict:
+    """대조 쌍의 집계: 쌍 수, split·분야별 쌍 수, 뒤집힌 질문 종류, 삭제 검사 결과, sibling이 없는 기본 레코드의 이유."""
+    pairs = 0
+    by_split: Counter = Counter()
+    by_domain: Counter = Counter()
+    by_kind: Counter = Counter()
+    deletion: Counter = Counter()
+    missing: Counter = Counter()
+    for record in records:
+        provenance = record.get("provenance") or {}
+        contrast = provenance.get("contrast")
+        if not contrast:
+            continue
+        if contrast.get("role") == "sibling":
+            pairs += 1
+            by_split[record.get("split")] += 1
+            by_domain[provenance.get("domain")] += 1
+            by_kind[_question_kind(str(contrast.get("flipped_question", "")))] += 1
+            deletion[(contrast.get("deletion") or {}).get("outcome")] += 1
+        elif contrast.get("sibling_id") is None:
+            missing[contrast.get("missing") or "unknown"] += 1
+    bases = sum(1 for record in records if (record.get("provenance") or {}).get("derived_from") is None)
+    return {
+        "pairs": pairs,
+        "base_records": bases,
+        "pair_share_of_bases": round(pairs / bases, 4) if bases else 0.0,
+        "by_split": dict(sorted(by_split.items())),
+        "by_domain": dict(sorted(by_domain.items())),
+        "by_question_kind": dict(sorted(by_kind.items())),
+        "deletion_outcomes": dict(sorted(deletion.items())),
+        "missing": dict(sorted(missing.items())),
+    }
 
 
 def generate_records(
@@ -455,6 +641,7 @@ def _counts(records: Sequence[dict]) -> dict:
                 ).items()
             )
         ),
+        "contrast": contrast_counts(records),
     }
 
 

@@ -2,7 +2,7 @@
 #
 # 전문가는 모델 자리에 서서 10개 답을 내고, 그 답이 D1 로봇 에피소드의 라벨 원천이다. 답은 하네스
 # 요청(모델 입력)과 commitment의 함수이며 시뮬레이터 참값을 보지 않는다. 수치는 전부 여기에만 둔다.
-version: e0.3
+version: e0.4
 
 # 실행기·하네스와 공유하는 값은 복사하지 않고 그 설정을 읽는다 (단일 출처).
 #   controller_config → 속도·힘 수준의 개수
@@ -64,6 +64,8 @@ profiles:
   # 물체를 치고(3c-1 측정 45~78N) ±x에서는 물체가 손가락 사이로 빠진다(≤5mm). 하네스는 밀기 명령에
   # `gripper_ref`를 두지 않으므로 실행기의 close readiness(대상 거리)가 걸리지 않는다.
   gripper_for_push: closed
+  # 놓기 국면의 `open`은 **내려가는 경로**(direct·via)에만 답한다 (e0.4, 리뷰 2 C2): 경로 답이 hold·retreat(막힌 하강, 경유점
+  # 없음)이면 그리퍼 답은 `closed`(이유 `place_blocked`)다 — 하네스도 같은 틱에 open을 적용하지 않는다(`gripper_downgraded`).
   fragile_speed_cap: 1
 
 # 라벨 (docs/08 §7).

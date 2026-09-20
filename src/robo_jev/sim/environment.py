@@ -514,6 +514,31 @@ class Environment:
         qpos = self._env.sim.data.qpos[indexes]
         return float(np.sum(np.abs(qpos)) * 1000.0)
 
+    def gripper_extent_mm(self) -> dict[str, dict[str, list[float]]]:
+        """지금 자세의 그리퍼 충돌 geom이 말단 기준(로봇 기준 축, mm)으로 뻗은 범위 — `{"hand": {x: [lo, hi], y, z}, "fingers": …}`.
+
+        하네스의 축별 밀기 접촉 거리(`candidates.push_contact_mm`, h0.6)를 실측에 대는 값이다: 손가락(`finger*`)과 손몸통
+        (`hand`)을 나눠 각 geom의 AABB(`geom_aabb`)를 자세로 돌린 뒤 말단 위치를 뺀다. 검사가 설정과 대조한다.
+        """
+        assert self._env is not None
+        model, data = self._env.sim.model._model, self._env.sim.data._data
+        ee = np.array(self._osc.ref_pos)
+        groups: dict[str, dict[str, list[float]]] = {}
+        for name in self._gripper_model.contact_geoms:
+            geom_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_GEOM, name)
+            if geom_id < 0:
+                continue
+            group = "hand" if "hand" in name else "fingers"
+            centre, half = model.geom_aabb[geom_id][:3], model.geom_aabb[geom_id][3:]
+            corners = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)]) * half + centre
+            rotation = data.geom_xmat[geom_id].reshape(3, 3)
+            world = (rotation @ corners.T).T + data.geom_xpos[geom_id]
+            lo, hi = (world.min(axis=0) - ee) * 1000.0, (world.max(axis=0) - ee) * 1000.0
+            entry = groups.setdefault(group, {"x": [np.inf, -np.inf], "y": [np.inf, -np.inf], "z": [np.inf, -np.inf]})
+            for axis, index in (("x", 0), ("y", 1), ("z", 2)):
+                entry[axis] = [min(entry[axis][0], float(lo[index])), max(entry[axis][1], float(hi[index]))]
+        return {group: {axis: [round(value, 1) for value in span] for axis, span in entry.items()} for group, entry in groups.items()}
+
     def _contact_force_n(self) -> float:
         return float(np.linalg.norm(self._env.robots[0].ee_force["right"]))
 
@@ -746,6 +771,8 @@ class Environment:
                 "speed_mm_s": round(self.controller.commanded_speed_mm_s),
                 "force_level": self.controller.force_level,
                 "gripper": self.controller.gripper_desired,
+                # 마지막 명령의 그리퍼 답이 보류된 사유 (readiness·정지 틱; 없으면 None) — 하네스의 놓기 정체 감시가 읽는다.
+                "gripper_wait": self.controller.gripper_wait,
                 "stop": bool(self.controller.stopping),
                 "stale": bool(self.controller.stale),
                 # 감속 구간과 HOLD 절차를 실행 이력에서 구분한다 (docs/08 §6 "stale").

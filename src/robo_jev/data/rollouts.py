@@ -21,7 +21,9 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import math
 import os
+import random
 import statistics
 import sys
 import time
@@ -53,6 +55,7 @@ __all__ = [
     "replay_to_keyframes",
     "run",
     "running_versions_for",
+    "summarise_sweep",
     "write_outputs",
 ]
 
@@ -205,8 +208,9 @@ def build_jobs(
 
     먼저 모든 레코드의 `versions`를 지금 것(`running`, 없으면 여기서 계산)과 맞대 보고 하나라도 다르면
     :class:`ConfigMismatch`로 멈춘다. 작업 순서는 (에피소드를 돌아가며 키프레임) → seed → 후보다. 그래서
-    `limit`가 작아도 첫 키프레임은 모든 후보의 paired seed를 갖고, 기능(파지·놓기·밀기)이 섞인다. 재생이
-    레코드와 어긋난 키프레임은 건넌다(`skipped_fidelity`).
+    `limit`가 작아도 첫 키프레임은 모든 후보의 paired seed를 갖는다. 에피소드 안의 키프레임 순서는 에피소드 id로 seed한
+    난수로 섞는다(리뷰 1 M1) — 정렬한 순서(t 오름차순)면 부분 sweep이 모든 에피소드의 t=0 `switch` 키프레임만 보게 된다;
+    섞으면 부분 sweep의 종류 혼합이 전체의 표본이 된다. 재생이 레코드와 어긋난 키프레임은 건넌다(`skipped_fidelity`).
     """
     from robo_jev.sim.environment import Environment
 
@@ -218,7 +222,9 @@ def build_jobs(
     config = {"keyframes": {"per_episode": per_episode or int((events.get("keyframes") or {}).get("per_episode", 5))}}
     selected: list[dict[str, Any]] = []
     for record in records:
-        for frame in select_keyframes(record, config):
+        frames = select_keyframes(record, config)
+        random.Random(f"jobs:{record.get('episode_id')}").shuffle(frames)  # 에피소드 안 순서는 seed한 무작위 (M1)
+        for frame in frames:
             frame["record"] = record
             selected.append(frame)
     # 에피소드를 돌아가며: (에피소드 안 순번, 에피소드 순서)
@@ -228,7 +234,7 @@ def build_jobs(
         rank = order.get(frame["episode_id"], 0)
         order[frame["episode_id"]] = rank + 1
         ranked.append((rank, records.index(frame["record"]), frame))
-    ranked.sort(key=lambda item: (item[0], item[1], item[2]["index"]))
+    ranked.sort(key=lambda item: (item[0], item[1]))
 
     jobs: list[dict[str, Any]] = []
     keyframes_out: list[dict[str, Any]] = []
@@ -493,6 +499,167 @@ def costing(
     }
 
 
+# --------------------------------------------------------------------------
+# sweep 요약 — 128k 전 관문 (ledger: 접근 시간·시작 거리로 조건화한 밀기 성공률, censoring 사유, 키프레임 종류 혼합)
+# --------------------------------------------------------------------------
+
+#: 접근 시간(s)·시작 거리(mm; 키프레임의 말단→대상 중심)의 구간 경계.
+_APPROACH_EDGES_S = (1.0, 2.0, 3.0, 4.0)
+_DISTANCE_EDGES_MM = (150, 250, 350, 500)
+
+
+def _bucket(value: float | None, edges: Sequence[float]) -> str:
+    if value is None:
+        return "none"
+    for edge in edges:
+        if value <= edge:
+            return f"<={edge:g}"
+    return f">{edges[-1]:g}"
+
+
+def _rate_table(groups: dict[str, dict[str, int]]) -> dict[str, dict[str, Any]]:
+    """구간 → {rollouts, success, failure, censored, rate, wilson} (유효 반복 = censoring을 뺀 수, z=1)."""
+    from robo_jev.sim.label import wilson_interval
+
+    table: dict[str, dict[str, Any]] = {}
+    for name, counts in sorted(groups.items()):
+        successes = int(counts.get("success", 0))
+        trials = successes + int(counts.get("failure", 0))
+        low, high = wilson_interval(successes, trials)
+        table[name] = {
+            "rollouts": sum(counts.values()),
+            "success": successes,
+            "failure": int(counts.get("failure", 0)),
+            "censored": int(counts.get("censored", 0)),
+            "rate": round(successes / trials, 3) if trials else None,
+            "wilson": [round(low, 3), round(high, 3)],
+        }
+    return table
+
+
+def summarise_sweep(out: Path) -> dict[str, Any]:
+    """`rollouts/` 출력(keyframes·rollouts·labels·costing)에서 128k 전 관문의 표를 만든다 (`sweep-summary.json`으로도 쓴다).
+
+    사건별 결과, **밀기 성공률을 접근 시간(`approach_s`)·시작 거리(키프레임의 말단→대상 중심)·방향·키프레임 종류로 조건화**한
+    표(Wilson 구간), 밀기 `contact_force` 실패의 시작 거리 분포, 파지 성공률의 시작 거리 표, censoring 사유, 키프레임 종류 혼합,
+    라벨 신뢰도, rollout당 벽시계와 128k·D2 산정을 한 dict에 모은다. rollout을 다시 돌리지 않는다.
+    """
+    root = Path(out)
+    results = [json.loads(line) for line in (root / "rollouts.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    keyframes = json.loads((root / "keyframes.json").read_text(encoding="utf-8"))
+    labels = [json.loads(line) for line in (root / "labels.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    cost = json.loads((root / "costing.json").read_text(encoding="utf-8"))
+
+    kind_of = {f"{frame['episode_id']}@{frame['t']}": str(frame["kind"]) for frame in keyframes}
+    holding_of = {f"{frame['episode_id']}@{frame['t']}": frame.get("holding") for frame in keyframes}
+    by_event: dict[str, dict[str, int]] = {}
+    push_by_approach: dict[str, dict[str, int]] = {}
+    push_reasons_by_approach: dict[str, dict[str, int]] = {}
+    push_stage_by_direction: dict[str, dict[str, int]] = {}
+    push_by_distance: dict[str, dict[str, int]] = {}
+    push_by_direction: dict[str, dict[str, int]] = {}
+    push_by_kind: dict[str, dict[str, int]] = {}
+    grasp_by_distance: dict[str, dict[str, int]] = {}
+    place_by_kind: dict[str, dict[str, int]] = {}
+    contact_force_by_distance: dict[str, int] = {}
+    reasons: dict[str, int] = {}
+    censoring: dict[str, int] = {}
+    approach_seconds: list[float] = []
+
+    def bump(table: dict[str, dict[str, int]], name: str, outcome: str) -> None:
+        table.setdefault(name, {})[outcome] = table.setdefault(name, {}).get(outcome, 0) + 1
+
+    for result in results:
+        evidence = result["evidence"]
+        key = str(result["job"]["key"])
+        parts = key.split(":")
+        keyframe = str(result["job"]["keyframe"])
+        holding = holding_of.get(keyframe)
+        event = "place" if parts[0] == "place" or (parts[0] == "grasp" and holding == parts[1]) else parts[0]
+        outcome = str(result["outcome"])
+        bump(by_event, event, outcome)
+        if result.get("reason"):
+            reasons[f"{event}:{result['reason']}"] = reasons.get(f"{event}:{result['reason']}", 0) + 1
+        if outcome == "censored":
+            censoring[str(result["reason"])] = censoring.get(str(result["reason"]), 0) + 1
+        trajectory = evidence.get("trajectory") or []
+        start_ee = trajectory[0][1:4] if trajectory else None
+        start_object = evidence.get("start_pose_mm")
+        distance = math.dist(start_ee, start_object) if start_ee and start_object else None
+        kind = kind_of.get(keyframe, "?")
+        if event == "push":
+            approach = evidence.get("approach_s")
+            bump(push_by_approach, _bucket(approach, _APPROACH_EDGES_S), outcome)
+            # 실패 이유를 접근 구간마다, 그리고 방향마다 단계(접근 중 충돌 / 밀기 중 충돌 / horizon)로 가른다 (리뷰 1 I5):
+            # `approach_s`가 없는 rollout은 접촉점에 닿기 전에 끝난 것이고, 그 대부분은 내려가다 물체를 친 `contact_force`다.
+            stage = "approach" if evidence.get("first_action_tick") is None else "push"
+            label = outcome if outcome != "failure" else f"{stage}_{result.get('reason')}"
+            bump(push_reasons_by_approach, _bucket(approach, _APPROACH_EDGES_S), label)
+            bump(push_stage_by_direction, parts[2], label)
+            bump(push_by_distance, _bucket(distance, _DISTANCE_EDGES_MM), outcome)
+            bump(push_by_direction, parts[2], outcome)
+            bump(push_by_kind, kind, outcome)
+            if approach is not None:
+                approach_seconds.append(float(approach))
+            if result.get("reason") == "contact_force":
+                name = _bucket(distance, _DISTANCE_EDGES_MM)
+                contact_force_by_distance[name] = contact_force_by_distance.get(name, 0) + 1
+        elif event == "grasp":
+            bump(grasp_by_distance, _bucket(distance, _DISTANCE_EDGES_MM), outcome)
+        else:
+            bump(place_by_kind, kind, outcome)
+
+    kinds: dict[str, int] = {}
+    for frame in keyframes:
+        kinds[str(frame["kind"])] = kinds.get(str(frame["kind"]), 0) + 1
+    confidence: dict[str, int] = {}
+    rollout_reason: dict[str, int] = {}
+    for entry in labels:
+        label = entry["label"]
+        confidence[str(label.get("label_confidence"))] = confidence.get(str(label.get("label_confidence")), 0) + 1
+        rollout_reason[str(label.get("rollout_reason"))] = rollout_reason.get(str(label.get("rollout_reason")), 0) + 1
+
+    summary = {
+        "version": ROLLOUTS_VERSION,
+        "rollouts": len(results),
+        "keyframes": {
+            "count": len(keyframes),
+            "exact": sum(1 for frame in keyframes if frame.get("exact")),
+            "kinds": dict(sorted(kinds.items())),
+            "labelled": len(labels),
+        },
+        "outcomes": cost.get("outcomes"),
+        "by_event": {name: dict(sorted(counts.items())) for name, counts in sorted(by_event.items())},
+        "reasons": dict(sorted(reasons.items(), key=lambda item: (-item[1], item[0]))),
+        "censoring": dict(sorted(censoring.items())),
+        "push_by_approach_s": _rate_table(push_by_approach),
+        "push_reasons_by_approach_s": {name: dict(sorted(counts.items())) for name, counts in sorted(push_reasons_by_approach.items())},
+        "push_stage_by_direction": {name: dict(sorted(counts.items())) for name, counts in sorted(push_stage_by_direction.items())},
+        "push_by_start_distance_mm": _rate_table(push_by_distance),
+        "push_by_direction": _rate_table(push_by_direction),
+        "push_by_keyframe_kind": _rate_table(push_by_kind),
+        "push_contact_force_failures_by_start_distance_mm": dict(sorted(contact_force_by_distance.items())),
+        "push_approach_s": {
+            "n": len(approach_seconds),
+            "mean": round(statistics.fmean(approach_seconds), 2) if approach_seconds else None,
+            "p50": round(statistics.median(approach_seconds), 2) if approach_seconds else None,
+        },
+        "grasp_by_start_distance_mm": _rate_table(grasp_by_distance),
+        "place_by_keyframe_kind": _rate_table(place_by_kind),
+        "labels": {"confidence": dict(sorted(confidence.items())), "rollout_reason": dict(sorted(rollout_reason.items()))},
+        "wall_s_per_rollout": cost.get("wall_s_per_rollout"),
+        "restore_s_per_rollout": cost.get("restore_s_per_rollout"),
+        "throughput": cost.get("throughput"),
+        "batch_wall_s": cost.get("batch_wall_s"),
+        "replay": cost.get("replay"),
+        "projections": cost.get("projections"),
+        "machine": cost.get("machine"),
+        "versions": cost.get("versions"),
+    }
+    (root / "sweep-summary.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return summary
+
+
 def write_outputs(out: Path, *, keyframes: list[dict[str, Any]], results: list[dict[str, Any]], labels: list[dict[str, Any]], cost: dict[str, Any]) -> dict[str, Path]:
     out.mkdir(parents=True, exist_ok=True)
     paths = {
@@ -557,7 +724,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--events", default="configs/sim/events.yaml")
     parser.add_argument("--out", type=Path, default=None, help="기본 <dataset>/rollouts")
     parser.add_argument("--generator-config", default="configs/data/d1_robot.yaml", help="레코드를 만든 생성 설정 (episode.* 손잡이가 지문에 든다)")
+    parser.add_argument("--summarise", type=Path, default=None, help="rollout을 돌리지 않고 이 출력 디렉터리의 sweep 요약(sweep-summary.json)만 만든다")
     args = parser.parse_args(argv)
+    if args.summarise is not None:
+        summary = summarise_sweep(args.summarise)
+        print(json.dumps({key: summary[key] for key in ("rollouts", "keyframes", "by_event", "censoring", "push_by_approach_s", "push_by_start_distance_mm", "wall_s_per_rollout", "throughput")}, ensure_ascii=False, indent=2))
+        print(f"→ {Path(args.summarise) / 'sweep-summary.json'}")
+        return 0
     outcome = run(
         args.dataset, limit=args.limit, workers=args.workers, events_path=args.events, out=args.out, log=sys.stdout,
         generator_config=args.generator_config,
