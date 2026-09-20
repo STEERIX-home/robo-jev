@@ -527,6 +527,35 @@ def test_the_gripper_closes_only_at_the_grasp_point():
     assert max(result["q_gripper"], key=result["q_gripper"].get) == "closed"
 
 
+def test_the_gripper_stays_closed_on_a_place_tick_whose_path_answer_is_hold_or_retreat():
+    """rj0.5는 전문가 e0.4의 `place_blocked`를 그대로 따른다 (docs/08 §5 "같은 10개 답"): 놓기 국면에서 경로 답이 내려가는
+    경로(direct·via)가 아니면 그리퍼 답은 `closed`다."""
+    import copy
+
+    from robo_jev.harness.rule_judge import RULE_JUDGE_VERSION
+
+    assert RULE_JUDGE_VERSION == "rj0.5"
+    hrn = harness()
+    placing = observation(tick=4, sim_time_ms=400)
+    placing["robot"].update(ee_pos_mm=[30, 240, -40], holding="o0")
+    first = hrn.build_request(placing, None, None)
+    geometry = first["harness"]["candidates"][candidate_id(GRASP)]
+    assert geometry["phase"] == "place"
+    commitment = {"action_ref": candidate_id(GRASP), "key": GRASP, "phase": "place", "held_ticks": 4, "last_switch_tick": 0, "goal_version": 1}
+    request = hrn.build_request(placing, None, commitment)
+    assert max(rule_judge(request)["q_gripper"], key=rule_judge(request)["q_gripper"].get) == "open"
+
+    blocked = copy.deepcopy(request)
+    entry = next(item for item in blocked["request"]["candidates"]["q_main"] if item["id"] == candidate_id(GRASP))
+    entry["path"] = "blocked"
+    blocked["harness"]["candidates"][candidate_id(GRASP)]["path_clear"] = False
+    blocked["request"]["candidates"]["q_path"] = [item for item in blocked["request"]["candidates"]["q_path"] if item["kind"] != "via"]
+    result = rule_judge(blocked)
+    kinds = {item["id"]: item["kind"] for item in blocked["request"]["candidates"]["q_path"]}
+    assert kinds[max(result["q_path"], key=result["q_path"].get)] in ("hold", "retreat")
+    assert max(result["q_gripper"], key=result["q_gripper"].get) == "closed"
+
+
 def test_speed_is_lowered_next_to_a_fragile_object():
     scene = observation()
     scene["objects"][2]["pos_mm"] = [340, 40, -80]

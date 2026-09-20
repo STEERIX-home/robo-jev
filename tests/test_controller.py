@@ -612,6 +612,32 @@ def test_open_in_the_place_phase_waits_until_the_end_effector_is_at_the_place_po
     assert other.apply(move(seq=2, now_ms=PERIOD_MS, phase="approach", gripper="open"), now_ms=PERIOD_MS)["gripper_event"] is not None
 
 
+def test_open_in_the_place_phase_is_anchored_on_the_commands_place_point_even_for_hold():
+    """리뷰 2 C2: hold 경로의 놓기 명령은 `target_mm`이 없어 readiness가 말단 자신에 대이고 운반 높이에서 열렸다. 명령이
+    따로 나르는 `place_mm`이 있으면 경로 종류와 무관하게 그 자리에 댄다; 없으면(옛 형식) 종전대로 목표점이다."""
+    tolerance = GRIPPER["open_readiness_distance_mm"]
+    place_point = [START_MM[0], START_MM[1], START_MM[2] - 100]
+    ctrl = controller(gripper_mm=GRIPPER["closed_mm"], holding="o3")
+    ctrl.apply(move(seq=1, gripper="closed", target_distance_mm=0.0), now_ms=0)
+
+    hold = move(seq=2, now_ms=PERIOD_MS, phase="place", gripper="open", place_mm=place_point)
+    hold["path"] = {"kind": "hold"}
+    far = ctrl.apply(hold, now_ms=PERIOD_MS)
+    assert far["applied"] is True and far["executor"] == "SET_GRIPPER"
+    assert far["gripper_event"] is None and far["gripper_wait"] == "readiness"
+
+    ctrl.observe(sensors(ee_pos_mm=[place_point[0], place_point[1], place_point[2] + tolerance - 1], holding="o3"))
+    near = dict(hold, seq=3)
+    assert ctrl.apply(near, now_ms=2 * PERIOD_MS)["gripper_event"] is not None
+
+    # direct 명령에서도 `place_mm`이 있으면 그것이 기준이다 (경유점 명령의 `target_mm`은 경유점이다).
+    other = controller(gripper_mm=GRIPPER["closed_mm"], holding="o3")
+    other.apply(move(seq=1, gripper="closed", target_distance_mm=0.0), now_ms=0)
+    via = move(seq=2, now_ms=PERIOD_MS, phase="place", gripper="open", place_mm=place_point)
+    via["path"] = {"kind": "via", "target_ref": "o3", "target_mm": place_point, "waypoint_mm": list(START_MM)}
+    assert other.apply(via, now_ms=PERIOD_MS)["gripper_wait"] == "readiness"
+
+
 # --------------------------------------------------------------------------
 # 관측 — 설정된 관측 자세로 이동한 뒤 정지 (docs/08 §6 "관측", docs/02 §4 `OBSERVE`)
 # --------------------------------------------------------------------------

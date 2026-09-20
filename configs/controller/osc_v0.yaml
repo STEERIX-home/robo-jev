@@ -2,7 +2,7 @@
 #
 # 계약의 수치는 전부 여기에만 둔다. `sim/controller.py`에는 상수를 쓰지 않는다.
 # 값은 실험 시작값이며 버전(`version`)과 함께 레코드에 기록한다(docs/08 §8 `versions.controller`).
-version: c0.5
+version: c0.6
 
 # 하네스↔실행기 계약의 표현 규약 (docs/02 §4, docs/05 §2 "좌표계·회전 표현·delta/absolute 설정을 기록").
 frame:
@@ -96,7 +96,9 @@ gripper:                     # docs/08 §6 "그리퍼" — readiness·ID·ACK·�
   # 다른 명령에서는 관측된 대상(중심)까지의 거리가 이 안이어야 한다.
   close_readiness_distance_mm: 15
   open_readiness_force_n: 25.0      # 이보다 큰 하중에서는 open을 보류한다
-  open_readiness_distance_mm: 20    # 놓기 국면의 open은 말단이 놓기점에 이 안으로 와야 실행한다
+  # 놓기 국면의 open은 말단이 **명령의 놓기점**(`place_mm`, 경로 종류와 무관 — hold 명령도 같은 자리를 말한다; 없으면 옛
+  # 형식대로 경로의 목표점)에 이 안으로 와야 실행한다 (c0.6, 리뷰 2 C2).
+  open_readiness_distance_mm: 20
   event_id_prefix: ge
 
 retreat:                     # docs/08 §6 `path: retreat`

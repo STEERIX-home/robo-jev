@@ -100,6 +100,20 @@ def test_jobs_cover_every_candidate_with_paired_seeds_before_the_next_keyframe(s
     assert len(jobs) == 20 and summary["skipped_fidelity"] == 0
     first = jobs[0]["keyframe"]
     assert all(job["keyframe"] == first for job in jobs)
+    # 리뷰 1 M1: 에피소드 안의 키프레임 순서는 에피소드 id로 seed한 무작위다 — 첫 키프레임이 언제나 t=0 `switch`가 아니고,
+    # 같은 레코드는 같은 순서다.
+    import random
+
+    from robo_jev.sim.label import select_keyframes
+
+    expected = select_keyframes(record, {"keyframes": {"per_episode": 5}})
+    random.Random(f"jobs:{record['episode_id']}").shuffle(expected)
+    again, _, _ = build_jobs(
+        [record], EVENTS, limit=20, sim_config=CONFIG["sim_config"], harness_config=load_harness_config(),
+        control_steps=CONFIG["episode"]["control_steps_per_tick"],
+    )
+    assert keyframes[0]["index"] == expected[0]["index"] and again[0]["keyframe"] == first
+    assert [frame["index"] for frame in expected] != sorted(frame["index"] for frame in expected) or len(expected) < 3
     candidates = keyframes[0]["candidates"]
     assert len(candidates) == 8
     assert [job["action"]["id"] for job in jobs[:8]] == candidates and [job["seed"] for job in jobs[:8]] == [0] * 8
@@ -157,6 +171,33 @@ def test_a_worker_pool_produces_the_same_evidence_as_the_serial_run(short_episod
         assert {k: v for k, v in left["job"].items() if k not in ("worker_pid", "env_rebuild_s")} == {
             k: v for k, v in right["job"].items() if k not in ("worker_pid", "env_rebuild_s")
         }
+
+
+def test_summarise_sweep_conditions_push_success_on_approach_time_and_start_distance(short_episode):
+    """128k 전 관문의 요약: 사건별 결과, 밀기 성공률을 접근 시간·시작 거리·방향·키프레임 종류로 조건화한 표(Wilson 구간),
+    censoring 사유, 키프레임 종류 혼합, 산정. rollout 파일에서만 만들고 다시 돌리지 않는다."""
+    from robo_jev.data.rollouts import summarise_sweep
+
+    out = short_episode["out"] / "sweep"
+    outcome = run(short_episode["out"], limit=16, workers=1, out=out)
+    summary = summarise_sweep(out)
+    assert (out / "sweep-summary.json").is_file()
+    assert summary["rollouts"] == 16 == sum(summary["outcomes"].values())
+    assert sum(sum(counts.values()) for counts in summary["by_event"].values()) == 16
+    assert set(summary["keyframes"]["kinds"]) and summary["keyframes"]["count"] == len(outcome["keyframes"])
+    for table in ("push_by_approach_s", "push_by_start_distance_mm", "push_by_direction", "push_by_keyframe_kind", "grasp_by_start_distance_mm"):
+        for row in summary[table].values():
+            assert row["rollouts"] == row["success"] + row["failure"] + row["censored"]
+            assert row["wilson"][0] <= (row["rate"] if row["rate"] is not None else 1.0) <= row["wilson"][1] + 1e-9
+    pushes = sum(row["rollouts"] for row in summary["push_by_direction"].values())
+    assert pushes == summary["by_event"].get("push", {}).get("success", 0) + summary["by_event"].get("push", {}).get("failure", 0) + summary["by_event"].get("push", {}).get("censored", 0)
+    # 리뷰 1 I5: 접근 구간마다·방향마다 실패 이유를 단계(접근 중 충돌·밀기 중 충돌·horizon)로 가른다.
+    assert sum(sum(counts.values()) for counts in summary["push_reasons_by_approach_s"].values()) == pushes
+    assert sum(sum(counts.values()) for counts in summary["push_stage_by_direction"].values()) == pushes
+    allowed = {"success", "censored", "approach_contact_force", "push_contact_force", "approach_horizon", "push_horizon", "push_None", "approach_None"}
+    assert all(set(counts) <= allowed for counts in summary["push_stage_by_direction"].values()), summary["push_stage_by_direction"]
+    assert all(set(counts) <= allowed for counts in summary["push_reasons_by_approach_s"].values())
+    assert summary["projections"]["d1_128k"]["cpu_hours"] > 0 and summary["wall_s_per_rollout"]["mean"] > 0
 
 
 def test_costing_counts_outcomes_by_function():

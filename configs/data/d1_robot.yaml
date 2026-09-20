@@ -33,6 +33,16 @@ episode:
 # D1 목표 편수 — manifest의 예상 소요 시간 계산에 쓴다 (docs/04 §6).
 target_episodes: 400
 
+# 틱 대조 쌍 (docs/04 §3, `robo_jev.data.robot_contrast`): 에피소드마다 종류별 ≤ 1(합쳐 ≤ per_episode) — 금지 접촉 토글(q_main의
+# 적합 집합), 놓인 대상을 영역 경계 너머 1cm(q_done), 지시 다음 버전(q_main; v2 조합이 틱의 목록에 있거나 다른 물체를 든 틱만).
+# `q_gripper`를 겨냥하는 종류는 없다 — 부가 라벨은 commitment의 국면 프로파일에 조건화되어 든 물체 표지로 뒤집히지 않고,
+# 든 물체 표지를 지우는 뒤집기는 실현할 수 없는 상태를 만들며 `q_done`은 zone_boundary가 이미 덮는다(리뷰 1 I2). 기본 틱과
+# sibling을 `judgment-v0`(state_first)로 `contrast/records.jsonl`에 쓴다. 퇴화(hold∉A) 답이 나오는 쌍은 만들지 않고, 삭제
+# analogue(대상을 관측에서 지움·지시의 대상을 비움 → 전문가가 관측·재계획 게이트로 간다)를 지나는 쌍만 남긴다.
+contrast:
+  per_episode: 3
+  kinds: [forbidden, zone_boundary, instruction]
+
 split:
   weights:
     train: 70

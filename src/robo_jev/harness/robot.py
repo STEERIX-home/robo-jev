@@ -62,12 +62,15 @@ __all__ = [
     "joint_key_parts",
     "load_harness_config",
     "parse_exec_history",
+    "push_contact_offset_mm",
     "push_directions_toward_zones",
 ]
 
 #: 하네스 버전. 질문 세트·후보 형식·조합 규칙의 묶음을 가리킨다 (docs/08 §3.1). h0.4 = 계약 v0.3(결합 키에서
-#: 프로파일 제거, 영역 방향 밀기, K≤12와 지시 조합 예약, 키 기반 후보 줄).
-HARNESS_VERSION = "h0.4"
+#: 프로파일 제거, 영역 방향 밀기, K≤12와 지시 조합 예약, 키 기반 후보 줄). h0.5 = 놓기점이 영역 안의 빈 자리(관측된
+#: 바닥 높이), 명령의 `place_mm`, hold·retreat 경로의 놓기 틱에는 open 없음(리뷰 2 C2). h0.6 = 축·손몸통별 밀기 접촉 거리,
+#: 놓기 정체 감시(`place_stalled`), 빈 자리 없는 영역의 후보는 `path=blocked`(D1-prep 리뷰 1).
+HARNESS_VERSION = "h0.6"
 
 #: 결합 행동의 기능. 이 셋만 `기능:대상:접근:목적지` 키를 갖는다.
 JOINT_FUNCTIONS = ("grasp", "place", "push")
@@ -133,6 +136,27 @@ def push_directions_toward_zones(
     return {direction: found[direction] for direction in allowed if direction in found}
 
 
+def push_contact_offset_mm(spec: dict[str, Any], direction: str, obb_mm, top_mm: float, push_z: float) -> float:
+    """밀기 접촉점이 물체 표면 밖으로 떨어지는 거리 (h0.6): 닫힌 그리퍼가 접근 축으로 뻗은 길이 + 여유.
+
+    `candidates.push_contact_mm`이 `{fingers: {…}, hand: {…}}`이면 물체 윗면이 손몸통 바닥(`push_z` + `push_hand_bottom_mm`)보다
+    `push_hand_overlap_mm`보다 더 높을 때 손몸통의 값을, 아니면 손가락의 값을 쓴다(방향 키가 있으면 그것, 없으면 축 키) — 겹침이
+    작은 물체는 손가락이 밀어도 충돌이 드물고 잘 미끄러진다(실측, configs/harness/robot.yaml). 옛 설정(하나의 수)은 축과 무관하게
+    그대로다. 전문가·rollout 후보 선택도 같은 함수로 접촉점을 계산한다.
+    """
+    contact = spec["push_contact_mm"]
+    if not isinstance(contact, dict):
+        return float(contact)
+    axis = direction[-1]
+    hand_bottom = float(push_z) + float(spec.get("push_hand_bottom_mm", 0.0))
+    overlap = float(top_mm) - hand_bottom
+    table = contact["hand"] if overlap > float(spec.get("push_hand_overlap_mm", 0.0)) else contact["fingers"]
+    value = table.get(direction, table.get(axis))
+    if value is None:
+        raise ValueError(f"push_contact_mm에 {direction!r}(축 {axis!r})의 값이 없다: {contact}")
+    return float(value)
+
+
 def parse_exec_history(text: Any) -> dict[str, str]:
     """실행 이력 한 줄(`main=c1 phase=approach … ack=ok`)을 필드로 푼다.
 
@@ -185,6 +209,8 @@ class _Candidate:
     phase: str = "none"
     #: 밀기 후보가 향하는 영역 id들 (영역 방향 열거의 근거; 지시 조합 예약이 읽는다).
     toward_zones: tuple[str, ...] = ()
+    #: 놓기 후보의 자리 기록 (`_place_points`): `{"free", "offset_mm", "point"}`. 놓기 후보가 아니면 `None`.
+    place: dict[str, Any] | None = None
 
     @property
     def id(self) -> str:
@@ -209,7 +235,7 @@ class _Candidate:
         return entry
 
     def geometry(self) -> dict[str, Any]:
-        return {
+        geometry = {
             "key": self.key,
             "function": self.function,
             "target_ref": self.target_ref,
@@ -228,6 +254,11 @@ class _Candidate:
             "phase": self.phase,
             "toward_zones": list(self.toward_zones),
         }
+        if self.place is not None:
+            # 놓기점은 행동점이다. 명령이 `place_mm`으로 따로 나른다 (docs/08 §6; 실행기의 open readiness 기준).
+            geometry["place_mm"] = geometry["action_mm"]
+            geometry["place"] = dict(self.place)
+        return geometry
 
 
 # --------------------------------------------------------------------------
@@ -274,6 +305,8 @@ class RobotHarness:
         self.adapter = adapter if adapter is not None else GroundTruthAdapter(config["perception"])
         #: 같은 방식의 연속 실패 횟수 (실행 이력의 `fails=`). 에피소드 안에서만 센다.
         self._failure_streak: dict[str, Any] | None = None
+        #: 놓기 정체(`place_stalled`)로 이 에피소드 동안 제외한 놓기점 (영역 id → xy 목록). 에피소드 안에서만 든다.
+        self._stalled_place_points: dict[str, list[tuple[float, float]]] = {}
 
     @classmethod
     def from_config_path(
@@ -285,6 +318,7 @@ class RobotHarness:
         """새 에피소드. 앞단의 추적 기억과 실패 횟수를 버린다."""
         self.adapter = GroundTruthAdapter(self.config["perception"])
         self._failure_streak = None
+        self._stalled_place_points = {}
 
     # ------------------------------------------------------------------
     # 질문 세트 (docs/08 §4)
@@ -586,23 +620,25 @@ class RobotHarness:
         radius_xy = math.dist((0.0, 0.0), (obb[0] / 2.0, obb[1] / 2.0))
         holding = state["robot"].get("holding")
 
+        place: dict[str, Any] | None = None
         if function == "place" or (function == "grasp" and holding == object_id):
             # 이미 집은 결합 행동은 남은 절반(목적지로 옮기기)이 목표다.
             points = self._place_points(state, destination, entry)
             if points is None:
                 return None
-            approach_mm, action_mm = points
+            approach_mm, action_mm, place = points
         elif function == "grasp":
             top = float(entry["top_mm"])
             approach_mm = [pose[0], pose[1], top + float(spec["approach_clearance_mm"])]
             action_mm = [pose[0], pose[1], top - float(spec["grasp_depth_mm"])]
         else:  # push
             vector = _PUSH_VECTORS[approach]
-            contact = radius_xy + float(spec["push_contact_mm"])
             # 물체 중간 높이로 밀되 작업면 위 최소 높이는 지킨다 — 닫힌 손가락 끝이 그립 사이트 아래 4mm에 있고
             # 하강 끝의 추종 오차가 10mm쯤이라, 낮은 상자(32mm)의 중간 높이(16mm)에서는 손가락이 작업면을 친다.
             surface = float(state["scene"].get("work_surface_mm", 0.0))
             height = max(pose[2], surface + float(spec["push_height_min_mm"]))
+            # 접촉 거리는 접근 축과 손몸통 겹침에 따른다 (h0.6): ±y는 닫힌 손가락이 30mm, 손몸통이 106mm 뻗어 있다.
+            contact = radius_xy + push_contact_offset_mm(spec, approach, obb, float(entry["top_mm"]), height)
             approach_mm = [pose[0] - vector[0] * contact, pose[1] - vector[1] * contact, height]
             action_mm = [
                 approach_mm[0] + vector[0] * float(spec["push_segment_mm"]),
@@ -626,6 +662,10 @@ class RobotHarness:
             if str(other["id"]) != object_id and str(other["id"]) != holding
         ]
         blocker = self._first_blocker(ee, target_mm, blockers, margins)
+        if place is not None and not place["free"]:
+            # 빈 자리 없는 영역 (h0.6, 리뷰 1 M2): 후보 줄이 `path=blocked`를 말해야 전문가의 경로 답이 hold, 그리퍼 답이
+            # `closed`가 되어 하네스가 실제로 명령하는 hold + `conflict{zone_full}`과 라벨이 맞는다.
+            blocker = "zone_full"
         clearance = min(
             (
                 math.dist(pose, [float(v) for v in other["pose_mm"]])
@@ -653,6 +693,7 @@ class RobotHarness:
             moving=bool(self.adapter.moving(object_id)),
             phase=phase,
             toward_zones=tuple(toward),
+            place=place,
         )
 
     @staticmethod
@@ -939,22 +980,97 @@ class RobotHarness:
 
     def _place_points(
         self, state: dict[str, Any], destination: str, entry: dict[str, Any]
-    ) -> tuple[list[float], list[float]] | None:
-        """목적지 영역의 접근 지점과 놓기 지점. 영역을 모르면 `None`.
+    ) -> tuple[list[float], list[float], dict[str, Any]] | None:
+        """목적지 영역의 접근 지점·놓기 지점과 자리 기록. 영역을 모르면 `None`.
 
-        놓기점은 **든 물체의 바닥**이 작업면 위 `place_clearance_mm`에 오는 그립 높이다.
-        파지점이 윗면 아래 `grasp_depth_mm`이므로 그립 = 작업면 + 높이 − 깊이 + 여유다.
+        놓기점은 고정된 영역 중심이 아니라 **영역 안의 빈 자리**다 (h0.5, 리뷰 2 C2 — E1에서 같은 영역에 두 번째로
+        놓는 물체의 하강이 먼저 놓인 물체에 막혀 hold 경로 + 운반 높이 open으로 떨어졌고, seed 13에서는 중심 곁 42mm의
+        낮은 상자가 구간 대조에는 걸리지 않으면서 든 원통의 바닥을 받쳐 하강이 멈췄다). 중심에서 가까운 격자점부터
+        (`place_grid_mm`; 같은 거리면 x·y 순) 든 물체의 바닥 자국(OBB xy 외접 반지름)이 관측된 다른 물체의 자국과
+        `place_margin_mm` 이상 떨어지고, 물체 중심이 영역 경계에서 `place_zone_inset_mm` 안쪽이며(완료 판정은 중심이 영역
+        안인 것이다), 그 자리로의 수직 하강 구간이 구간 대조(:meth:`_first_blocker`)에 걸리지 않는 첫 자리를 고른다 —
+        결정적이고 관측된 자세만 쓴다. 빈 자리가 없으면 중심을 목표로 두되 `free: False`(zone_full)로 표시한다.
+
+        놓기 높이는 **든 물체의 관측된 바닥**(앞단이 말단 + 파지 오프셋으로 채운다)이 작업면 위 `place_clearance_mm`에
+        오는 말단 높이다: 파지가 공칭(윗면 아래 `grasp_depth_mm`)보다 깊거나 얕아도 바닥이 작업면에 닿는 높이에서 열되,
+        공칭에서 `place_height_slack_mm`까지만 벗어난다(오프셋 추정이 틀렸을 때의 안전). 들고 있지 않은 대상(합성 상태)은
+        공칭이다: 그립 = 작업면 + 높이 − 깊이 + 여유.
         """
         spec = self.candidates_config
         zone = next((item for item in state["zones"] if str(item["id"]) == destination), None)
         if zone is None:
             return None
         centre = _zone_centre(zone)
+        x0, y0, x1, y1 = [float(value) for value in zone["bounds_mm"]]
+        x0, x1 = min(x0, x1), max(x0, x1)
+        y0, y1 = min(y0, y1), max(y0, y1)
         surface = float(state["scene"].get("work_surface_mm", 0.0))
-        grip = surface + float(entry["obb_mm"][2]) - float(spec["grasp_depth_mm"])
-        action_mm = [centre[0], centre[1], grip + float(spec["place_clearance_mm"])]
-        approach_mm = [centre[0], centre[1], action_mm[2] + float(spec["approach_clearance_mm"])]
-        return approach_mm, action_mm
+        clearance = float(spec["place_clearance_mm"])
+        obb = [float(value) for value in entry["obb_mm"]]
+        nominal = surface + obb[2] - float(spec["grasp_depth_mm"]) + clearance
+        grip = nominal
+        object_id = str(entry["id"])
+        holding = state["robot"].get("holding")
+        if holding == object_id:
+            ee_z = float(state["robot"]["ee_pose_mm"][2])
+            bottom = float(entry["pose_mm"][2]) - obb[2] / 2.0
+            slack = float(spec.get("place_height_slack_mm", 0.0))
+            grip = min(max(ee_z + (surface + clearance) - bottom, nominal - slack), nominal + slack)
+
+        footprint = math.hypot(obb[0] / 2.0, obb[1] / 2.0)
+        inset = float(spec["place_zone_inset_mm"])
+        others = [
+            other for other in state["objects"] if str(other["id"]) not in (object_id, holding)
+        ]
+        margins = self._margins(state)
+        rise = float(spec["approach_clearance_mm"])
+        stalled = self._stalled_place_points.get(destination) or []
+        exclusion = float(self.compose_config.get("place_stall_exclusion_mm", 0.0))
+
+        def free(px: float, py: float) -> bool:
+            if not (x0 + inset <= px <= x1 - inset and y0 + inset <= py <= y1 - inset):
+                return False
+            if any(math.hypot(px - sx, py - sy) <= exclusion for sx, sy in stalled):
+                return False  # 이 에피소드에서 정체한 자리 (h0.6, `place_stalled`)
+            return self._place_point_free(px, py, grip, rise, footprint, others, margins)
+
+        grid = float(spec["place_grid_mm"])
+        span_x = int((x1 - x0) / (2.0 * grid)) + 1
+        span_y = int((y1 - y0) / (2.0 * grid)) + 1
+        points = sorted(
+            (
+                (math.hypot(i * grid, j * grid), i * grid, j * grid)
+                for i in range(-span_x, span_x + 1)
+                for j in range(-span_y, span_y + 1)
+            ),
+        )
+        for offset, dx, dy in points:
+            px, py = centre[0] + dx, centre[1] + dy
+            if free(px, py):
+                record = {"free": True, "offset_mm": int(round(offset)), "point": "centre" if offset == 0.0 else "offset"}
+                return [px, py, grip + rise], [px, py, grip], record
+        record = {"free": False, "offset_mm": 0, "point": "zone_full"}
+        return [centre[0], centre[1], grip + rise], [centre[0], centre[1], grip], record
+
+    def _place_point_free(
+        self,
+        px: float,
+        py: float,
+        grip: float,
+        rise: float,
+        footprint: float,
+        others: list[dict[str, Any]],
+        margins: dict[str, float],
+    ) -> bool:
+        """놓기 자리의 자국·구간 검사 (:meth:`_place_points`의 규칙 (a)·(c)): 든 물체의 자국이 이웃 자국과 `place_margin_mm`
+        이상 떨어지고 수직 하강 구간이 구간 대조에 걸리지 않는다. 영역 경계·정체 제외는 부르는 쪽이 본다."""
+        margin = float(self.candidates_config["place_margin_mm"])
+        for other in others:
+            pose = [float(value) for value in other["pose_mm"]]
+            reach = footprint + math.hypot(float(other["obb_mm"][0]) / 2.0, float(other["obb_mm"][1]) / 2.0) + margin
+            if math.hypot(px - pose[0], py - pose[1]) < reach:
+                return False
+        return self._first_blocker([px, py, grip + rise], [px, py, grip], others, margins) is None
 
     def _obstacles(self, state: dict[str, Any], target_ref: str | None) -> list[dict[str, Any]]:
         """구간 검사의 장애물: 관측된 물체 가운데 대상 자신과 들고 있는 물체를 뺀 것."""
@@ -1103,12 +1219,14 @@ class RobotHarness:
 
         # 3. 주 결정과 결정 유지 ------------------------------------------
         blocked = self._retry_blocked(results, model.get("exec_history"), candidates, records)
-        current = commitment
+        current = self._track_place_stall(commitment, state, geometry) if commitment is not None else None
         if current is not None:
             release = self._release_reason(current, state, candidates, geometry)
             if release is None and current["action_ref"] in blocked:
                 release = {"reason": "retry_blocked"}
             if release is not None:
+                if release["reason"] == "place_stalled":
+                    records.append(self._exclude_place_point(current))
                 records.append({"kind": "release", **release, "action_ref": current["action_ref"]})
                 current = None
 
@@ -1150,17 +1268,10 @@ class RobotHarness:
         # 4. 부가 답의 적용 ------------------------------------------------
         aux = self._aux(results, paths, state, info, switch=switch, gripper=gripper_now, records=records)
 
-        # 5. 그리퍼 --------------------------------------------------------
-        if aux["gripper"] != gripper_now:
-            records.append({"kind": "gripper_change", "desired": aux["gripper"]})
-            if state.get("exec", {}).get("gripper_wait"):
-                records.append(
-                    {"kind": "gripper_wait", "reason": str(state["exec"]["gripper_wait"])}
-                )
-
         # 6. 명령 생성 ------------------------------------------------------
         # 실행기 대응은 **채택된 후보**를 따른다 (docs/02 §4 표). 관측·재계획을 게이팅이
-        # 아니라 주 결정으로 고른 틱도 같은 원시 기능으로 가야 한다.
+        # 아니라 주 결정으로 고른 틱도 같은 원시 기능으로 가야 한다. 5(그리퍼)보다 먼저 만드는 것은 실제로
+        # 명령한 경로가 그리퍼 답의 하향(아래)을 정하기 때문이다.
         command, executed = self._command(
             header,
             action_ref=chosen,
@@ -1177,6 +1288,21 @@ class RobotHarness:
             records=records,
             branch=chosen_key if chosen_key in FIXED_KEYS else None,
         )
+        if phase == "place" and executed["kind"] in ("hold", "retreat") and aux["gripper"] == "open" != gripper_now:
+            # 놓기 국면인데 실제 명령 경로가 내려가지 않는다(막힌 하강·모델의 경로 답). 운반 높이에서 열면 떨어뜨리는
+            # 일이므로 규칙 4의 경로 하향처럼 그리퍼 답도 현재 상태로 하향한다 (h0.5, 리뷰 2 C2). 전문가의 라벨도
+            # 같은 틱에 `closed`다(`place_blocked`).
+            records.append({"kind": "gripper_downgraded", "desired": "open", "reason": f"place_{executed['kind']}"})
+            aux["gripper"] = gripper_now
+            command["gripper"] = gripper_now
+
+        # 5. 그리퍼 --------------------------------------------------------
+        if aux["gripper"] != gripper_now:
+            records.append({"kind": "gripper_change", "desired": aux["gripper"]})
+            if state.get("exec", {}).get("gripper_wait"):
+                records.append(
+                    {"kind": "gripper_wait", "reason": str(state["exec"]["gripper_wait"])}
+                )
         current = self._count_forbidden(current, command, records)
         adopted = {
             "main": chosen,
@@ -1449,7 +1575,44 @@ class RobotHarness:
         drift = self._drift(commitment, state, geometry.get(commitment["action_ref"]))
         if drift is not None:
             return {"reason": "drifted", **drift}
+        waited = int(commitment.get("place_wait_ticks", 0))
+        if waited >= int(self.compose_config.get("m_place", 0) or 10**9):
+            return {"reason": "place_stalled", "ticks": waited}
         return None
+
+    def _track_place_stall(
+        self, commitment: dict[str, Any], state: dict[str, Any], geometry: dict[str, Any]
+    ) -> dict[str, Any]:
+        """놓기 정체 장부 (h0.6, 리뷰 1 I6): 놓기 국면에서 실행기가 `gripper_wait: readiness`로 기다린 연속 틱 수와 그 구간의
+        시작 높이. 말단이 `place_progress_mm` 이상 더 내려가면 구간을 새로 센다 — 접촉 진동은 진행이 아니다. `m_place`에
+        이르면 :meth:`_release_reason`이 `place_stalled`로 commitment를 푼다."""
+        info = geometry.get(commitment["action_ref"]) or {}
+        waiting = str((state.get("exec") or {}).get("gripper_wait") or "") == "readiness"
+        if commitment.get("phase") != "place" or not info.get("place_mm") or not waiting:
+            return {**commitment, "place_wait_ticks": 0, "place_wait_z": None}
+        z = float(state["robot"]["ee_pose_mm"][2])
+        start = commitment.get("place_wait_z")
+        progressed = start is None or float(start) - z >= float(self.compose_config.get("place_progress_mm", 0.0))
+        return {
+            **commitment,
+            "place_wait_ticks": 1 if progressed else int(commitment.get("place_wait_ticks", 0)) + 1,
+            "place_wait_z": z if progressed else float(start),
+            "place_point_mm": [float(value) for value in info["place_mm"]],
+            "place_destination": info.get("destination"),
+        }
+
+    def _exclude_place_point(self, commitment: dict[str, Any]) -> dict[str, Any]:
+        """정체한 놓기점을 이 에피소드에서 제외한다. 다음 :meth:`_place_points`는 그 둘레 `place_stall_exclusion_mm`를 건넌다."""
+        point = [float(value) for value in commitment.get("place_point_mm") or (0.0, 0.0, 0.0)]
+        destination = str(commitment.get("place_destination"))
+        self._stalled_place_points.setdefault(destination, []).append((point[0], point[1]))
+        return {
+            "kind": "place_stalled",
+            "action_ref": commitment["action_ref"],
+            "destination": destination,
+            "point_mm": [int(round(value)) for value in point],
+            "ticks": int(commitment.get("place_wait_ticks", 0)),
+        }
 
     def _drift(
         self, commitment: dict[str, Any], state: dict[str, Any], info: dict[str, Any] | None
@@ -1656,6 +1819,8 @@ class RobotHarness:
             "stop_ticks": 0,
             "start_pose_mm": start,
             "start_clearance_mm": int(info["clearance_mm"]) if info else None,
+            "place_wait_ticks": 0,
+            "place_wait_z": None,
         }
 
     @staticmethod
@@ -1828,6 +1993,9 @@ class RobotHarness:
             ),
             "target_moving": bool((info or {}).get("moving", False)),
         }
+        if phase == "place" and (info or {}).get("place_mm"):
+            # 놓기점은 경로와 따로 나른다 (h0.5): 실행기의 open readiness가 경로 종류(hold 포함)와 무관하게 이 자리에 댄다.
+            command["place_mm"] = _round_list(info["place_mm"])
         if branch == "observe":
             command["observe"] = True
             if state["robot"].get("holding") is None:
@@ -1867,6 +2035,11 @@ class RobotHarness:
         if info is None or info.get("function") is None or kind in ("hold", "retreat"):
             actual = "hold" if kind != "retreat" else "retreat"
             return {"kind": actual}, target_ref, False, _executed(_path_of_kind(paths, actual), actual)
+        if phase in ("transport", "place") and (info.get("place") or {}).get("free") is False:
+            # 영역에 빈 자리가 없다 (h0.5). 중심으로 내려가 떨어뜨리지 않고 hold로 기다린다 — 그 사이 목표가 바뀌거나
+            # 외란이 자리를 만든다. 충돌로 적는다.
+            records.append({"kind": "conflict", "reason": "zone_full", "target_ref": target_ref, "destination": info.get("destination")})
+            return {"kind": "hold"}, target_ref, False, _executed(_path_of_kind(paths, "hold"), "hold")
 
         point = [float(value) for value in (info.get("target_mm") or self._legacy_target(info, phase))]
         if not self._reachable(point):
