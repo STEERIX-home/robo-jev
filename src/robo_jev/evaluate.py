@@ -25,6 +25,10 @@
 * 규칙 기준군 (docs/02, `robo_jev.harness.rule_judge`): 로봇 틱마다 규칙 판단기의 10개 답을 같은 후보 목록 위의 확률로
   바꿔 같은 지표를 낸다 — 하네스만으로 풀리는 범위의 기준. 이 함수만 하네스를 import하므로 :mod:`robo_jev.train` 은
   이 모듈을 import하지 않는다(docs/06 §1의 경계는 학습 코드 쪽에 둔다).
+* **편 단위 불확실성** (Task P2 B): 틱은 편(에피소드) 안에서 상관되어 있어 독립 단위는 틱이 아니라 편이다. 그래서
+  :func:`aggregate` 가 질문 칸마다 편 단위 집계(``per_episode``)를 표에 남기고, :func:`episode_bootstrap` 이 편을
+  표본 단위로 재표집해 정확도의 구간과 **대조군 대비 여유의 쌍 구간**을 낸다 — 그 구간이 0을 포함하는 여유는
+  판정이 아니다. (P1은 `_predictions`를 표를 쓰기 전에 버려서 이 수를 산출물로 낼 수 없었다.)
 """
 
 from __future__ import annotations
@@ -47,10 +51,9 @@ from robo_jev.sampler import Item, permute_candidates
 __all__ = [
     "aggregate",
     "calibration_error",
-    "episode_bootstrap",
-    "split_episode_bootstrap",
     "context_shuffle_records",
     "contrast_pair_check",
+    "episode_bootstrap",
     "evaluate_items",
     "evaluate_suite",
     "eval_suite_identity",
@@ -61,6 +64,7 @@ __all__ = [
     "predict_items",
     "rule_judge_predictions",
     "selective_metrics",
+    "split_episode_bootstrap",
     "tiny_scorer_column",
 ]
 
@@ -767,7 +771,8 @@ def evaluate_items(
 ) -> dict[str, Any]:
     """분할 하나의 표: 모델(``model``), 치환한 순서(``permuted`` + ``answer_change``), 문맥 섞기(``context_shuffle`` +
     ``context_shuffle_kind = "state"``: 비로봇은 상태 전체, 로봇 스트림은 id를 재매핑한 구조화 상태 — 모듈 설명), 로봇 스트림만의
-    지시 텍스트 섞기(``instruction_shuffle`` + ``instruction_shuffle_kind``; `instruction_shuffle=True`일 때), 규칙 기준군(``rule_judge``)."""
+    지시 텍스트 섞기(``instruction_shuffle`` + ``instruction_shuffle_kind``; `instruction_shuffle=True`일 때), 규칙 기준군(``rule_judge``),
+    그리고 질문 칸마다의 **편 단위 95 % 구간**(``episode_bootstrap`` — :func:`split_episode_bootstrap`)."""
     from robo_jev.model.serialize import serialize_request
 
     predictions = predict_items(judge, items, tokens_per_batch=tokens_per_batch, fused=fused)

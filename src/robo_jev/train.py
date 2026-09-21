@@ -31,9 +31,17 @@ norm·토큰 수와 함께 **실현 토큰 비중**과 **유효 loss 비중** �
 손실에서 실제로 받은 **계수 질량**(분야는 0.6/0.4 그대로 — 한쪽이 없으면 1.0; 묶음·틱 종류는 그
 안의 배분), ``loss_contribution`` = 그 축의 기여 **값**이 step 손실 값에서 차지하는 몫.
 
+**정밀도 (docs/03 §5).** 실제 backbone은 BF16으로 계산하고 readout은 fp32다. 거기에 더해, 학습 대상 가운데 fp32가
+**아닌** 파라미터(= BF16 backbone을 통째로 학습하는 T1)는 optimizer가 **fp32 master 사본**을 들고 fp32로 갱신한 뒤
+bf16으로 되쓴다(:class:`MasterWeightAdamW`, 설정 `fp32_master_weights`, 기본 켜짐). 이것이 없으면 |p| ≈ 0.03의
+가중치에서 한 step의 1e-5가 bf16 눈금 2⁻¹³ = 1.22e-4에 반올림돼 **사라진다** — P1이 그 조건으로 돌았고, 40 step 뒤
+임베딩을 뺀 표본의 23.32 %만 움직였으며 움직인 원소의 평균 |Δ|는 반올림 없는 기대치의 7~9 %였다. readout과 LoRA는
+이미 fp32라 사본을 만들지 않는다.
+
 **저장·재개 (docs/03 §5).** step 사이에서는 model/optimizer/scheduler/RNG/sampler 위치/config/manifest를,
 step 도중(구간 경계)에서는 여기에 진행 위치(단위·구간 index), 누적 gradient, 이어 붙일 공통 상태를
-더해 :func:`robo_jev.checkpoint.save_checkpoint` 로 atomic하게 쓴다. 재개는 그 위치의 다음 구간부터
+더해 :func:`robo_jev.checkpoint.save_checkpoint` 로 atomic하게 쓴다(fp32 master 사본은 optimizer의 `state_dict`에
+함께 들어간다 — bf16 파라미터에서 되살릴 수 없는 정밀도다). 재개는 그 위치의 다음 구간부터
 이어가며, 같은 seed의 연속 실행과 FP32·CPU에서 비트 단위로 같아야 한다(tests/test_resume.py). 중단은
 ``stop_after``(결정적 검사용)나 ``max_wall_hours``(예산)로 구간 경계에서 일어난다.
 

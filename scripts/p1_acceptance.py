@@ -231,49 +231,40 @@ def _save_snapshot(snapshot: dict[str, Any], path: Path) -> None:
     torch.save(snapshot, path)
 
 
-def run_resume_phase(phase: str, *, steps: int, run_dir: Path, config_path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
-    """C3의 한 조각 — 자기 자신을 다시 띄워 돌린다(진짜 프로세스 재시작). `phase`는 continuous | first | second."""
+def run_resume_phase(phase: str, *, steps: int, run_dir: Path, config_path: Path = DEFAULT_CONFIG, mode: str = "t0") -> dict[str, Any]:
+    """C3의 한 조각 — 자기 자신을 다시 띄워 돌린다(진짜 프로세스 재시작). `phase`는 continuous | first | second.
+
+    `mode`는 t0 | lora | t1이다. P1의 게이트는 **T0만** 덮었다(readout tensor 셋뿐 — backbone optimizer 상태도,
+    LoRA adapter도, fp32 master 사본도 지나지 않는다). 그래서 이 게이트는 학습 범위를 인자로 받는다 (P1 리뷰 1 M3)."""
     from robo_jev.train import Trainer
 
     half = steps // 2
     if phase == "continuous":
-        config = _config("t0", steps=steps, run_id="p1-c3-continuous", overrides={"artifacts_dir": str(run_dir)}, config_path=config_path)
+        config = _config(mode, steps=steps, run_id=f"p1-c3-continuous-{mode}", overrides={"artifacts_dir": str(run_dir)}, config_path=config_path)
         with Trainer(config) as trainer:
             trainer.run()
-            _save_snapshot(_snapshot(trainer), run_dir / "continuous.pt")
-            return {"phase": phase, "step": trainer.step, "losses": [m["loss"] for m in trainer.history]}
+            _save_snapshot(_snapshot(trainer), run_dir / f"continuous-{mode}.pt")
+            return {"phase": phase, "mode": mode, "step": trainer.step, "losses": [m["loss"] for m in trainer.history]}
     if phase == "first":
-        config = _config("t0", steps=steps, run_id="p1-c3-split", overrides={"artifacts_dir": str(run_dir), "stop_after": {"step": half}, "checkpoint_every": half}, config_path=config_path)
+        config = _config(mode, steps=steps, run_id=f"p1-c3-split-{mode}", overrides={"artifacts_dir": str(run_dir), "stop_after": {"step": half}, "checkpoint_every": half}, config_path=config_path)
         with Trainer(config) as trainer:
             result = trainer.run()
-            return {"phase": phase, "step": trainer.step, "checkpoint": result["checkpoint"], "losses": [m["loss"] for m in trainer.history]}
+            return {"phase": phase, "mode": mode, "step": trainer.step, "checkpoint": result["checkpoint"], "losses": [m["loss"] for m in trainer.history]}
     if phase == "second":
-        config = _config("t0", steps=steps, run_id="p1-c3-split", overrides={"artifacts_dir": str(run_dir)}, config_path=config_path)
-        checkpoint = run_dir / "p1-c3-split" / "checkpoint.pt"
+        config = _config(mode, steps=steps, run_id=f"p1-c3-split-{mode}", overrides={"artifacts_dir": str(run_dir)}, config_path=config_path)
+        checkpoint = run_dir / f"p1-c3-split-{mode}" / "checkpoint.pt"
         with Trainer(config, resume=checkpoint) as trainer:
             trainer.run()
-            _save_snapshot(_snapshot(trainer), run_dir / "split.pt")
-            return {"phase": phase, "step": trainer.step, "losses": [m["loss"] for m in trainer.history]}
+            _save_snapshot(_snapshot(trainer), run_dir / f"split-{mode}.pt")
+            return {"phase": phase, "mode": mode, "step": trainer.step, "losses": [m["loss"] for m in trainer.history]}
     raise ValueError(f"phase: continuous | first | second (받은 값: {phase!r})")
 
 
-def check_resume(*, steps: int = 20, run_dir: Path, config_path: Path = DEFAULT_CONFIG, python: str | None = None) -> dict[str, Any]:
+def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: int) -> dict[str, Any]:
+    """두 :func:`_snapshot` 을 :data:`RESUME_TOLERANCE` 로 견준다 — 게이트의 **판정 부분**만 떼어 둔 것이라
+    GPU 없이도 시험할 수 있다 (P1 리뷰 1 M3: 이 판정에 시험이 하나도 없었다)."""
     import torch
 
-    python = python or sys.executable
-    started = time.perf_counter()
-    phases = []
-    for phase in ("continuous", "first", "second"):
-        phase_started = time.perf_counter()
-        command = [python, str(REPO / "scripts" / "p1_acceptance.py"), "--phase", phase, "--steps", str(steps), "--run-dir", str(run_dir), "--config", str(config_path)]
-        completed = subprocess.run(command, cwd=REPO, capture_output=True, text=True, check=False)
-        print(completed.stdout[-2000:], file=sys.stderr, flush=True)
-        if completed.returncode != 0:
-            return {"check": "resume", "passed": False, "failed_phase": phase, "stderr": completed.stderr[-4000:], "phases": phases}
-        phases.append({"phase": phase, "seconds": round(time.perf_counter() - phase_started, 1), "stdout_tail": completed.stdout.strip().splitlines()[-1:]})
-
-    continuous = torch.load(run_dir / "continuous.pt", map_location="cpu", weights_only=False)
-    split = torch.load(run_dir / "split.pt", map_location="cpu", weights_only=False)
     loss_rows = []
     for index, (a, b) in enumerate(zip(continuous["losses"], split["losses"]), start=1):
         loss_rows.append({"step": index, "continuous": a, "split": b, "abs": abs(a - b), "rel": abs(a - b) / max(abs(a), 1e-9)})
@@ -306,7 +297,7 @@ def check_resume(*, steps: int = 20, run_dir: Path, config_path: Path = DEFAULT_
         and worst_rel <= RESUME_TOLERANCE["param_rel_l2"]
     )
     return {
-        "check": "resume", "steps": int(steps), "seconds": round(time.perf_counter() - started, 1), "phases": phases,
+        "check": "resume", "steps": int(steps),
         "tolerance": dict(RESUME_TOLERANCE), "tolerance_note": "fixed in scripts/p1_acceptance.py before the comparison (RESUME_TOLERANCE)",
         "losses": loss_rows, "worst_loss_abs": worst_loss, "worst_loss_rel": worst_loss_rel,
         "parameters": parameters, "worst_param_max_abs": worst_param, "worst_param_relative_l2": worst_rel,
@@ -317,6 +308,27 @@ def check_resume(*, steps: int = 20, run_dir: Path, config_path: Path = DEFAULT_
     }
 
 
+def check_resume(*, steps: int = 20, run_dir: Path, config_path: Path = DEFAULT_CONFIG, python: str | None = None, mode: str = "t0") -> dict[str, Any]:
+    import torch
+
+    python = python or sys.executable
+    started = time.perf_counter()
+    phases = []
+    for phase in ("continuous", "first", "second"):
+        phase_started = time.perf_counter()
+        command = [python, str(REPO / "scripts" / "p1_acceptance.py"), "--phase", phase, "--steps", str(steps), "--run-dir", str(run_dir), "--config", str(config_path), "--resume-modes", mode]
+        completed = subprocess.run(command, cwd=REPO, capture_output=True, text=True, check=False)
+        print(completed.stdout[-2000:], file=sys.stderr, flush=True)
+        if completed.returncode != 0:
+            return {"check": "resume", "mode": mode, "passed": False, "failed_phase": phase, "stderr": completed.stderr[-4000:], "phases": phases}
+        phases.append({"phase": phase, "seconds": round(time.perf_counter() - phase_started, 1), "stdout_tail": completed.stdout.strip().splitlines()[-1:]})
+
+    continuous = torch.load(run_dir / f"continuous-{mode}.pt", map_location="cpu", weights_only=False)
+    split = torch.load(run_dir / f"split-{mode}.pt", map_location="cpu", weights_only=False)
+    return {**compare_resume(continuous, split, steps=steps), "mode": mode,
+            "seconds": round(time.perf_counter() - started, 1), "phases": phases}  # fmt: skip
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", default="frozen,trains,resume", help="frozen | trains | resume, 쉼표로")
@@ -324,6 +336,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--steps", type=int, default=20, help="resume: 연속 실행의 step 수 (절반에서 저장·재시작)")
     parser.add_argument("--train-steps", dest="train_steps", type=int, default=3, help="trains: LoRA·T1의 step 수")
     parser.add_argument("--trains-modes", dest="trains_modes", default="lora,t1")
+    parser.add_argument("--resume-modes", dest="resume_modes", default="t0", help="resume: 어느 학습 범위에서 게이트를 돌릴지 (t0 | lora | t1, 쉼표로) — P1은 t0만 덮었다")
     parser.add_argument("--run-dir", dest="run_dir", default=str(REPO / "artifacts" / "runs" / "p1-acceptance"))
     parser.add_argument("--phase", default=None, help="내부용 — C3의 조각을 다시 띄울 때")
     parser.add_argument("--out", default=str(REPO / "artifacts" / "reports" / "p1-acceptance.json"))
@@ -333,7 +346,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"[p1] gpu guard {guard} · memory {memory_report()}", file=sys.stderr, flush=True)
     run_dir = Path(args.run_dir)
     if args.phase:
-        result = run_resume_phase(args.phase, steps=args.steps, run_dir=run_dir, config_path=Path(args.config))
+        modes = [name.strip() for name in args.resume_modes.split(",") if name.strip()]
+        if len(modes) != 1:
+            parser.error(f"--phase와 함께 쓰는 --resume-modes는 하나여야 한다 (받은 값: {args.resume_modes!r})")
+        result = run_resume_phase(args.phase, steps=args.steps, run_dir=run_dir, config_path=Path(args.config), mode=modes[0])
         print(json.dumps(result, ensure_ascii=False))
         return 0
     wanted = [name.strip() for name in args.check.split(",") if name.strip()]
@@ -356,7 +372,10 @@ def main(argv: list[str] | None = None) -> int:
             for mode in (m.strip() for m in args.trains_modes.split(",") if m.strip()):
                 out["checks"][f"trains_{mode}"] = check_trains(mode, steps=args.train_steps, config_path=Path(args.config))
         else:
-            out["checks"]["resume"] = check_resume(steps=args.steps, run_dir=run_dir, config_path=Path(args.config))
+            for mode in (m.strip() for m in args.resume_modes.split(",") if m.strip()):
+                # t0의 자리 이름은 그대로 둔다 — stage D의 관문(`run_stage_d1_gated.sh`)이 `checks.resume.passed`를 본다
+                key = "resume" if mode == "t0" else f"resume_{mode}"
+                out["checks"][key] = check_resume(steps=args.steps, run_dir=run_dir, config_path=Path(args.config), mode=mode)
         print(f"[p1] {name}: {round(time.perf_counter() - started, 1)} s", file=sys.stderr, flush=True)
         target = Path(args.out)
         target.parent.mkdir(parents=True, exist_ok=True)
