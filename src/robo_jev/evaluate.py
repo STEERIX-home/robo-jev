@@ -39,6 +39,7 @@ import math
 import random
 import time
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -211,12 +212,18 @@ def _per_episode(groups: dict[str, list[int]]) -> list[dict[str, Any]]:
     ]
 
 
-def aggregate(predictions: list[dict[str, Any]]) -> dict[str, Any]:
+def aggregate(predictions: list[dict[str, Any]], *, store_predictions: bool | Sequence[str] = False) -> dict[str, Any]:
     """예측 목록 → 질문(id 또는 타입)별 ``{n, accuracy, nll, brier, first_position_rate, position_counts, per_episode}``와 전체.
 
     ``per_episode``는 **편 단위 집계**다(로봇 스트림은 에피소드, 비로봇·대조 단일은 `origin_group`; 예측의 `group`
     키, 없으면 `record_id`). 틱은 편 안에서 상관되어 있어 독립 단위는 편이므로, 이 목록이 있어야 표의 어떤 칸에도
-    편 단위 구간을 붙일 수 있다 (P2 B1)."""
+    편 단위 구간을 붙일 수 있다 (P2 B1).
+
+    ``store_predictions``면 질문 칸마다 ``per_record``(``{record_id, tick, question, predicted, correct}``)도 남긴다
+    — 편 단위 집계로는 **부분 모집단을 다시 고를 수 없어서**, "라벨이 지금 commitment가 아닌 틱만" 같은 물음이 전부
+    GPU 재실행이 됐다 (P2 리뷰 1 I3). ``True``면 모든 질문 칸, 이름 목록이면 **그 칸만**이다 — 판정 칸 하나는 열당
+    844줄이지만 이 분할의 질문 칸은 열 개라 다 켜면 같은 파일이 0.1 MB에서 4.8 MB가 된다. 물음이 있는 칸만 켠다."""
+    wanted = None if isinstance(store_predictions, bool) else {str(name) for name in store_predictions}
     rows: dict[str, dict[str, Any]] = {}
     totals: dict[str, list[int]] = {}
     for prediction in predictions:
@@ -229,8 +236,13 @@ def aggregate(predictions: list[dict[str, Any]]) -> dict[str, Any]:
             if metrics is None:
                 continue
             key = _table_key(prediction, qid)
-            row = rows.setdefault(key, {"n": 0, "correct": 0, "graded": 0, "nll": 0.0, "brier": 0.0, "positions": Counter(), "choice_n": 0, "groups": {}})
+            row = rows.setdefault(key, {"n": 0, "correct": 0, "graded": 0, "nll": 0.0, "brier": 0.0, "positions": Counter(), "choice_n": 0, "groups": {}, "records": []})
             row["n"] += 1
+            if store_predictions and (wanted is None or key in wanted):
+                row["records"].append({
+                    "record_id": prediction["record_id"], "tick": prediction.get("tick"), "question": qid,
+                    "predicted": metrics["predicted"], "correct": None if metrics["correct"] is None else bool(metrics["correct"]),
+                })  # fmt: skip
             row["nll"] += metrics["nll"]
             row["brier"] += metrics["brier"]
             counts = row["groups"].setdefault(group, [0, 0, 0])
@@ -260,6 +272,8 @@ def aggregate(predictions: list[dict[str, Any]]) -> dict[str, Any]:
             "position_counts": [row["positions"][i] for i in range(max(row["positions"]) + 1)] if row["positions"] else [],
             "per_episode": _per_episode(row["groups"]),
         }
+        if store_predictions and (wanted is None or key in wanted):
+            table[key]["per_record"] = row["records"]  # 합계 칸(`_all`)에는 두지 않는다 — 질문 칸의 합이다
         for name in ("n", "correct", "graded", "nll", "brier"):
             total[name] += row[name]
     table["_all"] = {
@@ -768,15 +782,20 @@ def evaluate_items(
     tokens_per_batch: int = 8192,
     fused: bool = False,
     return_predictions: bool = False,
+    store_predictions: bool | Sequence[str] = False,
 ) -> dict[str, Any]:
     """분할 하나의 표: 모델(``model``), 치환한 순서(``permuted`` + ``answer_change``), 문맥 섞기(``context_shuffle`` +
     ``context_shuffle_kind = "state"``: 비로봇은 상태 전체, 로봇 스트림은 id를 재매핑한 구조화 상태 — 모듈 설명), 로봇 스트림만의
     지시 텍스트 섞기(``instruction_shuffle`` + ``instruction_shuffle_kind``; `instruction_shuffle=True`일 때), 규칙 기준군(``rule_judge``),
-    그리고 질문 칸마다의 **편 단위 95 % 구간**(``episode_bootstrap`` — :func:`split_episode_bootstrap`)."""
+    그리고 질문 칸마다의 **편 단위 95 % 구간**(``episode_bootstrap`` — :func:`split_episode_bootstrap`).
+
+    ``store_predictions``(참 또는 질문 칸 이름 목록)이면 **모든 열**이 그 칸에 ``per_record``도 남긴다 — 나중에
+    틱의 부분집합(예: 라벨이 지금 commitment가 아닌 틱)만 다시 세려면 편 단위 집계로는 안 되기 때문이다
+    (P2 리뷰 1 I3). 대조군 열에도 남아야 여유를 부분집합 위에서 다시 짝지을 수 있다."""
     from robo_jev.model.serialize import serialize_request
 
     predictions = predict_items(judge, items, tokens_per_batch=tokens_per_batch, fused=fused)
-    result: dict[str, Any] = {"n_items": len(items), "n_states": len(predictions), "model": aggregate(predictions)}
+    result: dict[str, Any] = {"n_items": len(items), "n_states": len(predictions), "model": aggregate(predictions, store_predictions=store_predictions)}
     if return_predictions:
         result["_predictions"] = predictions  # 호출자가 선택적 지표·ECE에 다시 쓴다 (한 번 더 forward하지 않는다)
 
@@ -793,19 +812,19 @@ def evaluate_items(
 
     if shuffle_seed is not None:
         permuted = predict_items(judge, reserialised(items, [permute_candidates(item.record, int(shuffle_seed)) for item in items]), tokens_per_batch=tokens_per_batch, fused=fused)
-        result["permuted"] = aggregate(permuted)
+        result["permuted"] = aggregate(permuted, store_predictions=store_predictions)
         result["answer_change"] = {"shuffle_seed": int(shuffle_seed), **answer_change_rate(predictions, permuted)}
     if context_shuffle:
         shuffled = context_shuffle_records([item.record for item in items], robot="state")
-        result["context_shuffle"] = aggregate(predict_items(judge, reserialised(items, shuffled), tokens_per_batch=tokens_per_batch, fused=fused))
+        result["context_shuffle"] = aggregate(predict_items(judge, reserialised(items, shuffled), tokens_per_batch=tokens_per_batch, fused=fused), store_predictions=store_predictions)
         result["context_shuffle_kind"] = "state"  # 비로봇: 상태 전체, 로봇 스트림: id를 재매핑한 구조화 상태 (모듈 설명)
     if instruction_shuffle and any(item.kind == "stream" for item in items):
         streams = [item for item in items if item.kind == "stream"]
         rolled = context_shuffle_records([item.record for item in streams], robot="instruction")
-        result["instruction_shuffle"] = aggregate(predict_items(judge, reserialised(streams, rolled), tokens_per_batch=tokens_per_batch, fused=fused))
+        result["instruction_shuffle"] = aggregate(predict_items(judge, reserialised(streams, rolled), tokens_per_batch=tokens_per_batch, fused=fused), store_predictions=store_predictions)
         result["instruction_shuffle_kind"] = "instruction"  # 로봇 스트림: 지시·목표 텍스트만 굴림, 구조화 goal·상태·후보 유지
     if rule_judge and any(item.kind == "stream" for item in items):
-        result["rule_judge"] = aggregate(rule_judge_predictions(items))
+        result["rule_judge"] = aggregate(rule_judge_predictions(items), store_predictions=store_predictions)
     result["episode_bootstrap"] = split_episode_bootstrap(result)
     return result
 
@@ -838,7 +857,7 @@ def split_episode_bootstrap(table: dict[str, Any], **options: Any) -> dict[str, 
 #: 평가 집합 설정의 최상위 키.
 _SUITE_KEYS = ("version", "window_ticks", "shuffle_seed", "tokens_per_batch", "fused", "columns", "tiny_scorer_report", "splits", "note")
 #: 분할 하나의 키.
-_SUITE_SPLIT_KEYS = ("name", "manifest", "domain", "split", "files", "records", "limit", "max_ticks", "selection", "note")
+_SUITE_SPLIT_KEYS = ("name", "manifest", "domain", "split", "files", "records", "limit", "max_ticks", "selection", "store_predictions", "note")
 #: 열 선택 키 — 모델 열은 언제나 있다.
 _SUITE_COLUMNS = ("permuted", "state_shuffle", "instruction_shuffle", "rule_judge", "selective", "calibration")
 
@@ -923,6 +942,9 @@ def eval_suite_identity(suite: dict[str, Any], items: dict[str, list[Item]], *, 
     `tick_stride`는 **점수를 매긴 모집단을 줄이는** 것(무학습 run은 스트림을 그 간격으로 하나씩만 잰다)이라 해시에
     들어간다 — 같은 레코드를 실었더라도 844틱을 다 잰 run과 56틱만 잰 run은 나란히 놓을 수 없기 때문이다
     (P1 리뷰 1 I6). 솎지 않은 run은 이 키를 아예 쓰지 않으므로 그런 run의 해시는 이 변경 전과 같다.
+
+    분할의 `store_predictions`는 **일부러 payload에 없다** — 무엇을 저장할지는 바꾸지만 무엇을 점수 매길지는 바꾸지
+    않기 때문이다. 넣으면 켜는 순간 P1의 `79d09793eab5…`와 나란히 놓을 수 없게 된다 (P2 리뷰 1 I3).
     """
     import hashlib
 
@@ -1006,6 +1028,7 @@ def evaluate_suite(
             context_shuffle=columns["state_shuffle"], instruction_shuffle=columns["instruction_shuffle"],
             rule_judge=columns["rule_judge"], window_ticks=suite["window_ticks"],
             tokens_per_batch=suite["tokens_per_batch"], fused=suite["fused"], return_predictions=True,
+            store_predictions=entry.get("store_predictions") or False,
         )  # fmt: skip
         predictions = table.pop("_predictions")
         if columns["calibration"]:

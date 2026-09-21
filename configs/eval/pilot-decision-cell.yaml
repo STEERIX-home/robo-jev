@@ -38,6 +38,11 @@ splits:
     note: "configs/eval/pilot.yaml의 같은 분할과 레코드가 같다 — 봉인 계열 8편(E0 3 + E1 5) = 844틱. **판정 칸**(q_main)"
     records: [ep-E0-000110, ep-E0-000162, ep-E0-000171,
               ep-E1-000142, ep-E1-000181, ep-E1-000219, ep-E1-000235, ep-E1-000263]
+    # **판정 칸의** 틱별 예측을 남긴다 (P2 리뷰 1 I3). 이 칸의 0.904가 무엇으로 풀리는지 — 라벨이 지금
+    # `commitment.action_ref`인 595틱과 아닌 249틱 — 은 편 단위 집계로는 다시 셀 수 없어서 리뷰어가 GPU를 두 번 더
+    # 썼다. 여기 적은 질문 칸만 남기는 이유는 이 분할의 질문 칸이 열 개라 `true`로 켜면 같은 파일이 0.1 MB에서
+    # 4.8 MB가 되기 때문이다(실측). **점수를 매긴 모집단을 바꾸지 않으므로 `eval_set.sha256`은 그대로다.**
+    store_predictions: [q_main]
 
 note: >
   이 집합으로 나온 수는 `artifacts/reports/p2-reeval-*.json`에 남는다. 표의 `episode_bootstrap` 블록이

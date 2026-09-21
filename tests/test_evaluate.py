@@ -454,3 +454,46 @@ def test_evaluate_items_puts_an_episode_interval_and_a_paired_control_margin_on_
     assert isinstance(margin["margin_includes_zero"], bool)
     # 지시 섞기는 로봇 스트림 열이라 비로봇 타입 칸에는 없다
     assert "instruction_shuffle" in cell and "instruction_shuffle" not in intervals["choice"]
+
+
+def test_a_split_can_ask_for_its_per_tick_predictions_without_moving_the_eval_set_identity(tmp_path):
+    """판정 칸처럼 **지정한 분할에만** 틱별 예측을 남긴다 (P2 리뷰 1 I3).
+
+    P1·P2의 산출물은 편 단위 집계까지만 남겨서 "라벨이 지금 commitment가 아닌 틱만 골라 보면 얼마인가" 같은 질문이
+    전부 GPU 재실행이었다. 이 열은 **점수를 매긴 모집단을 바꾸지 않으므로** 평가 집합의 해시에 들어가면 안 된다 —
+    들어가면 P1의 `79d09793eab5…`와 나란히 놓을 수 없게 된다.
+    """
+    from robo_jev.evaluate import eval_suite_identity, evaluate_suite, load_eval_suite, load_suite_items
+
+    tokenizer = WhitespaceTokenizer()
+    plain = load_eval_suite(_suite_file(tmp_path))
+    assert all(entry.get("store_predictions", False) is False for entry in plain["splits"])
+
+    splits = [dict(entry) for entry in plain["splits"]]
+    splits[0]["store_predictions"] = ["q_main"]  # 질문 칸 이름 목록 — 이 분할의 질문 칸 열 개를 다 켜면 4.8 MB다
+    asked = load_eval_suite(_suite_file(tmp_path, splits=splits))
+    assert asked["splits"][0]["store_predictions"] == ["q_main"]
+
+    items = load_suite_items(asked, tokenizer=tokenizer)
+    assert eval_suite_identity(asked, items)["sha256"] == eval_suite_identity(plain, load_suite_items(plain, tokenizer=tokenizer))["sha256"]
+
+    judge = Judge.from_config(seed=5, vocab_size=SMALL_VOCAB)
+    result = evaluate_suite(judge, asked, tokenizer=tokenizer, items=items)
+    stream_table, singles_table = result["splits"]["d0/dev"], result["splits"]["d0/dev_singles"]
+    assert all("per_record" not in row for row in singles_table["model"].values())  # 켜지 않은 분할은 그대로다
+
+    for column in ("model", "permuted", "context_shuffle", "instruction_shuffle", "rule_judge"):
+        table = stream_table[column]
+        assert "per_record" not in table["_all"]  # 질문 칸마다 있으니 합계 칸에 또 두지 않는다
+        assert [key for key, row in table.items() if "per_record" in row] == ["q_main"], column  # 고른 칸만
+        row = table["q_main"]
+        records = row["per_record"]
+        assert len(records) == row["n"] == sum(entry["n"] for entry in row["per_episode"]), column
+        assert sum(entry["correct"] is True for entry in records) == sum(entry["correct"] for entry in row["per_episode"]), column
+        assert {name for entry in records for name in entry} == {"record_id", "tick", "question", "predicted", "correct"}
+        assert all(entry["tick"] is not None and entry["question"] == "q_main" for entry in records), column
+
+    # `true`면 모든 질문 칸에 남는다 — 무엇을 켤지는 설정이 고른다
+    splits[0]["store_predictions"] = True
+    everything = evaluate_suite(judge, load_eval_suite(_suite_file(tmp_path, splits=splits)), tokenizer=tokenizer, items=items)
+    assert all("per_record" in row for key, row in everything["splits"]["d0/dev"]["model"].items() if key != "_all")
