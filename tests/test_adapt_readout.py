@@ -72,14 +72,21 @@ def test_the_pilot_config_carries_the_measured_values_not_the_planned_ones():
     assert config["splits"] == ["train"]
 
 
-def test_the_4b_sibling_extends_the_2b_config_and_only_moves_the_model_and_the_chunk():
-    two, four = _resolved(TRAIN_2B, "lora"), _resolved(TRAIN_4B, "lora")
-    assert four["model_id"] == "Qwen/Qwen3.5-4B" and two["model_id"] == "Qwen/Qwen3.5-2B"
-    differences = {key for key in two if two[key] != four[key]}
-    assert differences <= {"model_id", "tokenizer", "run_name", "run_id", "stream_chunk_seconds"}
-    assert four["stream_chunk_seconds"] == 5 and two["stream_chunk_seconds"] == 5  # LoRA는 둘 다 5초
+def test_the_4b_sibling_extends_the_2b_config_and_moves_exactly_three_things():
+    """4B 파일이 덮어쓰는 것은 `model_id`·`run_name`·`modes.t1`의 구간 셋이다 (P1 리뷰 1 M7 — "둘뿐"이 아니었다).
+
+    `modes.lora`의 5초는 2B가 이미 쓰는 값이라 **실제로 돌린 두 run(t0·lora)에서는 구간이 완전히 같다**.
+    """
+    for mode in ("t0", "lora"):
+        two, four = _resolved(TRAIN_2B, mode), _resolved(TRAIN_4B, mode)
+        assert four["model_id"] == "Qwen/Qwen3.5-4B" and two["model_id"] == "Qwen/Qwen3.5-2B"
+        # `tokenizer`·`run_id`는 값이 같거나 실행 시각에서 나온다 — 실제로 갈리는 것은 model_id와 run_name뿐이다.
+        assert {key for key in two if two[key] != four[key]} <= {"model_id", "run_name", "run_id"}
+        assert four["stream_chunk_seconds"] == two["stream_chunk_seconds"]  # t0 10초, lora 5초 — 둘 다 같다
     assert _resolved(TRAIN_4B, "t1")["stream_chunk_seconds"] == 5  # 4B의 10초 full은 울타리를 넘는다 (G0b 사다리)
     assert _resolved(TRAIN_2B, "t1")["stream_chunk_seconds"] == 10
+    assert {key for key in _resolved(TRAIN_2B, "t1") if _resolved(TRAIN_2B, "t1")[key] != _resolved(TRAIN_4B, "t1")[key]} <= {
+        "model_id", "run_name", "run_id", "stream_chunk_seconds"}
 
 
 def test_dataset_switch_changes_only_the_training_manifests():

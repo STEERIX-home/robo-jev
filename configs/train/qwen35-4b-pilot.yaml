@@ -3,8 +3,13 @@
 #
 #   uv run python scripts/adapt_readout.py --config configs/train/qwen35-4b-pilot.yaml --mode t0 --steps 200 --out artifacts/reports/p1-4b-t0.json
 #
-# 차이는 둘뿐이다: 모델 id와, **LoRA·T1 구간을 5초로** 내린 것(G0b 구간 메모리: 4B full 10초는 73 GiB 울타리를
-# 넘어 OOM, 5초 58.2 GiB). step·seed·데이터·평가 집합은 2B와 같아야 한다 — 그것이 이 비교의 전부다.
+# 이 파일이 덮어쓰는 것은 셋이다(2026-09-21 P1 리뷰 1 M7에서 세어 고쳤다 — 전에는 "둘뿐"이라고 적혀 있었다):
+#   1. `model_id`
+#   2. `run_name`(보고서 이름표일 뿐 학습에 영향 없다)
+#   3. `modes.t1.stream_chunk_seconds` 10초 → **5초** (G0b 구간 메모리: 4B full 10초는 73 GiB 울타리를 넘어 OOM,
+#      5초 58.2 GiB). `modes.lora`의 5초는 2B가 이미 쓰는 값과 같아서 실제로 바뀌는 구간은 `t1`뿐이고, 그 `t1`은
+#      이 상자에서 돌리지 않았다 — 즉 **실제로 돌린 4B 두 run(t0·lora)의 구간은 2B와 완전히 같다**.
+# step·seed·데이터·평가 집합은 2B와 같아야 한다 — 그것이 이 비교의 전부다.
 extends: qwen35-2b-pilot.yaml
 
 run_name: p1-4b
