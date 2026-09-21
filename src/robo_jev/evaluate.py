@@ -222,7 +222,7 @@ def aggregate(predictions: list[dict[str, Any]], *, store_predictions: bool | Se
     ``store_predictions``면 질문 칸마다 ``per_record``(``{record_id, tick, question, predicted, correct}``)도 남긴다
     — 편 단위 집계로는 **부분 모집단을 다시 고를 수 없어서**, "라벨이 지금 commitment가 아닌 틱만" 같은 물음이 전부
     GPU 재실행이 됐다 (P2 리뷰 1 I3). ``True``면 모든 질문 칸, 이름 목록이면 **그 칸만**이다 — 판정 칸 하나는 열당
-    844줄이지만 이 분할의 질문 칸은 열 개라 다 켜면 같은 파일이 0.1 MB에서 4.8 MB가 된다. 물음이 있는 칸만 켠다."""
+    844줄이지만 이 분할의 질문 칸은 열 개라 다 켜면 같은 파일이 0.10 MB에서 **4.90 MB**가 된다(실측). 물음이 있는 칸만 켠다."""
     wanted = None if isinstance(store_predictions, bool) else {str(name) for name in store_predictions}
     rows: dict[str, dict[str, Any]] = {}
     totals: dict[str, list[int]] = {}
