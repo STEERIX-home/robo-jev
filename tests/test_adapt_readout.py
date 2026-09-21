@@ -128,3 +128,19 @@ def test_the_pilot_eval_set_is_fixed_by_name_and_keeps_test_out_of_selection():
         kinds = {base.split("-")[-2] for base in bases}
         assert {"forbidden", "zone_boundary", "instruction"} == kinds, kinds
     assert yaml.safe_load(EVAL_PILOT.read_text(encoding="utf-8"))["tiny_scorer_report"].endswith("tiny-scorer.json")
+
+
+def test_the_zero_shot_defaults_reproduce_the_runs_that_were_recorded():
+    """무학습 run의 기본값이 실제로 돌린 값과 같아야 명령줄이 그 run을 재현한다 (P1 리뷰 1 M12).
+
+    P1의 두 무학습 run은 **16틱마다**(G0b의 값) 쟀는데 `--tick-stride`의 기본값은 8이었고, 후보 순서 치환 seed는
+    평가 집합의 `shuffle_seed`가 아니라 함수 안에 1로 박혀 있었다. 기본은 집합이 정하게 둔다.
+    """
+    import inspect
+
+    module = script()
+    assert module.ZERO_SHOT_TICK_STRIDE == 16
+    assert module.build_parser().parse_args(["--out", "x.json"]).tick_stride == module.ZERO_SHOT_TICK_STRIDE
+    parameters = inspect.signature(module.run_zero_shot).parameters
+    assert parameters["tick_stride"].default == module.ZERO_SHOT_TICK_STRIDE
+    assert parameters["shuffle_seed"].default is None  # None = 평가 집합의 shuffle_seed를 쓴다

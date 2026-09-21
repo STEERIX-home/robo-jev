@@ -49,6 +49,30 @@ def test_eval_summary_names_the_control_column_and_labels_runs_that_predate_the_
     assert "instruction" in legacy["context_shuffle_kind"] and legacy["instruction_shuffle_accuracy"] is None
 
 
+def test_eval_summary_does_not_claim_a_control_for_a_run_that_has_none():
+    """대조군 **열이 아예 없는** run(무학습)에 옛 실행의 이름표를 붙이지 않는다 (P1 리뷰 1 I9).
+
+    무학습 run은 학습이 없어 섞을 것이 없다 — `context_shuffle` 열 자체가 없다. 옛 JSON용 이름표(G0b의 텍스트
+    대조군)를 그런 run에 붙이면 쓰지도 않은 대조군을 썼다고 주장하게 된다. 그리고 `n_states`에는 **상태 수**만
+    들어간다 — 무학습 표의 프롬프트 수는 `n_prompts`로 따로 적는다(한 틱이 질문 수만큼의 프롬프트가 된다).
+    """
+    module = script()
+    zero_shot = module._eval_summary({
+        "robot/dev": {
+            "n_prompts": 420, "tick_stride": 16,
+            "model": {"q_main": {"n": 42, "accuracy": 0.33}, "_all": {"accuracy": 0.48}},
+        },
+    })["robot/dev"]
+    assert zero_shot["context_shuffle_accuracy"] is None
+    assert zero_shot["context_shuffle_kind"] is None
+    assert zero_shot["control_note"] == module.NO_CONTROL_NOTE
+    assert zero_shot["n_states"] is None and zero_shot["n_prompts"] == 420 and zero_shot["tick_stride"] == 16
+
+    trained = module._eval_summary({"robot/dev": _table(context_shuffle_kind="state")})["robot/dev"]
+    assert trained["context_shuffle_kind"] == "state" and trained["n_states"] == 3
+    assert "control_note" not in trained and trained.get("n_prompts") is None
+
+
 def test_report_carries_the_note_that_the_two_controls_are_not_one_column():
     report = script().build("선정 문단")
     assert "instruction/text control" in report["context_shuffle_kind_note"]

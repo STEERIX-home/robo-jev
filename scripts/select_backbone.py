@@ -33,6 +33,9 @@ def _load(name: str) -> dict[str, Any] | None:
 #: `context_shuffle_kind`가 없는 평가 JSON은 그 키를 만들기 전(G0b)의 것이다 — 그때의 로봇 스트림 열은 **지시 텍스트** 대조군,
 #: 비로봇 단일 요청 열은 상태 전체 대조군이었다. 지금의 표준 열(id 재매핑 **상태** 섞기)과 같은 것으로 읽으면 안 된다.
 LEGACY_CONTEXT_SHUFFLE_KIND = "unrecorded (G0b, key predates the run: robot streams = instruction/text control, non-robot singles = whole-state control)"
+#: 대조군 **열이 없는** run — 무학습(학습이 없으니 섞을 것도 없다). 옛 JSON용 이름표를 붙이면 쓰지 않은 대조군을
+#: 썼다고 주장하게 된다 (P1 리뷰 1 I9). 종류는 `null`로 두고 왜 없는지를 여기 적는다.
+NO_CONTROL_NOTE = "no control column — untrained run (nothing was shuffled); do not read this row against another run's control"
 
 
 def _eval_summary(evaluation: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -41,20 +44,27 @@ def _eval_summary(evaluation: dict[str, Any] | None) -> dict[str, Any] | None:
     out: dict[str, Any] = {}
     for split, table in evaluation.items():
         model = table.get("model", {})
+        control = table.get("context_shuffle")
         out[split] = {
+            # 상태 수와 프롬프트 수는 다른 것이다 — 무학습 표는 (틱 × 질문)마다 프롬프트 하나라 10배쯤 크다.
             "n_states": table.get("n_states"),
+            "n_prompts": table.get("n_prompts"),
+            "tick_stride": table.get("tick_stride"),
             "accuracy": model.get("_all", {}).get("accuracy"),
             "nll": model.get("_all", {}).get("nll"),
             "brier": model.get("_all", {}).get("brier"),
             "per_question": {q: {k: v for k, v in row.items() if k in ("n", "accuracy", "nll", "brier", "first_position_rate")} for q, row in model.items() if q != "_all"},
             "answer_change_rate": (table.get("answer_change") or {}).get("rate"),
-            "context_shuffle_accuracy": (table.get("context_shuffle") or {}).get("_all", {}).get("accuracy"),
-            # 어느 대조군인지 (D1 리뷰 2 N4): 없는 값은 옛 실행의 텍스트 대조군이라고 이름으로 적는다 — null로 두지 않는다.
-            "context_shuffle_kind": table.get("context_shuffle_kind") or LEGACY_CONTEXT_SHUFFLE_KIND,
+            "context_shuffle_accuracy": (control or {}).get("_all", {}).get("accuracy"),
+            # 어느 대조군인지 (D1 리뷰 2 N4): 열이 **있는데** 종류가 없으면 옛 실행의 텍스트 대조군이라고 이름으로
+            # 적는다. 열 자체가 없으면(무학습) null로 두고 `control_note`로 왜 없는지를 적는다 (P1 리뷰 1 I9).
+            "context_shuffle_kind": (table.get("context_shuffle_kind") or LEGACY_CONTEXT_SHUFFLE_KIND) if control else None,
             "instruction_shuffle_accuracy": (table.get("instruction_shuffle") or {}).get("_all", {}).get("accuracy"),
             "instruction_shuffle_kind": table.get("instruction_shuffle_kind"),
             "rule_judge_accuracy": (table.get("rule_judge") or {}).get("_all", {}).get("accuracy"),
         }
+        if not control:
+            out[split]["control_note"] = NO_CONTROL_NOTE
     return out
 
 

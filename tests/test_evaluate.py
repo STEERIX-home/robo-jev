@@ -264,6 +264,28 @@ def test_the_eval_suite_config_picks_fixed_records_and_its_identity_moves_with_t
         load_suite_items(chosen, tokenizer=tokenizer)
 
 
+def test_the_eval_set_identity_covers_the_tick_stride_that_subsets_what_is_scored(tmp_path):
+    """해시는 **점수를 매긴 집합**을 덮어야 한다 (P1 리뷰 1 I6).
+
+    무학습 run은 스트림을 `tick_stride`마다 하나씩만 잰다 — 같은 설정·같은 레코드라도 점수가 매겨진 모집단이 다르다.
+    솎지 않은 run(기본)은 옛 해시를 그대로 유지하고(키가 없다), 솎은 run은 다른 해시를 받는다.
+    """
+    from robo_jev.evaluate import eval_suite_identity, load_eval_suite, load_suite_items
+
+    tokenizer = WhitespaceTokenizer()
+    suite = load_eval_suite(_suite_file(tmp_path))
+    items = load_suite_items(suite, tokenizer=tokenizer)
+
+    full = eval_suite_identity(suite, items)
+    assert "tick_stride" not in full  # 솎지 않은 run은 이 키를 쓰지 않는다 — 기존 해시가 그대로다
+    assert eval_suite_identity(suite, items, tick_stride=None)["sha256"] == full["sha256"]
+
+    strided = eval_suite_identity(suite, items, tick_stride=16)
+    assert strided["tick_stride"] == 16
+    assert strided["sha256"] != full["sha256"]
+    assert eval_suite_identity(suite, items, tick_stride=8)["sha256"] != strided["sha256"]
+
+
 def test_evaluate_suite_runs_every_split_with_the_standard_columns_and_marks_what_is_for_selection(tmp_path):
     from robo_jev.evaluate import evaluate_suite, load_eval_suite
 

@@ -772,8 +772,13 @@ def load_suite_items(suite: dict[str, Any], *, tokenizer: Any, root: Any = None,
     return out
 
 
-def eval_suite_identity(suite: dict[str, Any], items: dict[str, list[Item]]) -> dict[str, Any]:
-    """평가 집합의 정체 — 설정과 **실제로 읽힌 레코드 id·상태 수**의 sha256. run 사이에 같은 입력이었는지는 이 해시로 본다."""
+def eval_suite_identity(suite: dict[str, Any], items: dict[str, list[Item]], *, tick_stride: int | None = None) -> dict[str, Any]:
+    """평가 집합의 정체 — 설정과 **실제로 읽힌 레코드 id·상태 수**의 sha256. run 사이에 같은 입력이었는지는 이 해시로 본다.
+
+    `tick_stride`는 **점수를 매긴 모집단을 줄이는** 것(무학습 run은 스트림을 그 간격으로 하나씩만 잰다)이라 해시에
+    들어간다 — 같은 레코드를 실었더라도 844틱을 다 잰 run과 56틱만 잰 run은 나란히 놓을 수 없기 때문이다
+    (P1 리뷰 1 I6). 솎지 않은 run은 이 키를 아예 쓰지 않으므로 그런 run의 해시는 이 변경 전과 같다.
+    """
     import hashlib
 
     per_split = {}
@@ -787,6 +792,8 @@ def eval_suite_identity(suite: dict[str, Any], items: dict[str, list[Item]]) -> 
         }
     payload = {"version": suite["version"], "window_ticks": suite["window_ticks"], "shuffle_seed": suite["shuffle_seed"],
                "columns": suite["columns"], "fused": suite["fused"], "splits": per_split}
+    if tick_stride is not None:
+        payload["tick_stride"] = int(tick_stride)
     digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
     return {"config": suite["path"], "sha256": digest, **payload}
 

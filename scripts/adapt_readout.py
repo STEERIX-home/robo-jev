@@ -286,8 +286,18 @@ def adapt_readout(model_id: str, records: list[dict], steps: int, *, eval_record
     return out
 
 
-def run_zero_shot(config: dict[str, Any], *, eval_config: str | Path = DEFAULT_EVAL_CONFIG, tick_stride: int = 8, shuffle_seed: int = 1, batch: int = 8) -> dict[str, Any]:
-    """무학습 라벨 점수 (Nimble 방식) — **같은 고정 평가 집합**의 레코드에, 스트림은 `tick_stride` 틱마다."""
+#: 무학습 run이 스트림에서 몇 틱마다 하나를 재는지 — G0b의 값이자 P1의 두 무학습 run이 실제로 쓴 값이다.
+#: (틱 × 질문)마다 프롬프트 하나를 캐시 없이 짓기 때문에 8로 내리면 두 후보 합쳐 ≈2시간이다 (P1 리뷰 1 M12).
+ZERO_SHOT_TICK_STRIDE = 16
+
+
+def run_zero_shot(config: dict[str, Any], *, eval_config: str | Path = DEFAULT_EVAL_CONFIG, tick_stride: int = ZERO_SHOT_TICK_STRIDE, shuffle_seed: int | None = None, batch: int = 8) -> dict[str, Any]:
+    """무학습 라벨 점수 (Nimble 방식) — **같은 고정 평가 집합**의 레코드에, 스트림은 `tick_stride` 틱마다.
+
+    `shuffle_seed`가 `None`이면 평가 집합이 정한 값을 쓴다(설정이 정하는 것이지 여기 박아 둘 값이 아니다).
+    `tick_stride`는 점수를 매긴 모집단을 줄이므로 평가 집합의 정체(해시)에 들어간다 — 이 run의 수는 솎지 않은
+    run의 수와 같은 해시 아래 나란히 놓이지 않는다 (P1 리뷰 1 I6).
+    """
     import torch
 
     from robo_jev.evaluate import eval_suite_identity, load_eval_suite, load_suite_items
@@ -299,6 +309,7 @@ def run_zero_shot(config: dict[str, Any], *, eval_config: str | Path = DEFAULT_E
     tokenizer = load_tokenizer(config["tokenizer"])
     suite = load_eval_suite(eval_config)
     items = load_suite_items(suite, tokenizer=tokenizer, root=REPO, domain_tag=DOMAIN_TAG)
+    shuffle_seed = suite["shuffle_seed"] if shuffle_seed is None else shuffle_seed
     torch.cuda.reset_peak_memory_stats()
     started = time.perf_counter()
     backbone = QwenBackbone.load(model_id, root=config.get("model_root"), dtype=torch.bfloat16, device="cuda", kv_mode="static")
@@ -310,7 +321,8 @@ def run_zero_shot(config: dict[str, Any], *, eval_config: str | Path = DEFAULT_E
         "load_seconds": round(time.perf_counter() - started, 1), "tick_stride": int(tick_stride),
         "config": {key: value for key, value in config.items() if key != "dataset_manifests"},
         "manifest": {"model": {"id": model_id}, "tokenizer": tokenizer_block(config["tokenizer"])},
-        "evaluation": {"eval_set": eval_suite_identity(suite, items), "splits": {}},
+        "shuffle_seed": int(shuffle_seed),
+        "evaluation": {"eval_set": eval_suite_identity(suite, items, tick_stride=tick_stride), "splits": {}},
     }
     for key, subset in items.items():
         started = time.perf_counter()
@@ -319,7 +331,9 @@ def run_zero_shot(config: dict[str, Any], *, eval_config: str | Path = DEFAULT_E
         result["seconds"] = round(time.perf_counter() - started, 1)
         # 학습한 run의 표와 같은 자리에 오게 `model` 별칭을 둔다 (요약·선정이 한 꼴로 읽는다). 대조군·규칙 열은 없다 — 무학습이다.
         result["model"] = result["table"]
-        result["n_states"] = result.get("prompts")
+        # 프롬프트 수는 **상태 수가 아니다** ((틱 × 질문)마다 하나) — 상태 열에 프롬프트 수를 흘려보내지 않는다 (P1 리뷰 1 I9).
+        result["n_prompts"] = result.get("prompts")
+        result["tick_stride"] = int(tick_stride)
         out["evaluation"]["splits"][key] = result
         print(f"[p1] zero-shot {key}: {result['prompts']} prompts, acc {result['table']['_all']['accuracy']}, nll {result['table']['_all']['nll']:.3f} ({result['seconds']} s)", file=sys.stderr, flush=True)
     out["memory"] = _memory()
@@ -413,7 +427,7 @@ def run_chunk_memory(config: dict[str, Any], *, modes: tuple[str, ...] = ("reado
     return out
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--config", default=str(DEFAULT_TRAIN_CONFIG), help="학습 설정 YAML (extends·modes를 푼다)")
     parser.add_argument("--eval-config", dest="eval_config", default=str(DEFAULT_EVAL_CONFIG), help="고정 평가 집합 설정")
@@ -422,13 +436,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--mode", default="t0", choices=MODES)
     parser.add_argument("--steps", type=int, default=None, help="설정의 max_steps를 덮어쓴다")
     parser.add_argument("--seed", type=int, default=None)
-    parser.add_argument("--tick-stride", dest="tick_stride", type=int, default=8, help="zero-shot: 스트림에서 몇 틱마다 하나를 잴지")
+    parser.add_argument("--tick-stride", dest="tick_stride", type=int, default=ZERO_SHOT_TICK_STRIDE, help="zero-shot: 스트림에서 몇 틱마다 하나를 잴지 (평가 집합의 정체에 들어간다)")
     parser.add_argument("--chunk-modes", dest="chunk_modes", default="readout,full,full_nockpt", help="chunk-memory: readout | full(층 단위 checkpointing) | full_nockpt, 쉼표로 — 구간은 1→2→5→10초 사다리")
     parser.add_argument("--no-eval", dest="no_eval", action="store_true")
     parser.add_argument("--eval-checkpoint", dest="eval_checkpoint", default=None, help="t0/lora/t1: 학습하지 않고 이 checkpoint를 실어 평가만 (run 디렉터리의 metrics.json에서 곡선을 읽는다)")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="학습 설정 덮어쓰기 (값은 YAML로 읽는다)")
     parser.add_argument("--out", required=True)
     parser.add_argument("--gpu-memory-fraction", dest="gpu_memory_fraction", type=float, default=DEFAULT_FRACTION, help="프로세스가 쓸 장치(통합) 메모리 몫 (robo_jev.gpu; 첫 CUDA 할당 전에 건다)")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = build_parser()
     args = parser.parse_args(argv)
     guard = limit_gpu_memory(args.gpu_memory_fraction)
     memory_start = memory_report()
