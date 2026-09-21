@@ -21,11 +21,21 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[1]
 REPORTS = REPO / "artifacts" / "reports"
 CANDIDATES = {"Qwen/Qwen3.5-2B": "2b", "Qwen/Qwen3.5-4B": "4b"}
+#: Task P1 파일럿(D1 규모, 같은 step·seed·고정 평가 집합) — `artifacts/reports/p1-{2b,4b}-{mode}.json`.
+PILOT_MODES = ("t0", "lora", "t1", "zero-shot")
 
 
 def _load(name: str) -> dict[str, Any] | None:
     path = REPORTS / name
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+
+#: `context_shuffle_kind`가 없는 평가 JSON은 그 키를 만들기 전(G0b)의 것이다 — 그때의 로봇 스트림 열은 **지시 텍스트** 대조군,
+#: 비로봇 단일 요청 열은 상태 전체 대조군이었다. 지금의 표준 열(id 재매핑 **상태** 섞기)과 같은 것으로 읽으면 안 된다.
+LEGACY_CONTEXT_SHUFFLE_KIND = "unrecorded (G0b, key predates the run: robot streams = instruction/text control, non-robot singles = whole-state control)"
+#: 대조군 **열이 없는** run — 무학습(학습이 없으니 섞을 것도 없다). 옛 JSON용 이름표를 붙이면 쓰지 않은 대조군을
+#: 썼다고 주장하게 된다 (P1 리뷰 1 I9). 종류는 `null`로 두고 왜 없는지를 여기 적는다.
+NO_CONTROL_NOTE = "no control column — untrained run (nothing was shuffled); do not read this row against another run's control"
 
 
 def _eval_summary(evaluation: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -34,16 +44,27 @@ def _eval_summary(evaluation: dict[str, Any] | None) -> dict[str, Any] | None:
     out: dict[str, Any] = {}
     for split, table in evaluation.items():
         model = table.get("model", {})
+        control = table.get("context_shuffle")
         out[split] = {
+            # 상태 수와 프롬프트 수는 다른 것이다 — 무학습 표는 (틱 × 질문)마다 프롬프트 하나라 10배쯤 크다.
             "n_states": table.get("n_states"),
+            "n_prompts": table.get("n_prompts"),
+            "tick_stride": table.get("tick_stride"),
             "accuracy": model.get("_all", {}).get("accuracy"),
             "nll": model.get("_all", {}).get("nll"),
             "brier": model.get("_all", {}).get("brier"),
             "per_question": {q: {k: v for k, v in row.items() if k in ("n", "accuracy", "nll", "brier", "first_position_rate")} for q, row in model.items() if q != "_all"},
             "answer_change_rate": (table.get("answer_change") or {}).get("rate"),
-            "context_shuffle_accuracy": (table.get("context_shuffle") or {}).get("_all", {}).get("accuracy"),
+            "context_shuffle_accuracy": (control or {}).get("_all", {}).get("accuracy"),
+            # 어느 대조군인지 (D1 리뷰 2 N4): 열이 **있는데** 종류가 없으면 옛 실행의 텍스트 대조군이라고 이름으로
+            # 적는다. 열 자체가 없으면(무학습) null로 두고 `control_note`로 왜 없는지를 적는다 (P1 리뷰 1 I9).
+            "context_shuffle_kind": (table.get("context_shuffle_kind") or LEGACY_CONTEXT_SHUFFLE_KIND) if control else None,
+            "instruction_shuffle_accuracy": (table.get("instruction_shuffle") or {}).get("_all", {}).get("accuracy"),
+            "instruction_shuffle_kind": table.get("instruction_shuffle_kind"),
             "rule_judge_accuracy": (table.get("rule_judge") or {}).get("_all", {}).get("accuracy"),
         }
+        if not control:
+            out[split]["control_note"] = NO_CONTROL_NOTE
     return out
 
 
@@ -56,10 +77,17 @@ def build(selection_text: str | None) -> dict[str, Any]:
         "task": "2b-g0b-selection",
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "gate": "docs/03 §7-6: on `upper` and batch-0, p95 model time ≤ 80 ms and obs→apply miss rate (> 100 ms) ≤ 0.05 → passes_10hz; 5 Hz analogue at 150 ms with the 200 ms deadline",
+        "context_shuffle_kind_note": (
+            "`context_shuffle_accuracy` is the control column; `context_shuffle_kind` says which control it is. "
+            f"Runs whose JSON predates the key are labelled {LEGACY_CONTEXT_SHUFFLE_KIND!r} — for those the robot-stream column is the "
+            "instruction/text control (goal line, physical state and candidates kept), not the state shuffle of the current standard column, "
+            "so the two are not comparable. New runs carry kind `state` plus a separate `instruction_shuffle_*` column (D1 review 2 N4)."
+        ),
         "sources": {
             "stream": "backbone-stream.json" if stream else None, "levers": "backbone-stream-levers.json" if levers else None,
             "attribution": "attribution.json" if attribution else None,
             "fused_40_episodes": "backbone-stream-fused.json" if fused else None,
+            "pilot_d1": "p1-{2b,4b}-{t0,lora,t1,zero-shot}.json (Task P1: D1 규모, 같은 step·seed, 고정 평가 집합 configs/eval/pilot.yaml)",
         },
         "candidates": {},
         "selection": selection_text,
@@ -111,6 +139,21 @@ def build(selection_text: str | None) -> dict[str, Any]:
                 "train_seconds": adapt.get("train_seconds"), "memory": adapt.get("memory"), "checkpoint": adapt.get("checkpoint"), "contract_sha256": (adapt.get("manifest") or {}).get("contract_sha256"),
                 "evaluation": _eval_summary(adapt.get("evaluation")),
             }
+        pilot: dict[str, Any] = {}
+        for mode in PILOT_MODES:
+            run = _load(f"p1-{short}-{mode}.json")
+            if run is None:
+                continue
+            evaluation = run.get("evaluation") or {}
+            pilot[mode] = {
+                "steps": run.get("steps"), "status": run.get("status"), "loss_first_last": run.get("loss_first_last"),
+                "step_seconds": run.get("step_seconds"), "train_seconds": run.get("train_seconds"), "tokens": run.get("tokens"),
+                "memory": run.get("memory"), "checkpoint": run.get("checkpoint"), "contract_sha256": (run.get("manifest") or {}).get("contract_sha256"),
+                "train_config": run.get("train_config"), "eval_config": run.get("eval_config"),
+                "eval_set_sha256": (evaluation.get("eval_set") or {}).get("sha256"),
+                "evaluation": _eval_summary(evaluation.get("splits")),
+            }
+        entry["pilot_d1"] = pilot or None
         zero = _load(f"zero-shot-{short}.json")
         entry["zero_shot"] = None if zero is None else {
             split: {"prompts": r.get("prompts"), "accuracy": r["table"]["_all"].get("accuracy"), "nll": r["table"]["_all"].get("nll"), "per_question": {q: {k: v for k, v in row.items() if k in ("n", "accuracy", "nll", "first_position_rate")} for q, row in r["table"].items() if q != "_all"}}

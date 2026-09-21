@@ -48,3 +48,6 @@ packages = ["src/robo_jev"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["error"]
+# 실제 2B 가중치 + CUDA가 있어야 하는 검사의 표지. `tests/test_backbone_qwen.py`의 `_torch_kernels` fixture가
+# **이름이 아니라 이 표지로** 그 검사를 골라 공식 kernel로 돌린다 (G0b 리뷰 2 M-c).
+markers = ["real_2b: needs the real Qwen3.5-2B weights and CUDA (runs with the official kernels)"]

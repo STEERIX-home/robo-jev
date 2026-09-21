@@ -1,0 +1,175 @@
+# Task P1 — **고정 평가 집합**. stage D의 모든 run(2B/4B × T0/LoRA/T1/무학습)이 정확히 이 입력 위에서 측정된다
+# (docs/06 Task 6 `configs/eval/pilot.yaml`, docs/08 §10, G0b OQ8). 누가 기억해서 붙이는 플래그가 아니라 설정이다:
+# 어떤 manifest의 어떤 split에서 어떤 레코드를 몇 개까지 읽는지가 여기 적혀 있고, 실제로 읽힌 레코드 id와 상태 수의
+# sha256(`eval_set.sha256`)이 모든 보고서에 들어간다 — 두 run의 해시가 같아야 두 수를 나란히 놓을 수 있다.
+#
+# **크기는 비용이 정했다.** 2B 실측(2026-09-21, `artifacts/scratch/p1/eval-cost-*.json`): 로봇 스트림은 틱·pass마다
+# ≈50~78 ms이고 열이 4개(model · 후보 치환 · 상태 섞기 · 지시 섞기), 비로봇·대조 단일은 상태·pass마다 ≈0.7 s이고
+# 열이 3개다. 그래서 로봇은 **에피소드를 통째로**(지시 변경 틱이 에피소드 중반 5~15초에 있어 앞 N틱으로 자르면
+# 목표 읽기를 재는 틱이 사라진다) 대신 **편수를 줄이고**, 단일 요청은 앞에서부터 `limit`개만 읽는다.
+# 봉인(`ood_test`)은 여기에 없다 — 보지 않는다. `test`는 계산하되 `selection: false`다(docs/03:224).
+
+version: eval-pilot-v0.1
+window_ticks: 30
+shuffle_seed: 1          # 후보 순서 치환 (답 변경률·첫 자리 비율)
+tokens_per_batch: 8192   # 단일 요청 microbatch의 토큰 예산
+fused: true              # 평가의 스트림 재생은 몸통+분기 한 forward (서빙 기본 구성 `fused`; BF16 허용 오차 안에서 같은 값)
+
+columns:                 # docs/08 §10의 표준 열
+  permuted: true         # 후보 순서 치환 → 답 변경률 + 첫 자리 비율 (G0b OQ4)
+  state_shuffle: true    # **표준 대조군** — id 재매핑 상태 섞기 (goal·물체·영역·장면을 다음 에피소드 것으로)
+  instruction_shuffle: true  # 둘째 열 — 지시·목표 텍스트만 굴린다 (표지를 정하지 않는다)
+  rule_judge: true       # 로봇 스트림의 규칙 기준군
+  selective: true        # coverage·abstention·selective accuracy·wrong target·unsafe action (docs/08 §10)
+  calibration: true      # ECE (온도 미보정)
+
+# Task 2c 소형 scorer 표 — 어느 칸이 **패턴으로 풀리는지**를 표에 그대로 붙인다 (분할 전체 값이라 이 집합과 같은 틱
+# 부분집합은 아니다; 표지로만 읽는다). 이 표지가 붙은 칸 위에는 backbone의 성과 주장을 올리지 않는다.
+tiny_scorer_report: artifacts/reports/tiny-scorer.json
+
+splits:
+  # --- 로봇 스트림 (에피소드 통째로; 고정 목록) ---
+  - name: robot/dev
+    manifest: artifacts/datasets/d1-robot/d1-rollout-labels/manifest.json
+    domain: robot
+    split: dev
+    files: ["episodes/*/streams.jsonl"]
+    selection: true
+    note: "D1 dev 48편 가운데 8편(E0 4 + E1 4, 정렬 순서에서 균등 간격) = 635틱"
+    records: [ep-E0-000114, ep-E0-000139, ep-E0-000174, ep-E0-000224,
+              ep-E1-000118, ep-E1-000132, ep-E1-000169, ep-E1-000238]
+  - name: robot/ood_dev
+    manifest: artifacts/datasets/d1-robot/d1-rollout-labels/manifest.json
+    domain: robot
+    split: ood_dev
+    files: ["episodes/*/streams.jsonl"]
+    selection: true
+    note: "봉인 계열(zoneF 개념·템플릿·prefix) 24편 가운데 8편(E0 3 + E1 5) = 844틱. **판정 칸**(q_main)이 여기 있다"
+    records: [ep-E0-000110, ep-E0-000162, ep-E0-000171,
+              ep-E1-000142, ep-E1-000181, ep-E1-000219, ep-E1-000235, ep-E1-000263]
+  - name: robot/test
+    manifest: artifacts/datasets/d1-robot/d1-rollout-labels/manifest.json
+    domain: robot
+    split: test
+    files: ["episodes/*/streams.jsonl"]
+    selection: false          # 계산하되 checkpoint 선택에 쓰지 않는다 (docs/03:224)
+    note: "test 13편(전부 E1) 가운데 4편 = 382틱"
+    records: [ep-E1-000102, ep-E1-000195, ep-E1-000228, ep-E1-000254]
+
+  # --- 로봇 대조 쌍 (한 필드만 바뀐 base↔sibling; 적재 순서가 쌍을 붙여 놓으므로 `limit`은 짝수) ---
+  - name: robot_contrast/dev
+    manifest: artifacts/datasets/d1-robot/d1-rollout-labels/manifest.json
+    domain: robot
+    split: dev
+    files: ["contrast/records.jsonl"]
+    selection: true
+    note: "20쌍 = forbidden 7 + zone_boundary 7 + **instruction 6**. 종류를 이름으로 고른다 — 적재 순서 앞 40건은 E0의
+      forbidden·zone_boundary뿐이고 지시 대조 쌍(E1에만 있다)이 하나도 안 들어온다. base와 sibling은 반드시 짝으로."
+    records:
+      - ep-E0-000114@5-forbidden-base
+      - ep-E0-000114@5-forbidden
+      - ep-E0-000128@100-forbidden-base
+      - ep-E0-000128@100-forbidden
+      - ep-E0-000156@35-forbidden-base
+      - ep-E0-000156@35-forbidden
+      - ep-E0-000208@190-forbidden-base
+      - ep-E0-000208@190-forbidden
+      - ep-E0-000238@40-forbidden-base
+      - ep-E0-000238@40-forbidden
+      - ep-E1-000118@25-forbidden-base
+      - ep-E1-000118@25-forbidden
+      - ep-E1-000147@25-forbidden-base
+      - ep-E1-000147@25-forbidden
+      - ep-E0-000114@265-zone_boundary-base
+      - ep-E0-000114@265-zone_boundary
+      - ep-E0-000128@325-zone_boundary-base
+      - ep-E0-000128@325-zone_boundary
+      - ep-E0-000156@300-zone_boundary-base
+      - ep-E0-000156@300-zone_boundary
+      - ep-E0-000208@360-zone_boundary-base
+      - ep-E0-000208@360-zone_boundary
+      - ep-E0-000238@275-zone_boundary-base
+      - ep-E0-000238@275-zone_boundary
+      - ep-E1-000118@305-zone_boundary-base
+      - ep-E1-000118@305-zone_boundary
+      - ep-E1-000147@315-zone_boundary-base
+      - ep-E1-000147@315-zone_boundary
+      - ep-E1-000118@115-instruction-base
+      - ep-E1-000118@115-instruction
+      - ep-E1-000129@230-instruction-base
+      - ep-E1-000129@230-instruction
+      - ep-E1-000132@280-instruction-base
+      - ep-E1-000132@280-instruction
+      - ep-E1-000147@215-instruction-base
+      - ep-E1-000147@215-instruction
+      - ep-E1-000169@135-instruction-base
+      - ep-E1-000169@135-instruction
+      - ep-E1-000226@275-instruction-base
+      - ep-E1-000226@275-instruction
+  - name: robot_contrast/ood_dev
+    manifest: artifacts/datasets/d1-robot/d1-rollout-labels/manifest.json
+    domain: robot
+    split: ood_dev
+    files: ["contrast/records.jsonl"]
+    selection: true
+    note: "같은 구성 — forbidden 7 + zone_boundary 7 + instruction 6쌍"
+    records:
+      - ep-E0-000110@40-forbidden-base
+      - ep-E0-000110@40-forbidden
+      - ep-E0-000164@20-forbidden-base
+      - ep-E0-000164@20-forbidden
+      - ep-E0-000246@140-forbidden-base
+      - ep-E0-000246@140-forbidden
+      - ep-E1-000149@525-forbidden-base
+      - ep-E1-000149@525-forbidden
+      - ep-E1-000206@65-forbidden-base
+      - ep-E1-000206@65-forbidden
+      - ep-E1-000229@0-forbidden-base
+      - ep-E1-000229@0-forbidden
+      - ep-E1-000244@5-forbidden-base
+      - ep-E1-000244@5-forbidden
+      - ep-E0-000110@440-zone_boundary-base
+      - ep-E0-000110@440-zone_boundary
+      - ep-E0-000164@275-zone_boundary-base
+      - ep-E0-000164@275-zone_boundary
+      - ep-E0-000246@400-zone_boundary-base
+      - ep-E0-000246@400-zone_boundary
+      - ep-E1-000149@1005-zone_boundary-base
+      - ep-E1-000149@1005-zone_boundary
+      - ep-E1-000206@325-zone_boundary-base
+      - ep-E1-000206@325-zone_boundary
+      - ep-E1-000229@350-zone_boundary-base
+      - ep-E1-000229@350-zone_boundary
+      - ep-E1-000263@340-zone_boundary-base
+      - ep-E1-000263@340-zone_boundary
+      - ep-E1-000149@265-instruction-base
+      - ep-E1-000149@265-instruction
+      - ep-E1-000181@120-instruction-base
+      - ep-E1-000181@120-instruction
+      - ep-E1-000219@110-instruction-base
+      - ep-E1-000219@110-instruction
+      - ep-E1-000235@135-instruction-base
+      - ep-E1-000235@135-instruction
+      - ep-E1-000261@190-instruction-base
+      - ep-E1-000261@190-instruction
+      - ep-E1-000267@300-instruction-base
+      - ep-E1-000267@300-instruction
+
+  # --- 비로봇 단일 요청 (판정 칸: 소형 scorer가 0.43~0.45 = 상태 섞기라 패턴이 없다) ---
+  - name: non_robot/dev
+    manifest: artifacts/datasets/d1/single/manifest.json
+    domain: non_robot
+    split: dev
+    limit: 48                 # 177건 가운데 적재 순서 앞 48건
+    selection: true
+  - name: non_robot/ood_dev
+    manifest: artifacts/datasets/d1/single/manifest.json
+    domain: non_robot
+    split: ood_dev
+    limit: 48                 # 112건 가운데 앞 48건
+    selection: true
+
+note: >
+  ood_test(봉인)는 어느 분할에도 없다. calibration 분할은 이 파일럿에서 쓰지 않는다(온도 보정은 학습·개발과 분리한
+  데이터에서 하는 별도 단계 — docs/03 §4). 무학습(zero-shot) 실행은 같은 에피소드·레코드를 쓰되 스트림은 틱을 솎아
+  잰다(프롬프트마다 캐시 없이 9~12K 토큰이라 전 틱은 예산 밖) — 그 stride는 보고서에 적는다.

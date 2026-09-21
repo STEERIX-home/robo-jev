@@ -672,3 +672,72 @@ def test_tick_readout_matches_the_judge_pointer_logits_and_typed_outputs_on_the_
     assert len(episodes) == 1 and episodes[0]["episode_id"] == record["episode_id"]
     with pytest.raises(FileNotFoundError):
         module.read_episodes(tmp_path / "nowhere")
+
+
+def _lora_judge(seed: int):
+    """소형 난수 Qwen에 LoRA를 붙인 Judge (CPU) — checkpoint의 `lora_*` 키를 만드는 가장 작은 실물."""
+    from robo_jev.model.backbone_qwen import QwenBackbone
+    from robo_jev.model.judge import Judge
+    from robo_jev.train import attach_lora
+
+    backbone = QwenBackbone.tiny(seed=seed, vocab_size=256)
+    attach_lora(backbone, {"r": 2, "alpha": 4, "dropout": 0.0, "targets": ["q_proj", "gate_proj"]})
+    return Judge(backbone, rank=4, readout="pointer", seed=1000, readout_dtype=torch.float32)
+
+
+def test_stream_runner_loads_the_checkpoint_before_compiling_so_lora_keys_survive(tmp_path, monkeypatch):
+    """G0b 리뷰 2 M-b — `torch.compile`은 감싼 module의 state_dict 키에 `_orig_mod.`를 붙인다. 컴파일 뒤에 실으면
+    LoRA checkpoint가 거절되므로 `StreamRunner.load`는 **적재 → 컴파일** 순서여야 한다."""
+    from robo_jev.checkpoint import CHECKPOINT_FORMAT, save_checkpoint
+    from robo_jev.model.backbone_qwen import QwenBackbone
+    from robo_jev.model.contract_digest import contract_digest
+    from robo_jev.train import load_readout_checkpoint, trainable_state_dict
+
+    tokenizer_sha = "0" * 64
+    source = _lora_judge(seed=3)
+    saved = trainable_state_dict(source)
+    assert any("lora_A" in key for key in saved)
+    path = tmp_path / "checkpoint.pt"
+    save_checkpoint(path, {
+        "format": CHECKPOINT_FORMAT, "run_id": "p1-test", "step": 1, "model": saved, "optimizer": {}, "scheduler": {},
+        "rng": {}, "sampler": {}, "progress": None, "config": {},
+        "manifest": {"contract": contract_digest(tokenizer_sha), "model": {"rank": 4}},
+    })  # fmt: skip
+
+    order: list[str] = []
+
+    def fake_load(cls_id, **kwargs):
+        judge = _lora_judge(seed=4)
+        backbone = judge.backbone
+        original = backbone.compile_dense_parts
+
+        def compile_dense_parts():
+            order.append("compile")
+            for layer in backbone.text.layers:  # 예열 forward 없이 키 접두사만 재현한다 (torch.compile은 지연 컴파일이다)
+                layer.mlp = torch.compile(layer.mlp, dynamic=True)
+            backbone.compiled = True
+            return 0.0
+
+        assert callable(original)  # 진짜 메서드가 있는 자리를 덮는다 (예열 forward만 뺀다)
+        backbone.compile_dense_parts = compile_dense_parts
+        return backbone
+
+    monkeypatch.setattr(QwenBackbone, "load", staticmethod(fake_load))
+    monkeypatch.setattr("robo_jev.train.load_readout_checkpoint", lambda *a, **k: (order.append("load"), load_readout_checkpoint(*a, **k))[1])
+
+    runner = script().StreamRunner(device="cpu")
+    handle = runner.load({"id": "tiny", "readout_rank": 4, "checkpoint": str(path), "tokenizer_sha256": tokenizer_sha, "lever": {"compile": True}})
+    assert order == ["load", "compile"]  # 적재가 먼저다
+    assert handle["compile_seconds"] == 0.0 and handle["backbone"].compiled
+    assert torch.equal(handle["judge"].U.weight, source.U.weight)
+    lora_now = {n.replace("_orig_mod.", ""): p for n, p in handle["judge"].named_parameters() if "lora_A" in n}
+    lora_saved = {n: t for n, t in saved.items() if "lora_A" in n}
+    assert any("mlp.gate_proj" in n for n in lora_saved)  # 컴파일이 감싸는 module 안의 LoRA — 바로 이것이 거절되던 키다
+    assert all(torch.equal(lora_now[n], t) for n, t in lora_saved.items())
+
+    # 반대 순서(컴파일 먼저)는 실제로 거절된다 — 이 검사가 지키는 것이 그 순서다.
+    compiled = _lora_judge(seed=5)
+    for layer in compiled.backbone.text.layers:
+        layer.mlp = torch.compile(layer.mlp, dynamic=True)
+    with pytest.raises(ValueError, match="모델에 없는 파라미터가 저장되어 있다|학습 대상 파라미터가 저장되어 있지 않다"):
+        load_readout_checkpoint(compiled, path, tokenizer_sha256=tokenizer_sha)

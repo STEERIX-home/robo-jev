@@ -1180,6 +1180,7 @@ def serialize_request(
     max_total_tokens: int | None = 8192,
     window_ticks: int = WINDOW_TICKS,
     delta_rules: dict[str, Any] | None = None,
+    limits: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """레코드 → 토큰·구간·분기·position (모듈 설명 참조).
 
@@ -1187,11 +1188,13 @@ def serialize_request(
     검사를 먼저 돌리므로 입력 영역의 비입력 키·라벨 구조는 경로가 붙은 `ValueError`로 거절되고,
     입력 영역 밖의 라벨·근거는 투영에서 빠져 결과에 영향을 주지 않는다. `max_*`는 L0 프로파일의
     상한(docs/06 Global Constraints)이며 넘으면 자르지 않고 오류다. `delta_rules`는 스트림의 변화분
-    문턱·주기(:data:`DELTA_RULES`의 키를 덮어쓴다; 기본은 계약값).
+    문턱·주기(:data:`DELTA_RULES`의 키를 덮어쓴다; 기본은 계약값). `limits`는 질문 수·후보 수의 **프로파일 상한**
+    (:data:`robo_jev.contracts.PROFILE_LIMITS`, 기본 Q≤16·K≤32)이며, 일부러 프로파일 밖을 재는 상계 측정
+    (`scripts/measure_tokens.py`의 K 상한을 푼 셀, 직렬화의 질문 수 무제한 검사)만 더 넓은 값을 준다.
     """
     if layout not in LAYOUTS:
         raise ValueError(f"layout: {list(LAYOUTS)} 중 하나여야 한다 (받은 값: {layout!r})")
-    validate_record(request)
+    validate_record(request, limits=limits)
     projected = model_input(request)  # 허용 필드만 깊은 복사한 새 dict — 원본은 그대로다
     schema_version = projected["schema_version"]
     expected = SCHEMA_SINGLE_REQUEST if layout == "state_first" else SCHEMA_STREAM

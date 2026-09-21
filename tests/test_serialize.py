@@ -302,9 +302,13 @@ def test_state_first_has_no_question_cap_from_the_reserved_markers(single, token
         {**copy.deepcopy(question), "id": f"q{index}"} for index in range(len(DECISION_MARKERS) + 1)
     ]
     single.pop("labels")
-    out = serialize_request(single, tokenizer, max_total_tokens=None)
+    # 프로파일 상한(Q≤16)은 표지 수와 무관한 **별개**의 제약이다 — 이 검사는 표지 쪽만 보므로 상한을 넓혀 준다.
+    wide = {"max_questions": 64, "max_candidates": 32}
+    out = serialize_request(single, tokenizer, max_total_tokens=None, limits=wide)
     assert len(out["decision_positions"]) == len(DECISION_MARKERS) + 1
     assert set(out["decision_markers"].values()) == {STATE_FIRST_MARKER}
+    with pytest.raises(ValueError, match=r"^request\.questions: 질문 수가 프로파일 상한을 넘는다"):
+        serialize_request(single, tokenizer, max_total_tokens=None)
 
 
 def test_layout_must_match_the_record_kind(single, stream, tokenizer):

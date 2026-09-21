@@ -633,7 +633,20 @@ def _evaluate_tables(model: TinyScorer, eval_records: dict[tuple[str, str], list
 
 
 #: 저장한 모델과 평가 설정이 같아야 하는 항목 — 다르면 표가 다른 모델의 것이 된다.
-_CHECKPOINT_BOUND_KEYS = (("model",), ("data", "max_context_bytes"), ("data", "max_candidate_bytes"))
+#:
+#: 모델 모양·byte 상한(입력이 달라진다)에 더해 **학습 수를 정하는 것들**을 묶는다 (D1 리뷰 2 N5): 보고서의
+#: `sources[*].train_records`·`train_examples(_by_kind)`는 평가 전용 실행에서도 지금 설정의 manifest·train_splits·
+#: 로봇 틱 솎기로 다시 세므로, 이 셋이 저장 시와 다르면 그 checkpoint의 것이 아닌 학습 수를 찍는다.
+#: 평가 쪽 설정(`data.eval_splits`·`eval_robot_tick_stride`·`eval`)은 일부러 묶지 않는다 — 대조군 열을 바꾼 재평가가
+#: 이 진입점의 목적이다. 저장 시 설정 전체는 보고서의 `evaluation.checkpoint_config`에 그대로 남는다.
+_CHECKPOINT_BOUND_KEYS = (
+    ("model",),
+    ("data", "max_context_bytes"),
+    ("data", "max_candidate_bytes"),
+    ("data", "manifests"),
+    ("data", "train_splits"),
+    ("data", "robot_tick_stride"),
+)
 
 
 def _lookup(config: dict[str, Any], path: tuple[str, ...]) -> Any:
@@ -662,8 +675,9 @@ def load_checkpoint(path: str | Path, *, config: dict[str, Any] | None = None) -
 
 def evaluate_checkpoint(config: dict[str, Any], checkpoint: str | Path, *, log: Any = None, training_report: dict[str, Any] | None = None) -> dict[str, Any]:
     """학습 없이 저장한 모델(`checkpoint`)의 분할·분야별 표 — :func:`train_tiny_scorer`와 같은 꼴의 보고서. 평가 설정(`eval`,
-    `data.eval_splits`·`eval_robot_tick_stride`)은 `config`의 것이고 모델 모양·byte 상한은 저장 시 설정과 같아야 한다. `sources`의
-    학습 수는 레코드에서 다시 센다(:func:`count_examples_by_kind`); `training_report`(학습 때의 보고서)를 주면 `training`을 그대로
+    `data.eval_splits`·`eval_robot_tick_stride`)은 `config`의 것이고 모델 모양·byte 상한과 **학습 수를 정하는 설정**
+    (manifest·train_splits·robot_tick_stride)은 저장 시 설정과 같아야 한다(:data:`_CHECKPOINT_BOUND_KEYS`; D1 리뷰 2 N5 —
+    `sources`의 학습 수를 레코드에서 다시 세기 때문이다). 저장 시 설정 전체는 `evaluation.checkpoint_config`에 남는다; `training_report`(학습 때의 보고서)를 주면 `training`을 그대로
     옮기고 `evaluation`에 재평가임을 적는다(D1 리뷰 1 I1: 대조군 열을 바꾼 재평가는 재학습이 아니다)."""
     if config.get("threads"):
         torch.set_num_threads(int(config["threads"]))
@@ -671,7 +685,7 @@ def evaluate_checkpoint(config: dict[str, Any], checkpoint: str | Path, *, log: 
     train_splits = tuple(data.get("train_splits") or ("train",))
     eval_splits = tuple(data.get("eval_splits") or ("dev",))
     started = time.perf_counter()
-    model, _ = load_checkpoint(checkpoint, config=config)
+    model, saved_config = load_checkpoint(checkpoint, config=config)
     sources: list[dict[str, Any]] = []
     eval_records: dict[tuple[str, str], list[dict]] = {}
     total_by_kind: dict[str, int] = {}
@@ -691,7 +705,8 @@ def evaluate_checkpoint(config: dict[str, Any], checkpoint: str | Path, *, log: 
         "version": SCORER_VERSION, "config": copy.deepcopy(config), "parameters": model.parameter_count(), "sources": sources,
         "train_examples": sum(total_by_kind.values()), "train_examples_by_kind": dict(sorted(total_by_kind.items())),
         "training": copy.deepcopy((training_report or {}).get("training")),
-        "evaluation": {"checkpoint": str(checkpoint), "eval_only": True, "training_wall_s": (training_report or {}).get("wall_s"), "evaluated_at": time.strftime("%Y-%m-%dT%H:%M:%S")},
+        "evaluation": {"checkpoint": str(checkpoint), "eval_only": True, "training_wall_s": (training_report or {}).get("wall_s"),
+                       "evaluated_at": time.strftime("%Y-%m-%dT%H:%M:%S"), "checkpoint_config": copy.deepcopy(saved_config)},  # 저장 시 설정 전부 (D1 리뷰 2 N5)
         "tables": tables, "wall_s": round(time.perf_counter() - started, 1),
     }
     return report

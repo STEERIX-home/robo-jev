@@ -59,6 +59,10 @@ BUDGET = {"tick_p50": 500, "tick_p95": 800, "first_tick": 1200, "chunk_100_ticks
 #: 합성 셀 (물체 수, K 상한 — None은 상한 없음). K=32는 계약 v0.3에 없다; `(10, None)`은 10물체에서 상한을 푼 상계 참고값이다.
 SYNTHETIC_CELLS = ((6, 12), (10, 12), (10, None))
 
+#: 상한을 푼 셀은 **프로파일 밖**이다 — 10물체에서 후보가 42개까지 나온다. 계약 검사의 프로파일 상한(Q≤16·K≤32,
+#: `contracts.PROFILE_LIMITS`)을 그 셀에만 넓혀 준다: 상계 참고값을 재는 것이 목적이고, 계약이 넓어진 것이 아니다.
+UNCAPPED_LIMITS = {"max_questions": 16, "max_candidates": 64}
+
 #: 예산을 판정하는 셀 (10물체, K=12).
 BUDGET_CELL = (10, 12)
 
@@ -461,7 +465,7 @@ def measure_synthetic(tokenizer: Any, *, ticks: int = 100) -> list[dict[str, Any
         for change in (False, True):
             change_tick = max(1, ticks // 2) if change else None
             record = synthetic_episode(n_objects, k_cap, instruction_change=change, ticks=ticks, change_tick=change_tick)
-            out = serialize_request(record, tokenizer, layout="stream_l1a")
+            out = serialize_request(record, tokenizer, layout="stream_l1a", limits=None if k_cap is not None else UNCAPPED_LIMITS)
             breakdown = [tick_breakdown(out, tick) for tick in out["ticks"]]
             cells.append(
                 {

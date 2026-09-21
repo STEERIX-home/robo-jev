@@ -440,6 +440,7 @@ def replay_layout(
     initial: list[dict[str, Tensor]] | None = None,
     state: StreamState | None = None,
     start_tick: int = 0,
+    fused: bool = False,
 ) -> dict[str, Any]:
     """직렬화된 스트림 layout을 증분으로 재생한다.
 
@@ -449,9 +450,16 @@ def replay_layout(
     index → hidden), ``start_tick``. ``state``를 주면 prefix를 다시 읽지 않고 거기서 이어가며,
     ``start_tick``부터 재생한다(앞 틱은 그 상태가 이미 읽은 것으로 보고 hidden 행은 0이다) — 구간을
     이어 붙이는 학습(truncated BPTT)의 근거다.
+
+    ``fused=True``면 틱 몸통과 결정 분기를 **한 forward**로 돌린다(``advance_with_branches``; 실제 backbone의 지렛대
+    `fused` = 서빙 기본 구성). 값은 따로 돌린 것과 BF16 허용 오차 안에서 같고(tests/test_backbone_qwen.py) 층마다
+    가중치를 한 번만 읽어 더 빠르다 — **평가용**이다. 학습(gradient)은 기본값(따로 두 forward)을 쓴다. 그 메서드가
+    없는 backbone(CPU fixture)에서는 `ValueError`.
     """
     backbone = default_backbone() if backbone is None else backbone
     window = _resolve_window(layout, backbone, window_ticks)
+    if fused and not hasattr(stream_state_class(backbone), "advance_with_branches"):
+        raise ValueError(f"fused: {stream_state_class(backbone).__name__}에는 몸통+분기 한 forward가 없다 (실제 backbone 전용)")
     if window is None:
         raise ValueError("window_ticks: 증분 재생은 윈도우(정수)가 필요하다 — 절단 없는 기준은 forward_layout")
     tokens = layout["tokens"]
@@ -489,15 +497,20 @@ def replay_layout(
             cursor = end
             continue
         _check_position(layout, start, state.position)
-        state = state.advance(tokens[start:body_end])
+        decisions = list(range(body_end, end))
+        branch_hidden_rows: Tensor | None = None
+        if fused and decisions:
+            state, branch_hidden_rows = state.advance_with_branches(tokens[start:body_end], [tokens[index] for index in decisions])
+        else:
+            state = state.advance(tokens[start:body_end])
         tick_states.append(state)
         pieces.append(state.hidden)
-        decisions = list(range(body_end, end))
         outputs: dict[int, Tensor] = {}
         if decisions:
             for index in decisions:
                 _check_position(layout, index, state.position)
-            branch_hidden_rows = state.branch_step([tokens[index] for index in decisions])  # 분기 n개 (실제 backbone은 한 배치)
+            if branch_hidden_rows is None:
+                branch_hidden_rows = state.branch_step([tokens[index] for index in decisions])  # 분기 n개 (실제 backbone은 한 배치)
             for index, row in zip(decisions, branch_hidden_rows):
                 outputs[index] = row
             pieces.append(branch_hidden_rows)

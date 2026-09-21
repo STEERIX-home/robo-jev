@@ -30,6 +30,7 @@ __all__ = [
     "NON_INPUT_FIELDS",
     "PHASES",
     "PROB_SUM_TOL",
+    "PROFILE_LIMITS",
     "QUESTION_SET_V0",
     "QUESTION_SET_V0_EN",
     "QUESTION_TYPES",
@@ -54,6 +55,13 @@ PHASES = ("approach", "grasp", "lift", "transport", "place", "push", "none")
 
 #: 분포 라벨의 합 허용 오차.
 PROB_SUM_TOL = 1e-6
+
+#: 프로파일 상한 — 한 요청의 질문 수 `Q`와 한 질문의 후보 수 `K` (docs/03 §6 주요 축 `Q={1,4,8,16}`·`K={2,4,8,16,32}`,
+#: docs/06 Task 5 "클라우드 단계의 전제" 5). 지연·메모리 측정과 직렬화 예산이 이 상한 안에서만 뜻이 있으므로
+#: :func:`validate_record` 가 강제한다. 다른 프로파일(예: 더 큰 후보 집합의 실험)은 같은 꼴의 dict를 `limits`로 준다 —
+#: 상한을 넘는 레코드는 조용히 넓히지 않고 거절하고, 넓혀야 한다면 그 프로파일을 문서에 적고 여기 값을 바꾼다.
+#: D1 실측(2026-09-21): 로봇 스트림 틱 Q=10(세트 v0)·K≤12, 로봇 대조 단일 Q≤10·K≤12, 비로봇 단일 Q≤16·K≤14.
+PROFILE_LIMITS: dict[str, int] = {"max_questions": 16, "max_candidates": 32}
 
 #: 모델 입력에 절대 들어가지 않는 필드 이름 (docs/04 §1 표).
 NON_INPUT_FIELDS = (
@@ -730,8 +738,39 @@ def _validate_stream(record: dict) -> None:
 # --------------------------------------------------------------------------
 
 
-def validate_record(record: dict) -> None:
-    """레코드가 입력·라벨 계약을 지키는지 본다. 어기면 `ValueError`."""
+def _validate_profile_limits(record: dict, limits: dict[str, int]) -> None:
+    """프로파일 상한 `Q`·`K` (:data:`PROFILE_LIMITS`). 구조 검사가 끝난 레코드 위에서만 돈다.
+
+    단일 요청은 `request.questions`의 수와 질문마다의 `criteria` 수, 스트림은 질문 세트 v0의 크기(틱마다 같다)와
+    틱마다의 후보 목록 길이를 본다. 넘으면 그 자리의 경로와 실제 수를 말하는 `ValueError`.
+    """
+    max_q, max_k = int(limits["max_questions"]), int(limits["max_candidates"])
+    if record["schema_version"] == SCHEMA_SINGLE_REQUEST:
+        questions = record["request"]["questions"]
+        if len(questions) > max_q:
+            _fail("request.questions", f"질문 수가 프로파일 상한을 넘는다: {len(questions)} > Q≤{max_q}")
+        for index, question in enumerate(questions):
+            criteria = question["criteria"]
+            if len(criteria) > max_k:
+                _fail(f"request.questions[{index}].criteria", f"후보 수가 프로파일 상한을 넘는다: {len(criteria)} > K≤{max_k}")
+        return
+    if len(QUESTION_SET_V0) > max_q:
+        _fail("prefix.question_set", f"질문 세트 v0의 질문 수가 프로파일 상한을 넘는다: {len(QUESTION_SET_V0)} > Q≤{max_q}")
+    for index, tick in enumerate(record["ticks"]):
+        for question_id, entries in (tick["request"]["candidates"] or {}).items():
+            if len(entries) > max_k:
+                _fail(
+                    f"ticks[{index}].request.candidates.{question_id}",
+                    f"후보 수가 프로파일 상한을 넘는다: {len(entries)} > K≤{max_k}",
+                )
+
+
+def validate_record(record: dict, *, limits: dict[str, int] | None = None) -> None:
+    """레코드가 입력·라벨 계약을 지키는지 본다. 어기면 `ValueError`.
+
+    `limits`는 프로파일 상한(`{"max_questions", "max_candidates"}`; 기본 :data:`PROFILE_LIMITS`)이다 — 질문 수·후보 수가
+    그 안에 있어야 한다. `None`이 아니라 빈 dict를 주면 키가 없어 오류이므로, 상한을 끄는 방법은 없다(프로파일을 바꾼다).
+    """
     _need_dict(record, "record")
     schema_version = _need_one_of(
         record.get("schema_version"), "schema_version", (SCHEMA_SINGLE_REQUEST, SCHEMA_STREAM)
@@ -740,6 +779,7 @@ def validate_record(record: dict) -> None:
         _validate_single_request(record)
     else:
         _validate_stream(record)
+    _validate_profile_limits(record, PROFILE_LIMITS if limits is None else limits)
 
 
 def _pick(node: dict, fields: tuple[str, ...]) -> dict:
