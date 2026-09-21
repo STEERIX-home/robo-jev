@@ -88,3 +88,42 @@ def module_kind_in(report: dict) -> bool:
                 if "context_shuffle_kind" not in split:
                     return False
     return True
+
+
+def test_eval_summary_carries_the_episode_interval_so_the_decision_record_has_one(tmp_path):
+    """결정 기록(`backbone-selection.json`)이 점추정만 들고 있던 자리에 **편 단위 구간**이 들어간다 (P2 B2·B3)."""
+    module = script()
+    block = {"q_main": {"episodes": 8, "accuracy": 0.5, "accuracy_ci": [0.4, 0.6],
+                        "state_shuffle": {"control_accuracy": 0.45, "margin": 0.05, "margin_ci": [-0.02, 0.12], "margin_includes_zero": True}}}
+    summary = module._eval_summary({"robot/ood_dev": _table(episode_bootstrap=block)})["robot/ood_dev"]
+    assert summary["episode_bootstrap"] == block
+    assert module._eval_summary({"robot/dev": _table()})["robot/dev"]["episode_bootstrap"] is None
+
+
+def test_the_decision_cell_block_reads_the_reevaluations_and_says_which_margins_include_zero(tmp_path, monkeypatch):
+    module = script()
+    import json
+
+    monkeypatch.setattr(module, "REPORTS", tmp_path)
+    monkeypatch.setattr(module, "DECISION_CELL_RUNS", {"2B T0 (200)": "reeval.json", "missing": "nope.json"})
+    (tmp_path / "reeval.json").write_text(json.dumps({"evaluation": {
+        "eval_set": {"sha256": "abc123def456"},
+        "splits": {"robot/ood_dev": {
+            "model": {"q_main": {"n": 844, "accuracy": 0.454}},
+            "context_shuffle": {"q_main": {"accuracy": 0.289}},
+            "instruction_shuffle": {"q_main": {"accuracy": 0.468}},
+            "rule_judge": {"q_main": {"accuracy": 0.821}},
+            "episode_bootstrap": {"q_main": {"episodes": 8, "accuracy": 0.454,
+                                             "state_shuffle": {"margin": 0.165, "margin_ci": [0.02, 0.31], "margin_includes_zero": False}}},
+        }},
+    }}), encoding="utf-8")
+    cell = module._decision_cell()
+    assert cell["split"] == "robot/ood_dev" and cell["question"] == "q_main" and "PAIRED" in cell["note"]
+    row = cell["runs"]["2B T0 (200)"]
+    assert set(cell["runs"]) == {"2B T0 (200)"}  # 없는 파일은 조용히 빠진다(빈 줄을 만들지 않는다)
+    assert row["model_accuracy"] == 0.454 and row["state_shuffle_accuracy"] == 0.289 and row["n"] == 844
+    assert row["instruction_shuffle_accuracy"] == 0.468 and row["rule_judge_accuracy"] == 0.821
+    assert row["episode_bootstrap"]["state_shuffle"]["margin_includes_zero"] is False
+    assert row["eval_set_sha256"] == "abc123def456"
+    monkeypatch.setattr(module, "DECISION_CELL_RUNS", {"missing": "nope.json"})
+    assert module._decision_cell() is None

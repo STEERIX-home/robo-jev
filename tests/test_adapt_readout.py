@@ -44,7 +44,9 @@ def test_modes_change_only_the_three_things_that_differ_between_t0_lora_and_t1()
     assert (t0["trainable"], t0["stream_chunk_seconds"], t0["activation_checkpointing"], t0["lora"]) == ("readout_only", 10, False, None)
     assert (lora["trainable"], lora["stream_chunk_seconds"], lora["activation_checkpointing"]) == ("lora_and_readout", 5, True)
     assert lora["lora"]["r"] == 16 and lora["lora"]["alpha"] == 32
-    assert (t1["trainable"], t1["stream_chunk_seconds"], t1["activation_checkpointing"], t1["lora"]) == ("text_backbone_and_readout", 10, True, None)
+    # T1의 구간은 10초 → 5초다 (P2 A2: fp32 master가 +14.02 GiB라 10초는 40 step에서 73 GiB 울타리를 넘는다)
+    assert (t1["trainable"], t1["stream_chunk_seconds"], t1["activation_checkpointing"], t1["lora"]) == ("text_backbone_and_readout", 5, True, None)
+    assert t0["fp32_master_weights"] is lora["fp32_master_weights"] is t1["fp32_master_weights"] is True
     shared = ("readout_lr", "weight_decay", "gradient_clip", "warmup_ratio", "gradient_accumulation",
               "robot_loss_share", "nonrobot_tokens_per_unit", "stream_window_ticks", "seed", "sampler", "dataset_manifests", "model_id")
     for key in shared:
@@ -72,21 +74,21 @@ def test_the_pilot_config_carries_the_measured_values_not_the_planned_ones():
     assert config["splits"] == ["train"]
 
 
-def test_the_4b_sibling_extends_the_2b_config_and_moves_exactly_three_things():
-    """4B 파일이 덮어쓰는 것은 `model_id`·`run_name`·`modes.t1`의 구간 셋이다 (P1 리뷰 1 M7 — "둘뿐"이 아니었다).
+def test_the_4b_sibling_extends_the_2b_config_and_moves_exactly_two_things():
+    """4B 파일이 덮어쓰는 것은 이제 `model_id`와 `run_name` **둘뿐**이다 (P2 A2).
 
-    `modes.lora`의 5초는 2B가 이미 쓰는 값이라 **실제로 돌린 두 run(t0·lora)에서는 구간이 완전히 같다**.
+    셋째였던 `modes.t1.stream_chunk_seconds: 5`는 2B가 fp32 master 때문에 5초로 내려오면서 없앴다 — 4B는 그 값을
+    그대로 물려받는다. 세 모드 모두에서 **구간이 완전히 같다**.
     """
-    for mode in ("t0", "lora"):
+    for mode in ("t0", "lora", "t1"):
         two, four = _resolved(TRAIN_2B, mode), _resolved(TRAIN_4B, mode)
         assert four["model_id"] == "Qwen/Qwen3.5-4B" and two["model_id"] == "Qwen/Qwen3.5-2B"
         # `tokenizer`·`run_id`는 값이 같거나 실행 시각에서 나온다 — 실제로 갈리는 것은 model_id와 run_name뿐이다.
-        assert {key for key in two if two[key] != four[key]} <= {"model_id", "run_name", "run_id"}
-        assert four["stream_chunk_seconds"] == two["stream_chunk_seconds"]  # t0 10초, lora 5초 — 둘 다 같다
-    assert _resolved(TRAIN_4B, "t1")["stream_chunk_seconds"] == 5  # 4B의 10초 full은 울타리를 넘는다 (G0b 사다리)
-    assert _resolved(TRAIN_2B, "t1")["stream_chunk_seconds"] == 10
-    assert {key for key in _resolved(TRAIN_2B, "t1") if _resolved(TRAIN_2B, "t1")[key] != _resolved(TRAIN_4B, "t1")[key]} <= {
-        "model_id", "run_name", "run_id", "stream_chunk_seconds"}
+        assert {key for key in two if two[key] != four[key]} <= {"model_id", "run_name", "run_id"}, mode
+        assert four["stream_chunk_seconds"] == two["stream_chunk_seconds"], mode
+    assert _resolved(TRAIN_2B, "t1")["stream_chunk_seconds"] == _resolved(TRAIN_4B, "t1")["stream_chunk_seconds"] == 5
+    # 4B의 T1이 이 상자에서 돌 수 없는 이유(fp32 master 바닥 94.0 GiB)가 파일에 적혀 있다
+    assert "94.0 GiB" in TRAIN_4B.read_text(encoding="utf-8")
 
 
 def test_dataset_switch_changes_only_the_training_manifests():

@@ -300,7 +300,7 @@ def run_zero_shot(config: dict[str, Any], *, eval_config: str | Path = DEFAULT_E
     """
     import torch
 
-    from robo_jev.evaluate import eval_suite_identity, load_eval_suite, load_suite_items
+    from robo_jev.evaluate import eval_suite_identity, load_eval_suite, load_suite_items, split_episode_bootstrap
     from robo_jev.model.backbone_qwen import QwenBackbone
     from robo_jev.model.tokenizer import load_tokenizer
     from robo_jev.model.zero_shot import zero_shot_label_scores
@@ -334,6 +334,8 @@ def run_zero_shot(config: dict[str, Any], *, eval_config: str | Path = DEFAULT_E
         # 프롬프트 수는 **상태 수가 아니다** ((틱 × 질문)마다 하나) — 상태 열에 프롬프트 수를 흘려보내지 않는다 (P1 리뷰 1 I9).
         result["n_prompts"] = result.get("prompts")
         result["tick_stride"] = int(tick_stride)
+        # 편 단위 95 % 구간 (P2 B2). 대조군 열이 없으므로 여유 구간은 없다 — 모델 정확도의 구간만 붙는다.
+        result["episode_bootstrap"] = split_episode_bootstrap(result)
         out["evaluation"]["splits"][key] = result
         print(f"[p1] zero-shot {key}: {result['prompts']} prompts, acc {result['table']['_all']['accuracy']}, nll {result['table']['_all']['nll']:.3f} ({result['seconds']} s)", file=sys.stderr, flush=True)
     out["memory"] = _memory()
@@ -440,6 +442,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--chunk-modes", dest="chunk_modes", default="readout,full,full_nockpt", help="chunk-memory: readout | full(층 단위 checkpointing) | full_nockpt, 쉼표로 — 구간은 1→2→5→10초 사다리")
     parser.add_argument("--no-eval", dest="no_eval", action="store_true")
     parser.add_argument("--eval-checkpoint", dest="eval_checkpoint", default=None, help="t0/lora/t1: 학습하지 않고 이 checkpoint를 실어 평가만 (run 디렉터리의 metrics.json에서 곡선을 읽는다)")
+    parser.add_argument("--run-id", dest="run_id", default=None, help="run 디렉터리 이름 — 기본은 `p1-<mode>-<model>-<시각>`(파일럿의 이름표)")
     parser.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="학습 설정 덮어쓰기 (값은 YAML로 읽는다)")
     parser.add_argument("--out", required=True)
     parser.add_argument("--gpu-memory-fraction", dest="gpu_memory_fraction", type=float, default=DEFAULT_FRACTION, help="프로세스가 쓸 장치(통합) 메모리 몫 (robo_jev.gpu; 첫 CUDA 할당 전에 건다)")
@@ -467,7 +470,7 @@ def main(argv: list[str] | None = None) -> int:
     )  # fmt: skip
     # run id는 **실제로 쓰는 모델**에서 짓는다 (`--model`을 주지 않고 설정이 모델을 정하는 것이 기본이다)
     stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-    config["run_id"] = f"p1-{args.mode}-{str(config['model_id']).split('/')[-1].lower()}-{stamp}"
+    config["run_id"] = args.run_id or f"p1-{args.mode}-{str(config['model_id']).split('/')[-1].lower()}-{stamp}"
     started = time.perf_counter()
     if args.mode in ("t0", "lora", "t1") and args.eval_checkpoint:
         result = evaluate_checkpoint(config, mode=args.mode, checkpoint=args.eval_checkpoint, eval_config=args.eval_config)
