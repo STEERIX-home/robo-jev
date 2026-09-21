@@ -192,14 +192,104 @@ def test_the_resume_gate_takes_the_training_scope_instead_of_always_running_t0()
     assert "--resume-modes" in inspect.getsource(module.main)
 
 
-def test_the_trainer_refuses_to_resume_a_run_that_changed_the_master_weight_setting(tmp_path):
-    """`fp32_master_weights`는 run의 정체다 — 켜고 끄면 같은 run을 이어갈 수 없다(갱신 규칙이 달라진다)."""
+def test_the_master_weight_flag_is_run_identity_only_where_it_makes_master_copies(tmp_path):
+    """`fp32_master_weights`는 **사본이 생기는 경로(T1)에서만** run의 정체다 (P2 리뷰 1 M5).
+
+    fixture 모델은 학습 대상이 전부 fp32라 사본이 생기지 않고, `build_optimizer`는 플래그가 어느 쪽이든 평범한
+    `AdamW`를 돌려준다 — 그런 run에서 이 키로 거절하면 **키 자체가 없는 P2 이전 T0·LoRA checkpoint가 통째로
+    되살릴 수 없게 된다**(`None != True`). 그래서 여기서는 켜고 끈 채로도 이어가고, 이어간 뒤가 같아야 한다.
+    T1 쪽(사본이 생기므로 거절이 맞는 쪽)의 판정은 `tests/test_train.py`의
+    `test_the_master_weight_flag_is_run_identity_only_where_it_changes_the_optimizer`가 잡는다.
+    """
     config = fixture_config(tmp_path, max_steps=2, fp32_master_weights=True)
     with Trainer(config) as trainer:
         trainer.run_step()
         checkpoint = trainer.save()
-    with pytest.raises(ValueError, match="fp32_master_weights"):
-        Trainer({**config, "fp32_master_weights": False}, resume=checkpoint)
-    resumed = Trainer(config, resume=checkpoint)  # 같은 설정이면 이어간다
+    flipped = Trainer({**config, "fp32_master_weights": False}, resume=checkpoint)
+    assert flipped.step == 1
+    flipped.close()
+    resumed = Trainer(config, resume=checkpoint)
     assert resumed.step == 1
     resumed.close()
+    with pytest.raises(ValueError, match="readout_lr"):  # 다른 키는 예외 없이 그대로 거절한다
+        Trainer({**config, "readout_lr": 9e-9}, resume=checkpoint)
+
+
+# --------------------------------------------------------------------------
+# 게이트가 게이트인가 (P2 리뷰 1, focus 5 / N4)
+# --------------------------------------------------------------------------
+
+
+def test_a_scope_without_a_pre_registered_tolerance_is_not_judged_by_another_scopes_tolerance():
+    """T1에는 아직 **사전 등록된 허용 오차가 없다** — 그러면 게이트가 그렇게 말해야 한다 (P2 리뷰 1 focus 5).
+
+    `RESUME_TOLERANCE`는 P1이 **T0** run에 대고 고정한 값이고, 그 T0 경로는 이 상자에서 비트 결정적이었다. T1은
+    재시작 없이 돌린 두 프로세스의 loss가 이미 0.064 벌어진다. 그 run을 T0의 오차로 재고 `passed: false`라 적으면
+    "재개가 깨졌다"로 읽힌다 — 실제로 깬 것은 **오차가 그 범위에 없다**는 사실이다. 본 값 뒤에 오차를 맞추는 것은
+    이 프로젝트가 금하는 수이므로(P2 보고서 A1b), 등록되지 않은 범위는 `passed: None`으로 **멈춘다**.
+    """
+    module = script()
+    continuous, split = _snapshot_pair()
+    assert set(module.RESUME_TOLERANCES) == {"t0"}  # 등록된 것은 T0뿐이다
+    assert module.RESUME_TOLERANCES["t0"] == module.RESUME_TOLERANCE
+
+    t0 = module.compare_resume(continuous, split, steps=20, mode="t0")
+    assert t0["passed"] is True and t0["verdict"] == "pass" and t0["tolerance"] == module.RESUME_TOLERANCE
+
+    t1 = module.compare_resume(continuous, split, steps=20, mode="t1")
+    assert t1["passed"] is None and t1["verdict"] == "tolerance-unregistered" and t1["tolerance"] is None
+    assert t1["exact_criteria_passed"] is True  # 정수 기준(위치·뽑힌 단위·step 수·빠진 tensor)은 그대로 잰다
+    assert t1["worst_loss_abs"] == 0.0 and t1["tensors"] == 2
+    # 무엇을 쟀는지는 남는다 — 등록된 오차가 생기면 그대로 다시 판정할 수 있게
+    assert t1["would_pass_under"]["t0"] is True
+    split["losses"][7] += 0.5
+    broken = module.compare_resume(continuous, split, steps=20, mode="t1")
+    assert broken["passed"] is None and broken["would_pass_under"]["t0"] is False
+    # 정수 기준이 깨지면 오차와 무관하게 떨어진다 — 등록 여부가 면허가 되지는 않는다
+    split["sampler"]["cursors"]["robot"] = 4
+    assert module.compare_resume(continuous, split, steps=20, mode="t1")["passed"] is False
+
+
+def _gate_report(tmp_path, **checks):
+    import json
+
+    path = tmp_path / f"acceptance-{len(list(tmp_path.glob('acceptance-*.json')))}.json"
+    path.write_text(json.dumps({"task": "p1-acceptance", "checks": checks}, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
+def test_the_launcher_gate_reads_the_key_for_the_scope_it_is_about_to_launch(tmp_path):
+    """`checks.resume_t1`을 **아무도 읽지 않았다** (P2 리뷰 1 focus 5 / N4).
+
+    자동 게이트는 `artifacts/scratch/p1/run_stage_d1_gated.sh` 하나뿐이고 그것이 보는 키는 `checks.resume`,
+    곧 **T0의 것**이다. 긴 T1 run이 T0의 결과로 통과되고 있었다는 뜻이다. 게이트는 띄우려는 범위의 키를 읽고,
+    그 자리가 없거나 판정이 없으면 **멈춰야** 한다.
+    """
+    module = script()
+    report = _gate_report(
+        tmp_path,
+        resume={"check": "resume", "mode": "t0", "passed": True},
+        resume_t1={"check": "resume", "mode": "t1", "passed": None, "verdict": "tolerance-unregistered"},
+        resume_lora={"check": "resume", "mode": "lora", "passed": False, "verdict": "fail"},
+    )
+    t0 = module.resume_gate(report, "t0")
+    assert t0["key"] == "resume" and t0["passed"] is True and t0["exit_code"] == 0
+    t1 = module.resume_gate(report, "t1")
+    assert t1["key"] == "resume_t1" and t1["passed"] is None and t1["exit_code"] == 3 and "tolerance" in t1["reason"]
+    lora = module.resume_gate(report, "lora")
+    assert lora["key"] == "resume_lora" and lora["passed"] is False and lora["exit_code"] == 2
+    # 자리가 아예 없으면 통과가 아니라 멈춤이다 (오늘의 T1이 정확히 이 경우였다)
+    empty = module.resume_gate(_gate_report(tmp_path, resume={"check": "resume", "mode": "t0", "passed": True}), "t1")
+    assert empty["passed"] is None and empty["exit_code"] == 3 and "resume_t1" in empty["reason"]
+    # 다른 범위의 결과가 그 자리에 적혀 있으면 믿지 않는다
+    crossed = module.resume_gate(_gate_report(tmp_path, resume_t1={"check": "resume", "mode": "t0", "passed": True}), "t1")
+    assert crossed["passed"] is None and crossed["exit_code"] == 3 and "mode" in crossed["reason"]
+    # P1의 보고서에는 `mode` 키가 없다 — `checks.resume`에는 T0만 적혔으므로 그 조합만 t0로 읽는다
+    legacy = _gate_report(tmp_path, resume={"check": "resume", "passed": True, "steps": 20})
+    assert module.resume_gate(legacy, "t0")["exit_code"] == 0
+    assert module.resume_gate(_gate_report(tmp_path, resume_t1={"check": "resume", "passed": True}), "t1")["exit_code"] == 3
+
+    # CLI는 GPU를 건드리지 않고 같은 판정을 종료 코드로 돌려준다 (런처가 부르는 자리)
+    assert module.main(["--gate", "t0", "--gate-report", str(report)]) == 0
+    assert module.main(["--gate", "t1", "--gate-report", str(report)]) == 3
+    assert module.main(["--gate", "lora", "--gate-report", str(report)]) == 2

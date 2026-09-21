@@ -33,6 +33,7 @@ from robo_jev.train import (
     lr_factor,
     plan_episode,
     resolve_config,
+    resume_config_differences,
     run_single_unit,
     run_stream_chunk,
     train,
@@ -770,3 +771,29 @@ def test_a_tied_weight_is_saved_once_and_loading_it_back_is_not_refused_as_missi
     # 별명이 **하나도** 저장돼 있지 않으면 그때는 거절해야 한다
     with pytest.raises(ValueError, match="학습 대상 파라미터가 저장되어 있지 않다"):
         load_trainable_state(_TiedFixture(trainable=True), {"bias": torch.zeros(1)})
+
+
+def test_the_master_weight_flag_is_run_identity_only_where_it_changes_the_optimizer():
+    """P2 이전 checkpoint를 T0·LoRA에서 되살릴 수 있게 한다 (P2 리뷰 1 M5).
+
+    `resume_config`는 `RESUME_FREE_KEYS`·`RESUME_PATH_KEYS` 밖의 모든 키를 견주고 `Trainer._load`는
+    `saved.get(key) != current[key]`를 본다 — P1의 checkpoint에는 `fp32_master_weights` 키가 아예 없으므로
+    `None != True`가 되어 **사본이 생기지도 않는 경로에서까지** 이름으로 거절당했다. 사본이 생기는 경로(모델의
+    학습 대상에 fp32가 아닌 파라미터가 있는 T1)에서는 거절이 그대로 맞다 — 그리고 그 판정은 플래그가 아니라
+    모델을 보므로, 켜고 돌린 run을 끈 채 이어가는 반대 방향도 막는다.
+    """
+    old = {"trainable": "readout", "backbone_lr": 1e-5}  # P2 이전 checkpoint: 키 자체가 없다
+    new = {"trainable": "readout", "backbone_lr": 1e-5, "fp32_master_weights": True}
+    assert resume_config_differences(old, new, master_weights=False) == []
+    assert resume_config_differences(old, new, master_weights=True) == ["fp32_master_weights"]
+    off = {**new, "fp32_master_weights": False}
+    assert resume_config_differences(off, new, master_weights=True) == ["fp32_master_weights"]
+    assert resume_config_differences(new, off, master_weights=True) == ["fp32_master_weights"]
+    assert resume_config_differences(off, new, master_weights=False) == []
+    assert resume_config_differences({**new, "backbone_lr": 5e-5}, new, master_weights=False) == ["backbone_lr"]
+
+    # 판정의 입력은 모델이다: bf16 학습 대상이 있으면 참, fp32 readout만 학습하면 거짓
+    assert bool(fp32_master_weights(_BF16Fixture(MASTER_PROBE["start"], 8, frozen=True))) is True
+    frozen = _BF16Fixture(MASTER_PROBE["start"], 8, frozen=True)
+    frozen.backbone.weight.requires_grad_(False)
+    assert bool(fp32_master_weights(frozen)) is False

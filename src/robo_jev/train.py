@@ -138,6 +138,7 @@ __all__ = [
     "plan_episode",
     "resolve_config",
     "resume_config",
+    "resume_config_differences",
     "run_single_unit",
     "run_stream_chunk",
     "tokenizer_block",
@@ -972,6 +973,20 @@ def resume_config(config: dict) -> dict[str, Any]:
     return out
 
 
+def resume_config_differences(saved: dict[str, Any], current: dict[str, Any], *, master_weights: bool) -> list[str]:
+    """재개를 거절할 설정 키들 — :func:`resume_config` 의 두 결과를 견준다.
+
+    `master_weights`는 **이 모델에 fp32 master 사본이 생기는가**(= 학습 대상에 fp32가 아닌 파라미터가 있는가,
+    :func:`fp32_master_weights`)다. 생기지 않으면(T0·LoRA·fixture) :func:`build_optimizer` 는 어느 쪽이든 평범한
+    ``AdamW``를 돌려주므로 `fp32_master_weights` 플래그는 optimizer를 바꾸지 않는다 — 그런데도 견주면 이 키가 아예
+    없는 **P2 이전 checkpoint가 T0·LoRA에서까지 이름으로 거절당한다**(`None != True`; P2 리뷰 1 M5). 사본이 생기는
+    경로(T1)에서는 켜고 끄는 것이 갱신 규칙 자체를 바꾸므로 그대로 거절한다 — 그쪽은 모델이 bf16이면 플래그와
+    무관하게 참이라, 켜진 run을 끈 채로 이어가는 반대 방향도 함께 막힌다.
+    """
+    keys = [key for key in current if master_weights or key != "fp32_master_weights"]
+    return [key for key in keys if saved.get(key) != current[key]]
+
+
 def build_manifest(config: dict, items: list[Item], model: Judge) -> dict[str, Any]:
     """checkpoint에 함께 적는 것: 데이터 manifest 참조(manifest마다 경로·sha256·파일 해시·분야 태그·레코드 수), 토큰
     직렬화·질문 세트 버전, tokenizer의 정체, 실제로 만든 모델, git SHA — 그리고 이것들 가운데 재개 때 같아야 하는
@@ -1455,7 +1470,7 @@ class Trainer:
         state = load_checkpoint(path)
         check_contract(state.get("manifest"), self.manifest, where=f"resume: {path}")
         saved, current = resume_config(state["config"]), resume_config(self.config)
-        differences = [key for key in current if saved.get(key) != current[key]]
+        differences = resume_config_differences(saved, current, master_weights=bool(fp32_master_weights(self.model)))
         if differences:
             raise ValueError(
                 f"resume: checkpoint의 설정과 다르다: {differences} — 중단·예산·경로·이름({list(RESUME_FREE_KEYS)})과 "
