@@ -39,10 +39,15 @@ DECISION_CELL_RUNS = {
     "2B T1 bf16 (40)": "p2-reeval-2b-t1.json",
     "4B T0 (200)": "p2-reeval-4b-t0.json",
     "4B LoRA (40)": "p2-reeval-4b-lora.json",
+    "2B T1 bf16 5 s (40)": "p2-reeval-2b-t1-bf16-5s.json",
     "2B zero-shot (stride 16)": "p2-reeval-2b-zero-shot.json",
     "4B zero-shot (stride 16)": "p2-reeval-4b-zero-shot.json",
     "2B T1 fp32 master (40)": "p2-2b-t1-fp32.json",
 }
+
+#: 판정 칸을 "라벨이 지금 commitment인가"로 가른 표 (`scripts/decision_cell_strata.py`). 집계 여유는 70 %가
+#: commitment 반복인 모집단에서 잰 값이라 읽기를 희석한다 — 결정 기록은 그 층화를 함께 들고 있어야 한다.
+DECISION_CELL_STRATA = "p2-decision-cell-strata.json"
 
 
 def _load(name: str) -> dict[str, Any] | None:
@@ -99,10 +104,13 @@ def _decision_cell() -> dict[str, Any] | None:
     `margin_includes_zero`가 참인 줄의 여유는 **판정이 아니다** (Task P2 B2·B3).
     """
     rows: dict[str, Any] = {}
+    missing: dict[str, Any] = {}
     for label, name in DECISION_CELL_RUNS.items():
         payload = _load(name)
         table = ((payload or {}).get("evaluation") or {}).get("splits", {}).get(DECISION_SPLIT)
         if table is None:
+            # 없는 줄은 **이름으로 남긴다** — 조용히 빠지면 6줄짜리 표가 8줄이었던 것처럼 보이지 않는다 (P2 리뷰 1 M10)
+            missing[label] = {"report": name, "reason": "report not produced" if payload is None else f"the report has no {DECISION_SPLIT} split"}
             continue
         cell = (table.get("episode_bootstrap") or {}).get(DECISION_QUESTION)
         rows[label] = {
@@ -117,9 +125,19 @@ def _decision_cell() -> dict[str, Any] | None:
         }
     if not rows:
         return None
+    strata = _load(DECISION_CELL_STRATA)
     return {
         "split": DECISION_SPLIT, "question": DECISION_QUESTION,
-        "unit": "episode — the 844 ticks come from 8 episodes; the independent unit is the episode, not the tick",
+        "unit": (
+            "episode — the 844 ticks come from 8 episodes (94/80/67/79/72/70/300/82, so ep-E1-000235 alone is 35.5 % "
+            "of the cell); the independent unit is the episode, not the tick"
+        ),
+        "reading": (
+            "This cell is ~70 % 'repeat your commitment': on 595 of the 844 ticks the expert label IS the tick's own "
+            "commitment.action_ref (98.5 % of the 604 ticks that have one), and the state shuffle keeps that line "
+            "verbatim, so a policy that reads nothing but the preserved fields scores 751/844 = 0.890. Every whole-cell "
+            "margin below is therefore diluted by a stratum that needs no goal. Read `strata` before quoting one."
+        ),
         "note": (
             "Each row's controls are that run's own. `episode_bootstrap.state_shuffle.margin_ci` is a PAIRED bootstrap "
             "over episodes (model and its control counted inside the same resample), so it is the interval of the margin "
@@ -128,6 +146,11 @@ def _decision_cell() -> dict[str, Any] | None:
             "but turn the permutation column off, so their eval_set hash differs while the scored population does not."
         ),
         "runs": rows,
+        "missing": missing,
+        "strata": (
+            {"source": DECISION_CELL_STRATA, **{key: strata[key] for key in ("reading", "mechanism", "runs", "missing") if key in strata}}
+            if strata else {"source": DECISION_CELL_STRATA, "note": "not produced — run scripts/decision_cell_strata.py"}
+        ),
     }
 
 
