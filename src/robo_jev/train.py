@@ -440,15 +440,29 @@ def attach_lora(backbone: QwenBackbone, lora: dict[str, Any]) -> list[str]:
 
 
 def load_trainable_state(model: Judge, saved: dict[str, Tensor]) -> None:
-    """:func:`trainable_state_dict` 가 저장한 것을 싣는다 — 저장된 키는 전부 있어야 하고, 빠진 키는 고정된 backbone 가중치뿐이어야 한다."""
+    """:func:`trainable_state_dict` 가 저장한 것을 싣는다 — 저장된 키는 전부 있어야 하고, 빠진 키는 고정된 backbone 가중치뿐이어야 한다.
+
+    **묶인 가중치**(lm_head ↔ embedding)는 한 tensor에 이름이 둘이다. 저장은 중복을 지운 이름으로 하므로
+    (`trainable_state_dict`가 `named_parameters()`를 쓴다) 다른 쪽 이름은 `missing_keys`에 뜨지만 값은 이미 실렸다 —
+    같은 tensor를 가리키는 **별명 가운데 하나라도 저장돼 있으면** 빠진 것이 아니다. 그 구분이 없으면 T1 checkpoint를
+    다시 실을 수 없다(`backbone.model.lm_head.weight`가 빠졌다고 거절한다 — P2에서 실제로 걸렸다).
+    """
     result = model.load_state_dict(saved, strict=False)
     if result.unexpected_keys:
         raise ValueError(f"checkpoint: 모델에 없는 파라미터가 저장되어 있다: {sorted(result.unexpected_keys)[:5]}")
+    aliases: dict[int, list[str]] = {}
+    named: dict[str, Tensor] = {}
+    for name, parameter in model.named_parameters(remove_duplicate=False):
+        aliases.setdefault(id(parameter), []).append(name)
+        named[name] = parameter
     trainable = {
-        name for name, parameter in model.named_parameters(remove_duplicate=False)
+        name for name, parameter in named.items()
         if parameter.requires_grad or not name.startswith("backbone.")
-    }  # 묶인 가중치(lm_head↔embedding)는 이름이 둘이라 중복을 지우지 않고 본다
-    missing = [name for name in result.missing_keys if name in trainable]
+    }  # 묶인 가중치는 이름이 둘이라 중복을 지우지 않고 본다
+    missing = [
+        name for name in result.missing_keys
+        if name in trainable and not any(alias in saved for alias in aliases.get(id(named[name]), ()))
+    ]
     if missing:
         raise ValueError(f"checkpoint: 학습 대상 파라미터가 저장되어 있지 않다: {missing[:5]}")
 

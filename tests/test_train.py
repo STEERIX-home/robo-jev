@@ -29,12 +29,14 @@ from robo_jev.train import (
     episode_chunks,
     fp32_master_weights,
     layout_prefix,
+    load_trainable_state,
     lr_factor,
     plan_episode,
     resolve_config,
     run_single_unit,
     run_stream_chunk,
     train,
+    trainable_state_dict,
 )
 
 TICK_WEIGHTS = {"steady": 0.25, "event": 2.0, "goal_change": 2.0, "other": 1.0}
@@ -727,3 +729,44 @@ def test_a_checkpoint_without_master_copies_is_refused_instead_of_silently_losin
     with_master = build_optimizer(_BF16Fixture(MASTER_PROBE["start"], 8), _probe_config(True))
     with pytest.raises(ValueError, match="fp32 master"):
         with_master.load_state_dict(plain.state_dict())
+
+
+# --------------------------------------------------------------------------
+# 묶인 가중치와 checkpoint (Task P2 — T1 checkpoint를 다시 실을 수 없던 버그)
+# --------------------------------------------------------------------------
+
+
+class _TiedFixture(torch.nn.Module):
+    """lm_head ↔ embedding처럼 **한 tensor에 이름이 둘**인 backbone + fp32 readout."""
+
+    def __init__(self, *, trainable: bool) -> None:
+        super().__init__()
+        self.backbone = torch.nn.Module()
+        shared = torch.nn.Parameter(torch.full((4, 3), 0.25), requires_grad=trainable)
+        self.backbone.embed = torch.nn.Module()
+        self.backbone.embed.weight = shared
+        self.backbone.head = torch.nn.Module()
+        self.backbone.head.weight = shared  # 같은 Parameter 객체 (묶인 가중치)
+        self.backbone.frozen = torch.nn.Parameter(torch.zeros(2), requires_grad=False)
+        self.bias = torch.nn.Parameter(torch.zeros(1))
+
+
+def test_a_tied_weight_is_saved_once_and_loading_it_back_is_not_refused_as_missing():
+    """T1 checkpoint는 `named_parameters()`(중복 제거)로 저장되므로 묶인 가중치의 다른 이름은 저장되지 않는다.
+
+    P2에서 실제로 걸린 버그: 저장된 `p1-2b-t1`의 checkpoint를 평가하려고 싣자
+    `checkpoint: 학습 대상 파라미터가 저장되어 있지 않다: ['backbone.model.lm_head.weight']`로 거절당했다 —
+    그 tensor는 `embed_tokens.weight`라는 이름으로 이미 실려 있었는데도. 재개도 같은 경로를 지난다.
+    """
+    model = _TiedFixture(trainable=True)
+    saved = trainable_state_dict(model)
+    names = sorted(saved)
+    assert names == ["backbone.embed.weight", "bias"] or names == ["backbone.head.weight", "bias"], names
+    assert "backbone.frozen" not in saved  # 고정된 backbone 가중치는 저장하지 않는다
+    target = _TiedFixture(trainable=True)
+    load_trainable_state(target, {name: tensor.clone() + 1.0 for name, tensor in saved.items()})
+    assert torch.equal(target.backbone.embed.weight, target.backbone.head.weight)
+    assert float(target.backbone.head.weight.detach()[0, 0]) == pytest.approx(1.25)  # 다른 이름으로도 값이 들어왔다
+    # 별명이 **하나도** 저장돼 있지 않으면 그때는 거절해야 한다
+    with pytest.raises(ValueError, match="학습 대상 파라미터가 저장되어 있지 않다"):
+        load_trainable_state(_TiedFixture(trainable=True), {"bias": torch.zeros(1)})
