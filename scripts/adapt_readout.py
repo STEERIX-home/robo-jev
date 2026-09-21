@@ -302,9 +302,15 @@ def run_zero_shot(config: dict[str, Any], *, eval_config: str | Path = DEFAULT_E
     torch.cuda.reset_peak_memory_stats()
     started = time.perf_counter()
     backbone = QwenBackbone.load(model_id, root=config.get("model_root"), dtype=torch.bfloat16, device="cuda", kv_mode="static")
+    from robo_jev.train import tokenizer_block
+
     out: dict[str, Any] = {
-        "model_id": model_id, "mode": "zero-shot", "load_seconds": round(time.perf_counter() - started, 1),
-        "tick_stride": int(tick_stride), "evaluation": {"eval_set": eval_suite_identity(suite, items), "splits": {}},
+        # 학습 run과 같은 자리를 쓴다 — 학습이 없으니 `steps`·곡선·checkpoint는 없고, 모델·설정·계약 digest는 있다.
+        "model_id": model_id, "mode": "zero-shot", "run_id": config.get("run_id"), "status": "no-training", "steps": None,
+        "load_seconds": round(time.perf_counter() - started, 1), "tick_stride": int(tick_stride),
+        "config": {key: value for key, value in config.items() if key != "dataset_manifests"},
+        "manifest": {"model": {"id": model_id}, "tokenizer": tokenizer_block(config["tokenizer"])},
+        "evaluation": {"eval_set": eval_suite_identity(suite, items), "splits": {}},
     }
     for key, subset in items.items():
         started = time.perf_counter()
