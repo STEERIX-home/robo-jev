@@ -83,6 +83,7 @@ def build_single_prompts(record: dict, tokenizer: Any, *, shuffle_seed: int | No
                 "tokens": state_ids + suffix_ids, "question_id": question["id"], "type": question["type"],
                 "candidates": [criteria[i]["id"] for i in order], "codes": codes, "code_ids": code_ids,
                 "label": labels.get(question["id"]), "record_id": rid,
+                "group": str(record.get("origin_group") or rid),  # 편 단위 집계의 묶음 (P2 B1)
             }
         )
     return out
@@ -117,6 +118,7 @@ def build_tick_prompts(record: dict, tick_index: int, tokenizer: Any, *, shuffle
             {
                 "tokens": context + suffix_ids, "question_id": qid, "type": spec["type"], "candidates": [ids[i] for i in order],
                 "codes": codes, "code_ids": code_ids, "label": labels.get(qid), "record_id": eid, "tick": tick_index,
+                "group": eid,  # 스트림의 편 = 에피소드 (P2 B1)
             }
         )
     return out
@@ -147,6 +149,7 @@ def score_prompts(backbone: Any, prompts: list[dict[str, Any]], *, batch: int = 
 def _as_prediction(scored: dict[str, Any], kind: str) -> dict[str, Any]:
     return {
         "record_id": scored["record_id"], "tick": scored.get("tick"), "kind": kind, "split": None,
+        "group": scored.get("group") or scored["record_id"],
         "probabilities": {scored["question_id"]: scored["probabilities"]}, "candidates": {scored["question_id"]: list(scored["candidates"])},
         "labels": [scored["label"]] if scored["label"] is not None else [], "question_types": {scored["question_id"]: scored["type"]},
     }

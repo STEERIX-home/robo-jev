@@ -32,6 +32,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import random
 import time
 from collections import Counter
 from pathlib import Path
@@ -46,6 +47,8 @@ from robo_jev.sampler import Item, permute_candidates
 __all__ = [
     "aggregate",
     "calibration_error",
+    "episode_bootstrap",
+    "split_episode_bootstrap",
     "context_shuffle_records",
     "contrast_pair_check",
     "evaluate_items",
@@ -95,6 +98,7 @@ def predict_items(judge: Any, items: list[Item], *, tokens_per_batch: int = 8192
                     out.append(
                         {
                             "record_id": b.record_id, "tick": None, "kind": "single", "split": b.split,
+                            "group": str(b.record.get("origin_group") or b.record_id),  # 편 단위 집계의 묶음 (B1)
                             "probabilities": {qid: torch.softmax(z.detach().float().cpu(), 0) for qid, z in result["logits"][position].items()},
                             "candidates": result["candidates"][position], "labels": list(b.record.get("labels", [])),
                             "question_types": dict(b.question_types),
@@ -107,6 +111,7 @@ def predict_items(judge: Any, items: list[Item], *, tokens_per_batch: int = 8192
                 out.append(
                     {
                         "record_id": item.record_id, "tick": index, "kind": "stream", "split": item.split,
+                        "group": item.record_id,  # 스트림의 편 = 에피소드 (B1)
                         "probabilities": {qid: torch.softmax(z.detach().float().cpu(), 0) for qid, z in logits.items()},
                         "candidates": candidates, "labels": list(item.record["ticks"][index].get("labels", [])),
                         "question_types": dict(item.question_types),
@@ -139,7 +144,8 @@ def rule_judge_predictions(items: list[Item]) -> list[dict[str, Any]]:
                 probabilities[qid] = vector / total if total > 0 else torch.full((len(ids),), 1.0 / len(ids))
             out.append(
                 {
-                    "record_id": item.record_id, "tick": index, "kind": "stream", "split": item.split, "probabilities": probabilities,
+                    "record_id": item.record_id, "tick": index, "kind": "stream", "split": item.split, "group": item.record_id,
+                    "probabilities": probabilities,
                     "candidates": {qid: list(ids) for qid, ids in entry["candidate_mapping"].items() if qid in probabilities},
                     "labels": list(tick.get("labels", [])), "question_types": dict(item.question_types),
                 }
@@ -190,10 +196,27 @@ def _table_key(prediction: dict[str, Any], qid: str) -> str:
     return qid if prediction["kind"] == "stream" else prediction["question_types"].get(qid, "unknown")
 
 
+def _per_episode(groups: dict[str, list[int]]) -> list[dict[str, Any]]:
+    """편 단위 집계를 표에 남기는 꼴 — ``[{episode_id, n, graded, correct}, …]``(편 이름 순).
+
+    레코드별 예측을 다 저장하지 않는다(P1은 그것을 버려서 편 단위 구간을 낼 수 없었다). 이 네 수만 있으면
+    편을 표본 단위로 재표집하는 부트스트랩(:func:`episode_bootstrap`)이 그대로 돌아간다."""
+    return [
+        {"episode_id": name, "n": counts[0], "graded": counts[1], "correct": counts[2]}
+        for name, counts in sorted(groups.items())
+    ]
+
+
 def aggregate(predictions: list[dict[str, Any]]) -> dict[str, Any]:
-    """예측 목록 → 질문(id 또는 타입)별 ``{n, accuracy, nll, brier, first_position_rate, position_counts}``와 전체."""
+    """예측 목록 → 질문(id 또는 타입)별 ``{n, accuracy, nll, brier, first_position_rate, position_counts, per_episode}``와 전체.
+
+    ``per_episode``는 **편 단위 집계**다(로봇 스트림은 에피소드, 비로봇·대조 단일은 `origin_group`; 예측의 `group`
+    키, 없으면 `record_id`). 틱은 편 안에서 상관되어 있어 독립 단위는 편이므로, 이 목록이 있어야 표의 어떤 칸에도
+    편 단위 구간을 붙일 수 있다 (P2 B1)."""
     rows: dict[str, dict[str, Any]] = {}
+    totals: dict[str, list[int]] = {}
     for prediction in predictions:
+        group = str(prediction.get("group") or prediction["record_id"])
         for label in prediction["labels"]:
             qid = label.get("question_id")
             if qid not in prediction["probabilities"]:
@@ -202,13 +225,21 @@ def aggregate(predictions: list[dict[str, Any]]) -> dict[str, Any]:
             if metrics is None:
                 continue
             key = _table_key(prediction, qid)
-            row = rows.setdefault(key, {"n": 0, "correct": 0, "graded": 0, "nll": 0.0, "brier": 0.0, "positions": Counter(), "choice_n": 0})
+            row = rows.setdefault(key, {"n": 0, "correct": 0, "graded": 0, "nll": 0.0, "brier": 0.0, "positions": Counter(), "choice_n": 0, "groups": {}})
             row["n"] += 1
             row["nll"] += metrics["nll"]
             row["brier"] += metrics["brier"]
+            counts = row["groups"].setdefault(group, [0, 0, 0])
+            total_counts = totals.setdefault(group, [0, 0, 0])
+            counts[0] += 1
+            total_counts[0] += 1
             if metrics["correct"] is not None:
                 row["graded"] += 1
                 row["correct"] += int(metrics["correct"])
+                counts[1] += 1
+                counts[2] += int(metrics["correct"])
+                total_counts[1] += 1
+                total_counts[2] += int(metrics["correct"])
             if prediction["question_types"].get(qid) == "choice" and len(prediction["candidates"][qid]) >= 2:
                 row["positions"][metrics["position"]] += 1
                 row["choice_n"] += 1
@@ -223,6 +254,7 @@ def aggregate(predictions: list[dict[str, Any]]) -> dict[str, Any]:
             "brier": row["brier"] / row["n"],
             "first_position_rate": (row["positions"][0] / row["choice_n"]) if row["choice_n"] else None,
             "position_counts": [row["positions"][i] for i in range(max(row["positions"]) + 1)] if row["positions"] else [],
+            "per_episode": _per_episode(row["groups"]),
         }
         for name in ("n", "correct", "graded", "nll", "brier"):
             total[name] += row[name]
@@ -232,8 +264,95 @@ def aggregate(predictions: list[dict[str, Any]]) -> dict[str, Any]:
         "graded": total["graded"],
         "nll": (total["nll"] / total["n"]) if total["n"] else None,
         "brier": (total["brier"] / total["n"]) if total["n"] else None,
+        "per_episode": _per_episode(totals),
     }
     return table
+
+
+# --------------------------------------------------------------------------
+# 편 단위 부트스트랩 (P2 B2·B3)
+# --------------------------------------------------------------------------
+
+#: 편 단위 부트스트랩의 재표집 수·seed·신뢰 수준. **평가 집합 설정이 아니라 이 모듈의 상수다** — 설정에 넣으면
+#: :func:`eval_suite_identity` 의 payload가 바뀌어 P1이 낸 해시(`79d09793eab5…`)와 나란히 놓을 수 없게 된다.
+EPISODE_BOOTSTRAP = {"resamples": 2000, "seed": 20260921, "level": 0.95}
+
+
+def _quantile(sorted_values: list[float], q: float) -> float:
+    """정렬된 표본의 선형 보간 분위수 (numpy 없이 — 이 모듈은 tensor 말고는 순수 Python이다)."""
+    position = q * (len(sorted_values) - 1)
+    low = int(math.floor(position))
+    high = min(low + 1, len(sorted_values) - 1)
+    weight = position - low
+    return sorted_values[low] * (1.0 - weight) + sorted_values[high] * weight
+
+
+def episode_bootstrap(
+    model_rows: list[dict[str, Any]] | None,
+    control_rows: list[dict[str, Any]] | None = None,
+    *,
+    resamples: int = EPISODE_BOOTSTRAP["resamples"],
+    seed: int = EPISODE_BOOTSTRAP["seed"],
+    level: float = EPISODE_BOOTSTRAP["level"],
+) -> dict[str, Any] | None:
+    """편을 표본 단위로 재표집한 정확도(와, 대조군을 주면 **짝지은** 여유)의 부트스트랩 구간.
+
+    입력은 :func:`aggregate` 가 남긴 ``per_episode`` 목록이다. 틱은 편 안에서 상관되어 있으므로 독립 단위는 틱이
+    아니라 편이다 — 편 |G|개를 복원추출하고 그 편들의 ``Σ correct / Σ graded``를 다시 센다(편마다 틱 수가 다른
+    것이 재표집에 그대로 들어온다). ``control_rows``를 주면 **같은 재표집 안에서** 모델과 대조군을 함께 세어
+    그 차이의 구간을 낸다(**쌍 부트스트랩**): 두 열은 같은 편에서 나왔으므로 편의 난이도가 차이에서 상쇄된다.
+    ``margin_includes_zero``가 참이면 그 여유는 판정이 아니다.
+    """
+    model = {str(row["episode_id"]): row for row in (model_rows or [])}
+    groups = sorted(name for name in model if model[name].get("graded"))
+    if not groups:
+        return None
+    control = {str(row["episode_id"]): row for row in control_rows} if control_rows else None
+    paired = control is not None and all(name in control for name in groups)
+
+    def _accuracy(source: dict[str, dict[str, Any]], names: list[str]) -> float | None:
+        graded = sum(int(source[name]["graded"]) for name in names if name in source)
+        correct = sum(int(source[name]["correct"]) for name in names if name in source)
+        return (correct / graded) if graded else None
+
+    accuracies: list[float] = []
+    margins: list[float] = []
+    rng = random.Random(seed)
+    size = len(groups)
+    for _ in range(int(resamples)):
+        drawn = [groups[rng.randrange(size)] for _ in range(size)]
+        value = _accuracy(model, drawn)
+        if value is None:
+            continue
+        accuracies.append(value)
+        if paired:
+            other = _accuracy(control, drawn)
+            if other is not None:
+                margins.append(value - other)
+    accuracies.sort()
+    low, high = (1.0 - level) / 2.0, 1.0 - (1.0 - level) / 2.0
+    accuracy = _accuracy(model, groups)
+    out: dict[str, Any] = {
+        "episodes": size, "n": sum(int(model[name]["n"]) for name in groups),
+        "graded": sum(int(model[name]["graded"]) for name in groups),
+        "resamples": int(resamples), "seed": int(seed), "level": level, "unit": "episode",
+        "accuracy": accuracy,
+        "accuracy_ci": [_quantile(accuracies, low), _quantile(accuracies, high)] if accuracies else None,
+    }
+    if out["accuracy_ci"] is not None:
+        out["accuracy_half_width"] = (out["accuracy_ci"][1] - out["accuracy_ci"][0]) / 2.0
+    if paired and margins:
+        margins.sort()
+        control_accuracy = _accuracy(control, groups)
+        interval = [_quantile(margins, low), _quantile(margins, high)]
+        out.update({
+            "control_accuracy": control_accuracy,
+            "margin": None if (accuracy is None or control_accuracy is None) else accuracy - control_accuracy,
+            "margin_ci": interval,
+            "margin_half_width": (interval[1] - interval[0]) / 2.0,
+            "margin_includes_zero": bool(interval[0] <= 0.0 <= interval[1]),
+        })  # fmt: skip
+    return out
 
 
 def answer_change_rate(original: list[dict[str, Any]], permuted: list[dict[str, Any]]) -> dict[str, Any]:
@@ -682,7 +801,28 @@ def evaluate_items(
         result["instruction_shuffle_kind"] = "instruction"  # 로봇 스트림: 지시·목표 텍스트만 굴림, 구조화 goal·상태·후보 유지
     if rule_judge and any(item.kind == "stream" for item in items):
         result["rule_judge"] = aggregate(rule_judge_predictions(items))
+    result["episode_bootstrap"] = split_episode_bootstrap(result)
     return result
+
+
+def split_episode_bootstrap(table: dict[str, Any], **options: Any) -> dict[str, Any]:
+    """한 분할 표의 질문 칸마다 **편 단위 95 % 구간** — 모델 정확도의 구간과, 대조군 대비 여유의 **쌍** 구간.
+
+    P1은 이 수를 낼 수 없었다(`evaluate_items`가 레코드별 예측을 버려서 편 안의 상관을 추정할 수 없었고, 보고서는
+    "틱이 독립이면 ±0.023~0.034, 완전히 상관이면 ±0.23~0.35" 두 한계만 적었다). 이제 ``per_episode``가 표에 남으므로
+    실제 값이 그 사이 어디인지 잰다. 여유의 구간이 0을 포함하면 그 여유는 판정이 아니다 (P2 B2·B3)."""
+    out: dict[str, Any] = {}
+    for qid in table.get("model", {}):
+        entry = episode_bootstrap((table["model"].get(qid) or {}).get("per_episode"), **options)
+        if entry is None:
+            continue
+        for name, column in (("state_shuffle", "context_shuffle"), ("instruction_shuffle", "instruction_shuffle")):
+            rows = ((table.get(column) or {}).get(qid) or {}).get("per_episode")
+            control = episode_bootstrap((table["model"].get(qid) or {}).get("per_episode"), rows, **options) if rows else None
+            if control is not None and "margin" in control:
+                entry[name] = {key: control[key] for key in ("control_accuracy", "margin", "margin_ci", "margin_half_width", "margin_includes_zero")}
+        out[qid] = entry
+    return out
 
 
 # --------------------------------------------------------------------------
