@@ -1,0 +1,50 @@
+# Task P2 B2 — **판정 칸만** 다시 재는 평가 집합. P1의 일곱 run에 편 단위 95 % 구간을 붙이려고 저장된
+# checkpoint로 **학습 없이** 평가만 다시 돌린다 (`evaluate_items`가 레코드별 예측을 버려서 P1의 보고서에는
+# "틱이 독립이면 ±0.023~0.034, 완전히 상관이면 ±0.23~0.35"라는 두 한계밖에 없었다 — 실제 값은 재야 나온다).
+#
+# `configs/eval/pilot.yaml`의 `robot/ood_dev` 분할을 **레코드 하나도 다르지 않게** 옮겨 적었다(같은 8편 844틱).
+# 그래서 이 집합의 model 열은 P1이 낸 값을 그대로 재현해야 하고, 재현하면 그 위에 붙는 구간이 P1의 수에 붙는다.
+# 다른 것은 둘뿐이다:
+#   1. 분할이 하나다 (나머지 여섯 분할은 P1의 보고서에 이미 있고, 다시 재면 GPU 3.7시간이다).
+#   2. `permuted: false` — 답 변경률은 P1의 표에 있고, 이 열을 끄면 GPU pass가 4개에서 3개로 줄어든다(≈25 %).
+# 그러므로 `eval_set.sha256`은 `configs/eval/pilot.yaml`의 `79d09793eab5…`와 **다르다**(설정과 읽힌 레코드
+# 목록의 해시이고 둘 다 달라졌다). 같은 것은 **점수를 매긴 모집단**이다 — 그것을 보고서가 재현으로 보인다.
+#
+# 봉인(`ood_test`)은 여기에도 없다.
+
+version: eval-pilot-decision-cell-v0.1
+window_ticks: 30
+shuffle_seed: 1
+tokens_per_batch: 8192
+fused: true              # P1과 같은 서빙 구성 (몸통+분기 한 forward)
+
+columns:
+  permuted: false        # 위의 2
+  state_shuffle: true    # 표준 대조군 — 쌍 부트스트랩의 한쪽
+  instruction_shuffle: true
+  rule_judge: true
+  selective: false       # P1의 표에 있다 (여기서는 판정 칸의 구간만 본다)
+  calibration: false
+
+tiny_scorer_report: artifacts/reports/tiny-scorer.json
+
+splits:
+  - name: robot/ood_dev
+    manifest: artifacts/datasets/d1-robot/d1-rollout-labels/manifest.json
+    domain: robot
+    split: ood_dev
+    files: ["episodes/*/streams.jsonl"]
+    selection: true
+    note: "configs/eval/pilot.yaml의 같은 분할과 레코드가 같다 — 봉인 계열 8편(E0 3 + E1 5) = 844틱. **판정 칸**(q_main)"
+    records: [ep-E0-000110, ep-E0-000162, ep-E0-000171,
+              ep-E1-000142, ep-E1-000181, ep-E1-000219, ep-E1-000235, ep-E1-000263]
+    # **판정 칸의** 틱별 예측을 남긴다 (P2 리뷰 1 I3). 이 칸의 0.904가 무엇으로 풀리는지 — 라벨이 지금
+    # `commitment.action_ref`인 595틱과 아닌 249틱 — 은 편 단위 집계로는 다시 셀 수 없어서 리뷰어가 GPU를 두 번 더
+    # 썼다. 여기 적은 질문 칸만 남기는 이유는 이 분할의 질문 칸이 열 개라 `true`로 켜면 같은 파일이 0.10 MB에서
+    # **4.90 MB**가 되기 때문이다(실측; 이 칸 하나만 켜면 0.65 MB다). **점수를 매긴 모집단을 바꾸지 않으므로 `eval_set.sha256`은 그대로다.**
+    store_predictions: [q_main]
+
+note: >
+  이 집합으로 나온 수는 `artifacts/reports/p2-reeval-*.json`에 남는다. 표의 `episode_bootstrap` 블록이
+  편(에피소드)을 표본 단위로 재표집한 95 % 구간이고, 대조군 칸의 `margin_ci`는 **같은 편에서 짝지은**
+  차이의 구간이다 — 그것이 0을 포함하면 그 여유는 판정이 아니다.

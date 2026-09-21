@@ -22,16 +22,22 @@ from robo_jev.model.stream import StreamState, replay_layout
 from robo_jev.model.tokenizer import WhitespaceTokenizer
 from robo_jev.sampler import load_items, tick_weights, valid_label_ticks
 from robo_jev.train import (
+    MasterWeightAdamW,
     Trainer,
+    build_optimizer,
     detach_stream_state,
     episode_chunks,
+    fp32_master_weights,
     layout_prefix,
+    load_trainable_state,
     lr_factor,
     plan_episode,
     resolve_config,
+    resume_config_differences,
     run_single_unit,
     run_stream_chunk,
     train,
+    trainable_state_dict,
 )
 
 TICK_WEIGHTS = {"steady": 0.25, "event": 2.0, "goal_change": 2.0, "other": 1.0}
@@ -605,3 +611,189 @@ def test_train_function_returns_the_documented_result(tmp_path):
     assert (tmp_path / "runs" / "fn-1" / "checkpoint.pt").is_file()
     assert result["checkpoint"].endswith("checkpoint.pt") and len(result["metrics"]["steps"]) == 1
     assert torch.get_num_threads() == threads_before  # 스레드 수는 train()이 끝나면 되돌린다
+
+
+# --------------------------------------------------------------------------
+# fp32 master weights (Task P2 stage A3) — 갱신이 bf16 반올림을 살아남는가
+# --------------------------------------------------------------------------
+
+#: **비교 전에 고정한** 허용 오차 (P2 A3). 상수 gradient에서 AdamW의 원소별 갱신은 1·2차 모멘트의 bias
+#: correction이 상쇄되어 정확히 ``lr·g/(|g| + eps) ≈ lr``이므로, ``N`` step 뒤의 **반올림 없는 기대 이동**은
+#: ``N·lr``이다. fp32 master를 쓰면 남는 오차는 bf16으로 되쓸 때의 반올림 **한 번**뿐이고, |p| ≈ 0.03에서 그
+#: 크기는 반 눈금 = 2⁻¹⁴ = 6.10e-5 — 아래 탐침의 기대 이동 2.0e-3의 **3.05 %**다. 그 1.6배를 허용치로 둔다.
+#: (bf16을 직접 갱신하면 한 step의 1e-5가 매번 눈금 1.22e-4에 반올림돼 사라지므로 비가 0이 된다.)
+MASTER_UPDATE_REL_TOL = 0.05
+#: 탐침 값: |p| = 0.03(눈금 2⁻¹³ = 1.22e-4)에서 lr의 12배가 한 눈금이다 — P1의 T1이 선 자리 그대로다.
+MASTER_PROBE = {"steps": 200, "lr": 1e-5, "start": 0.03, "grad": 1e-3, "size": 256}
+
+
+class _BF16Fixture(torch.nn.Module):
+    """`parameter_groups`가 보는 최소 모양 — backbone 자리에 bf16 학습 대상 하나, readout 자리에 fp32 하나."""
+
+    def __init__(self, value: float, size: int, *, frozen: bool = False) -> None:
+        super().__init__()
+        self.backbone = torch.nn.Module()
+        self.backbone.weight = torch.nn.Parameter(torch.full((size,), value, dtype=torch.bfloat16))
+        if frozen:
+            self.backbone.frozen = torch.nn.Parameter(torch.zeros(size, dtype=torch.bfloat16), requires_grad=False)
+        self.bias = torch.nn.Parameter(torch.zeros(1))
+
+
+def _probe_config(fp32_master: bool) -> dict:
+    return {
+        "trainable": "text_backbone_and_readout", "backbone_lr": MASTER_PROBE["lr"], "readout_lr": MASTER_PROBE["lr"],
+        "weight_decay": 0.01, "fp32_master_weights": fp32_master,
+    }  # fmt: skip
+
+
+def _probe_steps(model: _BF16Fixture, optimizer, steps: int) -> None:
+    for _ in range(steps):
+        model.backbone.weight.grad = torch.full_like(model.backbone.weight, MASTER_PROBE["grad"])
+        model.bias.grad = torch.zeros_like(model.bias)
+        optimizer.step()
+        optimizer.zero_grad(set_to_none=True)
+
+
+def update_size_ratio(*, fp32_master: bool) -> dict:
+    """한 탐침: `steps` step 상수 gradient 뒤 **bf16 파라미터가 실제로 움직인 거리** / 반올림 없는 기대치 ``N·lr``.
+
+    두 검사가 같은 함수·같은 판정 기준을 쓰고 `fp32_master`만 다르다 — 그것이 이 짝의 전부다."""
+    model = _BF16Fixture(MASTER_PROBE["start"], MASTER_PROBE["size"])
+    optimizer = build_optimizer(model, _probe_config(fp32_master))
+    before = model.backbone.weight.detach().clone().float()
+    first_master = None
+    for step in range(MASTER_PROBE["steps"]):
+        _probe_steps(model, optimizer, 1)
+        if step == 0 and isinstance(optimizer, MasterWeightAdamW):
+            first_master = float((optimizer.master_pairs[0][2].detach() - before).abs().mean())
+    moved = float((model.backbone.weight.detach().float() - before).abs().mean())
+    expected = MASTER_PROBE["steps"] * MASTER_PROBE["lr"]
+    return {"moved": moved, "expected": expected, "ratio": moved / expected, "first_step_master": first_master}
+
+
+def update_size_passes(ratio: float) -> bool:
+    return abs(ratio - 1.0) <= MASTER_UPDATE_REL_TOL
+
+
+def test_fp32_master_weights_keep_the_update_that_the_bf16_grid_would_round_away():
+    result = update_size_ratio(fp32_master=True)
+    assert update_size_passes(result["ratio"]), result
+    # 한 step의 master 이동은 반올림 없는 기대치 lr 그 자체다 (bias correction이 상쇄된다)
+    assert result["first_step_master"] == pytest.approx(MASTER_PROBE["lr"], rel=1e-3), result
+
+
+def test_the_same_update_size_check_fails_when_adamw_steps_the_bf16_tensor_directly():
+    """A3의 짝 — 같은 fixture·같은 기준에서 bf16 직접 갱신은 **떨어진다**(P1이 실제로 돌린 조건)."""
+    result = update_size_ratio(fp32_master=False)
+    assert not update_size_passes(result["ratio"]), result
+    assert result["ratio"] < 0.01, result  # 갱신이 통째로 반올림돼 사라진다
+    assert result["moved"] == 0.0, result
+
+
+def test_master_copies_are_made_only_for_trainable_tensors_that_are_not_already_fp32():
+    model = _BF16Fixture(MASTER_PROBE["start"], 8, frozen=True)
+    assert sorted(fp32_master_weights(model)) == ["backbone.weight"]  # fp32 readout도, 고정된 bf16도 아니다
+    optimizer = build_optimizer(model, _probe_config(True))
+    assert isinstance(optimizer, MasterWeightAdamW)
+    assert [name for name, _, _ in optimizer.master_pairs] == ["backbone.weight"]
+    # readout은 param_groups에 **모델 파라미터 그대로** 들어간다 (사본을 만들지 않는다)
+    listed = [p for group in optimizer.param_groups for p in group["params"]]
+    assert any(p is model.bias for p in listed) and not any(p is model.backbone.weight for p in listed)
+    assert build_optimizer(_BF16Fixture(0.03, 8), _probe_config(False)).__class__ is torch.optim.AdamW
+
+
+def test_master_weights_survive_a_checkpoint_so_ten_plus_ten_steps_equal_twenty(tmp_path):
+    """fp32 master 아래의 재개 동등성 — master가 저장·복원되지 않으면 여기서 하위 비트가 사라진다."""
+    continuous = _BF16Fixture(MASTER_PROBE["start"], MASTER_PROBE["size"])
+    _probe_steps(continuous, build_optimizer(continuous, _probe_config(True)), 20)
+
+    first = _BF16Fixture(MASTER_PROBE["start"], MASTER_PROBE["size"])
+    optimizer = build_optimizer(first, _probe_config(True))
+    _probe_steps(first, optimizer, 10)
+    path = tmp_path / "optimizer.pt"
+    torch.save({"model": first.state_dict(), "optimizer": optimizer.state_dict()}, path)
+
+    second = _BF16Fixture(0.0, MASTER_PROBE["size"])  # 다른 값에서 시작해도 checkpoint가 정체를 정한다
+    resumed = build_optimizer(second, _probe_config(True))
+    state = torch.load(path, map_location="cpu", weights_only=True)  # checkpoint.load_checkpoint와 같은 조건
+    second.load_state_dict(state["model"])
+    resumed.load_state_dict(state["optimizer"])
+    assert torch.equal(second.backbone.weight, first.backbone.weight)
+    assert torch.equal(resumed.master_pairs[0][2], optimizer.master_pairs[0][2])
+    _probe_steps(second, resumed, 10)
+    assert torch.equal(second.backbone.weight, continuous.backbone.weight)
+
+
+def test_a_checkpoint_without_master_copies_is_refused_instead_of_silently_losing_the_low_bits():
+    model = _BF16Fixture(MASTER_PROBE["start"], 8)
+    plain = build_optimizer(model, _probe_config(False))
+    with_master = build_optimizer(_BF16Fixture(MASTER_PROBE["start"], 8), _probe_config(True))
+    with pytest.raises(ValueError, match="fp32 master"):
+        with_master.load_state_dict(plain.state_dict())
+
+
+# --------------------------------------------------------------------------
+# 묶인 가중치와 checkpoint (Task P2 — T1 checkpoint를 다시 실을 수 없던 버그)
+# --------------------------------------------------------------------------
+
+
+class _TiedFixture(torch.nn.Module):
+    """lm_head ↔ embedding처럼 **한 tensor에 이름이 둘**인 backbone + fp32 readout."""
+
+    def __init__(self, *, trainable: bool) -> None:
+        super().__init__()
+        self.backbone = torch.nn.Module()
+        shared = torch.nn.Parameter(torch.full((4, 3), 0.25), requires_grad=trainable)
+        self.backbone.embed = torch.nn.Module()
+        self.backbone.embed.weight = shared
+        self.backbone.head = torch.nn.Module()
+        self.backbone.head.weight = shared  # 같은 Parameter 객체 (묶인 가중치)
+        self.backbone.frozen = torch.nn.Parameter(torch.zeros(2), requires_grad=False)
+        self.bias = torch.nn.Parameter(torch.zeros(1))
+
+
+def test_a_tied_weight_is_saved_once_and_loading_it_back_is_not_refused_as_missing():
+    """T1 checkpoint는 `named_parameters()`(중복 제거)로 저장되므로 묶인 가중치의 다른 이름은 저장되지 않는다.
+
+    P2에서 실제로 걸린 버그: 저장된 `p1-2b-t1`의 checkpoint를 평가하려고 싣자
+    `checkpoint: 학습 대상 파라미터가 저장되어 있지 않다: ['backbone.model.lm_head.weight']`로 거절당했다 —
+    그 tensor는 `embed_tokens.weight`라는 이름으로 이미 실려 있었는데도. 재개도 같은 경로를 지난다.
+    """
+    model = _TiedFixture(trainable=True)
+    saved = trainable_state_dict(model)
+    names = sorted(saved)
+    assert names == ["backbone.embed.weight", "bias"] or names == ["backbone.head.weight", "bias"], names
+    assert "backbone.frozen" not in saved  # 고정된 backbone 가중치는 저장하지 않는다
+    target = _TiedFixture(trainable=True)
+    load_trainable_state(target, {name: tensor.clone() + 1.0 for name, tensor in saved.items()})
+    assert torch.equal(target.backbone.embed.weight, target.backbone.head.weight)
+    assert float(target.backbone.head.weight.detach()[0, 0]) == pytest.approx(1.25)  # 다른 이름으로도 값이 들어왔다
+    # 별명이 **하나도** 저장돼 있지 않으면 그때는 거절해야 한다
+    with pytest.raises(ValueError, match="학습 대상 파라미터가 저장되어 있지 않다"):
+        load_trainable_state(_TiedFixture(trainable=True), {"bias": torch.zeros(1)})
+
+
+def test_the_master_weight_flag_is_run_identity_only_where_it_changes_the_optimizer():
+    """P2 이전 checkpoint를 T0·LoRA에서 되살릴 수 있게 한다 (P2 리뷰 1 M5).
+
+    `resume_config`는 `RESUME_FREE_KEYS`·`RESUME_PATH_KEYS` 밖의 모든 키를 견주고 `Trainer._load`는
+    `saved.get(key) != current[key]`를 본다 — P1의 checkpoint에는 `fp32_master_weights` 키가 아예 없으므로
+    `None != True`가 되어 **사본이 생기지도 않는 경로에서까지** 이름으로 거절당했다. 사본이 생기는 경로(모델의
+    학습 대상에 fp32가 아닌 파라미터가 있는 T1)에서는 거절이 그대로 맞다 — 그리고 그 판정은 플래그가 아니라
+    모델을 보므로, 켜고 돌린 run을 끈 채 이어가는 반대 방향도 막는다.
+    """
+    old = {"trainable": "readout", "backbone_lr": 1e-5}  # P2 이전 checkpoint: 키 자체가 없다
+    new = {"trainable": "readout", "backbone_lr": 1e-5, "fp32_master_weights": True}
+    assert resume_config_differences(old, new, master_weights=False) == []
+    assert resume_config_differences(old, new, master_weights=True) == ["fp32_master_weights"]
+    off = {**new, "fp32_master_weights": False}
+    assert resume_config_differences(off, new, master_weights=True) == ["fp32_master_weights"]
+    assert resume_config_differences(new, off, master_weights=True) == ["fp32_master_weights"]
+    assert resume_config_differences(off, new, master_weights=False) == []
+    assert resume_config_differences({**new, "backbone_lr": 5e-5}, new, master_weights=False) == ["backbone_lr"]
+
+    # 판정의 입력은 모델이다: bf16 학습 대상이 있으면 참, fp32 readout만 학습하면 거짓
+    assert bool(fp32_master_weights(_BF16Fixture(MASTER_PROBE["start"], 8, frozen=True))) is True
+    frozen = _BF16Fixture(MASTER_PROBE["start"], 8, frozen=True)
+    frozen.backbone.weight.requires_grad_(False)
+    assert bool(fp32_master_weights(frozen)) is False

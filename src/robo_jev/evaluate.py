@@ -25,6 +25,10 @@
 * 규칙 기준군 (docs/02, `robo_jev.harness.rule_judge`): 로봇 틱마다 규칙 판단기의 10개 답을 같은 후보 목록 위의 확률로
   바꿔 같은 지표를 낸다 — 하네스만으로 풀리는 범위의 기준. 이 함수만 하네스를 import하므로 :mod:`robo_jev.train` 은
   이 모듈을 import하지 않는다(docs/06 §1의 경계는 학습 코드 쪽에 둔다).
+* **편 단위 불확실성** (Task P2 B): 틱은 편(에피소드) 안에서 상관되어 있어 독립 단위는 틱이 아니라 편이다. 그래서
+  :func:`aggregate` 가 질문 칸마다 편 단위 집계(``per_episode``)를 표에 남기고, :func:`episode_bootstrap` 이 편을
+  표본 단위로 재표집해 정확도의 구간과 **대조군 대비 여유의 쌍 구간**을 낸다 — 그 구간이 0을 포함하는 여유는
+  판정이 아니다. (P1은 `_predictions`를 표를 쓰기 전에 버려서 이 수를 산출물로 낼 수 없었다.)
 """
 
 from __future__ import annotations
@@ -32,8 +36,10 @@ from __future__ import annotations
 import copy
 import json
 import math
+import random
 import time
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +54,7 @@ __all__ = [
     "calibration_error",
     "context_shuffle_records",
     "contrast_pair_check",
+    "episode_bootstrap",
     "evaluate_items",
     "evaluate_suite",
     "eval_suite_identity",
@@ -58,6 +65,7 @@ __all__ = [
     "predict_items",
     "rule_judge_predictions",
     "selective_metrics",
+    "split_episode_bootstrap",
     "tiny_scorer_column",
 ]
 
@@ -95,6 +103,7 @@ def predict_items(judge: Any, items: list[Item], *, tokens_per_batch: int = 8192
                     out.append(
                         {
                             "record_id": b.record_id, "tick": None, "kind": "single", "split": b.split,
+                            "group": str(b.record.get("origin_group") or b.record_id),  # 편 단위 집계의 묶음 (B1)
                             "probabilities": {qid: torch.softmax(z.detach().float().cpu(), 0) for qid, z in result["logits"][position].items()},
                             "candidates": result["candidates"][position], "labels": list(b.record.get("labels", [])),
                             "question_types": dict(b.question_types),
@@ -107,6 +116,7 @@ def predict_items(judge: Any, items: list[Item], *, tokens_per_batch: int = 8192
                 out.append(
                     {
                         "record_id": item.record_id, "tick": index, "kind": "stream", "split": item.split,
+                        "group": item.record_id,  # 스트림의 편 = 에피소드 (B1)
                         "probabilities": {qid: torch.softmax(z.detach().float().cpu(), 0) for qid, z in logits.items()},
                         "candidates": candidates, "labels": list(item.record["ticks"][index].get("labels", [])),
                         "question_types": dict(item.question_types),
@@ -139,7 +149,8 @@ def rule_judge_predictions(items: list[Item]) -> list[dict[str, Any]]:
                 probabilities[qid] = vector / total if total > 0 else torch.full((len(ids),), 1.0 / len(ids))
             out.append(
                 {
-                    "record_id": item.record_id, "tick": index, "kind": "stream", "split": item.split, "probabilities": probabilities,
+                    "record_id": item.record_id, "tick": index, "kind": "stream", "split": item.split, "group": item.record_id,
+                    "probabilities": probabilities,
                     "candidates": {qid: list(ids) for qid, ids in entry["candidate_mapping"].items() if qid in probabilities},
                     "labels": list(tick.get("labels", [])), "question_types": dict(item.question_types),
                 }
@@ -190,10 +201,33 @@ def _table_key(prediction: dict[str, Any], qid: str) -> str:
     return qid if prediction["kind"] == "stream" else prediction["question_types"].get(qid, "unknown")
 
 
-def aggregate(predictions: list[dict[str, Any]]) -> dict[str, Any]:
-    """예측 목록 → 질문(id 또는 타입)별 ``{n, accuracy, nll, brier, first_position_rate, position_counts}``와 전체."""
+def _per_episode(groups: dict[str, list[int]]) -> list[dict[str, Any]]:
+    """편 단위 집계를 표에 남기는 꼴 — ``[{episode_id, n, graded, correct}, …]``(편 이름 순).
+
+    레코드별 예측을 다 저장하지 않는다(P1은 그것을 버려서 편 단위 구간을 낼 수 없었다). 이 네 수만 있으면
+    편을 표본 단위로 재표집하는 부트스트랩(:func:`episode_bootstrap`)이 그대로 돌아간다."""
+    return [
+        {"episode_id": name, "n": counts[0], "graded": counts[1], "correct": counts[2]}
+        for name, counts in sorted(groups.items())
+    ]
+
+
+def aggregate(predictions: list[dict[str, Any]], *, store_predictions: bool | Sequence[str] = False) -> dict[str, Any]:
+    """예측 목록 → 질문(id 또는 타입)별 ``{n, accuracy, nll, brier, first_position_rate, position_counts, per_episode}``와 전체.
+
+    ``per_episode``는 **편 단위 집계**다(로봇 스트림은 에피소드, 비로봇·대조 단일은 `origin_group`; 예측의 `group`
+    키, 없으면 `record_id`). 틱은 편 안에서 상관되어 있어 독립 단위는 편이므로, 이 목록이 있어야 표의 어떤 칸에도
+    편 단위 구간을 붙일 수 있다 (P2 B1).
+
+    ``store_predictions``면 질문 칸마다 ``per_record``(``{record_id, tick, question, predicted, correct}``)도 남긴다
+    — 편 단위 집계로는 **부분 모집단을 다시 고를 수 없어서**, "라벨이 지금 commitment가 아닌 틱만" 같은 물음이 전부
+    GPU 재실행이 됐다 (P2 리뷰 1 I3). ``True``면 모든 질문 칸, 이름 목록이면 **그 칸만**이다 — 판정 칸 하나는 열당
+    844줄이지만 이 분할의 질문 칸은 열 개라 다 켜면 같은 파일이 0.10 MB에서 **4.90 MB**가 된다(실측). 물음이 있는 칸만 켠다."""
+    wanted = None if isinstance(store_predictions, bool) else {str(name) for name in store_predictions}
     rows: dict[str, dict[str, Any]] = {}
+    totals: dict[str, list[int]] = {}
     for prediction in predictions:
+        group = str(prediction.get("group") or prediction["record_id"])
         for label in prediction["labels"]:
             qid = label.get("question_id")
             if qid not in prediction["probabilities"]:
@@ -202,13 +236,26 @@ def aggregate(predictions: list[dict[str, Any]]) -> dict[str, Any]:
             if metrics is None:
                 continue
             key = _table_key(prediction, qid)
-            row = rows.setdefault(key, {"n": 0, "correct": 0, "graded": 0, "nll": 0.0, "brier": 0.0, "positions": Counter(), "choice_n": 0})
+            row = rows.setdefault(key, {"n": 0, "correct": 0, "graded": 0, "nll": 0.0, "brier": 0.0, "positions": Counter(), "choice_n": 0, "groups": {}, "records": []})
             row["n"] += 1
+            if store_predictions and (wanted is None or key in wanted):
+                row["records"].append({
+                    "record_id": prediction["record_id"], "tick": prediction.get("tick"), "question": qid,
+                    "predicted": metrics["predicted"], "correct": None if metrics["correct"] is None else bool(metrics["correct"]),
+                })  # fmt: skip
             row["nll"] += metrics["nll"]
             row["brier"] += metrics["brier"]
+            counts = row["groups"].setdefault(group, [0, 0, 0])
+            total_counts = totals.setdefault(group, [0, 0, 0])
+            counts[0] += 1
+            total_counts[0] += 1
             if metrics["correct"] is not None:
                 row["graded"] += 1
                 row["correct"] += int(metrics["correct"])
+                counts[1] += 1
+                counts[2] += int(metrics["correct"])
+                total_counts[1] += 1
+                total_counts[2] += int(metrics["correct"])
             if prediction["question_types"].get(qid) == "choice" and len(prediction["candidates"][qid]) >= 2:
                 row["positions"][metrics["position"]] += 1
                 row["choice_n"] += 1
@@ -223,7 +270,10 @@ def aggregate(predictions: list[dict[str, Any]]) -> dict[str, Any]:
             "brier": row["brier"] / row["n"],
             "first_position_rate": (row["positions"][0] / row["choice_n"]) if row["choice_n"] else None,
             "position_counts": [row["positions"][i] for i in range(max(row["positions"]) + 1)] if row["positions"] else [],
+            "per_episode": _per_episode(row["groups"]),
         }
+        if store_predictions and (wanted is None or key in wanted):
+            table[key]["per_record"] = row["records"]  # 합계 칸(`_all`)에는 두지 않는다 — 질문 칸의 합이다
         for name in ("n", "correct", "graded", "nll", "brier"):
             total[name] += row[name]
     table["_all"] = {
@@ -232,8 +282,95 @@ def aggregate(predictions: list[dict[str, Any]]) -> dict[str, Any]:
         "graded": total["graded"],
         "nll": (total["nll"] / total["n"]) if total["n"] else None,
         "brier": (total["brier"] / total["n"]) if total["n"] else None,
+        "per_episode": _per_episode(totals),
     }
     return table
+
+
+# --------------------------------------------------------------------------
+# 편 단위 부트스트랩 (P2 B2·B3)
+# --------------------------------------------------------------------------
+
+#: 편 단위 부트스트랩의 재표집 수·seed·신뢰 수준. **평가 집합 설정이 아니라 이 모듈의 상수다** — 설정에 넣으면
+#: :func:`eval_suite_identity` 의 payload가 바뀌어 P1이 낸 해시(`79d09793eab5…`)와 나란히 놓을 수 없게 된다.
+EPISODE_BOOTSTRAP = {"resamples": 2000, "seed": 20260921, "level": 0.95}
+
+
+def _quantile(sorted_values: list[float], q: float) -> float:
+    """정렬된 표본의 선형 보간 분위수 (numpy 없이 — 이 모듈은 tensor 말고는 순수 Python이다)."""
+    position = q * (len(sorted_values) - 1)
+    low = int(math.floor(position))
+    high = min(low + 1, len(sorted_values) - 1)
+    weight = position - low
+    return sorted_values[low] * (1.0 - weight) + sorted_values[high] * weight
+
+
+def episode_bootstrap(
+    model_rows: list[dict[str, Any]] | None,
+    control_rows: list[dict[str, Any]] | None = None,
+    *,
+    resamples: int = EPISODE_BOOTSTRAP["resamples"],
+    seed: int = EPISODE_BOOTSTRAP["seed"],
+    level: float = EPISODE_BOOTSTRAP["level"],
+) -> dict[str, Any] | None:
+    """편을 표본 단위로 재표집한 정확도(와, 대조군을 주면 **짝지은** 여유)의 부트스트랩 구간.
+
+    입력은 :func:`aggregate` 가 남긴 ``per_episode`` 목록이다. 틱은 편 안에서 상관되어 있으므로 독립 단위는 틱이
+    아니라 편이다 — 편 |G|개를 복원추출하고 그 편들의 ``Σ correct / Σ graded``를 다시 센다(편마다 틱 수가 다른
+    것이 재표집에 그대로 들어온다). ``control_rows``를 주면 **같은 재표집 안에서** 모델과 대조군을 함께 세어
+    그 차이의 구간을 낸다(**쌍 부트스트랩**): 두 열은 같은 편에서 나왔으므로 편의 난이도가 차이에서 상쇄된다.
+    ``margin_includes_zero``가 참이면 그 여유는 판정이 아니다.
+    """
+    model = {str(row["episode_id"]): row for row in (model_rows or [])}
+    groups = sorted(name for name in model if model[name].get("graded"))
+    if not groups:
+        return None
+    control = {str(row["episode_id"]): row for row in control_rows} if control_rows else None
+    paired = control is not None and all(name in control for name in groups)
+
+    def _accuracy(source: dict[str, dict[str, Any]], names: list[str]) -> float | None:
+        graded = sum(int(source[name]["graded"]) for name in names if name in source)
+        correct = sum(int(source[name]["correct"]) for name in names if name in source)
+        return (correct / graded) if graded else None
+
+    accuracies: list[float] = []
+    margins: list[float] = []
+    rng = random.Random(seed)
+    size = len(groups)
+    for _ in range(int(resamples)):
+        drawn = [groups[rng.randrange(size)] for _ in range(size)]
+        value = _accuracy(model, drawn)
+        if value is None:
+            continue
+        accuracies.append(value)
+        if paired:
+            other = _accuracy(control, drawn)
+            if other is not None:
+                margins.append(value - other)
+    accuracies.sort()
+    low, high = (1.0 - level) / 2.0, 1.0 - (1.0 - level) / 2.0
+    accuracy = _accuracy(model, groups)
+    out: dict[str, Any] = {
+        "episodes": size, "n": sum(int(model[name]["n"]) for name in groups),
+        "graded": sum(int(model[name]["graded"]) for name in groups),
+        "resamples": int(resamples), "seed": int(seed), "level": level, "unit": "episode",
+        "accuracy": accuracy,
+        "accuracy_ci": [_quantile(accuracies, low), _quantile(accuracies, high)] if accuracies else None,
+    }
+    if out["accuracy_ci"] is not None:
+        out["accuracy_half_width"] = (out["accuracy_ci"][1] - out["accuracy_ci"][0]) / 2.0
+    if paired and margins:
+        margins.sort()
+        control_accuracy = _accuracy(control, groups)
+        interval = [_quantile(margins, low), _quantile(margins, high)]
+        out.update({
+            "control_accuracy": control_accuracy,
+            "margin": None if (accuracy is None or control_accuracy is None) else accuracy - control_accuracy,
+            "margin_ci": interval,
+            "margin_half_width": (interval[1] - interval[0]) / 2.0,
+            "margin_includes_zero": bool(interval[0] <= 0.0 <= interval[1]),
+        })  # fmt: skip
+    return out
 
 
 def answer_change_rate(original: list[dict[str, Any]], permuted: list[dict[str, Any]]) -> dict[str, Any]:
@@ -645,14 +782,20 @@ def evaluate_items(
     tokens_per_batch: int = 8192,
     fused: bool = False,
     return_predictions: bool = False,
+    store_predictions: bool | Sequence[str] = False,
 ) -> dict[str, Any]:
     """분할 하나의 표: 모델(``model``), 치환한 순서(``permuted`` + ``answer_change``), 문맥 섞기(``context_shuffle`` +
     ``context_shuffle_kind = "state"``: 비로봇은 상태 전체, 로봇 스트림은 id를 재매핑한 구조화 상태 — 모듈 설명), 로봇 스트림만의
-    지시 텍스트 섞기(``instruction_shuffle`` + ``instruction_shuffle_kind``; `instruction_shuffle=True`일 때), 규칙 기준군(``rule_judge``)."""
+    지시 텍스트 섞기(``instruction_shuffle`` + ``instruction_shuffle_kind``; `instruction_shuffle=True`일 때), 규칙 기준군(``rule_judge``),
+    그리고 질문 칸마다의 **편 단위 95 % 구간**(``episode_bootstrap`` — :func:`split_episode_bootstrap`).
+
+    ``store_predictions``(참 또는 질문 칸 이름 목록)이면 **모든 열**이 그 칸에 ``per_record``도 남긴다 — 나중에
+    틱의 부분집합(예: 라벨이 지금 commitment가 아닌 틱)만 다시 세려면 편 단위 집계로는 안 되기 때문이다
+    (P2 리뷰 1 I3). 대조군 열에도 남아야 여유를 부분집합 위에서 다시 짝지을 수 있다."""
     from robo_jev.model.serialize import serialize_request
 
     predictions = predict_items(judge, items, tokens_per_batch=tokens_per_batch, fused=fused)
-    result: dict[str, Any] = {"n_items": len(items), "n_states": len(predictions), "model": aggregate(predictions)}
+    result: dict[str, Any] = {"n_items": len(items), "n_states": len(predictions), "model": aggregate(predictions, store_predictions=store_predictions)}
     if return_predictions:
         result["_predictions"] = predictions  # 호출자가 선택적 지표·ECE에 다시 쓴다 (한 번 더 forward하지 않는다)
 
@@ -669,20 +812,41 @@ def evaluate_items(
 
     if shuffle_seed is not None:
         permuted = predict_items(judge, reserialised(items, [permute_candidates(item.record, int(shuffle_seed)) for item in items]), tokens_per_batch=tokens_per_batch, fused=fused)
-        result["permuted"] = aggregate(permuted)
+        result["permuted"] = aggregate(permuted, store_predictions=store_predictions)
         result["answer_change"] = {"shuffle_seed": int(shuffle_seed), **answer_change_rate(predictions, permuted)}
     if context_shuffle:
         shuffled = context_shuffle_records([item.record for item in items], robot="state")
-        result["context_shuffle"] = aggregate(predict_items(judge, reserialised(items, shuffled), tokens_per_batch=tokens_per_batch, fused=fused))
+        result["context_shuffle"] = aggregate(predict_items(judge, reserialised(items, shuffled), tokens_per_batch=tokens_per_batch, fused=fused), store_predictions=store_predictions)
         result["context_shuffle_kind"] = "state"  # 비로봇: 상태 전체, 로봇 스트림: id를 재매핑한 구조화 상태 (모듈 설명)
     if instruction_shuffle and any(item.kind == "stream" for item in items):
         streams = [item for item in items if item.kind == "stream"]
         rolled = context_shuffle_records([item.record for item in streams], robot="instruction")
-        result["instruction_shuffle"] = aggregate(predict_items(judge, reserialised(streams, rolled), tokens_per_batch=tokens_per_batch, fused=fused))
+        result["instruction_shuffle"] = aggregate(predict_items(judge, reserialised(streams, rolled), tokens_per_batch=tokens_per_batch, fused=fused), store_predictions=store_predictions)
         result["instruction_shuffle_kind"] = "instruction"  # 로봇 스트림: 지시·목표 텍스트만 굴림, 구조화 goal·상태·후보 유지
     if rule_judge and any(item.kind == "stream" for item in items):
-        result["rule_judge"] = aggregate(rule_judge_predictions(items))
+        result["rule_judge"] = aggregate(rule_judge_predictions(items), store_predictions=store_predictions)
+    result["episode_bootstrap"] = split_episode_bootstrap(result)
     return result
+
+
+def split_episode_bootstrap(table: dict[str, Any], **options: Any) -> dict[str, Any]:
+    """한 분할 표의 질문 칸마다 **편 단위 95 % 구간** — 모델 정확도의 구간과, 대조군 대비 여유의 **쌍** 구간.
+
+    P1은 이 수를 낼 수 없었다(`evaluate_items`가 레코드별 예측을 버려서 편 안의 상관을 추정할 수 없었고, 보고서는
+    "틱이 독립이면 ±0.023~0.034, 완전히 상관이면 ±0.23~0.35" 두 한계만 적었다). 이제 ``per_episode``가 표에 남으므로
+    실제 값이 그 사이 어디인지 잰다. 여유의 구간이 0을 포함하면 그 여유는 판정이 아니다 (P2 B2·B3)."""
+    out: dict[str, Any] = {}
+    for qid in table.get("model", {}):
+        entry = episode_bootstrap((table["model"].get(qid) or {}).get("per_episode"), **options)
+        if entry is None:
+            continue
+        for name, column in (("state_shuffle", "context_shuffle"), ("instruction_shuffle", "instruction_shuffle")):
+            rows = ((table.get(column) or {}).get(qid) or {}).get("per_episode")
+            control = episode_bootstrap((table["model"].get(qid) or {}).get("per_episode"), rows, **options) if rows else None
+            if control is not None and "margin" in control:
+                entry[name] = {key: control[key] for key in ("control_accuracy", "margin", "margin_ci", "margin_half_width", "margin_includes_zero")}
+        out[qid] = entry
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -693,7 +857,7 @@ def evaluate_items(
 #: 평가 집합 설정의 최상위 키.
 _SUITE_KEYS = ("version", "window_ticks", "shuffle_seed", "tokens_per_batch", "fused", "columns", "tiny_scorer_report", "splits", "note")
 #: 분할 하나의 키.
-_SUITE_SPLIT_KEYS = ("name", "manifest", "domain", "split", "files", "records", "limit", "max_ticks", "selection", "note")
+_SUITE_SPLIT_KEYS = ("name", "manifest", "domain", "split", "files", "records", "limit", "max_ticks", "selection", "store_predictions", "note")
 #: 열 선택 키 — 모델 열은 언제나 있다.
 _SUITE_COLUMNS = ("permuted", "state_shuffle", "instruction_shuffle", "rule_judge", "selective", "calibration")
 
@@ -778,6 +942,9 @@ def eval_suite_identity(suite: dict[str, Any], items: dict[str, list[Item]], *, 
     `tick_stride`는 **점수를 매긴 모집단을 줄이는** 것(무학습 run은 스트림을 그 간격으로 하나씩만 잰다)이라 해시에
     들어간다 — 같은 레코드를 실었더라도 844틱을 다 잰 run과 56틱만 잰 run은 나란히 놓을 수 없기 때문이다
     (P1 리뷰 1 I6). 솎지 않은 run은 이 키를 아예 쓰지 않으므로 그런 run의 해시는 이 변경 전과 같다.
+
+    분할의 `store_predictions`는 **일부러 payload에 없다** — 무엇을 저장할지는 바꾸지만 무엇을 점수 매길지는 바꾸지
+    않기 때문이다. 넣으면 켜는 순간 P1의 `79d09793eab5…`와 나란히 놓을 수 없게 된다 (P2 리뷰 1 I3).
     """
     import hashlib
 
@@ -861,6 +1028,7 @@ def evaluate_suite(
             context_shuffle=columns["state_shuffle"], instruction_shuffle=columns["instruction_shuffle"],
             rule_judge=columns["rule_judge"], window_ticks=suite["window_ticks"],
             tokens_per_batch=suite["tokens_per_batch"], fused=suite["fused"], return_predictions=True,
+            store_predictions=entry.get("store_predictions") or False,
         )  # fmt: skip
         predictions = table.pop("_predictions")
         if columns["calibration"]:

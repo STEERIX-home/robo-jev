@@ -1,13 +1,14 @@
 """평가 지표·대조군·치환 증강·무학습 점수 읽기의 검사 (G0b S3) — 소형 fixture와 소형 난수 Qwen으로 CPU에서."""
 
 import copy
+import math
 
 import pytest
 import torch
 from helpers import D0_MANIFEST, SMALL_VOCAB
 
 from robo_jev.contracts import validate_record
-from robo_jev.evaluate import aggregate, answer_change_rate, context_shuffle_records, evaluate_items, label_metrics, predict_items, rule_judge_predictions
+from robo_jev.evaluate import aggregate, answer_change_rate, context_shuffle_records, episode_bootstrap, evaluate_items, label_metrics, predict_items, rule_judge_predictions
 from robo_jev.model.judge import Judge
 from robo_jev.model.serialize import serialize_request
 from robo_jev.model.tokenizer import WhitespaceTokenizer, available_tokenizer, load_tokenizer
@@ -373,3 +374,126 @@ def test_holding_twin_preference_counts_which_key_the_model_picks_while_holding(
     assert (result["label_grasp"], result["label_place"], result["label_mixed"]) == (1, 1, 1)
     assert result["label_grasp_share"] == pytest.approx(0.5)
     assert result["predicted_held_object"] == 3 and result["held_object_share"] == pytest.approx(1.0)
+
+
+# --------------------------------------------------------------------------
+# 편 단위 집계와 부트스트랩 (Task P2 B1·B2·B3)
+# --------------------------------------------------------------------------
+
+
+def test_aggregate_leaves_per_episode_rows_that_add_up_to_the_table(items):
+    loaded, tokenizer = items
+    judge = Judge.from_config(seed=5, vocab_size=SMALL_VOCAB)
+    predictions = predict_items(judge, loaded)
+    # 편 = 스트림이면 에피소드 id, 단일이면 origin_group (없으면 record_id)
+    for prediction in predictions:
+        record = next(item.record for item in loaded if item.record_id == prediction["record_id"])
+        expected = prediction["record_id"] if prediction["kind"] == "stream" else str(record.get("origin_group") or prediction["record_id"])
+        assert prediction["group"] == expected
+    table = aggregate(predictions)
+    for key, row in table.items():
+        rows = row["per_episode"]
+        assert rows, key
+        assert [entry["episode_id"] for entry in rows] == sorted(entry["episode_id"] for entry in rows)
+        assert sum(entry["n"] for entry in rows) == row["n"], key
+        assert sum(entry["graded"] for entry in rows) == row["graded"], key
+        if row["accuracy"] is not None:
+            assert sum(entry["correct"] for entry in rows) / row["graded"] == pytest.approx(row["accuracy"]), key
+        assert {entry["episode_id"] for entry in rows} <= {p["group"] for p in predictions}
+
+
+def test_the_episode_clustered_interval_is_much_wider_than_treating_ticks_as_independent():
+    """편 안의 틱이 완전히 상관된 극단 — P1이 낸 두 한계 가운데 위쪽이 답이 되는 경우."""
+    rows = [{"episode_id": f"ep-{index}", "n": 100, "graded": 100, "correct": 100 if index < 4 else 0} for index in range(8)]
+    result = episode_bootstrap(rows)
+    assert result["unit"] == "episode" and result["episodes"] == 8 and result["graded"] == 800
+    assert result["accuracy"] == 0.5 and result["resamples"] == 2000
+    naive = 1.96 * math.sqrt(0.25 / 800)  # 틱이 독립이라면 ±0.035
+    assert result["accuracy_half_width"] > 5 * naive
+    assert result["accuracy_ci"][0] < 0.25 and result["accuracy_ci"][1] > 0.75
+    assert "margin" not in result  # 대조군이 없으면 여유 칸도 없다
+
+
+def test_the_paired_margin_interval_says_whether_a_margin_is_a_finding():
+    model = [{"episode_id": f"ep-{i}", "n": 50, "graded": 50, "correct": c} for i, c in enumerate([30, 25, 40, 20, 35, 28, 33, 22])]
+    flat = episode_bootstrap(model, [dict(row) for row in model])
+    assert flat["margin"] == 0.0 and flat["margin_includes_zero"] and flat["margin_ci"] == [0.0, 0.0]
+    # 편마다 정확히 같은 크기로 대조군이 낮다 → 여유는 확실하고 구간의 폭은 0이다 (쌍 부트스트랩이 편 효과를 지운다)
+    lifted = episode_bootstrap(model, [{**row, "correct": row["correct"] - 10} for row in model])
+    assert lifted["margin"] == pytest.approx(0.2) and not lifted["margin_includes_zero"]
+    assert lifted["margin_ci"][0] > 0.0 and lifted["margin_half_width"] < 1e-9
+    # 편마다 부호가 엇갈리면 같은 크기의 점추정도 0을 포함한다
+    deltas = [12, -10, 9, -8, 11, -9, 10, -12]
+    noisy = episode_bootstrap(model, [{**row, "correct": row["correct"] - d} for row, d in zip(model, deltas)])
+    assert noisy["margin"] == pytest.approx(sum(deltas) / 400) and noisy["margin"] != 0.0
+    assert noisy["margin_includes_zero"] and noisy["margin_ci"][0] < 0.0 < noisy["margin_ci"][1]
+
+
+def test_the_episode_bootstrap_is_a_deterministic_function_of_its_seed():
+    rows = [{"episode_id": f"ep-{i}", "n": 40, "graded": 40, "correct": c} for i, c in enumerate([10, 30, 20, 25, 35, 15])]
+    assert episode_bootstrap(rows) == episode_bootstrap(rows)
+    assert episode_bootstrap(rows, seed=1)["accuracy_ci"] != episode_bootstrap(rows, seed=2)["accuracy_ci"]
+    assert episode_bootstrap([]) is None and episode_bootstrap(None) is None
+    assert episode_bootstrap([{"episode_id": "a", "n": 3, "graded": 0, "correct": 0}]) is None
+
+
+def test_evaluate_items_puts_an_episode_interval_and_a_paired_control_margin_on_the_table(items):
+    loaded, tokenizer = items
+    judge = Judge.from_config(seed=5, vocab_size=SMALL_VOCAB)
+    result = evaluate_items(judge, loaded, tokenizer=tokenizer, shuffle_seed=None, instruction_shuffle=True)
+    intervals = result["episode_bootstrap"]
+    assert intervals and set(intervals) <= set(result["model"]) and "q_main" in intervals and "_all" in intervals
+    cell = intervals["q_main"]
+    assert cell["unit"] == "episode" and cell["episodes"] >= 1
+    assert cell["accuracy"] == pytest.approx(result["model"]["q_main"]["accuracy"])
+    assert cell["accuracy_ci"][0] <= cell["accuracy"] <= cell["accuracy_ci"][1]
+    margin = cell["state_shuffle"]
+    assert margin["control_accuracy"] == pytest.approx(result["context_shuffle"]["q_main"]["accuracy"])
+    assert margin["margin"] == pytest.approx(cell["accuracy"] - margin["control_accuracy"])
+    assert margin["margin_ci"][0] <= margin["margin"] <= margin["margin_ci"][1]
+    assert isinstance(margin["margin_includes_zero"], bool)
+    # 지시 섞기는 로봇 스트림 열이라 비로봇 타입 칸에는 없다
+    assert "instruction_shuffle" in cell and "instruction_shuffle" not in intervals["choice"]
+
+
+def test_a_split_can_ask_for_its_per_tick_predictions_without_moving_the_eval_set_identity(tmp_path):
+    """판정 칸처럼 **지정한 분할에만** 틱별 예측을 남긴다 (P2 리뷰 1 I3).
+
+    P1·P2의 산출물은 편 단위 집계까지만 남겨서 "라벨이 지금 commitment가 아닌 틱만 골라 보면 얼마인가" 같은 질문이
+    전부 GPU 재실행이었다. 이 열은 **점수를 매긴 모집단을 바꾸지 않으므로** 평가 집합의 해시에 들어가면 안 된다 —
+    들어가면 P1의 `79d09793eab5…`와 나란히 놓을 수 없게 된다.
+    """
+    from robo_jev.evaluate import eval_suite_identity, evaluate_suite, load_eval_suite, load_suite_items
+
+    tokenizer = WhitespaceTokenizer()
+    plain = load_eval_suite(_suite_file(tmp_path))
+    assert all(entry.get("store_predictions", False) is False for entry in plain["splits"])
+
+    splits = [dict(entry) for entry in plain["splits"]]
+    splits[0]["store_predictions"] = ["q_main"]  # 질문 칸 이름 목록 — 이 분할의 질문 칸 열 개를 다 켜면 4.8 MB다
+    asked = load_eval_suite(_suite_file(tmp_path, splits=splits))
+    assert asked["splits"][0]["store_predictions"] == ["q_main"]
+
+    items = load_suite_items(asked, tokenizer=tokenizer)
+    assert eval_suite_identity(asked, items)["sha256"] == eval_suite_identity(plain, load_suite_items(plain, tokenizer=tokenizer))["sha256"]
+
+    judge = Judge.from_config(seed=5, vocab_size=SMALL_VOCAB)
+    result = evaluate_suite(judge, asked, tokenizer=tokenizer, items=items)
+    stream_table, singles_table = result["splits"]["d0/dev"], result["splits"]["d0/dev_singles"]
+    assert all("per_record" not in row for row in singles_table["model"].values())  # 켜지 않은 분할은 그대로다
+
+    for column in ("model", "permuted", "context_shuffle", "instruction_shuffle", "rule_judge"):
+        table = stream_table[column]
+        assert "per_record" not in table["_all"]  # 질문 칸마다 있으니 합계 칸에 또 두지 않는다
+        assert [key for key, row in table.items() if "per_record" in row] == ["q_main"], column  # 고른 칸만
+        row = table["q_main"]
+        records = row["per_record"]
+        assert len(records) == row["n"] == sum(entry["n"] for entry in row["per_episode"]), column
+        assert sum(entry["correct"] is True for entry in records) == sum(entry["correct"] for entry in row["per_episode"]), column
+        assert {name for entry in records for name in entry} == {"record_id", "tick", "question", "predicted", "correct"}
+        assert all(entry["tick"] is not None and entry["question"] == "q_main" for entry in records), column
+
+    # `true`면 모든 질문 칸에 남는다 — 무엇을 켤지는 설정이 고른다
+    splits[0]["store_predictions"] = True
+    everything = evaluate_suite(judge, load_eval_suite(_suite_file(tmp_path, splits=splits)), tokenizer=tokenizer, items=items)
+    assert all("per_record" in row for key, row in everything["splits"]["d0/dev"]["model"].items() if key != "_all")

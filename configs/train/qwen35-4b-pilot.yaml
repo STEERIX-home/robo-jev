@@ -3,13 +3,18 @@
 #
 #   uv run python scripts/adapt_readout.py --config configs/train/qwen35-4b-pilot.yaml --mode t0 --steps 200 --out artifacts/reports/p1-4b-t0.json
 #
-# 이 파일이 덮어쓰는 것은 셋이다(2026-09-21 P1 리뷰 1 M7에서 세어 고쳤다 — 전에는 "둘뿐"이라고 적혀 있었다):
+# 이 파일이 덮어쓰는 것은 **둘**이다:
 #   1. `model_id`
 #   2. `run_name`(보고서 이름표일 뿐 학습에 영향 없다)
-#   3. `modes.t1.stream_chunk_seconds` 10초 → **5초** (G0b 구간 메모리: 4B full 10초는 73 GiB 울타리를 넘어 OOM,
-#      5초 58.2 GiB). `modes.lora`의 5초는 2B가 이미 쓰는 값과 같아서 실제로 바뀌는 구간은 `t1`뿐이고, 그 `t1`은
-#      이 상자에서 돌리지 않았다 — 즉 **실제로 돌린 4B 두 run(t0·lora)의 구간은 2B와 완전히 같다**.
+# 셋째였던 `modes.t1.stream_chunk_seconds: 5`는 2026-09-21 Task P2에서 **없앴다** — 2B의 `modes.t1`이 fp32 master
+# weight의 메모리 때문에 5초로 내려왔으므로(P2 A2 사다리) 4B는 그 값을 그대로 물려받는다.
 # step·seed·데이터·평가 집합은 2B와 같아야 한다 — 그것이 이 비교의 전부다.
+#
+# **4B의 T1은 이 상자에서 돌 수 없다** (P2 A2의 산수, 실측 아님). fp32 master 아래 학습 대상 4,205,751,296개의
+# optimizer step 상주량은 bf16 파라미터 7.83 + bf16 gradient 7.83 + fp32 master 15.67 + fp32 gradient 버퍼 15.67 +
+# fp32 Adam 상태 31.34 + AdamW의 full-size 임시 15.67 = **94.0 GiB**로, 활성값을 한 바이트도 담기 전에 이미 73 GiB
+# 울타리 밖이다(구간을 아무리 줄여도 그 바닥은 내려가지 않는다 — 2B에서도 2초 구간의 peak가 바닥 42.13 GiB였다).
+# 4B full 학습은 클라우드의 몫이다.
 extends: qwen35-2b-pilot.yaml
 
 run_name: p1-4b
@@ -25,7 +30,6 @@ modes:
     stream_chunk_seconds: 5
     activation_checkpointing: true
     lora: {r: 16, alpha: 32, dropout: 0.0}
-  t1:                                     # 이 상자에서는 돌리지 않는다 (4B full 5초 58.2 GiB + optimizer 상태 — 예산 밖)
+  t1:                                     # 이 상자에서는 돌 수 없다 (위의 산수: fp32 master 바닥만 94.0 GiB)
     trainable: text_backbone_and_readout
-    stream_chunk_seconds: 5
     activation_checkpointing: true

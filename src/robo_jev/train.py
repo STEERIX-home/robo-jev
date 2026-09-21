@@ -31,9 +31,17 @@ norm·토큰 수와 함께 **실현 토큰 비중**과 **유효 loss 비중** �
 손실에서 실제로 받은 **계수 질량**(분야는 0.6/0.4 그대로 — 한쪽이 없으면 1.0; 묶음·틱 종류는 그
 안의 배분), ``loss_contribution`` = 그 축의 기여 **값**이 step 손실 값에서 차지하는 몫.
 
+**정밀도 (docs/03 §5).** 실제 backbone은 BF16으로 계산하고 readout은 fp32다. 거기에 더해, 학습 대상 가운데 fp32가
+**아닌** 파라미터(= BF16 backbone을 통째로 학습하는 T1)는 optimizer가 **fp32 master 사본**을 들고 fp32로 갱신한 뒤
+bf16으로 되쓴다(:class:`MasterWeightAdamW`, 설정 `fp32_master_weights`, 기본 켜짐). 이것이 없으면 |p| ≈ 0.03의
+가중치에서 한 step의 1e-5가 bf16 눈금 2⁻¹³ = 1.22e-4에 반올림돼 **사라진다** — P1이 그 조건으로 돌았고, 40 step 뒤
+임베딩을 뺀 표본의 23.32 %만 움직였으며 움직인 원소의 평균 |Δ|는 반올림 없는 기대치의 7~9 %였다. readout과 LoRA는
+이미 fp32라 사본을 만들지 않는다.
+
 **저장·재개 (docs/03 §5).** step 사이에서는 model/optimizer/scheduler/RNG/sampler 위치/config/manifest를,
 step 도중(구간 경계)에서는 여기에 진행 위치(단위·구간 index), 누적 gradient, 이어 붙일 공통 상태를
-더해 :func:`robo_jev.checkpoint.save_checkpoint` 로 atomic하게 쓴다. 재개는 그 위치의 다음 구간부터
+더해 :func:`robo_jev.checkpoint.save_checkpoint` 로 atomic하게 쓴다(fp32 master 사본은 optimizer의 `state_dict`에
+함께 들어간다 — bf16 파라미터에서 되살릴 수 없는 정밀도다). 재개는 그 위치의 다음 구간부터
 이어가며, 같은 seed의 연속 실행과 FP32·CPU에서 비트 단위로 같아야 한다(tests/test_resume.py). 중단은
 ``stop_after``(결정적 검사용)나 ``max_wall_hours``(예산)로 구간 경계에서 일어난다.
 
@@ -108,14 +116,18 @@ from robo_jev.sampler import (
 __all__ = [
     "ChunkResult",
     "EpisodePlan",
+    "MASTER_WEIGHTS_KEY",
     "MODEL_IDS",
+    "MasterWeightAdamW",
     "RESUME_FREE_KEYS",
     "RESUME_PATH_KEYS",
     "Trainer",
     "build_model",
+    "build_optimizer",
     "clip_gradients",
     "detach_stream_state",
     "episode_chunks",
+    "fp32_master_weights",
     "identity_differences",
     "layout_prefix",
     "lr_factor",
@@ -126,6 +138,7 @@ __all__ = [
     "plan_episode",
     "resolve_config",
     "resume_config",
+    "resume_config_differences",
     "run_single_unit",
     "run_stream_chunk",
     "tokenizer_block",
@@ -197,6 +210,10 @@ DEFAULTS: dict[str, Any] = {
     "trainable": "text_backbone_and_readout",
     "freeze_vision_encoder": True,
     "optimizer": "adamw",
+    # 학습 대상 가운데 fp32가 아닌 파라미터(= BF16 backbone을 통째로 학습하는 T1)의 **fp32 master 사본**을 optimizer가
+    # 들고 fp32로 갱신한 뒤 bf16으로 되쓴다. readout(이미 fp32)·LoRA(attach_lora가 fp32로 올린다)에는 사본이 생기지
+    # 않는다. false는 P1이 돌린 조건(bf16 tensor를 AdamW가 직접 갱신 — 갱신폭이 bf16 격자에 반올림돼 사라진다)이다.
+    "fp32_master_weights": True,
     "backbone_lr": 1e-5,
     "readout_lr": 1e-4,
     "weight_decay": 0.01,
@@ -319,6 +336,7 @@ def resolve_config(config: dict) -> dict:
     else:
         _need(out["lora"] is None, "lora: trainable이 lora_and_readout일 때만 준다")
     _need(out["optimizer"] in OPTIMIZERS, f"optimizer: {list(OPTIMIZERS)}만 구현했다 (받은 값: {out['optimizer']!r})")
+    _need(isinstance(out["fp32_master_weights"], bool), f"fp32_master_weights: true/false여야 한다 (받은 값: {out['fp32_master_weights']!r})")
     _need(isinstance(out["activation_checkpointing"], bool), "activation_checkpointing: true/false여야 한다")
     _need(out["activation_checkpointing"] is False or out["model_id"] != "tiny_hybrid", "activation_checkpointing: CPU fixture 경로에는 없다 — 실제 backbone(qwen3_5)의 층 단위 checkpointing만 있다 (tiny_hybrid에서는 false여야 한다)")
     _need(out["world_size"] == 1, f"world_size: 이 학습기는 단일 프로세스다 (1이어야 한다, 받은 값: {out['world_size']!r})")
@@ -423,15 +441,29 @@ def attach_lora(backbone: QwenBackbone, lora: dict[str, Any]) -> list[str]:
 
 
 def load_trainable_state(model: Judge, saved: dict[str, Tensor]) -> None:
-    """:func:`trainable_state_dict` 가 저장한 것을 싣는다 — 저장된 키는 전부 있어야 하고, 빠진 키는 고정된 backbone 가중치뿐이어야 한다."""
+    """:func:`trainable_state_dict` 가 저장한 것을 싣는다 — 저장된 키는 전부 있어야 하고, 빠진 키는 고정된 backbone 가중치뿐이어야 한다.
+
+    **묶인 가중치**(lm_head ↔ embedding)는 한 tensor에 이름이 둘이다. 저장은 중복을 지운 이름으로 하므로
+    (`trainable_state_dict`가 `named_parameters()`를 쓴다) 다른 쪽 이름은 `missing_keys`에 뜨지만 값은 이미 실렸다 —
+    같은 tensor를 가리키는 **별명 가운데 하나라도 저장돼 있으면** 빠진 것이 아니다. 그 구분이 없으면 T1 checkpoint를
+    다시 실을 수 없다(`backbone.model.lm_head.weight`가 빠졌다고 거절한다 — P2에서 실제로 걸렸다).
+    """
     result = model.load_state_dict(saved, strict=False)
     if result.unexpected_keys:
         raise ValueError(f"checkpoint: 모델에 없는 파라미터가 저장되어 있다: {sorted(result.unexpected_keys)[:5]}")
+    aliases: dict[int, list[str]] = {}
+    named: dict[str, Tensor] = {}
+    for name, parameter in model.named_parameters(remove_duplicate=False):
+        aliases.setdefault(id(parameter), []).append(name)
+        named[name] = parameter
     trainable = {
-        name for name, parameter in model.named_parameters(remove_duplicate=False)
+        name for name, parameter in named.items()
         if parameter.requires_grad or not name.startswith("backbone.")
-    }  # 묶인 가중치(lm_head↔embedding)는 이름이 둘이라 중복을 지우지 않고 본다
-    missing = [name for name in result.missing_keys if name in trainable]
+    }  # 묶인 가중치는 이름이 둘이라 중복을 지우지 않고 본다
+    missing = [
+        name for name in result.missing_keys
+        if name in trainable and not any(alias in saved for alias in aliases.get(id(named[name]), ()))
+    ]
     if missing:
         raise ValueError(f"checkpoint: 학습 대상 파라미터가 저장되어 있지 않다: {missing[:5]}")
 
@@ -487,6 +519,112 @@ def parameter_groups(model: Judge, config: dict) -> list[dict]:
         add("backbone", backbone, config["backbone_lr"])
     add("readout", readout, config["readout_lr"])
     return groups
+
+
+#: fp32 master 사본이 optimizer의 `state_dict`에 들어가는 자리 (= checkpoint의 `optimizer` 블록 안).
+MASTER_WEIGHTS_KEY = "fp32_master_weights"
+
+
+def fp32_master_weights(model: Judge) -> dict[str, Tensor]:
+    """학습 대상 가운데 **fp32가 아닌** 파라미터의 fp32 master 사본 ``{이름: 사본}``.
+
+    readout(U·V·b)은 이미 fp32이고(`readout_dtype` 기본값) LoRA 파라미터도 :func:`attach_lora` 가 fp32로 올려
+    두므로 둘 다 사본이 생기지 않는다 — 사본이 생기는 것은 BF16 backbone을 통째로 학습하는 T1뿐이다(중복 금지).
+    """
+    return {
+        name: parameter.detach().clone().to(torch.float32)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and parameter.dtype != torch.float32
+    }
+
+
+class MasterWeightAdamW(torch.optim.AdamW):
+    """bf16 학습 대상의 **fp32 master 사본**을 들고 fp32로 갱신한 뒤 bf16으로 되쓰는 AdamW (고전적 혼합 정밀도).
+
+    `param_groups`에 든 것은 master 사본이고, 모델의 bf16 파라미터는 ``pairs``(이름, 모델 파라미터, master)로
+    짝지어 둔다. 한 step은 셋이다: (1) 모델 파라미터의 gradient를 master의 fp32 gradient 버퍼에 옮기고,
+    (2) fp32로 AdamW 한 step을 밟고, (3) master를 bf16 파라미터에 되쓴다. **반올림은 (3)에서 한 번만** 일어나고
+    누적은 master가 하므로, ``lr``이 bf16 눈금의 절반보다 작아도 갱신이 사라지지 않는다 (P1 §C2·D의 병리).
+
+    메모리 (2B, 학습 대상 1.88B). bf16 파라미터 3.76 GB + bf16 gradient 3.76 GB는 그대로이고, master 7.52 GB와
+    fp32 Adam 상태 15.04 GB가 더해진다 = backward 동안 30.08 GB(28.0 GiB), bf16 직접 갱신의 15.04 GB(14.0 GiB)보다
+    **+14.0 GiB**. fp32 gradient 버퍼(7.52 GB)는 :meth:`step` 안에서만 들고 step 끝에 놓는다 — 그때는 활성값이
+    이미 풀려 있어 backward의 peak를 올리지 않는다. (`torch`는 파라미터와 다른 dtype의 ``.grad`` 대입을 거절하므로
+    bf16 gradient를 그대로 넘길 수는 없다.)
+    """
+
+    def __init__(self, groups: list[dict], *, pairs: list[tuple[str, Tensor, Tensor]], **kwargs: Any) -> None:
+        super().__init__(groups, **kwargs)
+        self._pairs: list[tuple[str, Tensor, Tensor]] = list(pairs)
+
+    @property
+    def master_pairs(self) -> list[tuple[str, Tensor, Tensor]]:
+        """(이름, 모델 파라미터, fp32 master) 짝 — 검사·측정용."""
+        return list(self._pairs)
+
+    def step(self, closure: Any = None) -> Any:  # type: ignore[override]
+        for _, parameter, master in self._pairs:
+            master.grad = None if parameter.grad is None else parameter.grad.detach().to(torch.float32)
+        loss = super().step(closure)
+        for _, parameter, master in self._pairs:
+            parameter.data.copy_(master.data)  # 반올림은 여기 한 번 — 누적은 master가 한다
+            master.grad = None  # fp32 gradient 버퍼는 step 밖에서 들고 있지 않는다
+        return loss
+
+    def zero_grad(self, set_to_none: bool = True) -> None:  # type: ignore[override]
+        """master의 gradient뿐 아니라 **모델 파라미터의** gradient도 지운다 (모델 파라미터는 param_groups에 없다)."""
+        super().zero_grad(set_to_none=set_to_none)
+        for _, parameter, _ in self._pairs:
+            if parameter.grad is None:
+                continue
+            if set_to_none:
+                parameter.grad = None
+            else:
+                parameter.grad.zero_()
+
+    def state_dict(self) -> dict[str, Any]:
+        """AdamW의 상태 + master 사본(:data:`MASTER_WEIGHTS_KEY`) — master는 bf16 파라미터로 복원할 수 없는 정밀도다."""
+        state = super().state_dict()
+        state[MASTER_WEIGHTS_KEY] = {name: master for name, _, master in self._pairs}
+        return state
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:  # type: ignore[override]
+        saved = state_dict.get(MASTER_WEIGHTS_KEY)
+        super().load_state_dict({key: value for key, value in state_dict.items() if key != MASTER_WEIGHTS_KEY})
+        if not isinstance(saved, dict):
+            raise ValueError(
+                f"optimizer: fp32 master 사본({MASTER_WEIGHTS_KEY!r})이 checkpoint에 없다 — bf16으로 직접 갱신한 run은 "
+                "fp32 master로 이어갈 수 없다 (master가 없으면 잃어버린 하위 비트를 되살릴 수 없다). 새 run으로 시작한다"
+            )
+        missing = [name for name, _, _ in self._pairs if name not in saved]
+        if missing:
+            raise ValueError(f"optimizer: fp32 master 사본이 없는 학습 대상이 있다: {missing[:5]}")
+        for name, parameter, master in self._pairs:
+            master.data.copy_(saved[name].to(device=master.device, dtype=master.dtype))
+            parameter.data.copy_(master.data)  # bf16 사본은 master의 반올림이다 — 둘을 한 값에서 맞춘다
+
+
+def build_optimizer(model: Judge, config: dict) -> torch.optim.AdamW:
+    """설정의 optimizer. `fp32_master_weights`가 켜져 있고 학습 대상에 fp32가 아닌 파라미터가 있으면
+    :class:`MasterWeightAdamW`, 아니면 평범한 ``torch.optim.AdamW``다 (T0·LoRA·fixture는 후자 — 사본이 없다)."""
+    groups = parameter_groups(model, config)
+    masters = fp32_master_weights(model) if config["fp32_master_weights"] else {}
+    if not masters:
+        return torch.optim.AdamW(groups, betas=(0.9, 0.999), eps=1e-8)
+    by_id = {id(parameter): (name, masters[name]) for name, parameter in model.named_parameters() if name in masters}
+    pairs: list[tuple[str, Tensor, Tensor]] = []
+    for group in groups:
+        swapped: list[Tensor] = []
+        for parameter in group["params"]:
+            found = by_id.get(id(parameter))
+            if found is None:
+                swapped.append(parameter)
+                continue
+            name, master = found
+            swapped.append(master)
+            pairs.append((name, parameter, master))
+        group["params"] = swapped
+    return MasterWeightAdamW(groups, pairs=pairs, betas=(0.9, 0.999), eps=1e-8)
 
 
 def lr_factor(step: int, *, max_steps: int, warmup_ratio: float) -> float:
@@ -835,6 +973,20 @@ def resume_config(config: dict) -> dict[str, Any]:
     return out
 
 
+def resume_config_differences(saved: dict[str, Any], current: dict[str, Any], *, master_weights: bool) -> list[str]:
+    """재개를 거절할 설정 키들 — :func:`resume_config` 의 두 결과를 견준다.
+
+    `master_weights`는 **이 모델에 fp32 master 사본이 생기는가**(= 학습 대상에 fp32가 아닌 파라미터가 있는가,
+    :func:`fp32_master_weights`)다. 생기지 않으면(T0·LoRA·fixture) :func:`build_optimizer` 는 어느 쪽이든 평범한
+    ``AdamW``를 돌려주므로 `fp32_master_weights` 플래그는 optimizer를 바꾸지 않는다 — 그런데도 견주면 이 키가 아예
+    없는 **P2 이전 checkpoint가 T0·LoRA에서까지 이름으로 거절당한다**(`None != True`; P2 리뷰 1 M5). 사본이 생기는
+    경로(T1)에서는 켜고 끄는 것이 갱신 규칙 자체를 바꾸므로 그대로 거절한다 — 그쪽은 모델이 bf16이면 플래그와
+    무관하게 참이라, 켜진 run을 끈 채로 이어가는 반대 방향도 함께 막힌다.
+    """
+    keys = [key for key in current if master_weights or key != "fp32_master_weights"]
+    return [key for key in keys if saved.get(key) != current[key]]
+
+
 def build_manifest(config: dict, items: list[Item], model: Judge) -> dict[str, Any]:
     """checkpoint에 함께 적는 것: 데이터 manifest 참조(manifest마다 경로·sha256·파일 해시·분야 태그·레코드 수), 토큰
     직렬화·질문 세트 버전, tokenizer의 정체, 실제로 만든 모델, git SHA — 그리고 이것들 가운데 재개 때 같아야 하는
@@ -968,7 +1120,7 @@ class Trainer:
         largest = max(max(item.layout["tokens"]) for item in self.items)
         if largest >= vocab:
             raise ValueError(f"model_vocab_size: 토큰 id {largest}가 어휘 {vocab}를 넘는다 — tokenizer에 맞는 어휘를 써야 한다")
-        self.optimizer = torch.optim.AdamW(parameter_groups(self.model, self.config), betas=(0.9, 0.999), eps=1e-8)
+        self.optimizer = build_optimizer(self.model, self.config)
         max_steps, warmup = int(self.config["max_steps"]), float(self.config["warmup_ratio"])
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer, lambda step: lr_factor(step, max_steps=max_steps, warmup_ratio=warmup)
@@ -1318,7 +1470,7 @@ class Trainer:
         state = load_checkpoint(path)
         check_contract(state.get("manifest"), self.manifest, where=f"resume: {path}")
         saved, current = resume_config(state["config"]), resume_config(self.config)
-        differences = [key for key in current if saved.get(key) != current[key]]
+        differences = resume_config_differences(saved, current, master_weights=bool(fp32_master_weights(self.model)))
         if differences:
             raise ValueError(
                 f"resume: checkpoint의 설정과 다르다: {differences} — 중단·예산·경로·이름({list(RESUME_FREE_KEYS)})과 "

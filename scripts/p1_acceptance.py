@@ -46,6 +46,14 @@ RESUME_TOLERANCE = {
     "param_max_abs": 0.01,   # 고정 표본 tensor의 최대 절대 차
     "param_rel_l2": 0.05,    # 그 tensor의 상대 L2 (G0b의 BF16 readout 상수와 같은 크기)
 }
+#: **학습 범위별** 사전 등록 허용 오차. 등록된 것은 `t0`뿐이다 — :data:`RESUME_TOLERANCE` 는 P1이 **T0** run에
+#: 대고(그 경로는 이 상자에서 비트 결정적이었다) 비교 전에 고정한 값이기 때문이다. T1은 재시작이 전혀 없는 두
+#: 프로세스의 loss가 이미 0.064 벌어진다(P2 보고서 A1b) — 그 run을 T0의 오차로 재고 `passed: false`라 적으면
+#: "재개가 깨졌다"로 읽히지만 실제로 깬 것은 **오차가 그 범위에 등록돼 있지 않다**는 사실이다. 본 값에 맞춰
+#: 오차를 고치는 것은 이 프로젝트가 금하는 수이므로, 등록될 때까지 그 범위의 판정은 `passed: None`이고 게이트는
+#: 멈춘다(사전 등록 절차: 재시작 없는 같은 설정 두 run의 벌어짐을 먼저 기록하고, 그 위에 오차를 고정한다).
+RESUME_TOLERANCES: dict[str, dict[str, float]] = {"t0": RESUME_TOLERANCE}
+
 #: T1·LoRA에서 "움직였다"고 보는 최소 변화 — 이보다 작으면 업데이트가 빠진 것이다.
 MOVE_EPSILON = 1e-9
 
@@ -231,49 +239,46 @@ def _save_snapshot(snapshot: dict[str, Any], path: Path) -> None:
     torch.save(snapshot, path)
 
 
-def run_resume_phase(phase: str, *, steps: int, run_dir: Path, config_path: Path = DEFAULT_CONFIG) -> dict[str, Any]:
-    """C3의 한 조각 — 자기 자신을 다시 띄워 돌린다(진짜 프로세스 재시작). `phase`는 continuous | first | second."""
+def run_resume_phase(phase: str, *, steps: int, run_dir: Path, config_path: Path = DEFAULT_CONFIG, mode: str = "t0") -> dict[str, Any]:
+    """C3의 한 조각 — 자기 자신을 다시 띄워 돌린다(진짜 프로세스 재시작). `phase`는 continuous | first | second.
+
+    `mode`는 t0 | lora | t1이다. P1의 게이트는 **T0만** 덮었다(readout tensor 셋뿐 — backbone optimizer 상태도,
+    LoRA adapter도, fp32 master 사본도 지나지 않는다). 그래서 이 게이트는 학습 범위를 인자로 받는다 (P1 리뷰 1 M3)."""
     from robo_jev.train import Trainer
 
     half = steps // 2
     if phase == "continuous":
-        config = _config("t0", steps=steps, run_id="p1-c3-continuous", overrides={"artifacts_dir": str(run_dir)}, config_path=config_path)
+        config = _config(mode, steps=steps, run_id=f"p1-c3-continuous-{mode}", overrides={"artifacts_dir": str(run_dir)}, config_path=config_path)
         with Trainer(config) as trainer:
             trainer.run()
-            _save_snapshot(_snapshot(trainer), run_dir / "continuous.pt")
-            return {"phase": phase, "step": trainer.step, "losses": [m["loss"] for m in trainer.history]}
+            _save_snapshot(_snapshot(trainer), run_dir / f"continuous-{mode}.pt")
+            return {"phase": phase, "mode": mode, "step": trainer.step, "losses": [m["loss"] for m in trainer.history]}
     if phase == "first":
-        config = _config("t0", steps=steps, run_id="p1-c3-split", overrides={"artifacts_dir": str(run_dir), "stop_after": {"step": half}, "checkpoint_every": half}, config_path=config_path)
+        config = _config(mode, steps=steps, run_id=f"p1-c3-split-{mode}", overrides={"artifacts_dir": str(run_dir), "stop_after": {"step": half}, "checkpoint_every": half}, config_path=config_path)
         with Trainer(config) as trainer:
             result = trainer.run()
-            return {"phase": phase, "step": trainer.step, "checkpoint": result["checkpoint"], "losses": [m["loss"] for m in trainer.history]}
+            return {"phase": phase, "mode": mode, "step": trainer.step, "checkpoint": result["checkpoint"], "losses": [m["loss"] for m in trainer.history]}
     if phase == "second":
-        config = _config("t0", steps=steps, run_id="p1-c3-split", overrides={"artifacts_dir": str(run_dir)}, config_path=config_path)
-        checkpoint = run_dir / "p1-c3-split" / "checkpoint.pt"
+        config = _config(mode, steps=steps, run_id=f"p1-c3-split-{mode}", overrides={"artifacts_dir": str(run_dir)}, config_path=config_path)
+        checkpoint = run_dir / f"p1-c3-split-{mode}" / "checkpoint.pt"
         with Trainer(config, resume=checkpoint) as trainer:
             trainer.run()
-            _save_snapshot(_snapshot(trainer), run_dir / "split.pt")
-            return {"phase": phase, "step": trainer.step, "losses": [m["loss"] for m in trainer.history]}
+            _save_snapshot(_snapshot(trainer), run_dir / f"split-{mode}.pt")
+            return {"phase": phase, "mode": mode, "step": trainer.step, "losses": [m["loss"] for m in trainer.history]}
     raise ValueError(f"phase: continuous | first | second (받은 값: {phase!r})")
 
 
-def check_resume(*, steps: int = 20, run_dir: Path, config_path: Path = DEFAULT_CONFIG, python: str | None = None) -> dict[str, Any]:
+def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: int, mode: str = "t0") -> dict[str, Any]:
+    """두 :func:`_snapshot` 을 그 **학습 범위의** 사전 등록 허용 오차로 견준다 — 게이트의 **판정 부분**만 떼어 둔
+    것이라 GPU 없이도 시험할 수 있다 (P1 리뷰 1 M3: 이 판정에 시험이 하나도 없었다).
+
+    `mode`의 오차가 :data:`RESUME_TOLERANCES` 에 없으면 ``passed``는 **`None`**(`verdict`
+    ``"tolerance-unregistered"``)이고, 잰 값은 그대로 남기되 다른 범위의 오차로 합격·불합격을 선고하지 않는다.
+    정수 기준(sampler 위치·뽑힌 단위·step 수·빠진 tensor)은 오차와 무관하므로 등록 여부와 상관없이 판정한다 —
+    그것이 깨지면 ``passed``는 `False`다. 참고로 다른 범위의 오차가 무어라 했을지는 ``would_pass_under``에 적는다.
+    """
     import torch
 
-    python = python or sys.executable
-    started = time.perf_counter()
-    phases = []
-    for phase in ("continuous", "first", "second"):
-        phase_started = time.perf_counter()
-        command = [python, str(REPO / "scripts" / "p1_acceptance.py"), "--phase", phase, "--steps", str(steps), "--run-dir", str(run_dir), "--config", str(config_path)]
-        completed = subprocess.run(command, cwd=REPO, capture_output=True, text=True, check=False)
-        print(completed.stdout[-2000:], file=sys.stderr, flush=True)
-        if completed.returncode != 0:
-            return {"check": "resume", "passed": False, "failed_phase": phase, "stderr": completed.stderr[-4000:], "phases": phases}
-        phases.append({"phase": phase, "seconds": round(time.perf_counter() - phase_started, 1), "stdout_tail": completed.stdout.strip().splitlines()[-1:]})
-
-    continuous = torch.load(run_dir / "continuous.pt", map_location="cpu", weights_only=False)
-    split = torch.load(run_dir / "split.pt", map_location="cpu", weights_only=False)
     loss_rows = []
     for index, (a, b) in enumerate(zip(continuous["losses"], split["losses"]), start=1):
         loss_rows.append({"step": index, "continuous": a, "split": b, "abs": abs(a - b), "rel": abs(a - b) / max(abs(a), 1e-9)})
@@ -295,19 +300,40 @@ def check_resume(*, steps: int = 20, run_dir: Path, config_path: Path = DEFAULT_
     worst_loss_rel = max((row["rel"] for row in loss_rows), default=0.0)
     worst_param = max((row.get("max_abs", 0.0) for row in parameters), default=0.0)
     worst_rel = max((row.get("relative_l2", 0.0) for row in parameters), default=0.0)
-    passed = bool(
+    exact = bool(
         sampler_equal
         and units_equal
         and continuous["optimizer_steps"] == split["optimizer_steps"] == steps
         and continuous["step"] == split["step"] == steps
         and not any(row.get("missing") for row in parameters)
-        and (worst_loss <= RESUME_TOLERANCE["loss_abs"] or worst_loss_rel <= RESUME_TOLERANCE["loss_rel"])
-        and worst_param <= RESUME_TOLERANCE["param_max_abs"]
-        and worst_rel <= RESUME_TOLERANCE["param_rel_l2"]
     )
+
+    def _within(tolerance: dict[str, float]) -> bool:
+        return bool(
+            (worst_loss <= tolerance["loss_abs"] or worst_loss_rel <= tolerance["loss_rel"])
+            and worst_param <= tolerance["param_max_abs"]
+            and worst_rel <= tolerance["param_rel_l2"]
+        )
+
+    registered = RESUME_TOLERANCES.get(mode)
+    passed: bool | None
+    if not exact:
+        passed, verdict = False, "fail"
+    elif registered is None:
+        passed, verdict = None, "tolerance-unregistered"
+    else:
+        passed = _within(registered)
+        verdict = "pass" if passed else "fail"
     return {
-        "check": "resume", "steps": int(steps), "seconds": round(time.perf_counter() - started, 1), "phases": phases,
-        "tolerance": dict(RESUME_TOLERANCE), "tolerance_note": "fixed in scripts/p1_acceptance.py before the comparison (RESUME_TOLERANCE)",
+        "check": "resume", "steps": int(steps), "scope": mode,
+        "tolerance": dict(registered) if registered is not None else None,
+        "tolerance_note": (
+            f"fixed in scripts/p1_acceptance.py before the comparison (RESUME_TOLERANCES[{mode!r}])"
+            if registered is not None
+            else f"no tolerance is pre-registered for scope {mode!r} (RESUME_TOLERANCES); the gate stops instead of borrowing another scope's"
+        ),
+        "verdict": verdict, "exact_criteria_passed": exact,
+        "would_pass_under": {name: (exact and _within(value)) for name, value in sorted(RESUME_TOLERANCES.items())},
         "losses": loss_rows, "worst_loss_abs": worst_loss, "worst_loss_rel": worst_loss_rel,
         "parameters": parameters, "worst_param_max_abs": worst_param, "worst_param_relative_l2": worst_rel,
         "bit_identical_tensors": sum(1 for row in parameters if row.get("bit_identical")), "tensors": len(parameters),
@@ -317,6 +343,69 @@ def check_resume(*, steps: int = 20, run_dir: Path, config_path: Path = DEFAULT_
     }
 
 
+def check_resume(*, steps: int = 20, run_dir: Path, config_path: Path = DEFAULT_CONFIG, python: str | None = None, mode: str = "t0") -> dict[str, Any]:
+    import torch
+
+    python = python or sys.executable
+    started = time.perf_counter()
+    phases = []
+    for phase in ("continuous", "first", "second"):
+        phase_started = time.perf_counter()
+        command = [python, str(REPO / "scripts" / "p1_acceptance.py"), "--phase", phase, "--steps", str(steps), "--run-dir", str(run_dir), "--config", str(config_path), "--resume-modes", mode]
+        completed = subprocess.run(command, cwd=REPO, capture_output=True, text=True, check=False)
+        print(completed.stdout[-2000:], file=sys.stderr, flush=True)
+        if completed.returncode != 0:
+            return {"check": "resume", "mode": mode, "scope": mode, "verdict": "fail", "passed": False, "failed_phase": phase, "stderr": completed.stderr[-4000:], "phases": phases}
+        phases.append({"phase": phase, "seconds": round(time.perf_counter() - phase_started, 1), "stdout_tail": completed.stdout.strip().splitlines()[-1:]})
+
+    continuous = torch.load(run_dir / f"continuous-{mode}.pt", map_location="cpu", weights_only=False)
+    split = torch.load(run_dir / f"split-{mode}.pt", map_location="cpu", weights_only=False)
+    return {**compare_resume(continuous, split, steps=steps, mode=mode), "mode": mode,
+            "seconds": round(time.perf_counter() - started, 1), "phases": phases}  # fmt: skip
+
+
+#: 학습 범위 → 보고서의 `checks` 자리 이름. `t0`만 옛 이름(`resume`)을 쓴다 — P1의 런처가 그 키를 본다.
+def resume_gate_key(mode: str) -> str:
+    return "resume" if mode == "t0" else f"resume_{mode}"
+
+
+def resume_gate(report_path: Path | str, mode: str) -> dict[str, Any]:
+    """**띄우려는 학습 범위의** 재개 결과를 읽어 긴 run을 시작해도 되는지 판정한다 (P2 리뷰 1 focus 5 / N4).
+
+    P1의 유일한 자동 게이트(`artifacts/scratch/p1/run_stage_d1_gated.sh`)는 `checks.resume`, 곧 **T0의 자리**를
+    읽었다. P2는 T1의 결과를 `checks.resume_t1`에 적었지만 그것을 읽는 것이 아무것도 없었으므로, 긴 T1 run은
+    사실상 T0의 결과로 통과되고 있었다. 여기서는 자리를 범위로 고르고, **없거나·판정이 없거나·다른 범위의 결과가
+    적혀 있으면 멈춘다**(통과가 기본값이 되지 않게).
+
+    종료 코드: 0 통과 · 2 불합격 · 3 판정 없음(자리 없음·오차 미등록·범위 불일치).
+    """
+    path = Path(report_path)
+    key = resume_gate_key(mode)
+    if not path.is_file():
+        return {"mode": mode, "key": key, "passed": None, "verdict": "missing-report", "exit_code": 3,
+                "reason": f"{path}: 인수 검사 보고서가 없다 — {key}를 읽을 수 없다"}  # fmt: skip
+    checks = (json.loads(path.read_text(encoding="utf-8")) or {}).get("checks") or {}
+    check = checks.get(key)
+    if not isinstance(check, dict):
+        return {"mode": mode, "key": key, "passed": None, "verdict": "missing-check", "exit_code": 3,
+                "reason": f"{path}: checks.{key}가 없다 — {mode} 범위의 재개는 아직 재지 않았다 (있는 자리: {sorted(checks)})"}  # fmt: skip
+    # P1의 보고서에는 `mode`가 없다 — 그 스크립트는 `checks.resume` 자리에 **T0만** 적었으므로 그 조합은 t0로 읽는다.
+    recorded = check.get("scope") or check.get("mode") or ("t0" if key == "resume" else None)
+    if recorded != mode:
+        return {"mode": mode, "key": key, "passed": None, "verdict": "scope-mismatch", "exit_code": 3,
+                "reason": f"{path}: checks.{key}에 적힌 mode가 {recorded!r}이다 — {mode!r} 범위의 결과가 아니다"}  # fmt: skip
+    passed = check.get("passed")
+    if passed is None:
+        return {"mode": mode, "key": key, "passed": None, "verdict": check.get("verdict") or "undecided", "exit_code": 3,
+                "reason": f"{path}: checks.{key}에 판정이 없다 ({check.get('verdict')}) — {mode}의 허용 오차가 아직 사전 등록되지 않았다 "
+                          f"(RESUME_TOLERANCES). 두 run 기준선을 먼저 재고 그 위에 오차를 고정한다"}  # fmt: skip
+    if not passed:
+        return {"mode": mode, "key": key, "passed": False, "verdict": check.get("verdict") or "fail", "exit_code": 2,
+                "reason": f"{path}: checks.{key}.passed = false — 긴 {mode} run을 시작하지 않는다"}  # fmt: skip
+    return {"mode": mode, "key": key, "passed": True, "verdict": check.get("verdict") or "pass", "exit_code": 0,
+            "reason": f"{path}: checks.{key}.passed = true (steps {check.get('steps')})"}  # fmt: skip
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", default="frozen,trains,resume", help="frozen | trains | resume, 쉼표로")
@@ -324,16 +413,26 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--steps", type=int, default=20, help="resume: 연속 실행의 step 수 (절반에서 저장·재시작)")
     parser.add_argument("--train-steps", dest="train_steps", type=int, default=3, help="trains: LoRA·T1의 step 수")
     parser.add_argument("--trains-modes", dest="trains_modes", default="lora,t1")
+    parser.add_argument("--resume-modes", dest="resume_modes", default="t0", help="resume: 어느 학습 범위에서 게이트를 돌릴지 (t0 | lora | t1, 쉼표로) — P1은 t0만 덮었다")
     parser.add_argument("--run-dir", dest="run_dir", default=str(REPO / "artifacts" / "runs" / "p1-acceptance"))
     parser.add_argument("--phase", default=None, help="내부용 — C3의 조각을 다시 띄울 때")
     parser.add_argument("--out", default=str(REPO / "artifacts" / "reports" / "p1-acceptance.json"))
     parser.add_argument("--gpu-memory-fraction", dest="gpu_memory_fraction", type=float, default=DEFAULT_FRACTION)
+    parser.add_argument("--gate", default=None, help="긴 run을 띄우기 전의 관문 — 이 학습 범위(t0 | lora | t1)의 재개 결과만 읽고 종료 코드로 답한다 (GPU를 쓰지 않는다)")
+    parser.add_argument("--gate-report", dest="gate_report", default=str(REPO / "artifacts" / "reports" / "p1-acceptance.json"))
     args = parser.parse_args(argv)
+    if args.gate:
+        gate = resume_gate(args.gate_report, args.gate)
+        print(json.dumps(gate, ensure_ascii=False))
+        return int(gate["exit_code"])
     guard = limit_gpu_memory(args.gpu_memory_fraction)
     print(f"[p1] gpu guard {guard} · memory {memory_report()}", file=sys.stderr, flush=True)
     run_dir = Path(args.run_dir)
     if args.phase:
-        result = run_resume_phase(args.phase, steps=args.steps, run_dir=run_dir, config_path=Path(args.config))
+        modes = [name.strip() for name in args.resume_modes.split(",") if name.strip()]
+        if len(modes) != 1:
+            parser.error(f"--phase와 함께 쓰는 --resume-modes는 하나여야 한다 (받은 값: {args.resume_modes!r})")
+        result = run_resume_phase(args.phase, steps=args.steps, run_dir=run_dir, config_path=Path(args.config), mode=modes[0])
         print(json.dumps(result, ensure_ascii=False))
         return 0
     wanted = [name.strip() for name in args.check.split(",") if name.strip()]
@@ -356,7 +455,11 @@ def main(argv: list[str] | None = None) -> int:
             for mode in (m.strip() for m in args.trains_modes.split(",") if m.strip()):
                 out["checks"][f"trains_{mode}"] = check_trains(mode, steps=args.train_steps, config_path=Path(args.config))
         else:
-            out["checks"]["resume"] = check_resume(steps=args.steps, run_dir=run_dir, config_path=Path(args.config))
+            for mode in (m.strip() for m in args.resume_modes.split(",") if m.strip()):
+                # t0의 자리 이름은 그대로 둔다 — P1의 런처가 `checks.resume.passed`를 본다. 다른 범위는
+                # `resume_<mode>`이고, 그 자리를 읽는 것이 :func:`resume_gate`다 (P2 리뷰 1 N4).
+                key = resume_gate_key(mode)
+                out["checks"][key] = check_resume(steps=args.steps, run_dir=run_dir, config_path=Path(args.config), mode=mode)
         print(f"[p1] {name}: {round(time.perf_counter() - started, 1)} s", file=sys.stderr, flush=True)
         target = Path(args.out)
         target.parent.mkdir(parents=True, exist_ok=True)

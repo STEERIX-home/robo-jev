@@ -21,8 +21,33 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[1]
 REPORTS = REPO / "artifacts" / "reports"
 CANDIDATES = {"Qwen/Qwen3.5-2B": "2b", "Qwen/Qwen3.5-4B": "4b"}
-#: Task P1 파일럿(D1 규모, 같은 step·seed·고정 평가 집합) — `artifacts/reports/p1-{2b,4b}-{mode}.json`.
-PILOT_MODES = ("t0", "lora", "t1", "zero-shot")
+#: Task P1 파일럿(D1 규모, 같은 step·seed·고정 평가 집합) — `artifacts/reports/p1-{2b,4b}-{mode}.json`와,
+#: Task P2가 같은 조건에 **fp32 master weight**만 넣어 다시 돌린 T1(`p2-{2b}-t1-fp32.json`).
+PILOT_MODES = {
+    "t0": "p1-{short}-t0.json",
+    "lora": "p1-{short}-lora.json",
+    "t1": "p1-{short}-t1.json",
+    "zero-shot": "p1-{short}-zero-shot.json",
+    "t1-fp32-master": "p2-{short}-t1-fp32.json",
+}
+#: 판정 칸 — 편 단위 구간이 여기 붙는다 (Task P2 B2·B3).
+DECISION_SPLIT, DECISION_QUESTION = "robot/ood_dev", "q_main"
+#: 판정 칸만 다시 평가한 run들 (`configs/eval/pilot-decision-cell.yaml`; 학습 없음, 저장된 checkpoint).
+DECISION_CELL_RUNS = {
+    "2B T0 (200)": "p2-reeval-2b-t0.json",
+    "2B LoRA (40)": "p2-reeval-2b-lora.json",
+    "2B T1 bf16 (40)": "p2-reeval-2b-t1.json",
+    "4B T0 (200)": "p2-reeval-4b-t0.json",
+    "4B LoRA (40)": "p2-reeval-4b-lora.json",
+    "2B T1 bf16 5 s (40)": "p2-reeval-2b-t1-bf16-5s.json",
+    "2B zero-shot (stride 16)": "p2-reeval-2b-zero-shot.json",
+    "4B zero-shot (stride 16)": "p2-reeval-4b-zero-shot.json",
+    "2B T1 fp32 master (40)": "p2-2b-t1-fp32.json",
+}
+
+#: 판정 칸을 "라벨이 지금 commitment인가"로 가른 표 (`scripts/decision_cell_strata.py`). 집계 여유는 70 %가
+#: commitment 반복인 모집단에서 잰 값이라 읽기를 희석한다 — 결정 기록은 그 층화를 함께 들고 있어야 한다.
+DECISION_CELL_STRATA = "p2-decision-cell-strata.json"
 
 
 def _load(name: str) -> dict[str, Any] | None:
@@ -62,10 +87,71 @@ def _eval_summary(evaluation: dict[str, Any] | None) -> dict[str, Any] | None:
             "instruction_shuffle_accuracy": (table.get("instruction_shuffle") or {}).get("_all", {}).get("accuracy"),
             "instruction_shuffle_kind": table.get("instruction_shuffle_kind"),
             "rule_judge_accuracy": (table.get("rule_judge") or {}).get("_all", {}).get("accuracy"),
+            # 편(에피소드·origin_group) 단위 95 % 구간과 대조군 대비 **쌍** 구간 (Task P2 B2·B3). 구간이 0을
+            # 포함하는 여유는 판정이 아니다 — P1은 이 수를 산출물로 낼 수 없었다.
+            "episode_bootstrap": table.get("episode_bootstrap"),
         }
         if not control:
             out[split]["control_note"] = NO_CONTROL_NOTE
     return out
+
+
+def _decision_cell() -> dict[str, Any] | None:
+    """판정 칸(`robot/ood_dev` `q_main`)의 run별 모델·대조군·여유와 **편 단위 구간** — 결정 기록이 없던 수다.
+
+    P1의 보고서는 "틱이 독립이면 ±0.023~0.034, 완전히 상관이면 ±0.23~0.35"라는 두 한계만 적을 수 있었다
+    (`evaluate_items`가 레코드별 예측을 버렸다). 여기 들어가는 값은 편을 표본 단위로 재표집한 실제 구간이고,
+    `margin_includes_zero`가 참인 줄의 여유는 **판정이 아니다** (Task P2 B2·B3).
+    """
+    rows: dict[str, Any] = {}
+    missing: dict[str, Any] = {}
+    for label, name in DECISION_CELL_RUNS.items():
+        payload = _load(name)
+        table = ((payload or {}).get("evaluation") or {}).get("splits", {}).get(DECISION_SPLIT)
+        if table is None:
+            # 없는 줄은 **이름으로 남긴다** — 조용히 빠지면 6줄짜리 표가 8줄이었던 것처럼 보이지 않는다 (P2 리뷰 1 M10)
+            missing[label] = {"report": name, "reason": "report not produced" if payload is None else f"the report has no {DECISION_SPLIT} split"}
+            continue
+        cell = (table.get("episode_bootstrap") or {}).get(DECISION_QUESTION)
+        rows[label] = {
+            "report": name,
+            "eval_set_sha256": (payload["evaluation"].get("eval_set") or {}).get("sha256"),
+            "model_accuracy": (table["model"].get(DECISION_QUESTION) or {}).get("accuracy"),
+            "n": (table["model"].get(DECISION_QUESTION) or {}).get("n"),
+            "state_shuffle_accuracy": ((table.get("context_shuffle") or {}).get(DECISION_QUESTION) or {}).get("accuracy"),
+            "instruction_shuffle_accuracy": ((table.get("instruction_shuffle") or {}).get(DECISION_QUESTION) or {}).get("accuracy"),
+            "rule_judge_accuracy": ((table.get("rule_judge") or {}).get(DECISION_QUESTION) or {}).get("accuracy"),
+            "episode_bootstrap": cell,
+        }
+    if not rows:
+        return None
+    strata = _load(DECISION_CELL_STRATA)
+    return {
+        "split": DECISION_SPLIT, "question": DECISION_QUESTION,
+        "unit": (
+            "episode — the 844 ticks come from 8 episodes (94/80/67/79/72/70/300/82, so ep-E1-000235 alone is 35.5 % "
+            "of the cell); the independent unit is the episode, not the tick"
+        ),
+        "reading": (
+            "This cell is ~70 % 'repeat your commitment': on 595 of the 844 ticks the expert label IS the tick's own "
+            "commitment.action_ref (98.5 % of the 604 ticks that have one), and the state shuffle keeps that line "
+            "verbatim, so a policy that reads nothing but the preserved fields scores 751/844 = 0.890. Every whole-cell "
+            "margin below is therefore diluted by a stratum that needs no goal. Read `strata` before quoting one."
+        ),
+        "note": (
+            "Each row's controls are that run's own. `episode_bootstrap.state_shuffle.margin_ci` is a PAIRED bootstrap "
+            "over episodes (model and its control counted inside the same resample), so it is the interval of the margin "
+            "itself; a margin whose interval includes 0 is not a finding. Rows re-evaluated with "
+            "configs/eval/pilot-decision-cell.yaml load exactly the same 8 episodes / 844 ticks as configs/eval/pilot.yaml "
+            "but turn the permutation column off, so their eval_set hash differs while the scored population does not."
+        ),
+        "runs": rows,
+        "missing": missing,
+        "strata": (
+            {"source": DECISION_CELL_STRATA, **{key: strata[key] for key in ("reading", "mechanism", "runs", "missing") if key in strata}}
+            if strata else {"source": DECISION_CELL_STRATA, "note": "not produced — run scripts/decision_cell_strata.py"}
+        ),
+    }
 
 
 def build(selection_text: str | None) -> dict[str, Any]:
@@ -140,8 +226,8 @@ def build(selection_text: str | None) -> dict[str, Any]:
                 "evaluation": _eval_summary(adapt.get("evaluation")),
             }
         pilot: dict[str, Any] = {}
-        for mode in PILOT_MODES:
-            run = _load(f"p1-{short}-{mode}.json")
+        for mode, pattern in PILOT_MODES.items():
+            run = _load(pattern.format(short=short))
             if run is None:
                 continue
             evaluation = run.get("evaluation") or {}
@@ -163,6 +249,7 @@ def build(selection_text: str | None) -> dict[str, Any]:
             a = attribution["candidates"][model_id]
             entry["attribution"] = {"tokens": a.get("tokens"), "eager_ms": a.get("eager_ms"), "profiler": {k: v for k, v in a.get("profiler", {}).items() if k != "top_kernels_us_per_forward"}, "graph": a.get("graph"), "weight_read_lower_bound_ms": a.get("weight_read_lower_bound_ms"), "decomposition": a.get("decomposition")}
         out["candidates"][model_id] = entry
+    out["decision_cell"] = _decision_cell()
     if attribution and "Qwen/Qwen3.5-9B" in attribution.get("candidates", {}):
         a = attribution["candidates"]["Qwen/Qwen3.5-9B"]
         out["attribution_9b"] = {"eager_ms": a.get("eager_ms"), "profiler": {k: v for k, v in a.get("profiler", {}).items() if k != "top_kernels_us_per_forward"}, "graph": a.get("graph"), "weight_read_lower_bound_ms": a.get("weight_read_lower_bound_ms"), "decomposition": a.get("decomposition")}
