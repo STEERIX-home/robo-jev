@@ -108,14 +108,18 @@ from robo_jev.sampler import (
 __all__ = [
     "ChunkResult",
     "EpisodePlan",
+    "MASTER_WEIGHTS_KEY",
     "MODEL_IDS",
+    "MasterWeightAdamW",
     "RESUME_FREE_KEYS",
     "RESUME_PATH_KEYS",
     "Trainer",
     "build_model",
+    "build_optimizer",
     "clip_gradients",
     "detach_stream_state",
     "episode_chunks",
+    "fp32_master_weights",
     "identity_differences",
     "layout_prefix",
     "lr_factor",
@@ -197,6 +201,10 @@ DEFAULTS: dict[str, Any] = {
     "trainable": "text_backbone_and_readout",
     "freeze_vision_encoder": True,
     "optimizer": "adamw",
+    # 학습 대상 가운데 fp32가 아닌 파라미터(= BF16 backbone을 통째로 학습하는 T1)의 **fp32 master 사본**을 optimizer가
+    # 들고 fp32로 갱신한 뒤 bf16으로 되쓴다. readout(이미 fp32)·LoRA(attach_lora가 fp32로 올린다)에는 사본이 생기지
+    # 않는다. false는 P1이 돌린 조건(bf16 tensor를 AdamW가 직접 갱신 — 갱신폭이 bf16 격자에 반올림돼 사라진다)이다.
+    "fp32_master_weights": True,
     "backbone_lr": 1e-5,
     "readout_lr": 1e-4,
     "weight_decay": 0.01,
@@ -319,6 +327,7 @@ def resolve_config(config: dict) -> dict:
     else:
         _need(out["lora"] is None, "lora: trainable이 lora_and_readout일 때만 준다")
     _need(out["optimizer"] in OPTIMIZERS, f"optimizer: {list(OPTIMIZERS)}만 구현했다 (받은 값: {out['optimizer']!r})")
+    _need(isinstance(out["fp32_master_weights"], bool), f"fp32_master_weights: true/false여야 한다 (받은 값: {out['fp32_master_weights']!r})")
     _need(isinstance(out["activation_checkpointing"], bool), "activation_checkpointing: true/false여야 한다")
     _need(out["activation_checkpointing"] is False or out["model_id"] != "tiny_hybrid", "activation_checkpointing: CPU fixture 경로에는 없다 — 실제 backbone(qwen3_5)의 층 단위 checkpointing만 있다 (tiny_hybrid에서는 false여야 한다)")
     _need(out["world_size"] == 1, f"world_size: 이 학습기는 단일 프로세스다 (1이어야 한다, 받은 값: {out['world_size']!r})")
@@ -487,6 +496,112 @@ def parameter_groups(model: Judge, config: dict) -> list[dict]:
         add("backbone", backbone, config["backbone_lr"])
     add("readout", readout, config["readout_lr"])
     return groups
+
+
+#: fp32 master 사본이 optimizer의 `state_dict`에 들어가는 자리 (= checkpoint의 `optimizer` 블록 안).
+MASTER_WEIGHTS_KEY = "fp32_master_weights"
+
+
+def fp32_master_weights(model: Judge) -> dict[str, Tensor]:
+    """학습 대상 가운데 **fp32가 아닌** 파라미터의 fp32 master 사본 ``{이름: 사본}``.
+
+    readout(U·V·b)은 이미 fp32이고(`readout_dtype` 기본값) LoRA 파라미터도 :func:`attach_lora` 가 fp32로 올려
+    두므로 둘 다 사본이 생기지 않는다 — 사본이 생기는 것은 BF16 backbone을 통째로 학습하는 T1뿐이다(중복 금지).
+    """
+    return {
+        name: parameter.detach().clone().to(torch.float32)
+        for name, parameter in model.named_parameters()
+        if parameter.requires_grad and parameter.dtype != torch.float32
+    }
+
+
+class MasterWeightAdamW(torch.optim.AdamW):
+    """bf16 학습 대상의 **fp32 master 사본**을 들고 fp32로 갱신한 뒤 bf16으로 되쓰는 AdamW (고전적 혼합 정밀도).
+
+    `param_groups`에 든 것은 master 사본이고, 모델의 bf16 파라미터는 ``pairs``(이름, 모델 파라미터, master)로
+    짝지어 둔다. 한 step은 셋이다: (1) 모델 파라미터의 gradient를 master의 fp32 gradient 버퍼에 옮기고,
+    (2) fp32로 AdamW 한 step을 밟고, (3) master를 bf16 파라미터에 되쓴다. **반올림은 (3)에서 한 번만** 일어나고
+    누적은 master가 하므로, ``lr``이 bf16 눈금의 절반보다 작아도 갱신이 사라지지 않는다 (P1 §C2·D의 병리).
+
+    메모리 (2B, 학습 대상 1.88B). bf16 파라미터 3.76 GB + bf16 gradient 3.76 GB는 그대로이고, master 7.52 GB와
+    fp32 Adam 상태 15.04 GB가 더해진다 = backward 동안 30.08 GB(28.0 GiB), bf16 직접 갱신의 15.04 GB(14.0 GiB)보다
+    **+14.0 GiB**. fp32 gradient 버퍼(7.52 GB)는 :meth:`step` 안에서만 들고 step 끝에 놓는다 — 그때는 활성값이
+    이미 풀려 있어 backward의 peak를 올리지 않는다. (`torch`는 파라미터와 다른 dtype의 ``.grad`` 대입을 거절하므로
+    bf16 gradient를 그대로 넘길 수는 없다.)
+    """
+
+    def __init__(self, groups: list[dict], *, pairs: list[tuple[str, Tensor, Tensor]], **kwargs: Any) -> None:
+        super().__init__(groups, **kwargs)
+        self._pairs: list[tuple[str, Tensor, Tensor]] = list(pairs)
+
+    @property
+    def master_pairs(self) -> list[tuple[str, Tensor, Tensor]]:
+        """(이름, 모델 파라미터, fp32 master) 짝 — 검사·측정용."""
+        return list(self._pairs)
+
+    def step(self, closure: Any = None) -> Any:  # type: ignore[override]
+        for _, parameter, master in self._pairs:
+            master.grad = None if parameter.grad is None else parameter.grad.detach().to(torch.float32)
+        loss = super().step(closure)
+        for _, parameter, master in self._pairs:
+            parameter.data.copy_(master.data)  # 반올림은 여기 한 번 — 누적은 master가 한다
+            master.grad = None  # fp32 gradient 버퍼는 step 밖에서 들고 있지 않는다
+        return loss
+
+    def zero_grad(self, set_to_none: bool = True) -> None:  # type: ignore[override]
+        """master의 gradient뿐 아니라 **모델 파라미터의** gradient도 지운다 (모델 파라미터는 param_groups에 없다)."""
+        super().zero_grad(set_to_none=set_to_none)
+        for _, parameter, _ in self._pairs:
+            if parameter.grad is None:
+                continue
+            if set_to_none:
+                parameter.grad = None
+            else:
+                parameter.grad.zero_()
+
+    def state_dict(self) -> dict[str, Any]:
+        """AdamW의 상태 + master 사본(:data:`MASTER_WEIGHTS_KEY`) — master는 bf16 파라미터로 복원할 수 없는 정밀도다."""
+        state = super().state_dict()
+        state[MASTER_WEIGHTS_KEY] = {name: master for name, _, master in self._pairs}
+        return state
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:  # type: ignore[override]
+        saved = state_dict.get(MASTER_WEIGHTS_KEY)
+        super().load_state_dict({key: value for key, value in state_dict.items() if key != MASTER_WEIGHTS_KEY})
+        if not isinstance(saved, dict):
+            raise ValueError(
+                f"optimizer: fp32 master 사본({MASTER_WEIGHTS_KEY!r})이 checkpoint에 없다 — bf16으로 직접 갱신한 run은 "
+                "fp32 master로 이어갈 수 없다 (master가 없으면 잃어버린 하위 비트를 되살릴 수 없다). 새 run으로 시작한다"
+            )
+        missing = [name for name, _, _ in self._pairs if name not in saved]
+        if missing:
+            raise ValueError(f"optimizer: fp32 master 사본이 없는 학습 대상이 있다: {missing[:5]}")
+        for name, parameter, master in self._pairs:
+            master.data.copy_(saved[name].to(device=master.device, dtype=master.dtype))
+            parameter.data.copy_(master.data)  # bf16 사본은 master의 반올림이다 — 둘을 한 값에서 맞춘다
+
+
+def build_optimizer(model: Judge, config: dict) -> torch.optim.AdamW:
+    """설정의 optimizer. `fp32_master_weights`가 켜져 있고 학습 대상에 fp32가 아닌 파라미터가 있으면
+    :class:`MasterWeightAdamW`, 아니면 평범한 ``torch.optim.AdamW``다 (T0·LoRA·fixture는 후자 — 사본이 없다)."""
+    groups = parameter_groups(model, config)
+    masters = fp32_master_weights(model) if config["fp32_master_weights"] else {}
+    if not masters:
+        return torch.optim.AdamW(groups, betas=(0.9, 0.999), eps=1e-8)
+    by_id = {id(parameter): (name, masters[name]) for name, parameter in model.named_parameters() if name in masters}
+    pairs: list[tuple[str, Tensor, Tensor]] = []
+    for group in groups:
+        swapped: list[Tensor] = []
+        for parameter in group["params"]:
+            found = by_id.get(id(parameter))
+            if found is None:
+                swapped.append(parameter)
+                continue
+            name, master = found
+            swapped.append(master)
+            pairs.append((name, parameter, master))
+        group["params"] = swapped
+    return MasterWeightAdamW(groups, pairs=pairs, betas=(0.9, 0.999), eps=1e-8)
 
 
 def lr_factor(step: int, *, max_steps: int, warmup_ratio: float) -> float:
@@ -968,7 +1083,7 @@ class Trainer:
         largest = max(max(item.layout["tokens"]) for item in self.items)
         if largest >= vocab:
             raise ValueError(f"model_vocab_size: 토큰 id {largest}가 어휘 {vocab}를 넘는다 — tokenizer에 맞는 어휘를 써야 한다")
-        self.optimizer = torch.optim.AdamW(parameter_groups(self.model, self.config), betas=(0.9, 0.999), eps=1e-8)
+        self.optimizer = build_optimizer(self.model, self.config)
         max_steps, warmup = int(self.config["max_steps"]), float(self.config["warmup_ratio"])
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer, lambda step: lr_factor(step, max_steps=max_steps, warmup_ratio=warmup)
