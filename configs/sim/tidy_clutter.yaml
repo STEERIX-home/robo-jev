@@ -130,9 +130,9 @@ instruction:
     - {id: c, text: "{target2_ul} {zone}으로 먼저 옮겨라. {target} 쪽은 그다음이다"}
   # 변형의 비중 (v1·변경 공통). 봉인 변형(`c`)을 고르게 뽑으면 에피소드의 1/3이 OOD로 가므로 드물게 둔다 — train은
   # `a`·`b`를 반반 보고 `c`는 OOD에만 있다. zoneF 계열·E1 계열 하나와 합쳐 OOD가 에피소드의 ≈10~15 %가 되는 값이며,
-  # s0.3에서 **8**로 올렸다(D1은 5): 도중 변경이 zoneF를 들여올 수 없게 되어(`zone_change_excludes`) zoneF 봉인이
-  # v1의 목표 영역에서만 오므로 OOD가 9 %로 내려갔다 — 400편 모의 실측으로 14.75 %(ood_dev 27 · ood_test 32)로 맞춘다.
-  template_weights: [46, 46, 8]
+  # s0.3에서 **7**로 올렸다(D1은 5): 도중 변경이 zoneF를 들여올 수 없게 되어(`zone_change_excludes`) zoneF 봉인이
+  # v1의 목표 영역에서만 오므로 OOD가 9 %로 내려갔다 — 400편 모의 실측으로 14.75 %(ood_dev 26 · ood_test 33)로 맞춘다.
+  template_weights: [46.5, 46.5, 7]
 
 disturbance:
   # 기본값은 사건이 잦은 프로파일 E2의 것이다(E0·E1은 아래에서 덮는다). 창은 에피소드가 **끝나기 전**이라야

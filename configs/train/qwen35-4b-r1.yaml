@@ -1,0 +1,9 @@
+# Task R1 D2 — 4B 형제 (무학습 눈금만; 학습은 2B가 주 트랙이다, HANDOFF 결정 3).
+extends: qwen35-4b-pilot.yaml
+run_name: r1-4b
+dataset_manifests:
+  - path: artifacts/datasets/r1-robot/r1-rollout-labels/manifest.json
+    domain: robot
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r1/single/manifest.json
+    domain: non_robot

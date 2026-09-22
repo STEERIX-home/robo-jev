@@ -198,11 +198,17 @@ def seed_schedule(config: dict[str, Any], count: int) -> list[tuple[str, int]]:
     """
     cycle = profile_cycle(config)
     base = int(config["seeds"]["base"])
+    # 프로파일마다 seed 구간을 벌린다 (`seeds.profile_offset`). 같은 seed를 두 프로파일에 주면 프로파일 덮어쓰기가
+    # 장면을 바꾸지 않는 경우(E1 6~10물체 · E2 7~10물체) **같은 장면이 두 split에 생긴다** — 400편 QA가 실제로
+    # 그런 쌍 하나를 잡았다(`ep-E1-400142` train ↔ `ep-E2-400142` ood_test). 0이면 옛 규칙이다(D1은 E0 3물체 ·
+    # E1 6~10물체라 겹치지 않았다).
+    offset = int(config["seeds"].get("profile_offset", 0))
+    order = {name: index for index, name in enumerate(dict.fromkeys(cycle))}
     seen: dict[str, int] = {}
     schedule: list[tuple[str, int]] = []
     for index in range(int(count)):
         name = cycle[index % len(cycle)]
-        schedule.append((name, base + seen.get(name, 0)))
+        schedule.append((name, base + offset * order[name] + seen.get(name, 0)))
         seen[name] = seen.get(name, 0) + 1
     return schedule
 

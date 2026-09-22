@@ -204,7 +204,7 @@ def test_instruction_variants_keep_the_structured_goal_and_the_constraint_marker
     """세 변형은 표현만 다르다: 대상·영역·보호 물체는 같고, v1의 모든 변형에 규칙 기준군의 제약 표지가 있다. 변형은 계획의
     난수 소비 맨 뒤에서 고르므로 장면·일정은 변형 도입 전과 같다."""
     spec = SIM["instruction"]
-    assert len(spec["v1_templates"]) == 3 and len(spec["v2_templates"]) == 3 and spec["template_weights"] == [46, 46, 8]
+    assert len(spec["v1_templates"]) == 3 and len(spec["v2_templates"]) == 3 and spec["template_weights"] == [46.5, 46.5, 7]
     v1 = [str(item["text"]) for item in spec["v1_templates"]]
     v2 = [str(item["text"]) for item in spec["v2_templates"]]
     # v1은 대상·영역과 **두 제약을 전부** 부른다 (s0.3, Task R1 B1): 서식 v0.4에서 `attr=`와 구조화된 목표가
@@ -870,3 +870,20 @@ def test_the_model_sees_only_the_instruction_text_change_in_an_instruction_contr
                 assert "target" not in a + b and "zone=" not in a + b
             checked += 1
     assert checked, "instruction 쌍이 하나도 없다"
+
+
+def test_no_two_profiles_share_a_seed_so_no_scene_lands_in_two_splits():
+    """같은 seed를 두 프로파일에 주면, 프로파일 덮어쓰기가 장면 추첨을 바꾸지 않는 경우(E1 6~10물체 · E2 7~10물체)
+    **같은 장면이 두 split에** 생긴다 — 400편 QA가 그런 쌍 하나를 잡았다(`ep-E1-400142` train ↔ `ep-E2-400142`
+    ood_test). `seeds.profile_offset`이 프로파일마다 seed 구간을 벌린다."""
+    from robo_jev.data.robot_episodes import load_generator_config
+
+    config = load_generator_config("configs/data/r1_robot.yaml")
+    schedule = seed_schedule(config, 400)
+    assert len({seed for _, seed in schedule}) == len(schedule)  # seed가 겹치지 않는다
+    scenes: dict[tuple, tuple[str, int]] = {}
+    for profile, seed in schedule:
+        plan = build_plan(SIM, seed, profile)
+        key = tuple((obj.id, obj.shape, obj.colour, obj.pos_mm) for obj in plan.objects) + tuple(zone.id for zone in plan.zones)
+        assert key not in scenes, (scenes.get(key), (profile, seed))
+        scenes[key] = (profile, seed)

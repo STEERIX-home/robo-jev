@@ -1,0 +1,17 @@
+# Task R1 D2 — 새 계기의 첫 눈금을 찍는 학습 설정 (2B). `qwen35-2b-pilot.yaml`을 그대로 잇고 **데이터만** 바꾼다.
+#
+#   uv run python scripts/adapt_readout.py --config configs/train/qwen35-2b-r1.yaml --mode zero-shot \
+#       --eval-config configs/eval/r1-decision-cell.yaml --out artifacts/reports/r1-reeval-2b-zeroshot.json
+#   uv run python scripts/adapt_readout.py --config configs/train/qwen35-2b-r1.yaml --mode t0 --steps 200 \
+#       --eval-config configs/eval/r1-decision-cell.yaml --out artifacts/reports/r1-reeval-2b-t0.json
+#
+# 조리법(learning rate·구간·accumulation·seed)은 P1·D1과 **같다** — 바뀐 것은 입력(서식 v0.4)과 데이터(R1)뿐이라야
+# 그 둘의 효과를 읽을 수 있다. 옛 체크포인트는 계약 digest가 달라 적재에서 거절된다(Task R1 A2).
+extends: qwen35-2b-pilot.yaml
+run_name: r1-2b
+dataset_manifests:
+  - path: artifacts/datasets/r1-robot/r1-rollout-labels/manifest.json
+    domain: robot
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r1/single/manifest.json
+    domain: non_robot
