@@ -110,18 +110,25 @@ def test_the_zone_f_goal_family_and_the_third_instruction_variant_are_sealed_bef
 
 
 def test_no_origin_group_straddles_two_splits_and_the_sealed_share_lands_in_the_decided_band():
-    """리뷰 1 I1·I2: 문구 변형은 origin group의 해시가 정하므로 같은 group의 에피소드는 같은 변형·같은 split이다(400편 일정 모의,
-    E1 seed 243 포함 — 예외 없이 지어진다). 봉인(zoneF 목표 계열 + 변형 3번 + E1 계열 하나)이 보내는 OOD는 사용자가 정한
-    ≈10~15 %(D1 규모의 에피소드 기준; 생성 비중 `goal_zone_weights`·`template_weights`가 맞춘다)이고 ood_dev/ood_test는 둘 다 쓰인다."""
-    policy = SplitPolicy.from_config(CONFIG["split"])
+    """리뷰 1 I1·I2: 문구 변형은 origin group의 해시가 정하므로 같은 group의 에피소드는 같은 변형·같은 split이다(400편 일정 모의).
+    봉인(zoneF 목표 계열 + 변형 `c` + E1 계열 하나)이 보내는 OOD는 사용자가 정한 ≈10~15 %(생성 비중
+    `goal_zone_weights`·`template_weights`가 맞춘다)이고 ood_dev/ood_test는 둘 다 쓰인다.
+
+    **한 group이 두 split에 걸치지 않는다**는 것이 이 검사의 핵심이다 (docs/04 §5). s0.3에서 지시가 도중에 목표
+    영역까지 바꾸게 되자 이 규칙이 깨졌다: 같은 계보의 한 편만 zoneF로 바뀌어 봉인되고 나머지는 train으로 갔다
+    (400편 실측 27 group). 그래서 `instruction.zone_change_excludes`가 봉인 개념의 영역을 변경에서 뺀다."""
+    # **지금 생성하는 설정**으로 본다 (R1). D1의 데이터는 s0.2의 템플릿·비중으로 만들어졌고 그 값은 보고서에 남아 있다.
+    config = load_generator_config("configs/data/r1_robot.yaml")
+    policy = SplitPolicy.from_config(config["split"])
     groups: dict[str, set[str]] = {}
     variants: dict[tuple[str, int], set[str]] = {}
     splits = Counter()
-    for profile, seed in seed_schedule(CONFIG, 400):
+    for profile, seed in seed_schedule(config, 400):
         plan = build_plan(SIM, seed, profile)
         group = origin_group(profile, plan)
         split = assign_split(group, policy, plan_tags(plan))
         groups.setdefault(group, set()).add(split)
+        assert not any(step.zone == "zoneF" for step in plan.instructions[1:] if plan.instructions[0].zone != "zoneF")
         for step in plan.instructions:  # v1·v2는 따로 정해지고, v2가 없는 에피소드(영역 밖의 다른 대상이 없다)도 있다
             variants.setdefault((group, step.version), set()).add(str(step.template))
         splits[split] += 1
@@ -130,6 +137,7 @@ def test_no_origin_group_straddles_two_splits_and_the_sealed_share_lands_in_the_
     ood = sum(splits[name] for name in OOD_SPLITS)
     assert 0.10 <= ood / 400 <= 0.15, dict(splits)
     assert splits["ood_dev"] > 0 and splits["ood_test"] > 0 and splits["train"] > 200
+    assert splits["ood_dev"] >= 20, dict(splits)  # 판정 칸의 표본 단위(편)가 P3의 24편 규모여야 한다
 
 
 def test_the_goal_zone_is_reweighted_without_disturbing_the_scene_stream():
@@ -196,7 +204,7 @@ def test_instruction_variants_keep_the_structured_goal_and_the_constraint_marker
     """세 변형은 표현만 다르다: 대상·영역·보호 물체는 같고, v1의 모든 변형에 규칙 기준군의 제약 표지가 있다. 변형은 계획의
     난수 소비 맨 뒤에서 고르므로 장면·일정은 변형 도입 전과 같다."""
     spec = SIM["instruction"]
-    assert len(spec["v1_templates"]) == 3 and len(spec["v2_templates"]) == 3 and spec["template_weights"] == [47.5, 47.5, 5]
+    assert len(spec["v1_templates"]) == 3 and len(spec["v2_templates"]) == 3 and spec["template_weights"] == [46, 46, 8]
     v1 = [str(item["text"]) for item in spec["v1_templates"]]
     v2 = [str(item["text"]) for item in spec["v2_templates"]]
     # v1은 대상·영역과 **두 제약을 전부** 부른다 (s0.3, Task R1 B1): 서식 v0.4에서 `attr=`와 구조화된 목표가
