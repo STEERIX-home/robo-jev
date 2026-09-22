@@ -226,3 +226,27 @@ def test_the_new_population_is_the_whole_ood_dev_split_and_no_episode_owns_the_s
     found = module.mechanism(module.cell_ticks(module.REPO / "configs" / "eval" / "p3-decision-cell.yaml"))
     assert found["label_is_the_commitment"] == 2005 and round(found["share_of_all_ticks"], 4) == 0.7925
     assert found["mechanical_policy"]["correct"] == 2214 and round(found["mechanical_policy"]["accuracy"], 4) == 0.8751
+
+
+def test_the_primary_stratum_carries_a_leave_one_episode_out_refit():
+    """N2의 물음 — **한 편이 판정을 만드는가**. 구간은 그 물음에 답하지 않으므로 따로 센다.
+
+    fixture: 편 A는 모델만 맞고(여유가 거기 있다) 편 B는 두 열이 같다. A를 빼면 여유가 사라져야 하고, B를 빼면
+    남아야 한다 — 그리고 "모든 제거에서 0을 제외했는가"가 한 줄로 적혀야 한다."""
+    module = script()
+    ticks = _ticks()
+    others = {(row["episode_id"], row["tick"]) for row in ticks if not row["is_commitment"]}
+    model = {key: True for key in {(r["episode_id"], r["tick"]) for r in ticks}}
+    control = {key: (key[0] == "ep-B") for key in model}
+    strata = module.run_strata(_table(ticks, model, control), ticks)
+    loo = strata["primary_stratum_leave_one_episode_out"]
+
+    assert loo["episodes"] == 2 and set(loo["drops"]) == {"ep-A", "ep-B"}
+    assert loo["drops"]["ep-B"]["margin"] == 1.0        # 편 A만 남으면 모델이 대조군을 1.0으로 앞선다
+    assert loo["drops"]["ep-A"]["margin"] == 0.0        # 편 B만 남으면 두 열이 같다
+    assert loo["worst_drop"]["episode_id"] == "ep-A" and loo["worst_drop"]["margin"] == 0.0
+    assert loo["every_drop_excludes_zero"] is False
+    assert loo["drops"]["ep-B"]["graded"] == len({key for key in others if key[0] == "ep-A"})
+
+    # 대조군 열이 없으면 이 블록도 없다 (있다고 주장하지 않는다)
+    assert "primary_stratum_leave_one_episode_out" not in module.run_strata({"model": {"q_main": {"per_record": _per_record(ticks, model)}}}, ticks)

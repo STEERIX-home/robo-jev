@@ -264,7 +264,34 @@ def run_strata(table: dict[str, Any], ticks: list[dict[str, Any]], **options: An
         out[name] = block
     if columns.get("state_shuffle"):
         out["state_shuffle_repeats_the_commitment"] = repeats_the_commitment(columns["state_shuffle"], ticks)
-    out["primary_stratum_by_key_family"] = by_key_family(columns, [row for row in ticks if not row["is_commitment"]])
+    primary = [row for row in ticks if not row["is_commitment"]]
+    out["primary_stratum_by_key_family"] = by_key_family(columns, primary)
+    if columns.get("state_shuffle"):
+        out["primary_stratum_leave_one_episode_out"] = leave_one_episode_out(columns["model"], columns["state_shuffle"], primary, **options)
+    return out
+
+
+def leave_one_episode_out(model_rows: list[dict[str, Any]], control_rows: list[dict[str, Any]],
+                          rows: list[dict[str, Any]], **options: Any) -> dict[str, Any]:
+    """편을 하나씩 빼고 주 지표의 여유를 다시 낸다 — **한 편이 판정을 만드는가**에 대한 답 (N2).
+
+    구간은 편을 재표집하므로 불균형을 이미 담고 있지만, "한 편을 빼도 0을 제외하는가"는 그 구간이 대답하지 않는
+    물음이고 이 칸에서는 그것이 실제 쟁점이었다(옛 칸은 이 층의 63.9 %가 한 편이었다)."""
+    keep = {(row["episode_id"], row["tick"]) for row in rows}
+    episodes = sorted({episode for episode, _ in keep})
+    out: dict[str, Any] = {"episodes": len(episodes), "drops": {}}
+    for episode in episodes:
+        subset = {tick for tick in keep if tick[0] != episode}
+        paired = episode_bootstrap(stratum_per_episode(model_rows, subset), stratum_per_episode(control_rows, subset), **options) or {}
+        out["drops"][episode] = {
+            "graded": paired.get("graded"), "margin": paired.get("margin"),
+            "margin_ci": paired.get("margin_ci"), "margin_includes_zero": paired.get("margin_includes_zero"),
+        }
+    values = [(name, row) for name, row in out["drops"].items() if row.get("margin") is not None]
+    if values:
+        name, row = min(values, key=lambda pair: pair[1]["margin"])
+        out["worst_drop"] = {"episode_id": name, **row}
+        out["every_drop_excludes_zero"] = all(row["margin_includes_zero"] is False for _, row in values)
     return out
 
 
