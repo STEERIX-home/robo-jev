@@ -432,6 +432,19 @@ class RobotHarness:
         self._escape_pending = True
         self._escape_after = str(after)
 
+    def _still_limit(self, state: dict[str, Any]) -> int:
+        """멈춰 있는 팔의 상한 (`m_still`) — **물체를 들고 있으면 더 길게** (`m_still_holding`).
+
+        파지 직후의 들기는 접촉력이 실행기의 힘 반사 한계(30N) 바로 위에 앉았다가 몇 초에 걸쳐 잦아드는 구간이
+        있다(400편 실측: 31~33틱). 그동안 팔은 서 있지만 그것은 정체가 아니라 **과제가 진행된** 자리다 —
+        `m_still`(10)로 끊으면 스스로 풀릴 편을 죽인다. 들고도 이만큼 서 있으면 그때는 정체다
+        (`ep-E0-400122`는 `place` commitment를 든 채 419틱을 섰다).
+        """
+        caps = self.compose_config
+        if (state.get("robot") or {}).get("holding") is not None:
+            return int(caps.get("m_still_holding", 0) or 10**9)
+        return int(caps.get("m_still", 0) or 10**9)
+
     def _escape_moved(self, state: dict[str, Any]) -> bool:
         """지난 탈출 뒤 팔이 실제로 그 자리를 떴는가. 뜨지 못했으면 결정으로 풀 수 없는 정체다."""
         if not self._escape_from:
@@ -522,7 +535,7 @@ class RobotHarness:
             key = str(self._hold_key or "")
             reason = {"kind": "hold_stalled", "ticks": int(self._hold_ticks), "key": key or None}
             keys = {key} if key else set()
-        elif self._still_ticks >= int(caps.get("m_still", 0) or 10**9):
+        elif self._still_ticks >= self._still_limit(state):
             # 경로 종류와 무관하게 **팔이 멈춰 있다**. 실행기의 힘 반사(30N 초과면 속도 계수 0)가 걸리면 하네스가
             # 무엇을 명령하든 말단은 그 자리다 — `ep-E0-400122`는 `place` commitment를 `direct` 경로로 든 채
             # 419틱(42 s)을 그렇게 섰고 hold·관측 감시는 그 모양을 못 봤다(리뷰 1 C1의 세 번째 얼굴).
