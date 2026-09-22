@@ -153,7 +153,8 @@ def check_zone_change_excludes(config: dict[str, Any], sim_config: dict[str, Any
     """도중 지시 변경이 **봉인 개념의 영역**을 들여오지 못하게 막혀 있는가 (R1 리뷰 1 M13).
 
     개념 봉인은 에피소드 **계보**(origin group = v1의 목표 영역)의 성질이라, 변경이 봉인 영역을 들여오면 같은
-    group의 한 편만 OOD로 가고 나머지는 train에 남는다 — 400편 실측에서 27 group이 그랬다. `s0.3`이
+    group의 한 편만 OOD로 가고 나머지는 train에 남는다 — 400편 실측에서 **27 group이 그런 변경을 냈고 그 가운데
+    13 group(32편)이 실제로 두 split에 걸쳤다**(리뷰 1 I2). `s0.3`이
     `instruction.zone_change_excludes`로 막았지만 그 목록과 `split.holdout_concepts`를 **묶는 것이 없었다**:
     장면 설정의 기본값은 빈 목록이고, 둘째 영역을 봉인하면서 한쪽만 고치면 누출이 조용히 다시 열린다.
     생성 전에 멈춘다 — 누출은 QA가 잡기 전까지 보이지 않는다.

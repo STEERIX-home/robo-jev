@@ -103,7 +103,8 @@ instruction:
   zone_change_probability: 0.3
   # 도중 변경이 들여올 수 **없는** 영역. 개념 봉인(`robot:goal-zone:zoneF`)은 에피소드 계보(origin group =
   # v1의 목표 영역)의 성질이므로, 변경이 zoneF를 들여오면 같은 group의 에피소드가 두 split에 걸친다 —
-  # 400편 실측에서 27 group이 그랬다(docs/04 §5의 "한 group은 한 split"을 어긴다).
+  # 400편 실측에서 27 group이 그런 변경을 냈고 그 가운데 **13 group(32편)이 실제로 두 split에 걸쳤다**
+  # (docs/04 §5의 "한 group은 한 split"을 어긴다; 리뷰 1 I2 — 27은 영향을 받은 group 수다).
   zone_change_excludes: [zoneF]
   # 목표 영역의 비중 (v1 지시의 목표 영역, docs/04 §5). zoneF("앞쪽 보관 영역")는 봉인 개념(`robot:goal-zone:zoneF`)이라 드물게
   # 둔다 — 그 계열 전부가 OOD로 가고 train은 zoneL/zoneR만 목표로 한다(장면에 zoneF가 **있는** 것과는 무관하다). 추첨은

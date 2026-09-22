@@ -116,7 +116,8 @@ def test_no_origin_group_straddles_two_splits_and_the_sealed_share_lands_in_the_
 
     **한 group이 두 split에 걸치지 않는다**는 것이 이 검사의 핵심이다 (docs/04 §5). s0.3에서 지시가 도중에 목표
     영역까지 바꾸게 되자 이 규칙이 깨졌다: 같은 계보의 한 편만 zoneF로 바뀌어 봉인되고 나머지는 train으로 갔다
-    (400편 실측 27 group). 그래서 `instruction.zone_change_excludes`가 봉인 개념의 영역을 변경에서 뺀다."""
+    (400편 실측: 27 group이 그런 변경을 냈고 그 가운데 **13 group·32편이 실제로 두 split에 걸쳤다** — 리뷰 1 I2).
+    그래서 `instruction.zone_change_excludes`가 봉인 개념의 영역을 변경에서 뺀다."""
     # **지금 생성하는 설정**으로 본다 (R1). D1의 데이터는 s0.2의 템플릿·비중으로 만들어졌고 그 값은 보고서에 남아 있다.
     config = load_generator_config("configs/data/r1_robot.yaml")
     policy = SplitPolicy.from_config(config["split"])

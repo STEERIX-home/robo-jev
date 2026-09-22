@@ -635,7 +635,8 @@ def _sample_instructions(
         if index > 0 and len(zones) > 1 and _hash_unit(seed, "zone-change", index) < zone_change_unit:
             # 봉인 개념의 영역(`zone_change_excludes`, 기본 zoneF)은 **변경으로 들어오지 않는다**: 개념 봉인은
             # 에피소드 계보(origin group = v1의 목표 영역)의 성질이라, 도중 변경이 그것을 들여오면 같은 group의
-            # 에피소드가 두 split에 걸친다(docs/04 §5의 규칙 위반 — 400편 실측에서 27 group).
+            # 에피소드가 두 split에 걸친다(docs/04 §5의 규칙 위반 — 400편 실측에서 27 group이 그런 변경을 냈고
+            # 그 가운데 13 group(32편)이 실제로 걸쳤다; 리뷰 1 I2).
             excluded = {str(name) for name in spec.get("zone_change_excludes") or ()}
             options = [area for area in zones if area.id != current_zone.id and area.id not in excluded]
             if options:  # 갈 곳이 없으면 **영역을 바꾸지 않는다** — 제외한 영역으로 되돌아가지 않는다
