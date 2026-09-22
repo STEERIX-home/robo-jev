@@ -65,6 +65,7 @@ __all__ = [
     "build_manifest",
     "write_contrast",
     "check_holdout_templates",
+    "check_zone_change_excludes",
     "config_paths",
     "episode_id",
     "family_id",
@@ -77,6 +78,7 @@ __all__ = [
     "plan_tags",
     "profile_cycle",
     "run",
+    "sealed_goal_zones",
     "seed_schedule",
     "write_episode",
 ]
@@ -131,6 +133,40 @@ def check_holdout_templates(config: dict[str, Any], sim_config: dict[str, Any]) 
         raise ValueError(
             f"split.holdout_templates에 장면 설정이 모르는 변형 id가 있다: {unknown} "
             f"(있는 것: {sorted(known)}) — 템플릿 문장을 바꾸면 봉인 id도 같이 바꾼다"
+        )
+
+
+#: 개념 id에서 봉인한 **목표 영역**을 읽는 접두사 (`robot:goal-zone:zoneF` → `zoneF`).
+_GOAL_ZONE_CONCEPT = "robot:goal-zone:"
+
+
+def sealed_goal_zones(config: dict[str, Any]) -> set[str]:
+    """`split.holdout_concepts`가 봉인한 목표 영역 — 도중 지시 변경이 들여오면 안 되는 영역이다."""
+    return {
+        str(name)[len(_GOAL_ZONE_CONCEPT):]
+        for name in (config.get("split") or {}).get("holdout_concepts") or ()
+        if str(name).startswith(_GOAL_ZONE_CONCEPT)
+    }
+
+
+def check_zone_change_excludes(config: dict[str, Any], sim_config: dict[str, Any]) -> None:
+    """도중 지시 변경이 **봉인 개념의 영역**을 들여오지 못하게 막혀 있는가 (R1 리뷰 1 M13).
+
+    개념 봉인은 에피소드 **계보**(origin group = v1의 목표 영역)의 성질이라, 변경이 봉인 영역을 들여오면 같은
+    group의 한 편만 OOD로 가고 나머지는 train에 남는다 — 400편 실측에서 27 group이 그랬다. `s0.3`이
+    `instruction.zone_change_excludes`로 막았지만 그 목록과 `split.holdout_concepts`를 **묶는 것이 없었다**:
+    장면 설정의 기본값은 빈 목록이고, 둘째 영역을 봉인하면서 한쪽만 고치면 누출이 조용히 다시 열린다.
+    생성 전에 멈춘다 — 누출은 QA가 잡기 전까지 보이지 않는다.
+    """
+    sealed = sealed_goal_zones(config)
+    if not sealed:
+        return
+    excluded = {str(name) for name in (sim_config.get("instruction") or {}).get("zone_change_excludes") or ()}
+    missing = sorted(sealed - excluded)
+    if missing:
+        raise ValueError(
+            f"split.holdout_concepts가 봉인한 목표 영역이 instruction.zone_change_excludes에 없다: {missing} "
+            f"(지금 제외: {sorted(excluded)}) — 도중 지시 변경이 그 영역을 들여오면 한 group이 두 split에 걸친다"
         )
 
 
@@ -662,6 +698,7 @@ def run(
     sim_settings = yaml.safe_load(resolve_config_path(paths["sim_config"]).read_text(encoding="utf-8"))
     # 봉인한 템플릿 id가 장면 설정에 실제로 있는지 **생성 전에** 본다 (Task R1 B1).
     check_holdout_templates(config, sim_settings)
+    check_zone_change_excludes(config, sim_settings)
     schedule = seed_schedule(config, count if not exclude else count * int(config.get("exclude_schedule_factor", 8)))
     envs: dict[str, Any] = {}
     produced = skipped = excluded = 0

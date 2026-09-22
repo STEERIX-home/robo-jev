@@ -858,6 +858,31 @@ def test_the_generator_refuses_a_holdout_template_id_the_scene_config_does_not_h
         check_holdout_templates(stale, SIM)
 
 
+def test_the_generator_refuses_a_sealed_goal_zone_that_a_mid_episode_change_could_bring_in():
+    """봉인 개념의 영역과 `zone_change_excludes`를 **묶는다** (R1 리뷰 1 M13).
+
+    개념 봉인은 계보의 성질이라 도중 지시 변경이 봉인 영역을 들여오면 한 group이 두 split에 걸친다(400편 실측
+    27 group). `s0.3`이 `instruction.zone_change_excludes`로 막았지만 그 목록과 `split.holdout_concepts`를 잇는
+    것이 없었다 — 장면 설정의 기본값은 빈 목록이고, 걸친 group을 잡는 검사는 문자열 `"zoneF"`를 박아 두었다.
+    둘째 영역을 봉인하면서 한쪽만 고치면 누출이 조용히 다시 열린다. 이제 생성 전에 멈춘다.
+    """
+    from robo_jev.data.robot_episodes import check_zone_change_excludes, sealed_goal_zones
+
+    config = _r1_config()
+    assert sealed_goal_zones(config) == {"zoneF"}
+    check_zone_change_excludes(config, SIM)  # 지금 설정은 지난다
+
+    second = copy.deepcopy(config)
+    second["split"]["holdout_concepts"] = ["robot:goal-zone:zoneF", "robot:goal-zone:zoneL"]
+    with pytest.raises(ValueError, match="zone_change_excludes"):
+        check_zone_change_excludes(second, SIM)
+
+    unguarded = copy.deepcopy(SIM)
+    unguarded["instruction"] = {**unguarded["instruction"], "zone_change_excludes": []}
+    with pytest.raises(ValueError, match="zoneF"):
+        check_zone_change_excludes(config, unguarded)
+
+
 def test_the_r1_schedule_mixes_the_three_profiles_by_weight_without_repeating_an_episode_id():
     """E0 20 % · E1 40 % · E2 40 % (Task R1 B2-iv). 한 바퀴에 같은 프로파일이 두 번 나오므로 seed는 프로파일마다
     따로 센다 — 안 그러면 에피소드 id가 겹쳐 조용히 덮어쓴다."""

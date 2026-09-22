@@ -567,7 +567,7 @@ def section_text(out: dict, tokenizer, index: int, name: str) -> str:
     )
 
 
-def test_stream_format_v03_uses_short_names_and_key_based_candidate_lines(tokenizer):
+def test_the_stream_format_uses_short_names_and_key_based_candidate_lines(tokenizer):
     out = serialize_request(synthetic_stream(1), tokenizer, layout="stream_l1a")
     assert out["format"] == serialize_module.STREAM_FORMAT == "v0.4"
     assert out["delta_rules"] == serialize_module.DELTA_RULES
@@ -860,13 +860,19 @@ def test_serializing_a_prefix_of_the_ticks_gives_a_prefix_of_the_tokens(streams,
             assert part["prefix_end"] == whole["prefix_end"]
 
 
-def test_the_contract_doc_lists_every_short_field_name_of_format_v03():
-    """docs/08 §3.2의 서식 v0.3 표는 `STREAM_FIELDS`의 짧은 이름을 전부 적어야 한다 — 문서가 코드와 같도록."""
+def test_the_contract_doc_lists_every_short_field_name_of_the_stream_format():
+    """docs/08 §3.2의 서식 표는 `STREAM_FIELDS`의 짧은 이름을 전부 적어야 한다 — 문서가 코드와 같도록.
+
+    표의 **머리말**도 본다 (R1 리뷰 1 M1): 본문이 "v0.4 열이 모델이 보는 것"이라고 말하는 네 줄 아래에서 표의
+    넷째 열 머리말이 "서식 v0.3"으로 남아 있었고, `"v0.4" in section`만 보던 옛 단언은 본문에 걸려 그냥 지났다.
+    """
     from pathlib import Path
 
     doc = (Path(__file__).resolve().parents[1] / "docs" / "08-streaming-io-and-data-contract.md").read_text(encoding="utf-8")
     section = doc[doc.index("### 3.2") : doc.index("### 3.3")]
-    assert "v0.4" in section and "계약 v0.3" in doc[:2000]
+    assert "| 필드 | 내용 | 정보 경계 | 서식 v0.4 (모델이 보는 줄) |" in section  # 표의 머리말 (M1)
+    assert "서식 v0.3 (모델이 보는 줄)" not in section
+    assert "계약 v0.3" in doc[:2000]
     for group, table in serialize_module.STREAM_FIELDS.items():
         for short in table.values():
             if short:
