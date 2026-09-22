@@ -50,7 +50,7 @@ from torch import Tensor, nn
 from robo_jev.contracts import QUESTION_SET_V0, SCHEMA_SINGLE_REQUEST, SCHEMA_STREAM, model_input
 from robo_jev.evaluate import aggregate, answer_change_rate, calibration_error, context_shuffle_records, rule_judge_predictions, selective_metrics
 from robo_jev.loss import label_loss
-from robo_jev.model.serialize import candidate_line, full_tick_sections, state_lines, stream_candidate_line
+from robo_jev.model.serialize import candidate_line, full_tick_sections, model_visible_state, state_lines, stream_candidate_line
 from robo_jev.sampler import Item, manifest_files, permute_candidates
 
 __all__ = [
@@ -126,7 +126,9 @@ def _label_for(labels: list[dict], question_id: str) -> dict | None:
 def _single_examples(record: dict, *, domain: str, max_context: int, max_candidate: int) -> list[Example]:
     projected = model_input(record)
     request = projected["request"]
-    context = _truncate("[state]\n" + "\n".join(state_lines(request["state"])) + "\n", max_context)
+    # 모델이 보는 것과 **같은 텍스트**라야 이 기준군의 표지가 뜻을 갖는다 — 서식 v0.4에서 풀어 놓은 목표와 물체
+    # 속성은 L0 배치의 모델 입력에서도 빠진다(`serialize._serialize_state_first`와 같은 규칙; Task R1 A1).
+    context = _truncate("[state]\n" + "\n".join(state_lines(model_visible_state(request["state"]))) + "\n", max_context)
     labels = list(record.get("labels") or [])
     questions = []
     for spec in request["questions"]:
