@@ -57,7 +57,9 @@ split:
     test: 10
   holdout_groups: []
   # ood(ood_dev/ood_test, group 해시로 반분)는 holdout으로만 만든다. 봉인 목록은 docs/04 §5 표와 같다.
-  #   - E1 계열 하나 (일정의 첫 E1 에피소드 seed 400100의 계열; 결정적: `family_id(build_plan(sim_config, 400100, "E1"))`).
+  #   - E1 계열 하나 (일정의 첫 E1 에피소드의 계열; 결정적: `family_id(build_plan(sim_config, 410100, "E1"))`).
+  #     **seed는 410100이다** — `seeds.profile_offset`(10,000)이 E1의 구간을 벌린 뒤로 첫 E1 seed가 400100이 아니다
+  #     (400100은 `family-n7-b6c1-zFLR`을 내고 아래 적힌 계열이 아니다; 리뷰 1 M14).
   holdout_prefixes: ["robot/E1/family-n9-b3c6-zFLR"]
   holdout_domains: []
   #   - 지시 문구 템플릿 변형 `c` (`configs/sim/tidy_clutter.yaml` instruction.v1_templates/v2_templates의 id `c`).
