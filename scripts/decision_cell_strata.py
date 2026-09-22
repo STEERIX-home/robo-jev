@@ -23,6 +23,11 @@
         --out artifacts/reports/p3-decision-cell-strata.json
     uv run python scripts/decision_cell_strata.py --population-splits ood_dev,dev \
         --out artifacts/reports/p3-population.json     # A1 — 분할 **전체**의 구성 (run 없이, 데이터만)
+    uv run python scripts/decision_cell_strata.py --rescope artifacts/reports/p3-reeval-*.json
+        # 이미 저장된 보고서의 commitment 섞기 열에 **범위**를 적는다 (GPU 없이, 다른 값은 그대로임을 확인하고)
+
+`reading`은 **이 파일의 수에서 만든다**(:func:`reading_text`) — 손으로 쓴 문단은 모집단이 바뀌어도 그대로 다시
+찍히고, 실제로 P3의 첫 산출물이 P2의 문단(844·595·249·8편)을 그대로 실었다 (리뷰 1 C1).
 """
 
 from __future__ import annotations
