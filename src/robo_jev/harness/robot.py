@@ -462,8 +462,11 @@ class RobotHarness:
         # 0. 지난 탈출이 팔을 **실제로** 옮겼는가. 못 옮겼으면 결정으로 풀 수 없는 정체다 — 실행기의 힘 반사가
         #    속도를 0으로 묶은 자리는 어떤 답으로도 벗어날 수 없다(`ep-E2-420208`은 접촉력 50N으로 348틱을 그렇게
         #    섰다). 45초를 마저 채우지 않고 여기서 끝낸다.
+        # 이미 낸 `stall_exhausted`는 다시 내지 않는다: 생성기는 그 틱에 에피소드를 끝내지만 키프레임 rollout처럼
+        # 계속 도는 쪽에서는 틱마다 같은 기록이 쌓일 뿐이다. 아래의 구간 상한은 그대로 일한다.
+        terminal = self.stalled_out is None
         elapsed = max(1, int(caps.get("stall_escape_ticks", 1) or 1)) - self._escape_ticks
-        if self._escape_pending and (
+        if terminal and self._escape_pending and (
             self._escape_ticks == 0 or elapsed >= int(caps.get("stall_escape_check_ticks", 10**9) or 10**9)
         ):
             # 실행기의 힘 반사가 걸린 팔은 **한 틱도** 움직이지 않는다(속도 계수 0). 자유로운 팔은 물러남 한 틱에
@@ -486,7 +489,7 @@ class RobotHarness:
         window_min = int(caps.get("stall_window_min_ticks", 0) or 0)
         share = (sum(self._window) / len(self._window)) if self._window else 0.0
         windowed = bool(share_cap and window_min and len(self._window) >= window_min and share >= share_cap)
-        if (dead_cap and self._dead_ticks >= dead_cap) or windowed:
+        if terminal and ((dead_cap and self._dead_ticks >= dead_cap) or windowed):
             self.stalled_out = {
                 "kind": "stall_exhausted",
                 "reason": "no_progress",
