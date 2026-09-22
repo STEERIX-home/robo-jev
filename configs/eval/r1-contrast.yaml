@@ -1,0 +1,48 @@
+# Task R1 C3-d — 대조 쌍 전용 평가 집합 (판정 칸과 **다른** 집합: 레코드가 다르므로 해시도 다르다).
+# 저장한 checkpoint를 `adapt_readout.py --eval-checkpoint`로 이 집합에 다시 댄다. 대조 레코드는 **학습에 없다**
+# (학습 manifest는 `episodes/*/streams.jsonl`만 읽는다) — 그래서 dev·calibration의 쌍도 쓸 수 있다.
+version: eval-r1-contrast-v0.1
+window_ticks: 30
+shuffle_seed: 1
+tokens_per_batch: 8192
+fused: true
+columns:
+  permuted: false
+  state_shuffle: true
+  instruction_shuffle: true
+  commitment_shuffle: false
+  rule_judge: true
+  mechanical_baseline: true
+  event_metrics: false
+  selective: false
+  calibration: false
+tiny_scorer_report: artifacts/reports/r1-tiny-scorer.json
+splits:
+- name: robot_contrast/ood_dev
+  manifest: artifacts/datasets/r1-robot/r1/manifest.json
+  domain: robot
+  split: ood_dev
+  files: &id001
+  - contrast/records.jsonl
+  selection: true
+  note: 봉인 계열의 쌍 — 판정은 여기서
+  store_predictions: &id002
+  - q_main
+- name: robot_contrast/dev
+  manifest: artifacts/datasets/r1-robot/r1/manifest.json
+  domain: robot
+  split: dev
+  files: *id001
+  selection: true
+  note: '수를 늘리는 쌍 (학습에 들어가지 않는다: 학습 manifest는 episodes/*만 읽는다)'
+  store_predictions: *id002
+- name: robot_contrast/calibration
+  manifest: artifacts/datasets/r1-robot/r1/manifest.json
+  domain: robot
+  split: calibration
+  files: *id001
+  selection: true
+  note: '수를 늘리는 쌍 (학습에 들어가지 않는다: 학습 manifest는 episodes/*만 읽는다)'
+  store_predictions: *id002
+note: Task R1 C3-d — 지시 대조 쌍 **전부**의 표. judgment-v0 단일 레코드라 GPU pass가 짧다(쌍마다 두 번).
+  모델이 보는 차이가 goal 줄의 문장뿐임은 생성 쪽 시험이 고정한다.
