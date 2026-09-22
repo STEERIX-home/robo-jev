@@ -25,6 +25,7 @@ import json
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -79,11 +80,46 @@ RELATIVE_L2_REFERENCE_FLOOR = 1e-3
 #: 규칙: 기준마다 **두 run 사이 최악값 × :data:`TOLERANCE_SAFETY_FACTOR`**를 유효숫자 한 자리로 **올림**하고,
 #: T0의 값보다 **느슨해지기만** 한다(T1 경로가 T0보다 조용할 리 없으므로 더 조이지 않는다).
 TOLERANCE_SAFETY_FACTOR = 2.0
+#: 그 범위의 오차를 고정하기 전에 있어야 하는 **최소 쌍 수** (R2 A1). 한 쌍은 이 경로의 잡음을 대표하지 못한다 —
+#: P2의 쌍(0.0641)과 P3의 쌍(0.0236)이 **2.7배** 달랐고, 뒤엣것 하나로 고정한 오차는 이미 관측된 퍼짐보다 작았다.
+MINIMUM_BASELINE_PAIRS = 3
 RESUME_TOLERANCE_RULE = (
-    "run the same config twice with no restart (two separate processes, same seed), take the worst run-to-run "
-    "value of each criterion, multiply by TOLERANCE_SAFETY_FACTOR, round up to one significant figure, and never "
-    "go below the t0 tolerance. Fixed in this file before the baseline was measured."
+    "run the same config twice with no restart (two separate processes, same seed) and measure the run-to-run "
+    "spread; do this at least MINIMUM_BASELINE_PAIRS times on that scope's path; then, for each criterion, take "
+    "the worst value over every measured pair, multiply by TOLERANCE_SAFETY_FACTOR, round up to one significant "
+    "figure, and never go below the t0 tolerance. A pair that could not measure a criterion does not contribute "
+    "to it. Fixed in this file before the pair that completes the set was measured."
 )
+
+#: 이 범위의 경로에서 **이미 잰** 재시작 없는 쌍들 — 값은 저장된 보고서에서 읽었고, 어디서 왔는지가 함께 적혀
+#: 있다(시험이 보고서와 대조한다). 새로 재는 쌍은 :func:`check_baseline` 이 여기에 이어 붙인다.
+PRIOR_BASELINE_PAIRS: dict[str, list[dict[str, Any]]] = {
+    "t1": [
+        {
+            "label": "P2 (2026-09-21) — `continuous`의 앞 3 step 대 `first`의 3 step",
+            "unit": "two runs of the same config, same seed, **no restart** (two separate processes)",
+            "source": "artifacts/reports/p2-acceptance.json",
+            "config": "configs/train/qwen35-2b-pilot.yaml (D1 데이터)",
+            "steps": 3,
+            "worst_loss_abs": 0.06413567066192627,
+            "worst_loss_rel": 0.017781185372826285,
+            # snapshot(`first-t1.pt`)이 남아 있지 않다 — 이 쌍은 loss 기준에만 기여한다
+            "worst_param_max_abs": None,
+            "worst_param_relative_l2": None,
+        },
+        {
+            "label": "P3 (2026-09-22) — `--check baseline` 두 프로세스, 5 step",
+            "unit": "two runs of the same config, same seed, **no restart** (two separate processes)",
+            "source": "artifacts/reports/p3-acceptance.json",
+            "config": "configs/train/qwen35-2b-pilot.yaml (D1 데이터)",
+            "steps": 5,
+            "worst_loss_abs": 0.023573994636535645,
+            "worst_loss_rel": 0.00825756566314512,
+            "worst_param_max_abs": 0.000581890344619751,
+            "worst_param_relative_l2": 0.0006311355571226999,
+        },
+    ],
+}
 
 #: T1·LoRA에서 "움직였다"고 보는 최소 변화 — 이보다 작으면 업데이트가 빠진 것이다.
 MOVE_EPSILON = 1e-9
@@ -419,15 +455,32 @@ def measure_spread(first: dict[str, Any], second: dict[str, Any]) -> dict[str, A
     }
 
 
-def derive_tolerance(spread: dict[str, Any], *, floor: dict[str, float] = RESUME_TOLERANCE) -> dict[str, float]:
-    """퍼짐 → 허용 오차, :data:`RESUME_TOLERANCE_RULE` 그대로 (안전 계수 → 유효숫자 한 자리 올림 → T0보다 느슨하게)."""
-    pairs = (
-        ("loss_abs", "worst_loss_abs"), ("loss_rel", "worst_loss_rel"),
-        ("param_max_abs", "worst_param_max_abs"), ("param_rel_l2", "worst_param_relative_l2"),
-    )
+#: 기준 이름 → 퍼짐 기록의 자리.
+_SPREAD_KEYS = (
+    ("loss_abs", "worst_loss_abs"), ("loss_rel", "worst_loss_rel"),
+    ("param_max_abs", "worst_param_max_abs"), ("param_rel_l2", "worst_param_relative_l2"),
+)
+
+
+def worst_of_pairs(spreads: Sequence[dict[str, Any]]) -> dict[str, float]:
+    """잰 쌍 전부에서 **기준마다 최악값**을 모은다 (R2 A1의 규칙 개정).
+
+    어떤 쌍이 그 기준을 재지 못했으면(`None`) 그 쌍은 그 기준에 기여하지 않는다 — 못 잰 것을 0으로 세면 오차가
+    조여지고, 그것이 사전 등록이 막으려는 방향이다."""
     return {
-        key: max(float(floor[key]), _round_up_one_significant_figure(TOLERANCE_SAFETY_FACTOR * float(spread[name] or 0.0)))
-        for key, name in pairs
+        name: max([float(spread[name]) for spread in spreads if spread.get(name) is not None], default=0.0)
+        for _, name in _SPREAD_KEYS
+    }
+
+
+def derive_tolerance(spread: dict[str, Any] | Sequence[dict[str, Any]], *, floor: dict[str, float] = RESUME_TOLERANCE) -> dict[str, float]:
+    """퍼짐(쌍 하나 또는 쌍 목록) → 허용 오차, :data:`RESUME_TOLERANCE_RULE` 그대로.
+
+    쌍 전부의 최악값 → 안전 계수 → 유효숫자 한 자리 올림 → T0보다 느슨하게만."""
+    worst = worst_of_pairs([spread] if isinstance(spread, dict) else list(spread))
+    return {
+        key: max(float(floor[key]), _round_up_one_significant_figure(TOLERANCE_SAFETY_FACTOR * worst[name]))
+        for key, name in _SPREAD_KEYS
     }
 
 
@@ -455,11 +508,22 @@ def check_baseline(mode: str, *, steps: int = 5, run_dir: Path, config_path: Pat
         snapshots.append(torch.load(directory / f"continuous-{mode}.pt", map_location="cpu", weights_only=False))
 
     spread = measure_spread(snapshots[0], snapshots[1])
+    prior = [dict(pair) for pair in PRIOR_BASELINE_PAIRS.get(mode, [])]
+    measured = {**spread, "label": f"R2 ({dt.date.today().isoformat()}) — `--check baseline` 두 프로세스, {steps} step",
+                "source": "this report (checks.baseline_%s.spread)" % mode,
+                "config": str(config_path.relative_to(REPO)) if str(config_path).startswith(str(REPO)) else str(config_path)}  # fmt: skip
+    pairs = [*prior, measured]
     return {
         "check": "baseline", "scope": mode, "rule": RESUME_TOLERANCE_RULE,
         "safety_factor": TOLERANCE_SAFETY_FACTOR,
         "spread": spread,
-        "derived_tolerance": derive_tolerance(spread),
+        # **이 쌍 하나가 아니라 잰 쌍 전부**가 오차를 만든다 (R2 A1). 앞 쌍의 출처는 값 옆에 적혀 있다.
+        "pairs": [{key: pair.get(key) for key in ("label", "source", "config", "steps", "unit", *(name for _, name in _SPREAD_KEYS))} for pair in pairs],
+        "pairs_measured": len(pairs), "pairs_required": MINIMUM_BASELINE_PAIRS,
+        "enough_pairs": len(pairs) >= MINIMUM_BASELINE_PAIRS,
+        "worst_over_pairs": worst_of_pairs(pairs),
+        "derived_tolerance_this_pair_only": derive_tolerance(spread),
+        "derived_tolerance": derive_tolerance(pairs),
         "registered_tolerance": dict(RESUME_TOLERANCES[mode]) if mode in RESUME_TOLERANCES else None,
         "seconds": round(time.perf_counter() - started, 1), "phases": phases,
     }

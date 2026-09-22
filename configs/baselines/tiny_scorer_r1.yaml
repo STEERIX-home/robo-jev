@@ -39,7 +39,11 @@ train:
   weight_decay: 0.01
   warmup_ratio: 0.05
   gradient_clip: 1.0
-  max_wall_minutes: 90
+  # **Task R2 A3에서 90 → 480으로 올렸다** (R1 Deviation 4). R1은 90분 벽에 걸려 2,601 step 가운데 655,
+  # 곧 **1 epoch의 4분의 3**만 돌았다 — 그 표시로는 '이 칸이 패턴으로 풀리는가'를 물을 수 없다(덜 학습된
+  # 모델이 낮은 점수를 내는 것과 칸이 어려운 것을 가를 수 없다). 조리법(stride 3·epoch 3·lr·크기)은 D1·R1과
+  # **그대로**여서 세 표를 나란히 놓을 수 있고, 바뀐 것은 예산뿐이다. R1 실측 8.25 s/step이면 3 epoch ≈ 6 h다.
+  max_wall_minutes: 480
   log_every: 50
 
 eval:

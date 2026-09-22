@@ -400,3 +400,68 @@ def test_the_t1_gate_now_returns_a_verdict_instead_of_stopping_on_an_unregistere
         assert module.resume_gate(report, "t1")["exit_code"] == expected
     # 아직 등록되지 않은 범위는 그대로 멈춘다
     assert module.resume_gate(_gate_report(tmp_path, resume_lora={"passed": None, "verdict": "tolerance-unregistered", "scope": "lora"}), "lora")["exit_code"] == 3
+
+
+# --------------------------------------------------------------------------
+# R2 A1 — 허용 오차는 **한 쌍이 아니라 잰 쌍 전부**의 최악값 위에 선다
+# --------------------------------------------------------------------------
+
+
+def test_the_rule_takes_the_worst_of_every_measured_pair_not_just_the_last_one():
+    """R2 A1 — 규칙의 개정. **측정 전에** 파일에 넣고 커밋한다 (사전 등록의 순서).
+
+    P3가 한 쌍(최악 0.0236)에서 고정한 오차는 **이미 관측된 퍼짐보다 작았다** — P2의 쌍이 0.0641이었으므로
+    2.7배 차다. 한 쌍은 이 경로의 잡음을 대표하지 못한다. 그래서 규칙이 바뀐다: 그 범위의 **잰 쌍 전부**에서
+    기준마다 최악값을 모으고 그 위에 오차를 세운다. 안전 계수·올림·T0 바닥은 그대로다."""
+    module = script()
+    assert module.MINIMUM_BASELINE_PAIRS == 3
+    assert "every measured" in module.RESUME_TOLERANCE_RULE and "pair" in module.RESUME_TOLERANCE_RULE
+    assert "round up to one significant figure" in module.RESUME_TOLERANCE_RULE
+    assert module.TOLERANCE_SAFETY_FACTOR == 2.0
+
+    pairs = [
+        {"worst_loss_abs": 0.0641, "worst_loss_rel": 0.0178, "worst_param_max_abs": None, "worst_param_relative_l2": None},
+        {"worst_loss_abs": 0.0236, "worst_loss_rel": 0.0083, "worst_param_max_abs": 5.819e-4, "worst_param_relative_l2": 6.31e-4},
+    ]
+    worst = module.worst_of_pairs(pairs)
+    assert worst["worst_loss_abs"] == pytest.approx(0.0641)          # 둘 가운데 큰 쪽
+    assert worst["worst_loss_rel"] == pytest.approx(0.0178)
+    assert worst["worst_param_max_abs"] == pytest.approx(5.819e-4)   # 못 잰 쌍은 그 기준에 기여하지 않는다
+    assert worst["worst_param_relative_l2"] == pytest.approx(6.31e-4)
+    # 아무 쌍도 그 기준을 재지 않았으면 0 — 그러면 T0의 바닥이 그대로 오차가 된다
+    assert module.worst_of_pairs([{"worst_loss_abs": 0.01, "worst_loss_rel": 0.01,
+                                   "worst_param_max_abs": None, "worst_param_relative_l2": None}])["worst_param_max_abs"] == 0.0
+
+    # `derive_tolerance`는 쌍 하나든 목록이든 같은 규칙을 쓴다 (옛 호출 자리를 깨지 않는다)
+    assert module.derive_tolerance(pairs) == module.derive_tolerance(module.worst_of_pairs(pairs))
+    assert module.derive_tolerance(pairs[1]) == module.derive_tolerance([pairs[1]])
+    assert module.derive_tolerance(pairs)["loss_abs"] == pytest.approx(0.2)   # 2 × 0.0641 = 0.1282 → 0.2
+    assert module.derive_tolerance(pairs)["loss_rel"] == pytest.approx(0.04)  # 2 × 0.0178 = 0.0356 → 0.04
+
+
+def test_the_pairs_already_measured_on_the_t1_path_are_recorded_with_their_provenance():
+    """R2 A1 — 앞서 잰 두 쌍은 **보고서에서 읽은 값**이고, 어디서 왔는지가 값 옆에 적혀 있다.
+
+    P2의 쌍은 재시작이 없는 두 프로세스(`continuous`의 앞 3 step 대 `first`의 3 step)이고 그 snapshot은
+    남아 있지 않으므로 **loss 기준만** 잴 수 있다. P3의 쌍은 `measure_spread`가 네 기준을 모두 남겼다."""
+    import json
+    from pathlib import Path
+
+    module = script()
+    prior = module.PRIOR_BASELINE_PAIRS["t1"]
+    assert len(prior) == 2 and all(pair["source"].endswith(".json") for pair in prior)
+    assert all("no restart" in pair["unit"] for pair in prior)
+
+    p2, p3 = prior
+    assert p2["worst_param_max_abs"] is None and p2["worst_param_relative_l2"] is None
+    # 저장된 보고서와 대조한다 — 있으면 반드시 맞아야 하고, 없는 체크아웃에서는 규칙의 산술만 시험한다
+    report = Path(module.REPO) / p2["source"]
+    if report.is_file():
+        losses = json.loads(report.read_text(encoding="utf-8"))["checks"]["resume_t1"]["losses"][: p2["steps"]]
+        assert p2["worst_loss_abs"] == pytest.approx(max(row["abs"] for row in losses))
+        assert p2["worst_loss_rel"] == pytest.approx(max(row["rel"] for row in losses))
+    report = Path(module.REPO) / p3["source"]
+    if report.is_file():
+        spread = json.loads(report.read_text(encoding="utf-8"))["checks"]["baseline_t1"]["spread"]
+        for key in ("worst_loss_abs", "worst_loss_rel", "worst_param_max_abs", "worst_param_relative_l2"):
+            assert p3[key] == pytest.approx(spread[key])
