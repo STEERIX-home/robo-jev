@@ -528,7 +528,7 @@ def test_synthetic_episodes_extend_to_n_ticks_with_the_instruction_change_on_the
     assert "v03_target" not in module.PROFILES  # 계약 v0.3 서식이 있으므로 길이 대역은 은퇴했다
 
 
-def test_profiles_are_built_from_the_serializer_in_the_v03_format():
+def test_profiles_are_built_from_the_serializer_in_the_v04_format():
     module = script()
     tokenizer = WhitespaceTokenizer()
     profiles = module.build_profiles(tokenizer, ticks=6, names=("d0_streams", "lower", "upper"), d0_streams=[stream_record(6)], d0_singles=read_jsonl(D0)[:3], change_tick=3)
@@ -540,7 +540,7 @@ def test_profiles_are_built_from_the_serializer_in_the_v03_format():
     assert profiles["state_first"]["layout"] == "state_first" and len(profiles["state_first"]["requests"]) == 3
     for name, profile in profiles.items():
         if profile["layout"] == "stream_l1a":
-            assert profile["format"] == STREAM_FORMAT == "v0.3" and "truncate_tick_tokens" not in profile
+            assert profile["format"] == STREAM_FORMAT == "v0.4" and "truncate_tick_tokens" not in profile
             assert all(request["serializer"] == TOKEN_SERIALIZER_VERSION and request["format"] == STREAM_FORMAT for request in profile["requests"])
             assert profile["tick_tokens"]["n"] == 6 * len(profile["requests"]) and profile["prefix_tokens"] > 0
 

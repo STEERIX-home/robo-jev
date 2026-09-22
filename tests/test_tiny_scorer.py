@@ -235,3 +235,20 @@ def test_calibration_error_is_zero_for_confident_correct_answers_and_grows_with_
     assert over["ece"] == pytest.approx(0.75, abs=0.01)
     event = {**sure, "candidates": {"q": ["true", "false"]}, "labels": [{"question_id": "q", "kind": "event", "successes": 1, "failures": 1}]}
     assert calibration_error([event])["n"] == 0  # 확률 질문(event)은 채점하지 않는다
+
+
+def test_the_tiny_scorer_reads_the_same_text_the_model_does(singles, streams):
+    """Task R1 A1: 이 기준군의 표지는 **모델이 보는 텍스트**에 대한 것이다. 그러므로 풀어 놓은 목표와 물체 속성은
+    소형 scorer의 문맥에도 없어야 한다 — 남아 있으면 "패턴으로 풀린다"가 모델이 못 보는 사실로 풀린다는 뜻이 된다."""
+    import copy
+
+    from robo_jev.baselines.tiny_scorer import build_examples
+
+    from test_serialize import LEAKED_GOAL_MARKERS
+
+    for record in ([copy.deepcopy(singles[0])] + [copy.deepcopy(streams[0])]):
+        if record.get("schema_version") == "stream-v0":
+            record["ticks"] = record["ticks"][:2]
+        for example in build_examples([record], domain="robot", max_context=4096, max_candidate=128):
+            for marker in LEAKED_GOAL_MARKERS:
+                assert marker not in example.context, (marker, example.context[:200])

@@ -157,4 +157,6 @@ def test_a_stand_in_policy_behind_the_callable_interface_is_recorded_as_the_exec
     behaviour = count_policy_behaviour(record)
     assert record["provenance"]["policy"] == {"name": "AlwaysHold", "version": "test"} and behaviour["ticks"] == 12
     assert behaviour["policy_errors"] >= 10 and behaviour["main_disagreement"] >= 10
-    assert behaviour["commitment_changes"] == 0
+    # 제자리 hold만 하는 정책은 정체 감시를 부른다 (h0.9): `m_still`틱째에 감시가 재계획·물러남으로 끊고 그 틱이
+    # commitment 전환 하나를 만든다. 감시가 없던 h0.7까지는 0이었다.
+    assert behaviour["commitment_changes"] <= 1, behaviour["commitment_changes"]

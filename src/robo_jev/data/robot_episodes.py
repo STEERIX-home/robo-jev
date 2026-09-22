@@ -31,6 +31,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import statistics
 import sys
 import time
@@ -47,7 +48,14 @@ from robo_jev.data.split import CONCEPT_TAG, TEMPLATE_TAG, SplitPolicy, assign_s
 from robo_jev.harness.robot import RobotHarness, count_records, load_harness_config
 from robo_jev.sim.controller import resolve_config_path
 from robo_jev.sim.expert import Expert, load_expert_config
-from robo_jev.sim.scene import ScenePlan, build_plan, family_id, family_signature, origin_group
+from robo_jev.sim.scene import (
+    ScenePlan,
+    build_plan,
+    family_id,
+    family_signature,
+    origin_group,
+    template_entries,
+)
 
 __all__ = [
     "CONTRAST_PATH",
@@ -56,6 +64,8 @@ __all__ = [
     "MANIFEST_VERSION",
     "build_manifest",
     "write_contrast",
+    "check_holdout_templates",
+    "check_zone_change_excludes",
     "config_paths",
     "episode_id",
     "family_id",
@@ -66,12 +76,14 @@ __all__ = [
     "origin_group",
     "plan_concepts",
     "plan_tags",
+    "profile_cycle",
     "run",
+    "sealed_goal_zones",
     "seed_schedule",
     "write_episode",
 ]
 
-GENERATOR_VERSION = "gen-robot-v0.1"
+GENERATOR_VERSION = "gen-robot-v0.2"
 MANIFEST_VERSION = "manifest-robot-v1"
 DEFAULT_CONFIG_PATH = "configs/data/d1_robot.yaml"
 
@@ -101,6 +113,64 @@ def config_paths(config: dict[str, Any]) -> dict[str, str]:
     return {key: str(config[key]) for key in CONFIG_PATH_KEYS}
 
 
+def check_holdout_templates(config: dict[str, Any], sim_config: dict[str, Any]) -> None:
+    """봉인한 템플릿 변형 id가 장면 설정에 **실제로 있는가** (Task R1 B1).
+
+    템플릿 id는 봉인의 열쇠다(docs/04 §5). 장면 설정의 템플릿을 고치면서 id를 바꾸면 옛 id를 적은 데이터 설정은
+    아무것도 봉인하지 않게 되고, 그 사실은 OOD 비율이 조용히 내려가는 것으로만 드러난다 — 그래서 생성 전에 멈춘다.
+    """
+    declared = [str(name) for name in (config.get("split") or {}).get("holdout_templates") or ()]
+    if not declared:
+        return
+    spec = sim_config.get("instruction") or {}
+    known = {
+        f"{family}#{template_id}"
+        for family in ("v1", "v2")
+        for template_id, _ in template_entries(spec, family)
+    }
+    unknown = sorted(name for name in declared if name not in known)
+    if unknown:
+        raise ValueError(
+            f"split.holdout_templates에 장면 설정이 모르는 변형 id가 있다: {unknown} "
+            f"(있는 것: {sorted(known)}) — 템플릿 문장을 바꾸면 봉인 id도 같이 바꾼다"
+        )
+
+
+#: 개념 id에서 봉인한 **목표 영역**을 읽는 접두사 (`robot:goal-zone:zoneF` → `zoneF`).
+_GOAL_ZONE_CONCEPT = "robot:goal-zone:"
+
+
+def sealed_goal_zones(config: dict[str, Any]) -> set[str]:
+    """`split.holdout_concepts`가 봉인한 목표 영역 — 도중 지시 변경이 들여오면 안 되는 영역이다."""
+    return {
+        str(name)[len(_GOAL_ZONE_CONCEPT):]
+        for name in (config.get("split") or {}).get("holdout_concepts") or ()
+        if str(name).startswith(_GOAL_ZONE_CONCEPT)
+    }
+
+
+def check_zone_change_excludes(config: dict[str, Any], sim_config: dict[str, Any]) -> None:
+    """도중 지시 변경이 **봉인 개념의 영역**을 들여오지 못하게 막혀 있는가 (R1 리뷰 1 M13).
+
+    개념 봉인은 에피소드 **계보**(origin group = v1의 목표 영역)의 성질이라, 변경이 봉인 영역을 들여오면 같은
+    group의 한 편만 OOD로 가고 나머지는 train에 남는다 — 400편 실측에서 **27 group이 그런 변경을 냈고 그 가운데
+    13 group(32편)이 실제로 두 split에 걸쳤다**(리뷰 1 I2). `s0.3`이
+    `instruction.zone_change_excludes`로 막았지만 그 목록과 `split.holdout_concepts`를 **묶는 것이 없었다**:
+    장면 설정의 기본값은 빈 목록이고, 둘째 영역을 봉인하면서 한쪽만 고치면 누출이 조용히 다시 열린다.
+    생성 전에 멈춘다 — 누출은 QA가 잡기 전까지 보이지 않는다.
+    """
+    sealed = sealed_goal_zones(config)
+    if not sealed:
+        return
+    excluded = {str(name) for name in (sim_config.get("instruction") or {}).get("zone_change_excludes") or ()}
+    missing = sorted(sealed - excluded)
+    if missing:
+        raise ValueError(
+            f"split.holdout_concepts가 봉인한 목표 영역이 instruction.zone_change_excludes에 없다: {missing} "
+            f"(지금 제외: {sorted(excluded)}) — 도중 지시 변경이 그 영역을 들여오면 한 group이 두 split에 걸친다"
+        )
+
+
 # --------------------------------------------------------------------------
 # 장면 계열과 split — 생성 전에 (docs/04 §5)
 # --------------------------------------------------------------------------
@@ -128,14 +198,56 @@ def episode_id(profile: str, seed: int, suffix: str = "") -> str:
     return f"ep-{profile}-{int(seed):06d}{suffix}"
 
 
-def seed_schedule(config: dict[str, Any], count: int) -> list[tuple[str, int]]:
-    """결정적 seed 일정. 프로파일을 번갈아 가며 `seeds.base`부터 센다: (E0, 100), (E1, 100), (E0, 101), …
+def profile_cycle(config: dict[str, Any]) -> list[str]:
+    """한 바퀴의 프로파일 순서. `profile_weights`가 있으면 그 비중대로 섞어 돌린다 (Task R1 B2-iv).
 
-    같은 설정·`count`면 언제나 같은 목록이고, `count`를 늘려도 앞부분은 그대로다(`--resume`의 전제).
+    비중 [20, 40, 40](E0·E1·E2)은 최대공약수로 줄여 [1, 2, 2] → ``[E0, E1, E2, E1, E2]``가 된다 — 한 바퀴가 5편이고
+    편수가 5의 배수면 비중이 정확히 맞는다. 비중이 없으면 옛 규칙(균등 번갈기)이다.
     """
     profiles = [str(name) for name in config["profiles"]]
+    weights = config.get("profile_weights")
+    if not weights:
+        return profiles
+    if len(weights) != len(profiles):
+        raise ValueError(f"profile_weights는 profiles와 길이가 같아야 한다: {weights} vs {profiles}")
+    counts = [int(value) for value in weights]
+    if any(value <= 0 for value in counts):
+        raise ValueError(f"profile_weights는 전부 양수여야 한다: {weights}")
+    divisor = math.gcd(*counts) if len(counts) > 1 else counts[0]
+    remaining = [value // divisor for value in counts]
+    cycle: list[str] = []
+    while any(remaining):
+        for index, name in enumerate(profiles):
+            if remaining[index]:
+                cycle.append(name)
+                remaining[index] -= 1
+    return cycle
+
+
+def seed_schedule(config: dict[str, Any], count: int) -> list[tuple[str, int]]:
+    """결정적 seed 일정. 한 바퀴(:func:`profile_cycle`)를 돌며 프로파일마다 **자기 seed 계수기**를 센다:
+    비중 없이 [E0, E1]이면 (E0, 100), (E1, 100), (E0, 101), …이고, [E0, E1, E2] 20/40/40이면
+    (E0, 400100), (E1, 400100), (E2, 400100), (E1, 400101), (E2, 400101), (E0, 400101), …이다.
+
+    프로파일마다 따로 세는 까닭: 한 바퀴에 같은 프로파일이 두 번 나오면 seed를 바퀴 번호로 주었을 때 **에피소드
+    id가 겹친다**(`ep-E1-000400100`이 둘). 같은 설정·`count`면 언제나 같은 목록이고, `count`를 늘려도 앞부분은
+    그대로다(`--resume`의 전제).
+    """
+    cycle = profile_cycle(config)
     base = int(config["seeds"]["base"])
-    return [(profiles[index % len(profiles)], base + index // len(profiles)) for index in range(int(count))]
+    # 프로파일마다 seed 구간을 벌린다 (`seeds.profile_offset`). 같은 seed를 두 프로파일에 주면 프로파일 덮어쓰기가
+    # 장면을 바꾸지 않는 경우(E1 6~10물체 · E2 7~10물체) **같은 장면이 두 split에 생긴다** — 400편 QA가 실제로
+    # 그런 쌍 하나를 잡았다(`ep-E1-400142` train ↔ `ep-E2-400142` ood_test). 0이면 옛 규칙이다(D1은 E0 3물체 ·
+    # E1 6~10물체라 겹치지 않았다).
+    offset = int(config["seeds"].get("profile_offset", 0))
+    order = {name: index for index, name in enumerate(dict.fromkeys(cycle))}
+    seen: dict[str, int] = {}
+    schedule: list[tuple[str, int]] = []
+    for index in range(int(count)):
+        name = cycle[index % len(cycle)]
+        schedule.append((name, base + offset * order[name] + seen.get(name, 0)))
+        seen[name] = seen.get(name, 0) + 1
+    return schedule
 
 
 def split_policy(config: dict[str, Any]) -> SplitPolicy:
@@ -213,10 +325,16 @@ def generate_episode(
             labels = expert.labels(reference, request)
             out = harness.compose(request, results, commitment, int(scene["sim_time_ms"]))
 
+            # 틱 안의 5 제어 스텝에서 난 사건을 **합친다** (gen-robot-v0.2, Task R1 B2-i): 마지막 스텝의 관측만
+            # 남기면 스텝 1~4의 사건이 모델 입력에서 사라진다 — D1의 목표 변경 57번 중 `instruction_changed` 줄은
+            # 7개뿐이었다(변경은 스텝 경계에 내려오므로 5번에 4번은 버려졌다). ACK와 같은 규칙으로 모은다.
             ack = None
+            events: list[dict[str, Any]] = []
             for control_step in range(control_steps):
                 scene = env.step(out["command"] if control_step == 0 else None)
                 ack = scene["ack"] or ack
+                events.extend(scene.get("events") or ())
+            scene = {**scene, "events": events}
             usage = {
                 "gate": out["gate"],
                 "switch": bool(out["switch"]),
@@ -246,6 +364,12 @@ def generate_episode(
             if done_streak >= tail_ticks + 1:
                 terminated = "done_tail"
                 break
+            if harness.stalled_out is not None:
+                # 정체 감시가 결정으로 풀 수 없는 정체를 확인했다 (h0.9, R1 리뷰 1 C1): 팔이 물러남으로도
+                # 움직이지 않았거나 진행 없이 발동만 되풀이했다. 남은 시간을 죽은 틱으로 채우는 대신
+                # **명시적 이유**로 끝낸다 — `max_ms`는 "왜"를 말하지 않는다.
+                terminated = "stall_exhausted"
+                break
             if scene.get("episode_over"):
                 terminated = "max_ms"
                 break
@@ -254,6 +378,8 @@ def generate_episode(
         wall_s = time.perf_counter() - started
         outcome = _outcome(scene, plan, env, done_tick if terminated == "done_tail" else None, ticks, terminated)
         outcome["first_done_tick"] = first_done_tick
+        # 정체로 끝났으면 그 까닭(`arm_pinned`·`no_progress`)을 레코드에 남긴다 — "왜 안 끝났나"를 데이터가 말한다.
+        outcome["stall"] = harness.stalled_out
         versions = {"expert": expert.version, "generator": GENERATOR_VERSION, "sim": env.serializer_version}
         provenance = {
             "generator": GENERATOR_VERSION,
@@ -570,7 +696,10 @@ def run(
     paths = config_paths(config)
     expert = Expert(load_expert_config(paths["expert_config"]))
     exclude = excluded_groups(config)
-    sim_settings = yaml.safe_load(resolve_config_path(paths["sim_config"]).read_text(encoding="utf-8")) if exclude else None
+    sim_settings = yaml.safe_load(resolve_config_path(paths["sim_config"]).read_text(encoding="utf-8"))
+    # 봉인한 템플릿 id가 장면 설정에 실제로 있는지 **생성 전에** 본다 (Task R1 B1).
+    check_holdout_templates(config, sim_settings)
+    check_zone_change_excludes(config, sim_settings)
     schedule = seed_schedule(config, count if not exclude else count * int(config.get("exclude_schedule_factor", 8)))
     envs: dict[str, Any] = {}
     produced = skipped = excluded = 0

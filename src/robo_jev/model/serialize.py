@@ -91,12 +91,15 @@ __all__ = [
     "QUESTION_SETS",
     "SECTION_ORDER",
     "STREAM_FIELDS",
+    "HIDDEN_GOAL_FIELDS",
+    "HIDDEN_OBJECT_FIELDS",
     "STREAM_FORMAT",
     "TIME_UNIT",
     "TOKEN_SERIALIZER_VERSION",
     "WINDOW_TICKS",
     "candidate_line",
     "full_tick_sections",
+    "model_visible_state",
     "serialize_request",
     "state_lines",
     "stream_candidate_line",
@@ -112,10 +115,12 @@ LAYOUTS = ("state_first", "stream_l1a")
 #: 환경·하네스가 상태를 레코드로 적는 **레코드 직렬화**(상태 스키마·mm/ms 정수·quaternion 자릿수)의 버전이고
 #: :mod:`robo_jev.data.episode` 가 적는다. 4b가 토큰 형식을 바꿨을 때 두 형식이 `s0.2` 한 문자열을 나눠 가졌던
 #: 일을 되풀이하지 않도록 이름부터 가른다(`ts…` 대 `s…`).
-TOKEN_SERIALIZER_VERSION = "ts0.5"
+TOKEN_SERIALIZER_VERSION = "ts0.6"
 #: 스트림 서식의 계약 버전 (docs/08 §3.2 표). ts0.4 = 서식 v0.3 (짧은 이름, 물체 소개/동적 분리, 변화분 틱); ts0.5 = 리뷰 1의
-#: 변화분 줄 규칙(기본값 복귀·`gone`)과 후보 줄 생략(`path=ok`, 모델이 마지막으로 본 대상 `clr`와 같은 `clr`).
-STREAM_FORMAT = "v0.3"
+#: 변화분 줄 규칙(기본값 복귀·`gone`)과 후보 줄 생략(`path=ok`, 모델이 마지막으로 본 대상 `clr`와 같은 `clr`);
+#: **ts0.6 = 서식 v0.4** — 풀어 놓은 목표가 모델의 입력에서 빠진다(`goal v<n> [text=…]`뿐, 물체 소개 줄에 `attr=` 없음;
+#: Task R1 A1, docs/08 §3).
+STREAM_FORMAT = "v0.4"
 POSITION_UNIT = "mm"
 QUATERNION_DECIMALS = 2
 TIME_UNIT = "ms"
@@ -243,6 +248,44 @@ def _value(key: str, value: Any) -> str:
 
 def _pairs(item: dict) -> str:
     return " ".join(f"{key}={_value(key, value)}" for key, value in _ordered(item, _FIELD_RANK)) or "-"
+
+
+#: 모델의 입력에서 빼는 **풀어 놓은 목표** 필드 (Task R1 A1, docs/08 §3). 레코드에는 그대로 있고 전문가·라벨·규칙
+#: 판정기가 읽는다 — 빠지는 것은 두 layout의 모델이 보는 텍스트뿐이다. 남는 것은 버전과 지시 **문장**이다.
+HIDDEN_GOAL_FIELDS = (
+    # 로봇 배치의 스키마 키
+    "target_ref", "target_desc", "target_zone", "forbidden_contact", "fragile", "priority",
+    # 비로봇 L0 배치의 스키마 키 (R1 리뷰 1 I12). docs/08 §3.2는 **두 배치 모두** 풀어 놓은 목표가 빠진다고
+    # 적었지만 `HIDDEN_GOAL_FIELDS`가 로봇 스키마의 이름만 들고 있어, 4,200 레코드 중 1,052건이 `goal` 줄에
+    # `color=green zone=zoneC`를 그대로 실었다(T0 학습 항목의 91.8 %). spatial은 색·영역, dom은 목표 요소와
+    # 그 종류다 — 셋 다 지시 문장이 이미 말하는 것이고, 물체·요소 줄의 `desc`·`name`이 짝지을 근거를 준다.
+    "color", "zone", "element", "kind", "deadline_h",
+)  # fmt: skip
+#: 모델의 입력에서 빼는 물체의 정적 필드 — 금지·취약은 장면 속성이 아니라 **지시 문장**이 말한다.
+HIDDEN_OBJECT_FIELDS = ("attributes",)
+
+
+def model_visible_state(state: Any) -> Any:
+    """상태에서 풀어 놓은 목표(:data:`HIDDEN_GOAL_FIELDS`)와 물체 속성(:data:`HIDDEN_OBJECT_FIELDS`)을 지운 **얕은 복사**.
+
+    `state_first`(L0) 배치가 쓴다 — 스트림 배치는 `_goal_line`·`_intro_line`이 같은 규칙을 줄 단위로 적용한다.
+    원본은 건드리지 않는다.
+    """
+    if not isinstance(state, dict):
+        return state
+    out = dict(state)
+    goal = out.get("goal")
+    if isinstance(goal, dict):
+        out["goal"] = {key: value for key, value in goal.items() if key not in HIDDEN_GOAL_FIELDS}
+    objects = out.get("objects")
+    if isinstance(objects, list):
+        out["objects"] = [
+            {key: value for key, value in entry.items() if key not in HIDDEN_OBJECT_FIELDS}
+            if isinstance(entry, dict)
+            else entry
+            for entry in objects
+        ]
+    return out
 
 
 def state_lines(state: dict) -> list[str]:
@@ -400,7 +443,8 @@ def _serialize_state_first(
     questions = request["questions"]
     marker = STATE_FIRST_MARKER  # 모든 질문이 같은 고정 표지 — 질문 수 상한은 프로파일(계약)이 정한다
 
-    chunks = [_Chunk("[state]\n" + "\n".join(state_lines(request["state"])) + "\n", "state", "state")]
+    # 풀어 놓은 목표·물체 속성은 모델이 보지 않는다 (Task R1 A1) — 스트림의 `_goal_line`·`_intro_line`과 같은 규칙.
+    chunks = [_Chunk("[state]\n" + "\n".join(state_lines(model_visible_state(request["state"]))) + "\n", "state", "state")]
     for branch, spec in enumerate(questions):
         question_id = spec["id"]
         chunks.append(
@@ -572,32 +616,33 @@ def _tick_header_line(tick: dict) -> str:
 
 
 def _goal_line(goal: Any, *, with_text: bool) -> str:
-    """``goal v<n> target=<id> [desc=<설명>] zone=<id> forbid=<ids> fragile=<ids> [text=…]`` — 압축 참조. 문자열 goal(D0)은 그대로.
+    """``goal v<n> [text=…]`` — 버전과 주기적으로 다시 싣는 지시 **문장**뿐이다 (서식 v0.4, Task R1). 문자열 goal(D0)은 그대로.
 
-    `desc`(지시가 부르는 대상의 설명)는 대상이 아직 추적되지 않아 `target=-`일 때만 싣는다 — 그때 모델이 대상을 알 유일한 단서다.
+    풀어 놓은 목표(`target=`·`desc=`·`zone=`·`forbid=`·`fragile=`·`prio=`)는 **모델의 입력에서 뺀다**: 그것이 있으면
+    지시 문장은 잉여고 후보 줄과 문자열로 맞추기만 하면 답이 나와(P1~P3, 홀드아웃 2,530틱 중 읽어야 답이 나오는 틱 61개)
+    모델이 언어를 근거 짓지 않는다. 대상·목적지·제약은 이제 지시 문장과 물체 소개 줄(`obj o1 파란 원통`)·영역 줄에서
+    모델이 스스로 풀어야 한다. 레코드(`state.goal`)와 전문가·규칙 판정기·라벨은 구조화 목표를 그대로 읽는다 —
+    빠지는 것은 **모델이 보는 텍스트**뿐이다 (docs/08 §3).
     """
     if not isinstance(goal, dict):
         return f"goal {_scalar('goal', goal)}\n" if goal not in (None, "") else "goal -\n"
-    item = {key: value for key, value in goal.items() if key not in ("t_ms",)}
-    if not with_text:
-        item.pop("text", None)
-    version = item.pop("version", None)
-    target = item.pop("target_ref", None)
-    if target is not None:
-        item.pop("target_desc", None)
-    body = _short("", item, STREAM_FIELDS["goal"])
-    head = "goal" + (f" v{_scalar('version', version)}" if version is not None else "") + f" target={_value('target_ref', target)}"
-    return head + (f" {body}" if body else "") + "\n"
+    version = goal.get("version")
+    head = "goal" + (f" v{_scalar('version', version)}" if version is not None else "")
+    if with_text and goal.get("text") not in (None, ""):
+        return f"{head} text={_value('text', goal['text'])}\n"
+    return head + "\n"
 
 
-_INTRO_KEYS = ("desc", "obb_mm", "top_mm", "graspable_faces", "attributes")
+#: 물체 소개 줄의 정적 필드. `attributes`(`attr=forbidden|fragile`)는 **없다** — 제약은 지시 문장이 말한다 (서식 v0.4,
+#: Task R1 A1). 레코드의 `state.objects[].attributes`는 그대로이고 전문가·규칙 판정기·`unsafe_action_rate`가 읽는다.
+_INTRO_KEYS = ("desc", "obb_mm", "top_mm", "graspable_faces")
 #: 동적 줄의 항상 싣는 필드(자세·정밀도·여유·통로)와 바뀔 때만 싣는 필드(방향·표면 신뢰도·가시 비율·재식별).
 _DYNAMIC_ALWAYS = ("pose_mm", "precision_mm", "pose_sigma_mm")
 _DYNAMIC_OPTIONAL = ("quat", "surface_conf", "visible_ratio", "reid")
 
 
 def _intro_line(entry: dict) -> str:
-    """물체 소개 줄 ``obj <id> <desc> obb=<x,y,z> top=<mm> faces=<a,b> attr=<…>`` (정적 필드)."""
+    """물체 소개 줄 ``obj <id> <desc> obb=<x,y,z> top=<mm> faces=<a,b>`` (정적 필드; 속성은 싣지 않는다 — :data:`_INTRO_KEYS`)."""
     item = {key: entry[key] for key in _INTRO_KEYS if key in entry}
     return _short(f"obj {_scalar('id', entry['id'])}", item, STREAM_FIELDS["obj"]) + "\n"
 

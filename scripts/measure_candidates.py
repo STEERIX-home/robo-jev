@@ -30,7 +30,7 @@ full-attention의 KV는 에피소드 길이만큼 자라고 틱 지연도 그만
 
 * ``d0_streams`` — `tests/fixtures/d0_streams.jsonl`의 4 에피소드(각 `--ticks` 틱으로 자른다), 틱당 ≈800 토큰.
 * ``lower`` / ``upper`` / ``instruction_change`` — `scripts/measure_tokens.py`의 장면 빌더로 만든 합성 에피소드
-  (물체 6·K=12 / 물체 10·K=12 / 10·K=12 + 지시 변경 틱; 계약 v0.3 서식 `ts0.5`), `--ticks` 틱까지 `append_tick`으로
+  (물체 6·K=12 / 물체 10·K=12 / 10·K=12 + 지시 변경 틱; 계약 v0.3 **서식 v0.4**, `ts0.6`), `--ticks` 틱까지 `append_tick`으로
   늘린다. 지시 변경 틱은 이력·예열 뒤 첫 측정 틱(`--history + --warmup`)이라 측정 안에 든다. 계약 v0.3 이전에 있던
   ``v03_target``(옛 ``upper``를 틱마다 500토큰으로 자른 길이 대역)은 은퇴했다 — 이제 ``upper`` 자체가 v0.3 서식이다.
 * ``state_first`` — `tests/fixtures/d0.jsonl` 64건의 단일 요청(L0, cache 없음). 프로파일이 아니라 조건이지만 같은 표에 둔다.
@@ -943,7 +943,7 @@ STREAM_NOTES = [
 NOTES = [
     "native path = official transformers AutoModelForCausalLM forward (BF16, use_cache=True); the model's own hybrid cache grows without the 30-tick window (a stage-2 property), so every latency carries the cache length before that tick.",
     "stream_cold recomputes prefix + the most recent `cold_window_ticks` ticks, the current one included (the docs/08 window), with an empty cache (stateless bound; 0 = full history) and times only `cold_ticks` ticks.",
-    "stream profiles are serialized with the contract v0.3 format (serializer ts0.5: short names, object intro/dynamic split, delta ticks, trimmed candidate lines); the pre-v0.3 `v03_target` length-only stand-in is retired.",
+    "stream profiles are serialized with the contract v0.3 stream format v0.4 (serializer ts0.6: short names, object intro/dynamic split, delta ticks, trimmed candidate lines, and no resolved goal in the model's text); the pre-v0.3 `v03_target` length-only stand-in is retired.",
     "memory.estimates are computed from config.json (formulas in the entries), not measured; memory.peak_allocated_bytes and cache_bytes_measured are measured.",
     "verdicts follow the docs/06 stage-1 drop rule on stream_warm p95 model ms (80 ms = 10 Hz, 150 ms = 5 Hz) and the obs→apply 100 ms miss rate against --max-miss-rate; quality (bullet 4) is out of scope.",
 ]

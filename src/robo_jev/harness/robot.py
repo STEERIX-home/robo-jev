@@ -32,6 +32,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import math
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -73,8 +74,11 @@ __all__ = [
 #: 바닥 높이), 명령의 `place_mm`, hold·retreat 경로의 놓기 틱에는 open 없음(리뷰 2 C2). h0.6 = 축·손몸통별 밀기 접촉 거리,
 #: 놓기 정체 감시(`place_stalled`), 빈 자리 없는 영역의 후보는 `path=blocked`(D1-prep 리뷰 1). h0.7 = 밀기 명령 구간을
 #: stand-off 여유(접촉 거리 − 실측 도달, `push_reach_mm`)만큼 늘림, 놓기 정체 감시의 절대 상한(`m_place_total`), 경로 답과
-#: 무관한 `conflict{zone_full}` 기록(D1-prep 리뷰 2 N7·N2·N4).
-HARNESS_VERSION = "h0.7"
+#: 무관한 `conflict{zone_full}` 기록(D1-prep 리뷰 2 N7·N2·N4). h0.8 = 관측·hold 정체 감시(Task R1 B2-v). h0.9 = 그 감시의
+#: **극한 순환 차단**(R1 리뷰 1 C1): 발동한 결합 키의 쿨다운과 총량 상한(`m_hold_total`), 관측의 기하 나이 상한
+#: (`observe_max_age_ms`), 여러 틱 이어지는 물러남 탈출(`stall_escape_ticks`), 그래도 팔이 움직이지 못하면
+#: `stall_exhausted`로 **명시적으로** 끝낸다.
+HARNESS_VERSION = "h0.9"
 
 #: 결합 행동의 기능. 이 셋만 `기능:대상:접근:목적지` 키를 갖는다.
 JOINT_FUNCTIONS = ("grasp", "place", "push")
@@ -334,6 +338,8 @@ class RobotHarness:
         self._failure_streak: dict[str, Any] | None = None
         #: 놓기 정체(`place_stalled`)로 이 에피소드 동안 제외한 놓기점 (영역 id → xy 목록). 에피소드 안에서만 든다.
         self._stalled_place_points: dict[str, list[tuple[float, float]]] = {}
+        self._reset_stall_history()
+        self._reset_stall_ledger()
 
     @classmethod
     def from_config_path(
@@ -346,6 +352,312 @@ class RobotHarness:
         self.adapter = GroundTruthAdapter(self.config["perception"])
         self._failure_streak = None
         self._stalled_place_points = {}
+        self._reset_stall_history()
+        self._reset_stall_ledger()
+
+    def _reset_stall_history(self) -> None:
+        """**에피소드 수명의** 정체 이력 (h0.9). 감시가 발동해도 비우지 않는다.
+
+        h0.8의 결함이 여기 있었다(R1 리뷰 1 C1): 감시가 `m_hold`=15에서 발동해 장부를 비우면 같은 후보가 바로
+        다시 채택돼 또 15틱을 기다렸다 — "가장 긴 죽은 구간"은 언제나 정확히 15라서 정체 지표가 0을 냈고, 실제로는
+        27편이 45초를 그 순환에 썼다. 발동한 **결합 키**와 그 총 hold 틱, 마지막 진행 뒤의 발동 수는 에피소드가
+        끝날 때까지 남는다.
+        """
+        #: 결합 키 → 이 에피소드에서 그 키로 보낸 hold 틱의 총수 (절대 상한 `m_hold_total`의 장부).
+        self._hold_total: dict[str, int] = {}
+        #: 결합 키 → 쿨다운이 풀리는 틱 번호. 그때까지 후보 목록에서 뺀다(= 후보 집합을 다시 만든다).
+        self._stall_cooldown: dict[str, int] = {}
+        #: 총량 상한에 이르러 이 에피소드 동안 아주 빼는 결합 키.
+        self._stall_excluded: set[str] = set()
+        #: 마지막 진행(결합 행동 완료·목표 변경) 뒤의 감시 발동 수.
+        self._stall_firings = 0
+        #: 실제로 움직인 마지막 틱 뒤의 hold·관측 틱 수. 감시의 탈출 틱은 **세지도 비우지도 않는다** — 그것이
+        #: h0.8의 "가장 긴 죽은 구간 = 정확히 15"라는 착시를 만든 자리다(리뷰 1 C1).
+        self._dead_ticks = 0
+        #: 최근 `stall_window_ticks`틱이 hold·관측이었는지 (완료 꼬리는 넣지 않는다). 편이 **전체로** 정체했는지를
+        #: 보는 창이다 — 400편 실측: 완료한 373편은 p90 0.09, `max_ms` 27편은 중앙값 0.90.
+        self._window: deque[int] = deque(maxlen=max(1, int(self.compose_config.get("stall_window_ticks", 100) or 100)))
+        #: 남은 물러남 탈출 틱 수와 그 탈출이 시작된 말단 자세 — 팔이 실제로 그 자리를 떴는지 보는 자다.
+        self._escape_ticks = 0
+        self._escape_from: list[float] | None = None
+        #: 탈출이 끝난 다음 틱에 "움직였나"를 한 번 본다. 무엇을 끊고 나온 탈출이었는지도 같이 든다.
+        self._escape_pending = False
+        self._escape_after: str | None = None
+        #: 팔이 탈출로도 움직이지 못했거나 진행 없이 발동만 되풀이했다. 생성기가 읽어 에피소드를 **명시적 이유**로 끝낸다.
+        self.stalled_out: dict[str, Any] | None = None
+
+    def _reset_stall_ledger(self) -> None:
+        """정체 장부 (h0.8, Task R1 B2-v). 에피소드 안에서만 든다 — 놓기 정체 장부와 같은 수명이다."""
+        #: 기하가 젊어지지 않은 채 이어진 관측 게이트 틱 수 (진행 기준, `m_observe`).
+        self._observe_ticks = 0
+        #: 진행과 무관하게 이어진 관측 게이트 틱 수 (절대 상한, `m_observe_total`) — `m_place_total`과 대칭.
+        self._observe_total = 0
+        #: 그 구간에서 본 대상 기하의 가장 젊은 나이. 이보다 젊어지면 진행이다.
+        self._observe_age: int | None = None
+        #: 이어진 hold·정지 틱 수 (`m_hold`). 완료 꼬리(`gate=done`)는 세지 않는다.
+        self._hold_ticks = 0
+        #: 그 구간에서 hold로 붙잡고 있던 결합 키 — 감시가 발동하면 **이 키가** 쿨다운에 든다.
+        self._hold_key: str | None = None
+        #: 말단이 `stall_escape_progress_mm`을 넘게 움직이지 않은 채 이어진 틱 수와 그 기준 자세 (`m_still`).
+        self._still_ticks = 0
+        self._still_from: list[float] | None = None
+
+    def blocked_keys(self, tick: int) -> set[str]:
+        """지금 후보 목록에서 빼는 결합 키 (h0.9) — 쿨다운 중이거나 총량 상한에 이른 것.
+
+        `hold`·`replan`은 답의 공간 자체라 빼지 않는다. `observe`는 목록에 남되 게이트와 채택에서만 막힌다
+        (:meth:`_gate`) — 기계적 기준군과 모델이 여전히 그 답을 낼 수 있어야 층의 정의가 흔들리지 않는다.
+        """
+        return {key for key in self._stall_excluded if key not in FIXED_KEYS} | {
+            key for key, until in self._stall_cooldown.items() if tick < until and key not in FIXED_KEYS
+        }
+
+    def _in_cooldown(self, key: str, tick: int) -> bool:
+        return key in self._stall_excluded or tick < int(self._stall_cooldown.get(key, -1))
+
+    def _cool_down(self, keys: set[str], tick: int) -> list[str]:
+        """이 키들을 `stall_cooldown_ticks` 동안 후보에서 뺀다 — 같은 후보의 **즉시 재채택**을 막는 자물쇠다."""
+        ticks = int(self.compose_config.get("stall_cooldown_ticks", 0) or 0)
+        if ticks <= 0:
+            return []
+        for key in keys:
+            self._stall_cooldown[key] = int(tick) + ticks
+        return sorted(keys)
+
+    def _start_escape(self, state: dict[str, Any], after: str) -> None:
+        """물러남 탈출을 **여러 틱** 건다 (h0.9). 한 틱(h0.8)으로는 실행기의 힘 반사가 속도를 0으로 묶은 자리를
+        벗어나지 못했다 — 27편의 극한 순환이 그것이다."""
+        self._escape_ticks = max(1, int(self.compose_config.get("stall_escape_ticks", 1) or 1))
+        self._escape_from = [float(value) for value in (state.get("robot") or {}).get("ee_pose_mm") or ()]
+        self._escape_pending = True
+        self._escape_after = str(after)
+
+    def _still_limit(self, state: dict[str, Any]) -> int:
+        """멈춰 있는 팔의 상한 (`m_still`) — **물체를 들고 있으면 더 길게** (`m_still_holding`).
+
+        파지 직후의 들기는 접촉력이 실행기의 힘 반사 한계(30N) 바로 위에 앉았다가 몇 초에 걸쳐 잦아드는 구간이
+        있다(400편 실측: 31~33틱). 그동안 팔은 서 있지만 그것은 정체가 아니라 **과제가 진행된** 자리다 —
+        `m_still`(10)로 끊으면 스스로 풀릴 편을 죽인다. 들고도 이만큼 서 있으면 그때는 정체다
+        (`ep-E0-400122`는 `place` commitment를 든 채 419틱을 섰다).
+        """
+        caps = self.compose_config
+        if (state.get("robot") or {}).get("holding") is not None:
+            return int(caps.get("m_still_holding", 0) or 10**9)
+        return int(caps.get("m_still", 0) or 10**9)
+
+    def _escape_moved(self, state: dict[str, Any]) -> bool:
+        """지난 탈출 뒤 팔이 실제로 그 자리를 떴는가. 뜨지 못했으면 결정으로 풀 수 없는 정체다."""
+        if not self._escape_from:
+            return True
+        here = [float(value) for value in (state.get("robot") or {}).get("ee_pose_mm") or ()]
+        if len(here) != len(self._escape_from):
+            return True
+        moved = math.dist(here, self._escape_from)
+        return moved >= float(self.compose_config.get("stall_escape_progress_mm", 0.0) or 0.0)
+
+    def _stall_reason(
+        self,
+        state: dict[str, Any],
+        tick: int,
+        candidates: dict[str, Any],
+        commitment: dict[str, Any] | None = None,
+    ) -> dict[str, Any] | None:
+        """상한에 이른 정체가 있으면 그 기록, 없으면 `None`. 기록을 내면 **구간 장부만** 비운다.
+
+        h0.9가 h0.8에 더한 것 셋. (1) 발동한 결합 키를 `stall_cooldown_ticks` 동안 후보에서 빼 같은 후보가 바로
+        다시 채택되지 못하게 한다. (2) 관측은 진행·총량 상한에 더해 **대상 기하의 나이**(`observe_max_age_ms`)로도
+        발동한다 — 게이트가 영영 뜨는 편(`ep-E2-420114`)과 게이트가 안 뜬 채 유령 기하로 다가가는 편
+        (`ep-E2-420242`)은 같은 결함의 두 방향이다. (3) 탈출하고도 팔이 움직이지 않았거나 진행 없이
+        `stall_abort_firings`번 발동했으면 `stall_exhausted`다 — 45초를 죽은 틱으로 채우는 대신 **명시적 이유**로
+        끝낸다.
+        """
+        caps = self.compose_config
+        # 0. 지난 탈출이 팔을 **실제로** 옮겼는가. 못 옮겼으면 결정으로 풀 수 없는 정체다 — 실행기의 힘 반사가
+        #    속도를 0으로 묶은 자리는 어떤 답으로도 벗어날 수 없다(`ep-E2-420208`은 접촉력 50N으로 348틱을 그렇게
+        #    섰다). 45초를 마저 채우지 않고 여기서 끝낸다.
+        # 이미 낸 `stall_exhausted`는 다시 내지 않는다: 생성기는 그 틱에 에피소드를 끝내지만 키프레임 rollout처럼
+        # 계속 도는 쪽에서는 틱마다 같은 기록이 쌓일 뿐이다. 아래의 구간 상한은 그대로 일한다.
+        terminal = self.stalled_out is None
+        elapsed = max(1, int(caps.get("stall_escape_ticks", 1) or 1)) - self._escape_ticks
+        if terminal and self._escape_pending and (
+            self._escape_ticks == 0 or elapsed >= int(caps.get("stall_escape_check_ticks", 10**9) or 10**9)
+        ):
+            # 실행기의 힘 반사가 걸린 팔은 **한 틱도** 움직이지 않는다(속도 계수 0). 자유로운 팔은 물러남 한 틱에
+            # 속도 수준 1로 10mm를 간다 — 두 틱이면 둘은 갈린다. 탈출이 끝나기를 기다리지 않고 여기서 가른다.
+            self._escape_pending = False
+            if not self._escape_moved(state):
+                self.stalled_out = {
+                    "kind": "stall_exhausted",
+                    "reason": "arm_pinned",
+                    "firings": int(self._stall_firings),
+                    "dead_ticks": int(self._dead_ticks),
+                    "after": str(self._escape_after or ""),
+                }
+                return dict(self.stalled_out)
+            self._escape_from = None
+        # 0b. 탈출이 팔을 옮겼어도 hold·관측으로 되돌아가기만 한다면 순환이다. 감시의 탈출 틱을 건너뛰고 세는
+        #     이 장부가 그것을 본다 — 인수 기준이 재는 값("마지막 100틱의 hold/observe 비율")과 같은 양이다.
+        dead_cap = int(caps.get("stall_dead_ticks", 0) or 0)
+        share_cap = float(caps.get("stall_window_share", 0.0) or 0.0)
+        window_min = int(caps.get("stall_window_min_ticks", 0) or 0)
+        share = (sum(self._window) / len(self._window)) if self._window else 0.0
+        windowed = bool(share_cap and window_min and len(self._window) >= window_min and share >= share_cap)
+        if terminal and ((dead_cap and self._dead_ticks >= dead_cap) or windowed):
+            self.stalled_out = {
+                "kind": "stall_exhausted",
+                "reason": "no_progress",
+                "firings": int(self._stall_firings),
+                "dead_ticks": int(self._dead_ticks),
+                "window_share": round(share, 3),
+                "after": "window" if windowed else "dead_ticks",
+            }
+            return dict(self.stalled_out)
+        limit_observe = int(caps.get("m_observe", 0) or 10**9)
+        limit_total = int(caps.get("m_observe_total", 0) or 10**9)
+        age_cap = int(caps.get("observe_max_age_ms", 0) or 0)
+        age = self._target_geometry_age(state)
+        reason: dict[str, Any] | None = None
+        keys: set[str] = set()
+        if self._observe_ticks >= limit_observe or self._observe_total >= limit_total:
+            reason = {
+                "kind": "observe_stalled",
+                "ticks": int(self._observe_ticks),
+                "total_ticks": int(self._observe_total),
+                "cap": "progress" if self._observe_ticks >= limit_observe else "total",
+            }
+            keys = {"observe"}
+        elif age_cap and age is not None and age > age_cap and not self._in_cooldown("observe", tick):
+            # 대상 기하가 이만큼 늙었으면 관측 게이트가 아니라 **재계획**이다: 그 자리에서 다시 보는 것으로는
+            # 풀리지 않는 가림이고(팔 자신이 가린다), 그 기하로 만든 후보는 유령을 향한다.
+            reason = {"kind": "observe_stalled", "cap": "age", "age_ms": int(age), "ticks": int(self._observe_ticks)}
+            keys = {"observe"} | self._target_keys(state, candidates)
+        elif self._hold_ticks >= int(caps.get("m_hold", 0) or 10**9):
+            key = str(self._hold_key or "")
+            reason = {"kind": "hold_stalled", "ticks": int(self._hold_ticks), "key": key or None}
+            keys = {key} if key else set()
+        elif self._still_ticks >= self._still_limit(state):
+            # 경로 종류와 무관하게 **팔이 멈춰 있다**. 실행기의 힘 반사(30N 초과면 속도 계수 0)가 걸리면 하네스가
+            # 무엇을 명령하든 말단은 그 자리다 — `ep-E0-400122`는 `place` commitment를 `direct` 경로로 든 채
+            # 419틱(42 s)을 그렇게 섰고 hold·관측 감시는 그 모양을 못 봤다(리뷰 1 C1의 세 번째 얼굴).
+            key = str((commitment or {}).get("key") or self._hold_key or "")
+            reason = {"kind": "hold_stalled", "cap": "still", "ticks": int(self._still_ticks), "key": key or None}
+            keys = {key} if key else set()
+        if reason is None:
+            return None
+        self._reset_stall_ledger()
+        self._stall_firings += 1
+        reason["cooled_down"] = self._cool_down({key for key in keys if key}, tick)
+        reason["firings"] = int(self._stall_firings)
+        limit_firings = int(caps.get("stall_abort_firings", 0) or 0)
+        if limit_firings and self._stall_firings >= limit_firings:
+            self.stalled_out = {
+                "kind": "stall_exhausted",
+                "reason": "no_progress",
+                "firings": int(self._stall_firings),
+                "after": str(reason["kind"]),
+            }
+            reason["exhausted"] = str(self.stalled_out["reason"])
+        self._start_escape(state, str(reason["kind"]))
+        return reason
+
+    @staticmethod
+    def _target_keys(state: dict[str, Any], candidates: dict[str, Any]) -> set[str]:
+        """지시 대상을 향하는 결합 키 — 그 대상의 기하가 늙었으면 이 키들이 전부 유령을 가리킨다."""
+        target = str((state.get("goal") or {}).get("target_ref") or "")
+        if not target:
+            return set()
+        keys = set()
+        for entry in candidates.values():
+            parts = joint_key_parts(str(entry.get("key", "")))
+            if parts is not None and parts[1] == target:
+                keys.add(str(entry["key"]))
+        return keys
+
+    def _note_stall_outcome(self, out: dict[str, Any], request: dict[str, Any]) -> None:
+        """이 틱의 결과로 정체 장부를 갱신한다 (:meth:`compose`가 부른다)."""
+        if out.get("command") is None:
+            return  # 폐기된 요청은 이 에피소드의 진행이 아니다
+        model = request.get("request", request)
+        state = model.get("state") or {}
+        gate = out.get("gate")
+        adopted = out.get("adopted") or {}
+        records = out.get("records") or []
+        keys = {entry["id"]: str(entry.get("key", "")) for entry in (model.get("candidates") or {}).get("q_main", [])}
+        # 진행이 있었으면 발동 수를 다시 센다 — 긴 에피소드가 흩어진 발동으로 끝나지 않게. **결합 행동**의 완료만
+        # 진행이다: `hold` 후보는 `compose.hold_ticks`(3)마다 "완료"로 풀리므로 그것까지 진행으로 세면 제자리에서
+        # 기다리는 것이 진행이 된다(그 실수가 `ep-E2-420249`를 450틱까지 끌고 갔다).
+        if any(
+            str(item.get("kind")) == "release"
+            and (
+                str(item.get("reason")) == "goal_version"
+                or (
+                    str(item.get("reason")) == "completed"
+                    and keys.get(str(item.get("action_ref")), "") not in FIXED_KEYS
+                )
+            )
+            for item in records
+        ):
+            self._stall_firings = 0
+            self._escape_from = None
+        if gate == "observe":
+            self._observe_total += 1
+            age = self._target_geometry_age(state)
+            if age is not None and (self._observe_age is None or age < self._observe_age):
+                self._observe_ticks = 0  # 진행: 대상 기하가 실제로 젊어졌다
+            else:
+                self._observe_ticks += 1
+            self._observe_age = age if age is not None else self._observe_age
+        else:
+            self._observe_ticks = self._observe_total = 0
+            self._observe_age = None
+        path_kind = str(adopted.get("path_kind"))
+        if gate != "done":
+            self._window.append(1 if (gate == "observe" or path_kind == "hold") else 0)
+        if gate == "done":
+            self._dead_ticks = 0
+        elif gate == "observe" or path_kind == "hold":
+            self._dead_ticks += 1
+        elif self._escape_ticks > 0 or path_kind == "retreat" or gate == "instr":
+            pass  # 감시의 탈출 — 세지도 비우지도 않는다
+        else:
+            # 실제로 움직인 틱은 장부를 **한 칸** 던다. 통째로 비우면 "15틱 hold → 탈출 → 한 틱 접근 → 다시 hold"인
+            # 극한 순환이 영원히 0으로 남는다 — 지금 고치는 결함이 바로 그 모양이다.
+            self._dead_ticks = max(0, self._dead_ticks - 1)
+        # 팔이 실제로 움직였는가 (h0.9, `m_still`) — 경로 종류·게이트와 무관한 장부다. 놓기 readiness 대기
+        # (`exec.gripper_wait`)는 제 감시(`m_place`/`m_place_total`)가 보므로 여기서 세지 않는다.
+        here = [float(value) for value in (state.get("robot") or {}).get("ee_pose_mm") or ()]
+        slack = float(self.compose_config.get("stall_escape_progress_mm", 0.0) or 0.0)
+        if gate == "done" or self._escape_ticks > 0 or (state.get("exec") or {}).get("gripper_wait"):
+            self._still_ticks = 0
+            self._still_from = here
+        elif self._still_from is not None and len(here) == len(self._still_from) and math.dist(here, self._still_from) < slack:
+            self._still_ticks += 1
+        else:
+            self._still_ticks = 0
+            self._still_from = here
+        if gate != "done" and path_kind == "hold":
+            self._hold_ticks += 1
+            key = keys.get(str(adopted.get("main")), "")
+            self._hold_key = key
+            if key:
+                total = self._hold_total.get(key, 0) + 1
+                self._hold_total[key] = total
+                cap = int(self.compose_config.get("m_hold_total", 0) or 0)
+                if cap and total >= cap and key not in FIXED_KEYS and key not in self._stall_excluded:
+                    # 절대 상한 (h0.9, `m_place_total`과 대칭): 쿨다운을 넘나들며 같은 키로 이만큼을 썼으면
+                    # 그 행동은 이 에피소드에서 되지 않는다. 남은 동안 후보에서 뺀다 — 후보 집합을 다시 만든다.
+                    self._stall_excluded.add(key)
+                    records.append({"kind": "hold_exhausted", "key": key, "total_ticks": int(total)})
+        else:
+            self._hold_ticks = 0
+            self._hold_key = None
+
+    @staticmethod
+    def _target_geometry_age(state: dict[str, Any]) -> int | None:
+        """지시 대상의 기하 나이(ms). 대상이 없거나 상태에 없으면 `None`."""
+        target = str((state.get("goal") or {}).get("target_ref") or "")
+        entry = next((item for item in state.get("objects") or () if str(item.get("id")) == target), None)
+        return int(entry.get("age_ms", 0)) if isinstance(entry, dict) else None
 
     # ------------------------------------------------------------------
     # 질문 세트 (docs/08 §4)
@@ -467,7 +779,11 @@ class RobotHarness:
         spec = self.candidates_config
         # `unsupported_face`는 앞단이 낸 파지면 중 실행기가 못 쓰는 면(`faces` 밖)의 조합이다 —
         # 물체의 실행 가능성이 아니라 실행기 역량이며, 조용히 빠지지 않고 여기 남는다.
-        dropped = {"unsupported_face": 0, "stale": 0, "unreachable": 0, "cap": 0}
+        dropped = {"unsupported_face": 0, "stale": 0, "unreachable": 0, "cap": 0, "stalled": 0}
+        # 정체 감시가 끊은 결합 키는 쿨다운(또는 총량 상한) 동안 **후보 목록에서 뺀다** (h0.9, 리뷰 1 C1):
+        # 감시가 commitment를 풀어도 다음 틱에 같은 후보가 그대로 다시 뽑히면 순환의 주기만 정하는 셈이다.
+        # 목록에서 빼면 전문가·모델·라벨이 모두 다시 만들어진 집합 위에서 답한다.
+        stalled_keys = self.blocked_keys(int((state.get("t") or {}).get("tick", 0) or 0))
         enumerated = 0
         feasible: list[_Candidate] = []
 
@@ -497,6 +813,11 @@ class RobotHarness:
                     dropped["stale"] += 1
                     continue
                 feasible.append(candidate)
+
+        if stalled_keys:
+            kept_after_stall = [candidate for candidate in feasible if candidate.key not in stalled_keys]
+            dropped["stalled"] = len(feasible) - len(kept_after_stall)
+            feasible = kept_after_stall
 
         goal_reserved = self._goal_reserved(feasible, state)
         kept = self._prune(feasible, objects, ee, reserved=reserved, goal_reserved=goal_reserved)
@@ -1164,7 +1485,17 @@ class RobotHarness:
     # 조합 규칙 v0 (docs/08 §5)
     # ------------------------------------------------------------------
 
-    def compose(
+    def compose(self, request: dict[str, Any], results: dict[str, Any], commitment: dict[str, Any] | None, now_ms: int) -> dict[str, Any]:
+        """한 틱의 조합. 정체 감시(h0.8)가 앞뒤를 감싼다 — 안쪽은 :meth:`_compose`다.
+
+        감시는 **틱 사이에 남는 장부**라서 여기 있다: 연속 관측 게이트(기하가 젊어지지 않는)와 연속 hold·정지 틱을
+        세고, 상한에 이르면 :meth:`_compose`가 그 틱을 재계획 게이트로 내보낸다 (docs/04 §3, Task R1 B2-v).
+        """
+        out = self._compose(request, results, commitment, now_ms)
+        self._note_stall_outcome(out, request)
+        return out
+
+    def _compose(
         self,
         request: dict[str, Any],
         results: dict[str, Any],
@@ -1226,6 +1557,22 @@ class RobotHarness:
             "candidate_set_version": set_version,
         }
 
+        # 1a. 정체 감시 (h0.8, Task R1 B2-v; h0.9, 리뷰 1 C1) ----------------
+        # 스스로 풀 수 없는 반복 — 팔이 카메라를 가린 채 관측을 되풀이하거나(ep-E1-000235), 금지 물체 곁에서
+        # 정지가 풀리지 않거나 경로가 막힌 채 hold를 되풀이하는(ep-E1-000244) 구간 — 을 재계획 게이트로 끊는다.
+        # **반사·정지보다 먼저** 본다: 풀리지 않는 정지가 바로 그 정체이기 때문이다. 물러남 경로로 나가 팔이
+        # 실제로 그 자리를 뜬다 — h0.9는 그 물러남을 `stall_escape_ticks`틱 **이어서** 건다(한 틱은 실행기의
+        # 힘 반사가 속도를 0으로 묶은 자리를 못 벗어났다). 발동한 키는 쿨다운에 들어가 후보 집합이 다시 만들어진다.
+        tick_no = int(request.get("t", (state.get("t") or {}).get("tick", 0)) or 0)
+        stall = self._stall_reason(state, tick_no, candidates, commitment)
+        if stall is not None:
+            records.append(stall)
+        if self._escape_ticks > 0:
+            self._escape_ticks -= 1
+            return self._compose_gate(
+                header, state, candidates, paths, commitment, gripper_now, records, gate="instr", escape=True
+            )
+
         # 1. 반사·정지 ---------------------------------------------------
         reflex = any(
             str(event.get("kind", "")).startswith("reflex") for event in state.get("events") or []
@@ -1237,7 +1584,7 @@ class RobotHarness:
             )
 
         # 2. 게이팅 ------------------------------------------------------
-        gate = self._gate(results, state)
+        gate = self._gate(results, state, observe_blocked=self._in_cooldown("observe", tick_no))
         if gate is not None:
             return self._compose_gate(
                 header, state, candidates, paths, commitment, gripper_now, records, gate=gate
@@ -1245,6 +1592,11 @@ class RobotHarness:
 
         # 3. 주 결정과 결정 유지 ------------------------------------------
         blocked = self._retry_blocked(results, model.get("exec_history"), candidates, records)
+        if self._in_cooldown("observe", tick_no):
+            # 결합 키는 후보 목록에서 이미 빠졌지만 `observe`는 고정 키라 목록에 남는다 — 채택에서만 막는다.
+            blocked = set(blocked) | {
+                cid for cid, entry in candidates.items() if str(entry.get("key", "")) == "observe"
+            }
         current = self._track_place_stall(commitment, state, geometry) if commitment is not None else None
         if current is not None:
             release = self._release_reason(current, state, candidates, geometry)
@@ -1276,8 +1628,10 @@ class RobotHarness:
         stale = self._geometry_fault(info, now_ms, observed_at, state)
         if stale is not None:
             records.append({"kind": "geometry_age", "action_ref": chosen, "age_ms": stale})
+            observe_blocked = self._in_cooldown("observe", tick_no)
             return self._compose_gate(
-                header, state, candidates, paths, current, gripper_now, records, gate="observe"
+                header, state, candidates, paths, current, gripper_now, records,
+                gate="instr" if observe_blocked else "observe", escape=observe_blocked,
             )
         records.extend(decision_records)
         current = decided
@@ -1504,14 +1858,21 @@ class RobotHarness:
 
     # -- 2. 게이팅 -----------------------------------------------------------
 
-    def _gate(self, results: dict[str, Any], state: dict[str, Any]) -> str | None:
-        """완료 → 재계획 → 관측의 순서로 본다 (docs/08 §5.2)."""
+    def _gate(
+        self, results: dict[str, Any], state: dict[str, Any], *, observe_blocked: bool = False
+    ) -> str | None:
+        """완료 → 재계획 → 관측의 순서로 본다 (docs/08 §5.2).
+
+        `observe_blocked`는 관측 정체 감시가 막 발동한 쿨다운이다(h0.9): 방금 끊은 관측으로 그 다음 틱에 바로
+        되돌아가면 감시는 순환의 주기만 정하는 셈이 된다. 관측 후보는 목록에 그대로 남는다 — 막히는 것은 게이트와
+        채택뿐이다.
+        """
         if self._boolean(results, "q_done", "done", default=False):
             return "done"
         if not self._boolean(results, "q_instr", "instr", default=True):
             return "instr"
         if self._boolean(results, "q_observe", "observe", default=False):
-            return "observe"
+            return None if observe_blocked else "observe"
         return None
 
     def _compose_gate(
@@ -1525,8 +1886,13 @@ class RobotHarness:
         records: list[dict[str, Any]],
         *,
         gate: str,
+        escape: bool = False,
     ) -> dict[str, Any]:
-        """게이팅 분기. commitment를 해제하고 부가 답을 버린다 (docs/08 §5.2, §5.4)."""
+        """게이팅 분기. commitment를 해제하고 부가 답을 버린다 (docs/08 §5.2, §5.4).
+
+        `escape`는 정체 감시가 부른 재계획이다(h0.8): hold가 아니라 **물러남** 경로를 0이 아닌 속도로 명령해 팔이
+        실제로 그 자리를 뜬다 — 금지 물체 곁의 정지처럼 제자리에서는 풀 수 없는 조건이 있기 때문이다.
+        """
         carrying = state["robot"].get("holding") is not None
         key = {"done": "hold", "instr": "replan", "observe": "hold" if carrying else "observe"}[gate]
         main = _id_for_key(key, candidates)
@@ -1537,7 +1903,8 @@ class RobotHarness:
             )
         records.append({"kind": "aux_discarded", "reason": gate})
 
-        hold_path = _path_of_kind(paths, "hold")
+        escape_speed = int(self.compose_config.get("stall_escape_speed_level", 1)) if escape else 0
+        hold_path = (_path_of_kind(paths, "retreat") if escape else None) or _path_of_kind(paths, "hold")
         command, executed = self._command(
             header,
             action_ref=main,
@@ -1546,13 +1913,13 @@ class RobotHarness:
             path_entry=paths.get(hold_path),
             paths=paths,
             waypoints={},
-            speed_level=0,
+            speed_level=escape_speed,
             force_level=0,
             gripper=gripper,
             stop=False,
             state=state,
             records=records,
-            branch=key,
+            branch=None if escape else key,
         )
         adopted = {
             "main": main,
@@ -1561,7 +1928,7 @@ class RobotHarness:
             "path": executed["id"],
             "path_kind": executed["kind"],
             "waypoint": executed["waypoint"],
-            "speed": 0,
+            "speed": escape_speed,
             "force": 0,
             "gripper": gripper,
             "stop": False,

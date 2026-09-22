@@ -37,7 +37,7 @@ __all__ = [
 ]
 
 #: 추출 모듈의 버전. 레코드의 `versions.extractor`에 들어간다 (docs/08 §3.2 "앞단 조건").
-EXTRACTOR_VERSION = "pw0.1"
+EXTRACTOR_VERSION = "pw0.2"
 
 
 # --------------------------------------------------------------------------
@@ -461,9 +461,13 @@ class GroundTruthAdapter:
         else:
             pose = tuple(known["pose_mm"])
             quat = tuple(known["quat"])
-            last_seen = int(known["last_seen_ms"])
+            # **자기 가림 이어 들기** (pw0.2, Task R1 B2-v): 광선을 막은 것이 로봇 자신이고 물체가 움직이지 않았으면
+            # (앞단이 `self_tracked`로 알린다 — 로봇의 자세는 아는 값이므로 예측 가능한 결측이다) 추적이 자세를 이어
+            # 들고 **기하 나이가 자라지 않는다**. 자세는 마지막 관측의 것이고 정밀도는 `occluded` 등급이라 이어 든
+            # 값임이 상태에 남는다. 이것이 없으면 팔이 관측 자세에서 카메라를 가리는 장면이 스스로 풀 수 없다.
+            last_seen = sim_ms if entry.get("self_tracked") else int(known["last_seen_ms"])
             appearance = known["appearance"]
-            track = {**known, "held_offset": None}
+            track = {**known, "last_seen_ms": last_seen, "held_offset": None}
             if fresh:
                 track["visible"] = False
         self._tracks[object_id] = track

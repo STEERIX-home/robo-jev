@@ -47,7 +47,7 @@ __all__ = [
     "write_dataset",
 ]
 
-GENERATOR_VERSION = "gen-single-v0.2.0"
+GENERATOR_VERSION = "gen-single-v0.3.0"
 MANIFEST_VERSION = "manifest-v0"
 
 #: 함께 배포하는 설정 파일. `load_config(PILOT_CONFIG) == DEFAULT_CONFIG`이어야 한다.

@@ -74,7 +74,14 @@ STRATA_RUNS = {
 }
 #: 같은 run들을 **P3의 새 모집단**(24편 전부)에서 다시 잰 보고서.
 P3_RUNS = {name: report.replace("p2-reeval-", "p3-reeval-") for name, report in STRATA_RUNS.items()}
-RUN_SETS = {"p2": STRATA_RUNS, "p3": P3_RUNS}
+#: Task R1의 run들 — **새 계기의 첫 눈금**(서식 v0.4·R1 데이터). 옛 체크포인트는 계약 digest가 달라 거절되므로
+#: P1~P3의 run은 여기 없다; 그 값들은 "옛 계약·옛 모집단"으로 범위를 붙여 보존한다.
+R1_RUNS = {
+    "2B zero-shot": "r1-reeval-2b-zeroshot.json",
+    "4B zero-shot": "r1-reeval-4b-zeroshot.json",
+    "2B T0 (200)": "r1-reeval-2b-t0.json",
+}
+RUN_SETS = {"p2": STRATA_RUNS, "p3": P3_RUNS, "r1": R1_RUNS}
 
 
 # --------------------------------------------------------------------------
@@ -170,29 +177,38 @@ def donor_rotation(ticks: list[dict[str, Any]], order: list[str]) -> dict[str, A
     """표준 대조군의 **기증자 배정**과 길이 고정이 덮는 틱 수 — 이 모집단에서, 편 길이만으로 (P3 C1b).
 
     :func:`robo_jev.evaluate.context_shuffle_records` 는 기증자를 **설정 목록의 다음 레코드**로 고르고,
-    `_roll_stream_state`는 기증자의 틱을 ``min(position, len(donor) - 1)``에서 읽는다. 그래서 기증자가 더 짧은
-    편에서는 그 길이를 넘는 틱이 전부 기증자의 **마지막(끝난) 상태** 하나와 섞인다. 몇 틱이 그렇게 되는지는
-    모델이 아니라 **설정의 편 순서와 편 길이**가 정한다 — 곧 이 블록은 대조군 값이 어느 draw에서 나왔는지다.
+    회전은 **편 길이로 짝짓고** 남는 차이는 기증자를 **감아 돌아** 읽는다 (Task R1 C2) — 곧 고정된 틱은 없다.
+    옛 규칙은 기증자의 틱을 ``min(position, len(donor) - 1)``에서 읽어 기증자가 더 짧은 편의 나머지 틱이 전부
+    기증자의 **마지막(끝난) 상태** 하나와 섞였고, 그 수가 **설정의 편 순서**에 달려 대조군 값이 draw마다 움직였다.
+    이 블록은 두 수를 함께 적는다 — 지금 감아 도는 틱 수와, 옛 규칙이었다면 얼어붙었을 틱 수.
     이 수가 파일 안에 있어야 `reading`이 기증자 의존성을 자기 파일의 수로 말할 수 있다 (리뷰 1 C1·I1)."""
     length: dict[str, int] = {}
     for row in ticks:  # 라벨 없는 틱이 있어도 편 길이는 record_ticks가 안다 (없으면 본 틱의 최대 색인 + 1)
         name = row["episode_id"]
         length[name] = max(length.get(name, 0), int(row.get("record_ticks") or 0), int(row["tick"]) + 1)
     names = [name for name in order if name in length] or sorted(length)
+    # 지금의 회전은 **편 길이로 짝짓는다** (`robo_jev.evaluate.donor_rotation`과 같은 규칙).
+    paired = sorted(names, key=lambda name: (length[name], name))
     per_episode: dict[str, Any] = {}
-    clamped = total = 0
-    for position, name in enumerate(names):
-        donor = names[(position + 1) % len(names)]
+    wrapped = total = old_clamped = 0
+    for position, name in enumerate(paired):
+        donor = paired[(position + 1) % len(paired)]
         short = max(0, length[name] - length[donor])
-        per_episode[name] = {"donor": donor, "ticks": length[name], "donor_ticks": length[donor], "clamped_ticks": short}
-        clamped, total = clamped + short, total + length[name]
+        per_episode[name] = {"donor": donor, "ticks": length[name], "donor_ticks": length[donor], "wrapped_ticks": short, "clamped_ticks": 0}
+        wrapped, total = wrapped + short, total + length[name]
+    for position, name in enumerate(names):  # 옛 규칙(설정 순서 + 클램프)이었다면 몇 틱이 얼어붙었을까
+        old_clamped += max(0, length[name] - length[names[(position + 1) % len(names)]])
     return {
         "rule": (
-            "the donor is the NEXT record in the config's list, and _roll_stream_state reads it at "
-            "min(position, len(donor) - 1) — so every tick past the donor's end is shuffled against the donor's "
-            "final, finished state. Which donor a record draws is a property of the config's order, not of the model."
+            "the donor rotation is paired by episode length and the remaining difference WRAPS "
+            "(position % len(donor)), so no tick is frozen on a donor's finished final state (Task R1 C2). "
+            "The old rule took the donor at min(position, len(donor) - 1) from the config's order, which clamped "
+            "the ticks counted below and made the control's value depend on that order."
         ),
-        "ticks": total, "clamped_ticks": clamped, "clamped_share": clamped / total if total else None,
+        "ticks": total, "clamped_ticks": 0, "clamped_share": 0.0,
+        "wrapped_ticks": wrapped, "wrapped_share": wrapped / total if total else None,
+        "clamped_ticks_under_the_old_rule": old_clamped,
+        "clamped_share_under_the_old_rule": old_clamped / total if total else None,
         "per_episode": per_episode,
     }
 
@@ -415,12 +431,14 @@ def reading_text(population: dict[str, Any], mechanism: dict[str, Any], donor: d
         f"{_share(largest_b['share_of_the_stratum'])} of the primary stratum, and the sampling unit is the episode — so "
         f"quote a margin only with its paired episode-clustered interval, and an interval that contains zero is not a finding.",
     ]
-    if donor and donor.get("clamped_share") is not None:
+    if donor and donor.get("wrapped_share") is not None:
         out.append(
-            f"The standard control is DONOR-DEPENDENT: {donor['rule']} On this population that clamps "
-            f"{donor['clamped_ticks']:,} of {donor['ticks']:,} ticks ({_share(donor['clamped_share'])}) onto a frozen "
-            f"final state (`donor_rotation` in this file), so a state-shuffle value is one draw from a distribution "
-            f"over donor assignments."
+            f"The standard control no longer freezes any tick: {donor['rule']} On this population "
+            f"{donor['wrapped_ticks']:,} of {donor['ticks']:,} ticks ({_share(donor['wrapped_share'])}) read a wrapped "
+            f"donor tick and {donor['clamped_ticks']:,} are clamped; under the OLD rule "
+            f"{donor['clamped_ticks_under_the_old_rule']:,} ({_share(donor['clamped_share_under_the_old_rule'])}) "
+            f"would have been frozen on a finished state — which is why a state-shuffle value here cannot be merged "
+            f"with a P1-P3 one (`donor_rotation` in this file)."
         )
     out.append(
         "Read `runs[*].non_commitment`. `whole_cell` is kept only so earlier published numbers stay comparable; "
@@ -542,6 +560,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--split", default=SPLIT, help="평가 집합 안의 분할 이름")
     parser.add_argument("--runs", default="p2", choices=sorted(RUN_SETS), help="어느 재평가 묶음의 층화 표인가")
     parser.add_argument("--reports", default=str(REPORTS))
+    parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST), help="모집단 구성을 읽을 데이터셋 manifest")
     parser.add_argument("--population-splits", dest="population_splits", default=None,
                         help="이것을 주면 층화 대신 **모집단 구성만** 낸다 (쉼표로 나눈 split 이름)")
     parser.add_argument("--population-suites", dest="population_suites", default=None,
@@ -558,7 +577,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.population_splits:
         suites = dict(pair.split("=", 1) for pair in args.population_suites.split(",")) if args.population_suites else None
-        payload = build_population([name.strip() for name in args.population_splits.split(",")], suites=suites)
+        payload = build_population([name.strip() for name in args.population_splits.split(",")], manifest=args.manifest, suites=suites)
         summary = ", ".join(f"{name} {block['whole_split']['episodes']}편 {block['whole_split']['ticks']}틱" for name, block in payload["splits"].items())
     else:
         payload = build(suite_path=args.suite, reports=args.reports, runs=RUN_SETS[args.runs], split=args.split,

@@ -83,17 +83,17 @@ def test_the_zone_f_goal_family_and_the_third_instruction_variant_are_sealed_bef
     """docs/04 §5 봉인 표(로봇): 지시의 목표 영역이 zoneF인 계열과 지시 문구 변형 3번(v1#2·v2#2)은 생성 전에 OOD로 간다 —
     태그는 계획에서 나오므로 에피소드를 돌리기 전에 안다. train은 zoneL·zoneR만 목표로 하고 변형 1·2번만 본다."""
     policy = SplitPolicy.from_config(CONFIG["split"])
-    assert CONFIG["split"]["holdout_concepts"] == ["robot:goal-zone:zoneF"] and CONFIG["split"]["holdout_templates"] == ["v1#2", "v2#2"]
+    assert CONFIG["split"]["holdout_concepts"] == ["robot:goal-zone:zoneF"] and CONFIG["split"]["holdout_templates"] == ["v1#c", "v2#c"]
     seen = {"ood": 0, "zoneF": 0, "variant3": 0, "train_like": 0}
     for profile, seed in seed_schedule(CONFIG, 60):
         plan = build_plan(SIM, seed, profile)
         group, tags = origin_group(profile, plan), plan_tags(plan)
         assert plan_concepts(plan) == sorted({f"robot:goal-zone:{step.zone}" for step in plan.instructions})
-        assert all(step.template in ("v1#0", "v1#1", "v1#2", "v2#0", "v2#1", "v2#2") for step in plan.instructions)
+        assert all(step.template in ("v1#a", "v1#b", "v1#c", "v2#a", "v2#b", "v2#c") for step in plan.instructions)
         split = assign_split(group, policy, tags)
         reasons = policy.holdout_reasons(group, tags)
         zone_f = any(step.zone == "zoneF" for step in plan.instructions)
-        variant3 = any(step.template.endswith("#2") for step in plan.instructions)
+        variant3 = any(step.template.endswith("#c") for step in plan.instructions)
         if zone_f:
             seen["zoneF"] += 1
             assert "concept:robot:goal-zone:zoneF" in reasons and split in OOD_SPLITS
@@ -110,18 +110,26 @@ def test_the_zone_f_goal_family_and_the_third_instruction_variant_are_sealed_bef
 
 
 def test_no_origin_group_straddles_two_splits_and_the_sealed_share_lands_in_the_decided_band():
-    """리뷰 1 I1·I2: 문구 변형은 origin group의 해시가 정하므로 같은 group의 에피소드는 같은 변형·같은 split이다(400편 일정 모의,
-    E1 seed 243 포함 — 예외 없이 지어진다). 봉인(zoneF 목표 계열 + 변형 3번 + E1 계열 하나)이 보내는 OOD는 사용자가 정한
-    ≈10~15 %(D1 규모의 에피소드 기준; 생성 비중 `goal_zone_weights`·`template_weights`가 맞춘다)이고 ood_dev/ood_test는 둘 다 쓰인다."""
-    policy = SplitPolicy.from_config(CONFIG["split"])
+    """리뷰 1 I1·I2: 문구 변형은 origin group의 해시가 정하므로 같은 group의 에피소드는 같은 변형·같은 split이다(400편 일정 모의).
+    봉인(zoneF 목표 계열 + 변형 `c` + E1 계열 하나)이 보내는 OOD는 사용자가 정한 ≈10~15 %(생성 비중
+    `goal_zone_weights`·`template_weights`가 맞춘다)이고 ood_dev/ood_test는 둘 다 쓰인다.
+
+    **한 group이 두 split에 걸치지 않는다**는 것이 이 검사의 핵심이다 (docs/04 §5). s0.3에서 지시가 도중에 목표
+    영역까지 바꾸게 되자 이 규칙이 깨졌다: 같은 계보의 한 편만 zoneF로 바뀌어 봉인되고 나머지는 train으로 갔다
+    (400편 실측: 27 group이 그런 변경을 냈고 그 가운데 **13 group·32편이 실제로 두 split에 걸쳤다** — 리뷰 1 I2).
+    그래서 `instruction.zone_change_excludes`가 봉인 개념의 영역을 변경에서 뺀다."""
+    # **지금 생성하는 설정**으로 본다 (R1). D1의 데이터는 s0.2의 템플릿·비중으로 만들어졌고 그 값은 보고서에 남아 있다.
+    config = load_generator_config("configs/data/r1_robot.yaml")
+    policy = SplitPolicy.from_config(config["split"])
     groups: dict[str, set[str]] = {}
     variants: dict[tuple[str, int], set[str]] = {}
     splits = Counter()
-    for profile, seed in seed_schedule(CONFIG, 400):
+    for profile, seed in seed_schedule(config, 400):
         plan = build_plan(SIM, seed, profile)
         group = origin_group(profile, plan)
         split = assign_split(group, policy, plan_tags(plan))
         groups.setdefault(group, set()).add(split)
+        assert not any(step.zone == "zoneF" for step in plan.instructions[1:] if plan.instructions[0].zone != "zoneF")
         for step in plan.instructions:  # v1·v2는 따로 정해지고, v2가 없는 에피소드(영역 밖의 다른 대상이 없다)도 있다
             variants.setdefault((group, step.version), set()).add(str(step.template))
         splits[split] += 1
@@ -130,6 +138,7 @@ def test_no_origin_group_straddles_two_splits_and_the_sealed_share_lands_in_the_
     ood = sum(splits[name] for name in OOD_SPLITS)
     assert 0.10 <= ood / 400 <= 0.15, dict(splits)
     assert splits["ood_dev"] > 0 and splits["ood_test"] > 0 and splits["train"] > 200
+    assert splits["ood_dev"] >= 20, dict(splits)  # 판정 칸의 표본 단위(편)가 P3의 24편 규모여야 한다
 
 
 def test_the_goal_zone_is_reweighted_without_disturbing_the_scene_stream():
@@ -196,10 +205,15 @@ def test_instruction_variants_keep_the_structured_goal_and_the_constraint_marker
     """세 변형은 표현만 다르다: 대상·영역·보호 물체는 같고, v1의 모든 변형에 규칙 기준군의 제약 표지가 있다. 변형은 계획의
     난수 소비 맨 뒤에서 고르므로 장면·일정은 변형 도입 전과 같다."""
     spec = SIM["instruction"]
-    assert len(spec["v1_templates"]) == 3 and len(spec["v2_templates"]) == 3 and spec["template_weights"] == [47.5, 47.5, 5]
-    assert all("{color}" in t and "{shape}" in t and "{zone}" in t and "{fragile}" in t for t in spec["v1_templates"])
-    assert all("{color2}" in t and "{shape2}" in t and "{zone}" in t for t in spec["v2_templates"])
-    assert all("건드리지 마라" in t for t in spec["v1_templates"])
+    assert len(spec["v1_templates"]) == 3 and len(spec["v2_templates"]) == 3 and spec["template_weights"] == [46.5, 46.5, 7]
+    v1 = [str(item["text"]) for item in spec["v1_templates"]]
+    v2 = [str(item["text"]) for item in spec["v2_templates"]]
+    # v1은 대상·영역과 **두 제약을 전부** 부른다 (s0.3, Task R1 B1): 서식 v0.4에서 `attr=`와 구조화된 목표가
+    # 모델 입력 밖이므로 문장이 부르지 않은 제약은 알 길이 없다.
+    assert all("{target_ul}" in t and "{zone}" in t and "{fragile}" in t and "{forbidden}" in t for t in v1)
+    assert all("{target2_ul}" in t and "{target}" in t and "{zone}" in t for t in v2)
+    assert all("건드리지 마라" in t for t in v1)
+    assert all(str(item["id"]) for item in spec["v1_templates"] + spec["v2_templates"])
     variants = set()
     for seed in range(100, 160):
         plan = build_plan(SIM, seed, "E1")
@@ -214,7 +228,7 @@ def test_instruction_variants_keep_the_structured_goal_and_the_constraint_marker
         assert [o.pos_mm for o in again.objects] == [o.pos_mm for o in plan.objects]
         assert again.disturbances == plan.disturbances
         assert [(s.target, s.zone, s.protected, s.sim_ms) for s in again.instructions] == [(s.target, s.zone, s.protected, s.sim_ms) for s in plan.instructions]
-    assert variants >= {"v1#0", "v1#1", "v1#2"}
+    assert variants >= {"v1#a", "v1#b", "v1#c"}
 
 
 def test_the_generator_config_names_every_config_it_digests_and_the_generator_requires_them():
@@ -388,13 +402,29 @@ def test_a_stand_in_policy_keeps_its_own_executed_history_while_labels_come_from
     assert record["provenance"]["outcome"]["done"] is False
     differing = assert_history_follows_the_executed_tick(record)
     assert differing >= 10
-    for tick in record["ticks"]:
-        hold = next(entry["id"] for entry in tick["request"]["candidates"]["q_main"] if entry["key"] == "hold")
+    # 정체 감시(h0.9)가 상한 틱째에 재계획 게이트로 끊는다 — 제자리 hold만 하는 정책은 그것을 부르는 정책이다.
+    # 상한은 둘 중 먼저 오는 것이다: 이어진 hold 경로(`m_hold`)와 **움직이지 않는 팔**(`m_still`).
+    from robo_jev.data.robot_episodes import config_paths
+    from robo_jev.harness.robot import load_harness_config
+
+    caps = load_harness_config(config_paths(CONFIG)["harness_config"])["compose"]
+    limit = min(int(caps["m_hold"]), int(caps["m_still"]))
+    stalled = 0
+    for index, tick in enumerate(record["ticks"]):
+        keys = {entry["id"]: entry["key"] for entry in tick["request"]["candidates"]["q_main"]}
+        hold = next(ref for ref, key in keys.items() if key == "hold")
         assert max(tick["model_output"]["q_main"], key=tick["model_output"]["q_main"].get) == hold
-        assert tick["adopted"]["main"] == hold
+        if keys[tick["adopted"]["main"]] == "replan":
+            stalled += 1
+            assert index >= limit, index  # 감시는 상한 전에는 걸리지 않는다
+        else:
+            assert tick["adopted"]["main"] == hold
         label = next(item for item in tick["labels"] if item["question_id"] == "q_main")
         assert label["candidate_ids"] != [hold]  # 전문가는 파지를 고른다
         assert label["source"] == "expert_v0"
+    # 감시가 한 번 걸리고 물러남을 `stall_escape_ticks`틱까지 **이어서** 건다 (h0.9): 한 틱으로는 실행기의 힘 반사가
+    # 묶어 둔 자리를 벗어나지 못했다. 팔이 그래도 안 움직이면 두 틱째에 갈라 에피소드를 끝낸다.
+    assert 1 <= stalled <= int(caps["stall_escape_ticks"]), stalled
 
 
 def test_smoke_labels_never_reach_the_input_area(smoke):
@@ -716,3 +746,208 @@ _SMOKE_TEMPLATE = {
     ],
     "provenance": {"profile": "E0", "seed": 0, "timing": {"wall_s": 0.5}, "outcome": {"done": False}},
 }
+
+
+# --------------------------------------------------------------------------
+# gen-robot-v0.2 — 사건이 잦은 에피소드 (Task R1 Stage B)
+# --------------------------------------------------------------------------
+
+R1_CONFIG_PATH = "configs/data/r1_robot.yaml"
+
+
+def _r1_config():
+    from robo_jev.data.robot_episodes import load_generator_config
+
+    return load_generator_config(R1_CONFIG_PATH)
+
+
+def test_every_instruction_change_inside_a_tick_reaches_the_model_as_an_event(smoke):
+    """**틱 안에서 버려지던 사건의 복원** (gen-robot-v0.2, Task R1 B2-i).
+
+    틱 하나는 제어 스텝 5회다. 마지막 스텝의 관측만 남기면 스텝 1~4에서 난 사건이 모델 입력에서 사라진다 —
+    D1에서는 목표 변경 57번 중 `instruction_changed` 줄이 **7개**뿐이었다. 이제 틱 안의 사건을 합치므로 지시 변경은
+    빠짐없이 그 틱의 `state.events`에 실린다.
+    """
+    expert = smoke["expert"]
+    config = _r1_config()
+    record = generate_episode("E2", 400100, policy=expert, expert=expert, config=config, max_ticks=120)
+    changes = [
+        int(step["version"])
+        for step in record["prefix"]["instructions"][1:]
+        if int(step["t_ms"]) <= int(record["ticks"][-1]["sim_ms"])
+    ]
+    assert changes, "이 seed의 E2 에피소드는 지시 변경이 있어야 한다"
+    seen = [
+        int(event.get("version"))
+        for tick in record["ticks"]
+        for event in tick["request"]["state"].get("events") or ()
+        if event.get("kind") == "instruction_changed"
+    ]
+    assert seen == changes, (seen, changes)
+
+
+#: R1 코퍼스가 `max_ms`로 끝낸 27편 가운데 **네 가지 모양**을 하나씩 (리뷰 1 C1·I3·I4). 같은 결함의 네 얼굴이다.
+#:   - `ep-E2-420249` — 경로가 막힌 채 같은 commitment로 hold를 되풀이한다(감시가 15틱마다 끊고 같은 후보가 다시 뽑힌다).
+#:   - `ep-E2-420208` — 접촉력 50N으로 힘 반사가 걸려 팔이 한 밀리미터도 움직이지 않는다(I4의 편: 주 층의 61.3 %).
+#:   - `ep-E2-420114` — 관측 게이트가 영영 뜬다(450틱 중 308틱, 대상 기하 39.1 s).
+#:   - `ep-E2-420242` — 게이트가 **안 뜬 채** 유령 기하(37.7 s)로 다가간다. I3의 두 방향 중 나머지.
+#:   - `ep-E0-400122` — `place` commitment를 `direct` 경로로 든 채 419틱을 선다. hold·관측 감시가 못 보는 모양.
+LIMIT_CYCLE_EPISODES = (("E2", 420249), ("E2", 420208), ("E2", 420114), ("E2", 420242), ("E0", 400122))
+
+
+def _stall_shape(record):
+    """(끝난 이유, 완료 여부, 마지막 100틱의 hold·관측 비율, 가장 긴 hold·관측 구간). 완료 꼬리는 빼고 센다."""
+    ticks = [tick for tick in record["ticks"] if str((tick.get("usage") or {}).get("gate")) != "done"]
+    dead = [
+        bool(str((tick.get("usage") or {}).get("gate")) == "observe" or str((tick.get("adopted") or {}).get("path_kind")) == "hold")
+        for tick in ticks
+    ]
+    run = longest = 0
+    for value in dead:
+        run = run + 1 if value else 0
+        longest = max(longest, run)
+    tail = dead[-100:]
+    outcome = record["provenance"]["outcome"]
+    return outcome["terminated"], bool(outcome["done"]), (sum(tail) / len(tail) if tail else 0.0), longest
+
+
+@pytest.mark.parametrize(("profile", "seed"), (("E1", 235), ("E1", 244), *LIMIT_CYCLE_EPISODES))
+def test_the_limit_cycle_episodes_end_for_a_reason_instead_of_burning_the_clock(profile, seed):
+    """정체 감시의 **극한 순환**이 끊긴다 (h0.9, 리뷰 1 C1).
+
+    D1의 두 편(`ep-E1-000235` 관측 157틱, `ep-E1-000244` 죽은 hold 120틱)과 R1이 `max_ms`로 끝낸 27편의 네 모양을
+    새 하네스로 재생한다. h0.8은 `m_hold`=15에서 감시를 걸고 **같은 후보를 바로 다시 채택**했으므로 순환의 주기만
+    정했다 — "가장 긴 죽은 구간"이 언제나 정확히 15라서 정체 지표가 0을 냈고, 27편이 45초를 그 순환에 썼다.
+
+    h0.9가 지키는 것 둘. (1) 에피소드는 **완료되거나 `max_ms`가 아닌 명시적 이유**(`stall_exhausted`)로 끝난다 —
+    "왜 안 끝났나"를 데이터가 말한다. (2) 마지막 100틱의 죽은 틱(hold·관측, 완료 꼬리 제외)이 **30 이하**이고,
+    100틱보다 긴 편에서는 그 비율이 0.3 미만이다. 짧은 편에서 몫이 아니라 **수**를 재는 까닭: 팔이 20틱째에
+    굳으면 34틱짜리 에피소드가 남고 몫의 분모가 짧아진다(`ep-E2-420200` 0.471, 죽은 틱 16). 그 몫은 순환이
+    남았다는 뜻이 아니라 에피소드가 짧다는 뜻이며, 보고서가 편마다 실측을 적는다.
+    """
+    from robo_jev.data.robot_episodes import config_paths
+    from robo_jev.harness.robot import load_harness_config
+
+    config = _r1_config()
+    caps = load_harness_config(config_paths(config)["harness_config"])["compose"]
+    expert = Expert()
+    record = generate_episode(profile, seed, policy=expert, expert=expert, config=config)
+    terminated, done, share, longest = _stall_shape(record)
+    assert done or terminated == "stall_exhausted", (profile, seed, record["provenance"]["outcome"])
+    assert terminated != "max_ms", (profile, seed, terminated)
+    dead = round(share * min(100, len([t for t in record["ticks"] if str((t.get("usage") or {}).get("gate")) != "done"])))
+    assert dead <= 30, (profile, seed, dead, share)
+    if len(record["ticks"]) >= 100:
+        assert share < 0.3, (profile, seed, share)
+    # 감시는 상한 안에서 끊는다 — 구간 하나가 `m_hold`를 넘으면 감시가 걸리지 않은 것이다.
+    assert longest <= max(int(caps["m_hold"]), int(caps["m_observe_total"])), (profile, seed, longest)
+    if not done:
+        stall = record["provenance"]["outcome"]["stall"]
+        assert stall["reason"] in ("arm_pinned", "no_progress"), stall
+
+
+def test_the_generator_refuses_a_holdout_template_id_the_scene_config_does_not_have(tmp_path):
+    """템플릿 id는 봉인의 열쇠다 (docs/04 §5). 장면 설정의 템플릿을 고치면서 id를 바꾸면 옛 id를 적은 데이터 설정은
+    아무것도 봉인하지 않게 되고, 그 사실은 OOD 비율이 조용히 내려가는 것으로만 드러난다 — 생성 전에 멈춘다."""
+    from robo_jev.data.robot_episodes import check_holdout_templates
+
+    config = _r1_config()
+    check_holdout_templates(config, SIM)  # 지금 설정은 지난다
+    stale = copy.deepcopy(config)
+    stale["split"]["holdout_templates"] = ["v1#2", "v2#2"]  # D1의 옛 id
+    with pytest.raises(ValueError, match="모르는 변형 id"):
+        check_holdout_templates(stale, SIM)
+
+
+def test_the_generator_refuses_a_sealed_goal_zone_that_a_mid_episode_change_could_bring_in():
+    """봉인 개념의 영역과 `zone_change_excludes`를 **묶는다** (R1 리뷰 1 M13).
+
+    개념 봉인은 계보의 성질이라 도중 지시 변경이 봉인 영역을 들여오면 한 group이 두 split에 걸친다(400편 실측
+    27 group). `s0.3`이 `instruction.zone_change_excludes`로 막았지만 그 목록과 `split.holdout_concepts`를 잇는
+    것이 없었다 — 장면 설정의 기본값은 빈 목록이고, 걸친 group을 잡는 검사는 문자열 `"zoneF"`를 박아 두었다.
+    둘째 영역을 봉인하면서 한쪽만 고치면 누출이 조용히 다시 열린다. 이제 생성 전에 멈춘다.
+    """
+    from robo_jev.data.robot_episodes import check_zone_change_excludes, sealed_goal_zones
+
+    config = _r1_config()
+    assert sealed_goal_zones(config) == {"zoneF"}
+    check_zone_change_excludes(config, SIM)  # 지금 설정은 지난다
+
+    second = copy.deepcopy(config)
+    second["split"]["holdout_concepts"] = ["robot:goal-zone:zoneF", "robot:goal-zone:zoneL"]
+    with pytest.raises(ValueError, match="zone_change_excludes"):
+        check_zone_change_excludes(second, SIM)
+
+    unguarded = copy.deepcopy(SIM)
+    unguarded["instruction"] = {**unguarded["instruction"], "zone_change_excludes": []}
+    with pytest.raises(ValueError, match="zoneF"):
+        check_zone_change_excludes(config, unguarded)
+
+
+def test_the_r1_schedule_mixes_the_three_profiles_by_weight_without_repeating_an_episode_id():
+    """E0 20 % · E1 40 % · E2 40 % (Task R1 B2-iv). 한 바퀴에 같은 프로파일이 두 번 나오므로 seed는 프로파일마다
+    따로 센다 — 안 그러면 에피소드 id가 겹쳐 조용히 덮어쓴다."""
+    from robo_jev.data.robot_episodes import profile_cycle
+
+    config = _r1_config()
+    assert profile_cycle(config) == ["E0", "E1", "E2", "E1", "E2"]
+    schedule = seed_schedule(config, 400)
+    assert len(set(schedule)) == 400
+    counts = Counter(profile for profile, _ in schedule)
+    assert counts == {"E0": 80, "E1": 160, "E2": 160}
+    assert seed_schedule(config, 400)[:17] == seed_schedule(config, 17)  # --resume의 전제
+
+
+def test_the_model_sees_only_the_instruction_text_change_in_an_instruction_contrast_pair(smoke):
+    """C3-d QA (Task R1): `instruction` 대조 쌍은 이제 **주 계기**다 — 서식 v0.4에서 구조화된 목표가 모델 입력 밖이라
+    base와 sibling의 직렬화 차이가 **지시 문장(과 버전)뿐**이기 때문이다. 전문가용 `allowed_diff_paths`의 여섯 잎 가운데
+    넷(`target_ref`·`target_desc`·`target_zone`·`t_ms`)은 모델에 닿지 않는다.
+
+    쌍의 후보 **순서**는 정답 위치 편향을 막으려 섞으므로, 비교는 순서를 되돌린 사본에서 한다.
+    """
+    import copy as _copy
+
+    from robo_jev.data.robot_contrast import allowed_diff_paths, build_pairs
+    from robo_jev.model.serialize import serialize_request
+    from robo_jev.model.tokenizer import WhitespaceTokenizer
+
+    expert = smoke["expert"]
+    tokenizer = WhitespaceTokenizer()
+    checked = 0
+    for record in smoke["records"].values():
+        pairs, _ = build_pairs(record, expert=expert)
+        by_id = {row["request"]["request_id"]: row for row in pairs}
+        for sibling in (row for row in pairs if row["provenance"].get("kind") == "instruction" and row["provenance"].get("derivation") == "contrast"):
+            base = by_id[sibling["provenance"]["contrast"]["sibling_id"]]
+            assert allowed_diff_paths("instruction", "", base["request"]["state"]) >= {"state.goal.text", "state.goal.version"}
+            aligned = _copy.deepcopy(sibling)
+            for question, source in zip(aligned["request"]["questions"], base["request"]["questions"]):
+                order = {entry["id"]: index for index, entry in enumerate(source["criteria"])}
+                question["criteria"].sort(key=lambda entry: order.get(entry["id"], len(order)))
+            base_lines = tokenizer.decode(serialize_request(base, tokenizer)["tokens"]).splitlines()
+            sibling_lines = tokenizer.decode(serialize_request(aligned, tokenizer)["tokens"]).splitlines()
+            differing = [(a, b) for a, b in zip(base_lines, sibling_lines) if a != b]
+            assert len(base_lines) == len(sibling_lines)
+            assert differing, "지시가 바뀐 쌍인데 모델이 보는 텍스트가 같다"
+            for a, b in differing:
+                assert a.startswith("goal ") and b.startswith("goal "), (a, b)
+                assert "target" not in a + b and "zone=" not in a + b
+            checked += 1
+    assert checked, "instruction 쌍이 하나도 없다"
+
+
+def test_no_two_profiles_share_a_seed_so_no_scene_lands_in_two_splits():
+    """같은 seed를 두 프로파일에 주면, 프로파일 덮어쓰기가 장면 추첨을 바꾸지 않는 경우(E1 6~10물체 · E2 7~10물체)
+    **같은 장면이 두 split에** 생긴다 — 400편 QA가 그런 쌍 하나를 잡았다(`ep-E1-400142` train ↔ `ep-E2-400142`
+    ood_test). `seeds.profile_offset`이 프로파일마다 seed 구간을 벌린다."""
+    from robo_jev.data.robot_episodes import load_generator_config
+
+    config = load_generator_config("configs/data/r1_robot.yaml")
+    schedule = seed_schedule(config, 400)
+    assert len({seed for _, seed in schedule}) == len(schedule)  # seed가 겹치지 않는다
+    scenes: dict[tuple, tuple[str, int]] = {}
+    for profile, seed in schedule:
+        plan = build_plan(SIM, seed, profile)
+        key = tuple((obj.id, obj.shape, obj.colour, obj.pos_mm) for obj in plan.objects) + tuple(zone.id for zone in plan.zones)
+        assert key not in scenes, (scenes.get(key), (profile, seed))
+        scenes[key] = (profile, seed)

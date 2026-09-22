@@ -307,7 +307,8 @@ def test_the_generated_reading_is_what_the_script_writes_and_a_flag_can_override
     assert module.main(["--suite", str(P3_SUITE), "--runs", "p3", "--reports", str(tmp_path), "--out", str(out)]) == 0
     payload = json.loads(out.read_text(encoding="utf-8"))
     assert payload["reading"].startswith("This cell is 24 episodes / 2,530")
-    assert "844" not in payload["reading"] and payload["donor_rotation"]["clamped_ticks"] == 524
+    assert payload["donor_rotation"]["clamped_ticks"] == 0
+    assert payload["donor_rotation"]["clamped_ticks_under_the_old_rule"] == 524
 
     assert module.main(["--suite", str(P3_SUITE), "--runs", "p3", "--reports", str(tmp_path),
                         "--reading", "quote nothing", "--out", str(out)]) == 0
@@ -315,21 +316,27 @@ def test_the_generated_reading_is_what_the_script_writes_and_a_flag_can_override
 
 
 def test_the_donor_rotation_is_measured_for_the_population_it_sits_in():
-    """C1b/리뷰 1 I1 — 대조군 값이 **어느 draw에서 나왔는지**가 파일 안에 있어야 한다.
+    """C1b/리뷰 1 I1 + Task R1 C2 — 대조군 값이 **어느 draw에서 나왔는지**가 파일 안에 있어야 한다.
 
-    기증자는 설정 목록의 다음 레코드이고 더 짧으면 마지막 틱에 고정된다. 이 수는 모델이 아니라 설정의 편 순서와
-    편 길이만으로 정해지므로 CPU에서 그대로 다시 나온다 — 8편 회전 254/844 = 30.1 %, 24편 회전 524/2,530 = 20.7 %."""
+    이제 회전은 **편 길이로 짝짓고** 남는 차이는 감아 돈다(`robo_jev.evaluate.context_shuffle_records`) — 그래서
+    **고정된 틱은 0**이다. 옛 규칙(설정 순서 + 클램프)이었다면 몇 틱이 얼어붙었을지는 같은 파일에 남는다:
+    8편 회전 254/844 = 30.1 %, 24편 회전 524/2,530 = 20.7 %. 두 수가 같이 있어야 "왜 P1~P3의 상태 섞기 값과
+    나란히 놓을 수 없는가"가 파일 안의 수로 말해진다."""
     module = script()
     new = module.donor_rotation(list(real(P3_SUITE)), module.cell_records(P3_SUITE))
-    assert new["ticks"] == 2530 and new["clamped_ticks"] == 524
-    assert round(new["clamped_share"], 4) == 0.2071
-    assert new["per_episode"]["ep-E1-000235"] == {"donor": "ep-E1-000244", "ticks": 300, "donor_ticks": 300, "clamped_ticks": 0}
+    assert new["ticks"] == 2530 and new["clamped_ticks"] == 0 and new["clamped_share"] == 0.0
+    assert new["clamped_ticks_under_the_old_rule"] == 524
+    assert round(new["clamped_share_under_the_old_rule"], 4) == 0.2071
+    # 길이로 짝지으면 300틱짜리 둘이 서로를 받는다 — 감아 돌 틱도 없다.
+    assert new["per_episode"]["ep-E1-000235"]["ticks"] == 300 and new["per_episode"]["ep-E1-000235"]["wrapped_ticks"] == 0
+    assert all(entry["clamped_ticks"] == 0 for entry in new["per_episode"].values())
 
     old = module.donor_rotation(list(real()), module.cell_records())
-    assert old["ticks"] == 844 and old["clamped_ticks"] == 254 and round(old["clamped_share"], 4) == 0.3009
-    # P2의 +0.257을 만든 짝: 300틱짜리가 82틱짜리를 받아 218틱이 얼어붙은 완료 상태와 섞였다
-    assert old["per_episode"]["ep-E1-000235"] == {"donor": "ep-E1-000263", "ticks": 300, "donor_ticks": 82, "clamped_ticks": 218}
-    assert sum(entry["clamped_ticks"] for entry in old["per_episode"].values()) == 254
+    assert old["ticks"] == 844 and old["clamped_ticks"] == 0
+    assert old["clamped_ticks_under_the_old_rule"] == 254 and round(old["clamped_share_under_the_old_rule"], 4) == 0.3009
+    # P2의 +0.257을 만든 짝(옛 규칙): 300틱짜리가 82틱짜리를 받아 218틱이 얼어붙은 완료 상태와 섞였다 — 지금은
+    # 길이 순이라 `ep-E1-000235`가 가장 긴 편이고 가장 짧은 편을 감아 돌아 읽는다.
+    assert old["per_episode"]["ep-E1-000235"]["wrapped_ticks"] > 0
 
 
 def test_each_key_family_carries_the_same_paired_interval_as_its_stratum():

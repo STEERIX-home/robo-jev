@@ -120,7 +120,7 @@ def test_the_token_serializer_has_its_own_version_apart_from_the_record_serializ
     from robo_jev.model import serialize as serialize_module
 
     config = yaml.safe_load(SIM_CONFIG.read_text(encoding="utf-8"))
-    assert TOKEN_SERIALIZER_VERSION == "ts0.5"
+    assert TOKEN_SERIALIZER_VERSION == "ts0.6"
     assert TOKEN_SERIALIZER_VERSION.startswith("ts") and str(config["version"]).startswith("s")
     assert TOKEN_SERIALIZER_VERSION != config["version"]
     assert not hasattr(serialize_module, "SERIALIZER_VERSION")  # 옛 이름은 뜻이 둘이라 없앴다
@@ -163,10 +163,10 @@ def test_one_item_per_line_in_a_fixed_field_order(single, tokenizer):
 
 def test_empty_lists_and_none_are_explicit(single, tokenizer):
     state = single["request"]["state"]
-    state["objects"][0]["attributes"] = []
+    state["objects"][0]["graspable_faces"] = []  # `attributes`는 서식 v0.4에서 모델 입력 밖이다 (Task R1 A1)
     state["robot"] = {"holding": None}
     text = serialize_request(single, tokenizer)["text"]
-    assert "attributes=-" in text
+    assert "graspable_faces=-" in text
     assert "robot holding=none" in text
 
 
@@ -567,16 +567,16 @@ def section_text(out: dict, tokenizer, index: int, name: str) -> str:
     )
 
 
-def test_stream_format_v03_uses_short_names_and_key_based_candidate_lines(tokenizer):
+def test_the_stream_format_uses_short_names_and_key_based_candidate_lines(tokenizer):
     out = serialize_request(synthetic_stream(1), tokenizer, layout="stream_l1a")
-    assert out["format"] == serialize_module.STREAM_FORMAT == "v0.3"
+    assert out["format"] == serialize_module.STREAM_FORMAT == "v0.4"
     assert out["delta_rules"] == serialize_module.DELTA_RULES
     text = tick_text(out, tokenizer, 0)
     lines = text.splitlines()
     assert lines[0] == "t 0 age g0 p0 seq 1"
-    assert lines[1] == "goal v1 target=o0 zone=zoneL fragile=o1"  # 압축 참조: 텍스트는 지시 조각(prefix)에 있다
+    assert lines[1] == "goal v1"  # 서식 v0.4: 버전뿐이다 — 텍스트는 지시 조각(prefix)과 주기적 재적재에, 목표는 없다
     assert "obj o0 o0 상자 obb=60,60,64 top=-48 faces=top,side" in lines
-    assert "obj o1 o1 상자 obb=60,60,64 top=-48 faces=top,side attr=fragile" in lines
+    assert "obj o1 o1 상자 obb=60,60,64 top=-48 faces=top,side" in lines  # 속성(`attr=`)은 없다 (서식 v0.4)
     # 동적 줄: 회전 없음(yaw=0)·다 보임(vis=1)은 기본값이라 없고, 말단 기준 상대 벡터는 싣지 않는다 (ee와 p로 정해진다).
     assert "o0 p=300,0,-80 s=3 conf=0.92 clr=40 corr=100" in lines
     assert "robot ee=0,0,200 eq=0.00,0.00,0.00,1.00 grip=80" in lines  # holding·contact_n·speed의 기본값은 뺀다
@@ -587,7 +587,7 @@ def test_stream_format_v03_uses_short_names_and_key_based_candidate_lines(tokeni
     assert "c1: grasp o0 top→zoneL d=381" in lines
     assert "c2: push o0 -x d=417 path=blocked" in lines
     assert "ch: hold" in lines and "p0: direct" in lines and "p1: via w1" in lines and "ph: hold" in lines
-    for absent in ("pose_mm", "visible_ratio", "graspable_faces", "extractor", "image", "geom", "candidate_set_version", "target_desc", "action_ref", "key=", "rel=", "g=0", "path=ok"):
+    for absent in ("pose_mm", "visible_ratio", "graspable_faces", "extractor", "image", "geom", "candidate_set_version", "target_desc", "action_ref", "key=", "rel=", "g=0", "path=ok", "attr=", "target=", "forbid="):
         assert absent not in text, absent
     stale = synthetic_stream(1)
     stale["ticks"][0]["request"]["candidates"]["q_main"][0]["g"] = 200
@@ -600,17 +600,121 @@ def test_stream_format_v03_uses_short_names_and_key_based_candidate_lines(tokeni
     assert "zone " not in text and "scene " not in text
 
 
-def test_the_goal_line_names_the_target_description_only_while_the_target_is_untracked(tokenizer):
+def test_the_goal_line_carries_the_version_and_nothing_the_instruction_text_should_say(tokenizer):
+    """서식 v0.4 (Task R1 A1): `goal` 줄은 **버전뿐**이고, 풀어 놓은 목표는 대상이 추적되든 말든, 금지 물체가 생기든
+    한 글자도 나가지 않는다. 대상·목적지·제약은 지시 문장과 `obj`·`zone` 줄에서 모델이 스스로 풀어야 하는 것이다."""
+
     def mutate(index, state):
         if index == 1:
-            state["goal"]["target_ref"] = None  # 아직 관측되지 않은 대상: 설명이 유일한 단서
+            state["goal"]["target_ref"] = None  # 아직 관측되지 않은 대상 — 옛 서식은 여기서 `desc=`를 실었다
         if index == 2:
             state["goal"]["forbidden_contact"] = ["o1"]
 
     out = serialize_request(synthetic_stream(3, mutate=mutate), tokenizer, layout="stream_l1a")
-    assert section_text(out, tokenizer, 0, "state:goal") == "goal v1 target=o0 zone=zoneL fragile=o1\n"
-    assert section_text(out, tokenizer, 1, "state:goal") == "goal v1 target=none desc=o0 상자 zone=zoneL fragile=o1\n"
-    assert section_text(out, tokenizer, 2, "state:goal") == "goal v1 target=o0 zone=zoneL forbid=o1 fragile=o1\n"
+    for index in range(3):
+        assert section_text(out, tokenizer, index, "state:goal") == "goal v1\n", index
+
+
+#: 모델이 보는 텍스트 **어디에도** 있으면 안 되는 표지 — 풀어 놓은 목표와 물체 속성, 두 layout의 이름 모두 (Task R1 A1).
+LEAKED_GOAL_MARKERS = (
+    "target=", "target_ref=", "target_desc=", "zone=", "forbid=", "forbidden_contact=",
+    "fragile=", "prio=", "priority=", "attr=", "attributes=",
+)  # fmt: skip
+#: `goal` 줄에만 걸리는 표지 — 물체·영역 줄의 `desc=`(설명)는 **남는다**: 그것이 모델이 지시 문장과 맞춰야 하는 것이다.
+LEAKED_GOAL_LINE_MARKERS = ("desc=",)
+
+
+def _model_text(out: dict, tokenizer) -> str:
+    return tokenizer.decode(out["tokens"])
+
+
+def assert_no_resolved_goal(text: str, where: str) -> None:
+    for marker in LEAKED_GOAL_MARKERS:
+        assert marker not in text, (where, marker)
+    assert_goal_line_is_only_text(text, where)
+
+
+def assert_goal_line_is_only_text(text: str, where: str) -> None:
+    """`goal` 줄은 **버전과 문장뿐**이다 (Task R1 A1, 리뷰 1 I12).
+
+    표지 목록(:data:`LEAKED_GOAL_MARKERS`)은 로봇 배치의 스키마 이름이라 비로봇에는 너무 무디다 — `rules` 영역은
+    상태에 과제의 **규칙 목록**을 싣고 그 줄이 `priority=`·`when=zone:…`를 정당하게 쓴다. 두 배치에 같이 걸 수 있는
+    정확한 문장은 이것이다: 목표 줄에 `text` 말고 다른 `k=v`가 있으면 그것이 풀어 놓은 목표다.
+    """
+    for line in text.splitlines():
+        if not line.startswith("goal"):
+            continue
+        for marker in LEAKED_GOAL_LINE_MARKERS:
+            assert marker not in line, (where, marker, line)
+        if not line.startswith("goal "):
+            continue  # `goal=<문장>` — 목표가 문장 하나인 레코드(D0 fixture)는 그 자체가 지시다
+        keys = {token.split("=", 1)[0] for token in line.split() if "=" in token}
+        # `version`·`t_ms`는 지시가 **언제 몇 번째로** 왔는지이지 그 내용이 아니다 — 사건 줄이 이미 말한다.
+        assert keys <= {"text", "version", "t_ms"}, (where, sorted(keys - {"text", "version", "t_ms"}), line)
+
+
+def test_no_resolved_goal_field_reaches_the_model_in_the_non_robot_pilot_records(tokenizer):
+    """**비로봇 L0의 목표 누출** (R1 리뷰 1 I12). docs/08 §3.2는 "두 배치 모두" 풀어 놓은 목표가 빠진다고 적었지만
+    `HIDDEN_GOAL_FIELDS`가 로봇 스키마의 이름(`target_ref`·`target_zone`…)만 들고 있어 비로봇의 `goal` 줄은
+    `color=green zone=zoneC`를 그대로 실었다 — R1이 배포한 4,200 레코드 중 **1,052건**, T0 학습 항목의 91.8 %다.
+
+    네 영역을 **실제로 생성해** 본다(fixture가 아니라 생성기의 출력이다 — 옛 시험이 D0 fixture와 로봇 에피소드
+    하나만 봐서 이 누출을 못 봤다). 레코드의 `state.goal`에는 그 필드가 **남아 있다**: 빠지는 것은 모델이 보는
+    텍스트뿐이고, 라벨과 규칙은 그대로 구조화된 목표를 읽는다.
+    """
+    from robo_jev.data.generate import generate_records
+
+    records = generate_records(count=60, seed=11)
+    seen_hidden = 0
+    for index, record in enumerate(records):
+        text = _model_text(serialize_request(record, tokenizer, layout="state_first"), tokenizer)
+        assert_goal_line_is_only_text(text, f"pilot[{index}] {record.get('origin_group')}")
+        goal = ((record.get("request") or {}).get("state") or {}).get("goal") or {}
+        seen_hidden += bool(set(goal) & set(serialize_module.HIDDEN_GOAL_FIELDS))
+        assert goal.get("text")  # 문장은 남는다 — 이제 그것이 유일한 단서다
+        assert goal["text"] in text  # 그리고 모델이 그것을 본다
+    # 검사가 "그냥 목표가 없는 레코드"를 재는 것이 아님을 못 박는다: 절반 이상이 숨긴 필드를 레코드에 들고 있다.
+    assert seen_hidden >= len(records) // 2, seen_hidden
+
+
+def test_no_resolved_goal_field_reaches_the_model_in_either_layout(tokenizer, single, stream, three_questions):
+    """**누출 봉쇄 (Task R1 A1·A2).** 풀어 놓은 목표(`target=`·`desc=`·`zone=`·`forbid=`·`fragile=`·`prio=`)와 물체
+    속성(`attr=`)은 두 layout 어느 쪽의 모델 입력에도 나오지 않는다 — D0 fixture와 **실제로 생성한 에피소드 한 편**에서.
+    레코드에는 그대로 있다(전문가·라벨·규칙 판정기가 읽는다); 빠지는 것은 모델이 보는 텍스트뿐이다."""
+    for record, layout in ((single, "state_first"), (three_questions, "state_first"), (stream, "stream_l1a")):
+        assert_no_resolved_goal(_model_text(serialize_request(record, tokenizer, layout=layout), tokenizer), layout)
+    # 구조화된 목표는 레코드에 남아 있다 — 이 검사가 "그냥 목표가 없는 레코드"를 재는 것이 아니다.
+    goal = stream["ticks"][0]["request"]["state"]["goal"]
+    assert set(goal) & set(serialize_module.HIDDEN_GOAL_FIELDS)
+
+
+@pytest.mark.parametrize("profile", ["E1"])
+def test_no_resolved_goal_field_reaches_the_model_in_a_real_episode(tokenizer, profile):
+    """실제 에피소드 한 편(생성기로 8틱)을 두 layout으로 직렬화해 같은 것을 확인한다 — 합성 fixture가 아니라
+    하네스·전문가·앞단이 실제로 채운 상태에서."""
+    from robo_jev.data.robot_contrast import default_question_texts, single_request_from_tick
+    from robo_jev.data.robot_episodes import generate_episode, load_generator_config
+    from robo_jev.sim.expert import Expert
+
+    config = load_generator_config()
+    expert = Expert()
+    record = generate_episode(profile, 11, policy=expert, expert=expert, config=config, max_ticks=8)
+    text = _model_text(serialize_request(record, tokenizer, layout="stream_l1a"), tokenizer)
+    assert_no_resolved_goal(text, "stream_l1a")
+    assert "goal v1\n" in text  # 버전은 남는다
+    # 같은 틱을 `judgment-v0`(state_first)로 낸 대조 레코드도 같다.
+    single, _ = single_request_from_tick(
+        record,
+        record["ticks"][0],
+        record["ticks"][0]["request"]["state"],
+        request_id="r1-leak-0",
+        expert=expert,
+        question_texts=default_question_texts(),
+        shuffle_seed="r1-leak",
+    )
+    assert_no_resolved_goal(_model_text(serialize_request(single, tokenizer), tokenizer), "state_first")
+    # 그런데 지시 **문장**은 있어야 한다 — 그것이 이제 유일한 단서다.
+    assert record["prefix"]["instructions"][0]["text"] in text
 
 
 def test_the_commitment_line_drops_the_key_the_candidate_line_carries(tokenizer):
@@ -641,7 +745,8 @@ def test_objects_are_introduced_once_and_dynamic_lines_follow_changes(tokenizer)
             o1["visible_ratio"] = 1.0
             o1["reid"] = ["merge:o9"]
         if index == 9:
-            o1["attributes"] = ["fragile", "forbidden"]  # 정적 필드 변경 → 소개 줄
+            o1["graspable_faces"] = ["top"]  # 정적 필드 변경 → 소개 줄
+            o1["attributes"] = ["fragile", "forbidden"]  # 서식 v0.4에서 모델 입력 밖 — 이것만으로는 소개 줄이 안 난다
             o1["visible_ratio"] = 1.0
 
     out = serialize_request(synthetic_stream(10, mutate=mutate), tokenizer, layout="stream_l1a")
@@ -657,8 +762,21 @@ def test_objects_are_introduced_once_and_dynamic_lines_follow_changes(tokenizer)
     assert dynamic[7] == "o1 p=200,220,-80 s=3 seen=500 clr=40 corr=100\n"  # 관측이 끊겼다 (가시 비율은 그대로라 없다)
     assert dynamic[8] == "o1 p=200,220,-80 s=3 vis=1 clr=40 corr=100 reid=merge:o9\n"  # 다시 보인다: 변화분 줄은 기본값(vis=1)도 적는다, 재식별
     assert "seen=" not in dynamic[8]
-    assert intro[9] == "obj o1 o1 상자 obb=60,60,64 top=-48 faces=top,side attr=fragile,forbidden\n"
+    assert intro[9] == "obj o1 o1 상자 obb=60,60,64 top=-48 faces=top\n"  # 속성(`attr=`)은 서식 v0.4에서 빠졌다
     assert all(intro[i] == "" for i in range(1, 9))
+
+
+def test_a_change_of_object_attributes_alone_does_not_reach_the_model(tokenizer):
+    """서식 v0.4 (Task R1 A1): 물체의 금지·취약 표지가 바뀌어도 모델의 입력은 한 글자도 바뀌지 않는다 — 그 사실은
+    지시 문장이 말한다. (대조 쌍 `forbidden`의 sibling이 텍스트 없이 풀리지 않는다는 뜻이기도 하다.)"""
+
+    def mutate(index, state):
+        if index >= 1:
+            state["objects"][1]["attributes"] = ["fragile", "forbidden"]
+
+    plain = serialize_request(synthetic_stream(3), tokenizer, layout="stream_l1a")
+    flipped = serialize_request(synthetic_stream(3, mutate=mutate), tokenizer, layout="stream_l1a")
+    assert flipped["tokens"] == plain["tokens"]
 
 
 def test_intro_and_dynamic_lines_refresh_on_their_periods_and_the_goal_text_on_its_own(tokenizer):
@@ -742,13 +860,19 @@ def test_serializing_a_prefix_of_the_ticks_gives_a_prefix_of_the_tokens(streams,
             assert part["prefix_end"] == whole["prefix_end"]
 
 
-def test_the_contract_doc_lists_every_short_field_name_of_format_v03():
-    """docs/08 §3.2의 서식 v0.3 표는 `STREAM_FIELDS`의 짧은 이름을 전부 적어야 한다 — 문서가 코드와 같도록."""
+def test_the_contract_doc_lists_every_short_field_name_of_the_stream_format():
+    """docs/08 §3.2의 서식 표는 `STREAM_FIELDS`의 짧은 이름을 전부 적어야 한다 — 문서가 코드와 같도록.
+
+    표의 **머리말**도 본다 (R1 리뷰 1 M1): 본문이 "v0.4 열이 모델이 보는 것"이라고 말하는 네 줄 아래에서 표의
+    넷째 열 머리말이 "서식 v0.3"으로 남아 있었고, `"v0.4" in section`만 보던 옛 단언은 본문에 걸려 그냥 지났다.
+    """
     from pathlib import Path
 
     doc = (Path(__file__).resolve().parents[1] / "docs" / "08-streaming-io-and-data-contract.md").read_text(encoding="utf-8")
     section = doc[doc.index("### 3.2") : doc.index("### 3.3")]
-    assert "v0.3" in section and "계약 v0.3" in doc[:2000]
+    assert "| 필드 | 내용 | 정보 경계 | 서식 v0.4 (모델이 보는 줄) |" in section  # 표의 머리말 (M1)
+    assert "서식 v0.3 (모델이 보는 줄)" not in section
+    assert "계약 v0.3" in doc[:2000]
     for group, table in serialize_module.STREAM_FIELDS.items():
         for short in table.values():
             if short:

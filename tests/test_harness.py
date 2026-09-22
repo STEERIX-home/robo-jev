@@ -2220,7 +2220,19 @@ def test_versions_carry_a_digest_of_every_config_that_shapes_the_record(tmp_path
     versions = episode_module.default_versions()
     assert len(versions["config_digest"]) == 64
     assert versions["config_digest"] == episode_module.running_config_digest()
-    assert versions["harness"] == HARNESS_VERSION == "h0.7" and versions["controller"] == "c0.6"
+    assert versions["harness"] == HARNESS_VERSION == "h0.9" and versions["controller"] == "c0.6"
+    # 버전 **문자열**을 못 박는다 (R1 리뷰 1 M15): `s0.3`·`pw0.2`·`gen-robot-v0.2`는 자기 자신을 가리키는
+    # 단언밖에 없어, 누군가 올리거나 되돌려도 검사가 아무 말을 하지 않았다. 올리는 것은 **여기를 고치는 일**이다.
+    from robo_jev.data.robot_episodes import GENERATOR_VERSION as ROBOT_GENERATOR_VERSION
+    from robo_jev.model.serialize import STREAM_FORMAT, TOKEN_SERIALIZER_VERSION
+    from robo_jev.perception.pointworld import EXTRACTOR_VERSION
+
+    assert versions["sim"] == "s0.3" and EXTRACTOR_VERSION == "pw0.2"
+    assert ROBOT_GENERATOR_VERSION == "gen-robot-v0.2"
+    assert TOKEN_SERIALIZER_VERSION == "ts0.6" and STREAM_FORMAT == "v0.4"
+    from robo_jev.data.generate import GENERATOR_VERSION as SINGLE_GENERATOR_VERSION
+
+    assert SINGLE_GENERATOR_VERSION == "gen-single-v0.3.0"
 
     hrn = harness()
     record = new_episode("ep-0005", "scene-family-031", instructions=[INSTRUCTION])

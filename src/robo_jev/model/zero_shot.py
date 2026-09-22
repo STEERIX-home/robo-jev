@@ -195,4 +195,27 @@ def zero_shot_label_scores(
     return {
         "model_id": model_id, "recipe": "nimble: one-letter code per candidate, code rows of the LM head only, fp32 projection, per-record permutation",
         "shuffle_seed": shuffle_seed, "tick_stride": tick_stride, "prompts": prompts_total, "tokens": tokens_total, "table": table,
+        # 질문마다 하나씩 나온 예측을 **레코드 단위로 합쳐** 같이 돌려준다 — 대조 쌍 검사(`contrast_pair_check`)는
+        # 한 레코드의 여러 질문을 한 자리에서 본다. 학습한 run의 `return_predictions=True`와 같은 모양이다.
+        "predictions": merge_predictions(predictions),
     }
+
+
+def merge_predictions(predictions: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """(레코드, 질문)마다 하나인 예측을 **레코드마다 하나**로 합친다 (틱은 틱마다).
+
+    무학습 채점은 질문 하나가 프롬프트 하나라서 예측도 질문마다 난다. 대조 쌍 검사는 base와 sibling의 같은
+    질문을 한 레코드 안에서 찾으므로 그 모양이 필요하다.
+    """
+    merged: dict[tuple[str, Any], dict[str, Any]] = {}
+    for prediction in predictions:
+        key = (prediction["record_id"], prediction.get("tick"))
+        entry = merged.get(key)
+        if entry is None:
+            entry = {**prediction, "probabilities": {}, "candidates": {}, "labels": [], "question_types": {}}
+            merged[key] = entry
+        entry["probabilities"].update(prediction["probabilities"])
+        entry["candidates"].update(prediction["candidates"])
+        entry["question_types"].update(prediction["question_types"])
+        entry["labels"].extend(prediction["labels"])
+    return list(merged.values())

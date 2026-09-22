@@ -54,6 +54,8 @@ _BASE_ORIENTATION_TOLERANCE = 1e-9
 
 #: 설정의 `reach.min_height_mm`가 실제 테이블 윗면과 이만큼 넘게 어긋나면 실패한다.
 _TABLE_HEIGHT_TOLERANCE_MM = 2.0
+#: 로봇(팔·그리퍼) body 이름의 접두사 — 자기 가림 판정이 광선을 막은 것이 로봇인지 가른다.
+_ROBOT_BODY_PREFIX = "robot0"
 
 #: 물리 timestep 비교 허용 오차(초). 설정은 ms 정수이므로 부동소수 표현 오차만 흡수한다.
 _TIMESTEP_TOLERANCE_S = 1e-12
@@ -197,6 +199,8 @@ class Environment:
         self.plan: ScenePlan | None = None
         self._env: TidyClutter | None = None
         self._model_signature: tuple | None = None
+        #: 로봇(팔·그리퍼)의 body id — 자기 가림 판정이 쓴다. 모델을 다시 지으면 비운다.
+        self._robot_bodies: frozenset[int] | None = None
         self.seed: int | None = None
         # 에피소드 RNG. 3a는 여기서 뽑지 않지만(장면·일정은 reset seed가 통째로 정한다)
         # snapshot에 담아 둔다. 뒤 slice가 에피소드 안에서 난수를 써야 할 때 **이 두 개**를
@@ -264,6 +268,7 @@ class Environment:
                 seed=self.seed,
             )
             self._model_signature = signature
+            self._robot_bodies = None  # 새 모델 — body id를 다시 찾는다
         # robosuite는 생성자에서 `_reset_internal`을 부르지 않는다. 물체 자세는 거기서
         # 놓이므로 새로 지었든 재사용하든 여기서 한 번 reset한다.
         self._env.reset()
@@ -350,6 +355,8 @@ class Environment:
         self._step_events: list[dict[str, Any]] = []
         self._contacting: dict[str, bool] = {obj.id: False for obj in self.plan.objects}
         self._last_seen_ms: dict[str, int] = {obj.id: 0 for obj in self.plan.objects}
+        #: 마지막으로 **실제로 본** 자세 — 자기 가림 구간에서 물체가 움직였는지 가른다 (s0.3).
+        self._last_observed_mm: dict[str, list[float]] = {}
         self._holding: str | None = None
         self._grasp_pose_mm: dict[str, list[float]] = {}
 
@@ -567,11 +574,15 @@ class Environment:
             int(round(y1 + shift[1])),
         ]
 
-    def _visibility(self) -> dict[str, float]:
-        """고정 시점에서 물체 윗면 표본으로 광선을 쏴 가시 비율을 잰다.
+    def _visibility(self) -> tuple[dict[str, float], dict[str, float]]:
+        """고정 시점에서 물체 윗면 표본으로 광선을 쏴 (가시 비율, **로봇 자신에게 막힌** 비율)을 잰다.
 
         참값을 읽지 않는다 — 실제로 막히는지 MuJoCo에 물어본다. 앞단(3D 재구성)이
         채울 수 있는 값만 만든다는 docs/08 §3.2의 조건을 지키는 근사다.
+
+        두 번째 값은 **자기 가림**(self-occlusion)이다: 그 광선을 막은 것이 로봇의 몸이면 따로 센다.
+        앞단(3D 재구성·추적기)은 로봇의 자세를 알고 있으므로 자기 가림은 예측 가능한 결측이고,
+        정지한 물체를 그 구간 동안 추적으로 이어 든다 (:meth:`_observation`, s0.3 · Task R1 B2-v).
         """
         spec = self.settings["visibility"]
         offset = [float(value) / 1000.0 for value in spec["viewpoint_mm"]]
@@ -587,12 +598,16 @@ class Environment:
         model, data = self._env.sim.model._model, self._env.sim.data._data
         geom_id = np.zeros(1, dtype=np.int32)
 
+        robot_bodies = self._robot_body_ids()
+
         ratios: dict[str, float] = {}
+        self_blocked: dict[str, float] = {}
         for plan_object in self.plan.objects:
             body = self._env.object_body_ids[plan_object.id]
             centre = np.array(self._env.sim.data.body_xpos[body])
             rotation = np.array(self._env.sim.data.body_xmat[body]).reshape(3, 3)
             hits = 0
+            blocked_by_robot = 0
             offsets = _top_face_samples(plan_object, inflate, samples)
             for offset in offsets:
                 target = centre + rotation @ offset
@@ -603,10 +618,51 @@ class Environment:
                 mujoco.mj_ray(
                     model, data, viewpoint, direction / distance, None, 1, -1, geom_id
                 )
-                if geom_id[0] >= 0 and int(model.geom_bodyid[geom_id[0]]) == body:
+                if geom_id[0] < 0:
+                    continue
+                blocker = int(model.geom_bodyid[geom_id[0]])
+                if blocker == body:
                     hits += 1
+                elif blocker in robot_bodies:
+                    blocked_by_robot += 1
             ratios[plan_object.id] = hits / max(1, len(offsets))
-        return ratios
+            self_blocked[plan_object.id] = blocked_by_robot / max(1, len(offsets))
+        return ratios, self_blocked
+
+    def _robot_body_ids(self) -> frozenset[int]:
+        """로봇(팔·그리퍼)에 속한 body id 집합. 모델이 바뀌지 않는 동안 한 번만 만든다."""
+        if self._robot_bodies is None:
+            model = self._env.sim.model._model
+            names = (
+                mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, index) or ""
+                for index in range(model.nbody)
+            )
+            self._robot_bodies = frozenset(
+                index for index, name in enumerate(names) if name.startswith(_ROBOT_BODY_PREFIX)
+            )
+        return self._robot_bodies
+
+    def _carried_through_self_occlusion(
+        self,
+        object_id: str,
+        ratio: float,
+        self_blocked: dict[str, float],
+        threshold: float,
+        position: Any,
+        carry_mm: float,
+    ) -> bool:
+        """로봇의 몸이 없었다면 보였을 물체가 **움직이지 않았는가** (s0.3, Task R1 B2-v).
+
+        앞단(3D 재구성·추적기)은 로봇의 자세를 알므로 자기 가림은 예측 가능한 결측이고, 그 구간의 정지한 물체는
+        마지막 자세로 이어 든다 — docs/08 §3.2가 이미 "가시 비율은 정보이지 실행 가능성의 기준이 아니다"라고 적은
+        것과 같은 취지다. **움직였으면 이어 들지 않는다**: 그때는 추적이 틀렸으므로 기하가 늙어야 한다(외란이 자기
+        가림 중인 물체를 밀면 다시 봐야 한다). 판정에 참값 자세를 쓰는 것은 시뮬레이션의 근사다 — 실제 추적기는
+        재관측으로 같은 판정을 한다(docs/04 §3).
+        """
+        if carry_mm <= 0.0 or ratio + float(self_blocked.get(object_id, 0.0)) < threshold:
+            return False
+        last = self._last_observed_mm.get(object_id)
+        return last is not None and math.dist(list(position), last) <= carry_mm
 
     def _sensors(self, target_ref: str | None = None) -> dict[str, Any]:
         """실행기가 아는 자기 상태. 컨트롤러의 반사·readiness가 이것만 본다.
@@ -698,8 +754,9 @@ class Environment:
 
     def _observation(self, ack: dict[str, Any] | None) -> dict[str, Any]:
         assert self.plan is not None
-        ratios = self._visibility()
+        ratios, self_blocked = self._visibility()
         threshold = float(self.settings["visibility"]["visible_ratio_threshold"])
+        carry_mm = float(self.settings["visibility"].get("self_occlusion_carry_mm", 0.0))
 
         objects = []
         shape_labels = dict(self.settings["objects"]["shape_labels"])
@@ -707,8 +764,16 @@ class Environment:
             position, quat = self._object_pose(plan_object.id)
             ratio = ratios[plan_object.id]
             visible = ratio >= threshold
+            self_tracked = False
             if visible:
                 self._last_seen_ms[plan_object.id] = self.sim_time_ms
+                self._last_observed_mm[plan_object.id] = list(position)
+            elif self._carried_through_self_occlusion(plan_object.id, ratio, self_blocked, threshold, position, carry_mm):
+                # 자기 가림 구간의 **정지한** 물체는 추적기가 이어 든다 — 기하 나이가 자라지 않는다(앞단이
+                # 판정하므로 `self_tracked`로 알린다). 팔이 관측 자세에서 카메라를 가려 스스로 풀 수 없는
+                # 정체(ep-E1-000235)의 근본 원인이다 (s0.3 · Task R1 B2-v).
+                self._last_seen_ms[plan_object.id] = self.sim_time_ms
+                self_tracked = True
             objects.append(
                 {
                     "id": plan_object.id,
@@ -725,6 +790,8 @@ class Environment:
                     "visible_ratio": round(ratio, 2),
                     "attributes": list(plan_object.attributes),
                     "last_seen_ms": int(self._last_seen_ms[plan_object.id]),
+                    # 앞단의 자기 가림 보정: 로봇의 몸에만 가린 **정지한** 물체는 추적으로 이어 든다 (s0.3).
+                    "self_tracked": bool(self_tracked),
                 }
             )
 
@@ -951,6 +1018,7 @@ class Environment:
             self._env.close()
             self._env = None
             self._model_signature = None
+            self._robot_bodies = None
 
 
 # --------------------------------------------------------------------------

@@ -60,8 +60,11 @@ from robo_jev.sampler import Item, permute_candidates
 
 __all__ = [
     "aggregate",
+    "answer_stability",
     "calibration_error",
+    "column_event_metrics",
     "context_shuffle_records",
+    "donor_rotation",
     "contrast_pair_check",
     "episode_bootstrap",
     "evaluate_items",
@@ -73,9 +76,11 @@ __all__ = [
     "load_suite_items",
     "mechanical_baseline_predictions",
     "predict_items",
+    "reaction_delay",
     "rule_judge_predictions",
     "selective_metrics",
     "split_episode_bootstrap",
+    "stop_timing",
     "tiny_scorer_column",
 ]
 
@@ -665,6 +670,197 @@ def contrast_pair_check(predictions: list[dict[str, Any]], records: list[dict]) 
     return {"_all": summarise(total), **{kind: summarise(row) for kind, row in sorted(rows.items())}}
 
 
+# --------------------------------------------------------------------------
+# 사건을 재는 지표 (docs/08 §10, Task R1 C3) — 오프라인, 재생 기준, 틱별 예측에서
+# --------------------------------------------------------------------------
+
+#: 반응 지연의 상한 틱 수. 이 안에 새 정답 집합에 들지 못하면 **검열**로 센다 (평균에 상한을 섞지 않는다).
+REACTION_HORIZON_TICKS = 30
+
+
+def _per_record_index(per_record: Sequence[dict[str, Any]], question: str) -> dict[tuple[str, int], str]:
+    """`aggregate(..., store_predictions=…)`의 `per_record` → (에피소드, 틱) → argmax 후보 id."""
+    return {
+        (str(row["record_id"]), int(row["tick"])): str(row["predicted"])
+        for row in per_record
+        if row.get("question") == question and row.get("tick") is not None and row.get("predicted") is not None
+    }
+
+
+def _tick_label_ids(tick: dict[str, Any], question: str) -> list[str] | None:
+    label = next((item for item in tick.get("labels") or () if item.get("question_id") == question), None)
+    return [str(value) for value in label.get("candidate_ids") or ()] if label else None
+
+
+def _event_ticks(record: dict[str, Any]) -> dict[int, str]:
+    """사건이 난 틱 → 종류(`goal_change`·`world_event`). 목표 변경이 세계 사건과 겹치면 목표 변경이 이긴다."""
+    from robo_jev.sampler import tick_class
+
+    out: dict[int, str] = {}
+    for index, tick in enumerate(record.get("ticks") or ()):
+        events = [event for event in (tick["request"].get("state") or {}).get("events") or () if isinstance(event, dict)]
+        if tick_class(record, index) == "goal_change":
+            out[index] = "goal_change"
+        elif events:
+            out[index] = "world_event"
+    return out
+
+
+def reaction_delay(
+    per_record: Sequence[dict[str, Any]],
+    records: Sequence[dict[str, Any]],
+    *,
+    question: str = "q_main",
+    horizon: int = REACTION_HORIZON_TICKS,
+) -> dict[str, Any]:
+    """**반응 지연** (Task R1 C3-a): 사건이 난 틱마다, 모델의 argmax가 **그 틱의 새 정답 집합**에 처음 드는 데 걸린
+    틱 수다. `horizon` 안에 들지 못하면 값을 지어내지 않고 **검열**로 센다.
+
+    사건은 목표 변경 틱(`tick_class == "goal_change"`)과 세계 사건이 실린 틱이고, 둘을 따로 적는다. 같은 자를 규칙
+    판정기·기계적 기준군의 `per_record`에도 대면 열이 나란히 선다 — 그것이 이 지표의 쓰임새다.
+    """
+    predicted = _per_record_index(per_record, question)
+    rows: dict[str, dict[str, Any]] = {}
+    for record in records:
+        episode = str(record.get("episode_id") or record.get("record_id") or "")
+        ticks = record.get("ticks") or ()
+        for index, kind in _event_ticks(record).items():
+            answer = _tick_label_ids(ticks[index], question)
+            if not answer:
+                continue
+            row = rows.setdefault(kind, {"events": 0, "delays": [], "censored": 0})
+            row["events"] += 1
+            for delay in range(0, min(horizon, len(ticks) - index)):
+                if predicted.get((episode, index + delay)) in set(answer):
+                    row["delays"].append(delay)
+                    break
+            else:
+                row["censored"] += 1
+
+    def summarise(row: dict[str, Any]) -> dict[str, Any]:
+        delays = sorted(row["delays"])
+        return {
+            "events": row["events"],
+            "reacted": len(delays),
+            "censored": row["censored"],
+            "censored_rate": (row["censored"] / row["events"]) if row["events"] else None,
+            "immediate_rate": (sum(1 for value in delays if value == 0) / row["events"]) if row["events"] else None,
+            "median_ticks": _quantile(delays, 0.5) if delays else None,
+            "p90_ticks": _quantile(delays, 0.9) if delays else None,
+            "mean_ticks": (sum(delays) / len(delays)) if delays else None,
+        }
+
+    out = {kind: summarise(row) for kind, row in sorted(rows.items())}
+    out["horizon_ticks"] = horizon
+    return out
+
+
+def answer_stability(
+    per_record: Sequence[dict[str, Any]], records: Sequence[dict[str, Any]], *, question: str = "q_main"
+) -> dict[str, Any]:
+    """**안정성** (Task R1 C3-b): 라벨이 **바뀌지 않은** 연속 구간에서 모델의 답이 바뀐 비율(전환율), 왕복(A→B→A) 수,
+    한 답을 유지한 시간의 분포.
+
+    사건이 없는데 답이 흔들리는 것은 반응이 아니라 잡음이다 — 반응 지연과 짝으로만 읽는다.
+    """
+    predicted = _per_record_index(per_record, question)
+    transitions = steps = round_trips = 0
+    holds: list[int] = []
+    segments = 0
+    for record in records:
+        episode = str(record.get("episode_id") or record.get("record_id") or "")
+        ticks = record.get("ticks") or ()
+        start = 0
+        while start < len(ticks):
+            answer = _tick_label_ids(ticks[start], question)
+            end = start
+            while end + 1 < len(ticks) and _tick_label_ids(ticks[end + 1], question) == answer:
+                end += 1
+            series = [predicted.get((episode, index)) for index in range(start, end + 1)]
+            series = [value for value in series if value is not None]
+            if answer and len(series) >= 2:
+                segments += 1
+                steps += len(series) - 1
+                transitions += sum(1 for a, b in zip(series, series[1:]) if a != b)
+                round_trips += sum(
+                    1 for a, b, c in zip(series, series[1:], series[2:]) if a == c and a != b
+                )
+                run = 1
+                for a, b in zip(series, series[1:]):
+                    if a == b:
+                        run += 1
+                    else:
+                        holds.append(run)
+                        run = 1
+                holds.append(run)
+            start = end + 1
+    holds.sort()
+    return {
+        "segments": segments,
+        "steps": steps,
+        "switch_rate": (transitions / steps) if steps else None,
+        "switches": transitions,
+        "round_trips": round_trips,
+        "hold_ticks_median": _quantile(holds, 0.5) if holds else None,
+        "hold_ticks_p90": _quantile(holds, 0.9) if holds else None,
+        "hold_ticks_mean": (sum(holds) / len(holds)) if holds else None,
+    }
+
+
+def stop_timing(
+    per_record: Sequence[dict[str, Any]],
+    records: Sequence[dict[str, Any]],
+    *,
+    question: str = "q_stop",
+    horizon: int = REACTION_HORIZON_TICKS,
+) -> dict[str, Any]:
+    """**`q_stop` 지연·오경보** (Task R1 C3-c): 정지가 필요해진 틱(라벨이 거짓 → 참으로 바뀐 틱)부터 모델이
+    `q_stop ≥ 0.5`(= 참 후보가 argmax)를 낼 때까지의 틱 수, 그리고 **정지가 필요 없는 틱**의 오경보율.
+
+    boolean 질문의 후보는 ``true``/``false`` 둘뿐이라 argmax가 곧 0.5 문턱이다.
+    """
+    predicted = _per_record_index(per_record, question)
+    onsets = 0
+    delays: list[int] = []
+    censored = 0
+    negative = false_alarm = 0
+    for record in records:
+        episode = str(record.get("episode_id") or record.get("record_id") or "")
+        ticks = record.get("ticks") or ()
+        previous = False
+        for index, tick in enumerate(ticks):
+            label = next((item for item in tick.get("labels") or () if item.get("question_id") == question), None)
+            if label is None or "answer" not in label:
+                continue
+            wants_stop = bool(label["answer"])
+            if wants_stop and not previous:
+                onsets += 1
+                for delay in range(0, min(horizon, len(ticks) - index)):
+                    if predicted.get((episode, index + delay)) == _TRUE:
+                        delays.append(delay)
+                        break
+                else:
+                    censored += 1
+            if not wants_stop:
+                answer = predicted.get((episode, index))
+                if answer is not None:
+                    negative += 1
+                    false_alarm += int(answer == _TRUE)
+            previous = wants_stop
+    delays.sort()
+    return {
+        "onsets": onsets,
+        "reacted": len(delays),
+        "censored": censored,
+        "censored_rate": (censored / onsets) if onsets else None,
+        "median_ticks": _quantile(delays, 0.5) if delays else None,
+        "p90_ticks": _quantile(delays, 0.9) if delays else None,
+        "quiet_ticks": negative,
+        "false_alarm_rate": (false_alarm / negative) if negative else None,
+        "horizon_ticks": horizon,
+    }
+
+
 def _label_answer(label: dict | None) -> Any:
     """라벨이 가리키는 답 — 비교 가능한 값으로 (허용 집합은 정렬한 tuple, 참/거짓은 그대로)."""
     if label is None:
@@ -882,14 +1078,76 @@ def _roll_commitment(own_tick: dict, donor_request: dict) -> bool:
     return True
 
 
-def _roll_instruction_text(shuffled: dict, donor: dict) -> None:
-    donor_texts = [i.get("text") for i in donor["prefix"].get("instructions", [])]
+def _roll_instruction_text(shuffled: dict, donor: dict) -> list[str]:
+    """지시 조각의 텍스트를 기증 에피소드의 것으로 (버전 순서대로). 돌려주는 것은 그 텍스트 목록이다."""
+    donor_texts = [str(i.get("text") or "") for i in donor["prefix"].get("instructions", []) if i.get("text")]
+    if not donor_texts:
+        return []
     for position, instruction in enumerate(shuffled["prefix"].get("instructions", [])):
-        if position < len(donor_texts) and donor_texts[position] is not None:
-            instruction["text"] = donor_texts[position]
+        # 기증자의 지시가 더 적으면 **마지막 문장**으로 채운다 — 하나라도 자기 문장이 남으면 이 열이 진짜 지시를 흘린다.
+        instruction["text"] = donor_texts[min(position, len(donor_texts) - 1)]
+    return donor_texts
 
 
-def context_shuffle_records(records: list[dict], *, robot: str = "state") -> list[dict]:
+def _roll_instruction_carriers(shuffled: dict, donor_texts: Sequence[str]) -> None:
+    """**모델이 지시 문장을 보는 자리 전부**를 기증 텍스트로 바꾼다 (Task R1 C2).
+
+    서식 v0.4에서 지시 문장은 세 자리로 온다: 정적 prefix의 지시 조각, 주기적으로 다시 싣는 `goal … text=`, 그리고
+    지시 변경 틱의 `ev instruction_changed text=…`. 하나라도 남기면 "지시 섞기" 열이 진짜 지시를 흘린다 — 그 열이
+    이제 **"지시를 읽는가"를 재는 열**이므로(`goal` 줄에 구조화된 목표가 없다) 셋을 같이 굴린다. 버전 **구조**는
+    그대로다: 버전 v의 자리에는 기증자의 v번째 문장이 들어간다.
+    """
+    if not donor_texts:
+        return
+    def text_for(version: Any) -> str:
+        try:
+            index = max(1, int(version)) - 1
+        except (TypeError, ValueError):
+            index = 0
+        return donor_texts[min(index, len(donor_texts) - 1)]
+
+    for tick in shuffled.get("ticks") or ():
+        state = tick["request"].get("state")
+        if not isinstance(state, dict):
+            continue
+        goal = state.get("goal")
+        if isinstance(goal, dict) and "text" in goal:
+            goal["text"] = text_for(goal.get("version", 1))
+        for event in state.get("events") or ():
+            if isinstance(event, dict) and event.get("kind") == "instruction_changed" and "text" in event:
+                event["text"] = text_for(event.get("version", 1))
+
+
+def _tick_count(record: dict) -> int:
+    return len(record.get("ticks") or ())
+
+
+def donor_rotation(records: list[dict], *, pair_by_length: bool = True) -> list[dict[str, Any]]:
+    """문맥 섞기의 기증자 배정 표 — 어느 편이 어느 편에게서 받는지와 길이 차이 (Task R1 C2의 투명성).
+
+    길이로 짝지으면 남는 차이가 작아지고, 남는 차이는 감아 돌아 읽으므로 **고정된 틱은 없다**. 표는 보고서가
+    옛 값(클램프)과 나란히 적을 수 있게 그 차이를 그대로 적는다.
+    """
+    groups: dict[str, list[int]] = {}
+    for index, record in enumerate(records):
+        groups.setdefault(str(record.get("schema_version")), []).append(index)
+    rows: list[dict[str, Any]] = []
+    for members in groups.values():
+        order = sorted(members, key=lambda index: (_tick_count(records[index]), str(records[index].get("episode_id") or index))) if pair_by_length else list(members)
+        for position, index in enumerate(order):
+            donor = order[(position + 1) % len(order)]
+            own, other = _tick_count(records[index]), _tick_count(records[donor])
+            rows.append({
+                "record": str(records[index].get("episode_id") or records[index].get("request_id") or index),
+                "donor": str(records[donor].get("episode_id") or records[donor].get("request_id") or donor),
+                "ticks": own, "donor_ticks": other,
+                "wrapped_ticks": max(0, own - other),
+                "clamped_ticks_under_old_rule": max(0, own - other),
+            })  # fmt: skip
+    return rows
+
+
+def context_shuffle_records(records: list[dict], *, robot: str = "state", pair_by_length: bool = True) -> list[dict]:
     """분할 안에서 문맥을 한 칸 굴린 레코드들 (모듈 설명). 레코드가 하나면 그대로(굴릴 것이 없다).
 
     `robot`은 로봇 스트림에 무엇을 굴리는지다 — ``"state"``(표준: 구조화된 상태를 id 재매핑으로, 지시 텍스트도 함께),
@@ -913,8 +1171,9 @@ def context_shuffle_records(records: list[dict], *, robot: str = "state") -> lis
         groups.setdefault(str(record.get("schema_version")), []).append(index)
     donors: dict[int, dict] = {}
     for members in groups.values():  # 같은 종류(단일/스트림) 안에서만 굴린다
-        for position, index in enumerate(members):
-            donors[index] = records[members[(position + 1) % len(members)]]
+        order = sorted(members, key=lambda index: (_tick_count(records[index]), str(records[index].get("episode_id") or index))) if pair_by_length else list(members)
+        for position, index in enumerate(order):
+            donors[index] = records[order[(position + 1) % len(order)]]
     out = []
     for index, record in enumerate(records):
         donor = donors[index]
@@ -922,21 +1181,19 @@ def context_shuffle_records(records: list[dict], *, robot: str = "state") -> lis
         if record.get("schema_version") == SCHEMA_SINGLE_REQUEST:
             shuffled["request"]["state"] = copy.deepcopy(donor["request"]["state"])
         elif record.get("schema_version") == SCHEMA_STREAM and donor is not record:
-            _roll_instruction_text(shuffled, donor)
+            donor_texts = _roll_instruction_text(shuffled, donor)
             donor_ticks = donor["ticks"]
             if robot == "instruction":
-                donor_goal = ((donor_ticks[0]["request"].get("state") or {}).get("goal") or {}).get("text")
-                for tick in shuffled["ticks"]:
-                    goal = (tick["request"].get("state") or {}).get("goal")
-                    if isinstance(goal, dict) and donor_goal is not None and "text" in goal:
-                        goal["text"] = donor_goal
+                _roll_instruction_carriers(shuffled, donor_texts)
             else:
                 for position, tick in enumerate(shuffled["ticks"]):
-                    # **길이 고정**: 기증자가 더 짧으면 그 뒤의 틱은 전부 기증자의 **마지막(끝난) 상태** 하나와 섞인다.
-                    # 이것이 대조군을 기증자 배정에 의존하게 만든다 — P3 판정 칸에서 20.7 %(524/2,530), 옛 8편 칸에서
-                    # 30.1 %(254/844)의 틱이 그렇고, 두 회전 사이에서 예측의 9.7 %가 움직였다 (P3 C1b;
-                    # `scripts/decision_cell_strata.py`의 `donor_rotation`이 모집단마다 다시 센다).
-                    donor_request = donor_ticks[min(position, len(donor_ticks) - 1)]["request"]
+                    # **길이 고정을 없앴다** (Task R1 C2). 옛 규칙은 `min(position, len(donor) - 1)`이라 기증자가 더
+                    # 짧으면 그 뒤의 틱이 전부 기증자의 **마지막(끝난) 상태** 하나와 섞였고, 그래서 이 열의 값이
+                    # **설정의 편 순서**에 달려 있었다 — P3 판정 칸의 20.7 %(524/2,530)가 고정됐고 같은 249틱의
+                    # 대조군이 두 회전 사이에서 0.727 → 0.960으로 움직였다(P3 C1b). 이제 둘을 함께 고친다:
+                    # 회전을 **길이로 짝짓고**(`pair_by_length`), 남는 차이는 기증자를 **감아 돌아** 읽는다. 어느
+                    # 틱도 끝난 장면 하나에 갇히지 않으므로 옛 값과는 다르다 — 나란히 적는다.
+                    donor_request = donor_ticks[position % len(donor_ticks)]["request"]
                     donor_state = donor_request.get("state") or {}
                     own_state = tick["request"].get("state")
                     if isinstance(own_state, dict) and donor_state:
@@ -968,6 +1225,7 @@ def evaluate_items(
     fused: bool = False,
     return_predictions: bool = False,
     store_predictions: bool | Sequence[str] = False,
+    event_metrics: bool = False,
 ) -> dict[str, Any]:
     """분할 하나의 표: 모델(``model``), 치환한 순서(``permuted`` + ``answer_change``), 문맥 섞기(``context_shuffle`` +
     ``context_shuffle_kind = "state"``: 비로봇은 상태 전체, 로봇 스트림은 id를 재매핑한 구조화 상태 — 모듈 설명), 로봇 스트림만의
@@ -1022,7 +1280,37 @@ def evaluate_items(
         result["mechanical_baseline"] = aggregate(mechanical_baseline_predictions(items), store_predictions=store_predictions)
         result["mechanical_baseline_policy"] = MECHANICAL_BASELINE_POLICY  # GPU를 쓰지 않는 상시 기준선 (P3 B3)
     result["episode_bootstrap"] = split_episode_bootstrap(result)
+    if event_metrics:
+        result["event_metrics"] = column_event_metrics(result, [item.record for item in items if item.kind == "stream"])
     return result
+
+
+#: 사건 지표를 낼 수 있는 열 — `per_record`가 있는 열이면 어느 것이든 같은 자로 잰다 (Task R1 C3).
+EVENT_METRIC_COLUMNS = ("model", "context_shuffle", "instruction_shuffle", "commitment_shuffle", "rule_judge", "mechanical_baseline")
+
+
+def column_event_metrics(table: dict[str, Any], records: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """표의 **모든 열**에 대해 반응 지연·안정성·`q_stop` 지연·오경보를 잰다 (Task R1 C3).
+
+    열마다 같은 자를 대는 것이 요점이다: 반응 지연은 규칙 판정기·기계적 기준군과 나란히 놓여야 "빠르다"는 말이
+    뜻을 갖는다. `per_record`가 없는 열은 건너뛴다(그 열은 `store_predictions`를 켜지 않은 것이다).
+    """
+    out: dict[str, Any] = {}
+    for column in EVENT_METRIC_COLUMNS:
+        block = table.get(column)
+        if not isinstance(block, dict):
+            continue
+        main = (block.get("q_main") or {}).get("per_record")
+        stop = (block.get("q_stop") or {}).get("per_record")
+        entry: dict[str, Any] = {}
+        if main:
+            entry["reaction_delay"] = reaction_delay(main, records)
+            entry["stability"] = answer_stability(main, records)
+        if stop:
+            entry["stop_timing"] = stop_timing(stop, records)
+        if entry:
+            out[column] = entry
+    return out
 
 
 def split_episode_bootstrap(table: dict[str, Any], **options: Any) -> dict[str, Any]:
@@ -1065,7 +1353,7 @@ _SUITE_SPLIT_KEYS = ("name", "manifest", "domain", "split", "files", "records", 
 _LEGACY_SUITE_COLUMNS = ("permuted", "state_shuffle", "instruction_shuffle", "rule_judge", "selective", "calibration")
 #: 열 선택 키 — 모델 열은 언제나 있다. P3가 더한 두 열(`commitment_shuffle`·`mechanical_baseline`)은 **기본이 거짓**이고
 #: 정체 payload에 들어가지 않는다 — 점수를 매긴 모집단을 바꾸지 않으므로 (:func:`eval_suite_identity`).
-_SUITE_COLUMNS = _LEGACY_SUITE_COLUMNS + ("commitment_shuffle", "mechanical_baseline")
+_SUITE_COLUMNS = _LEGACY_SUITE_COLUMNS + ("commitment_shuffle", "mechanical_baseline", "event_metrics")
 
 
 def load_eval_suite(path: Any) -> dict[str, Any]:
@@ -1241,6 +1529,7 @@ def evaluate_suite(
             mechanical_baseline=columns["mechanical_baseline"], window_ticks=suite["window_ticks"],
             tokens_per_batch=suite["tokens_per_batch"], fused=suite["fused"], return_predictions=True,
             store_predictions=entry.get("store_predictions") or False,
+            event_metrics=columns["event_metrics"],
         )  # fmt: skip
         predictions = table.pop("_predictions")
         if columns["calibration"]:

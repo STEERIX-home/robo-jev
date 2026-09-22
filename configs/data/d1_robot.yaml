@@ -5,7 +5,11 @@
 #
 # 한 에피소드가 데이터의 독립 단위다. split은 장면 계열(`robot/<profile>/family-<k>`, k = 물체 수·형상
 # 다중집합·영역 집합의 구조 서명, `robo_jev.data.robot_episodes.family_id`) 단위로 **생성 전에** 배정한다.
-version: d1-robot-v0.3
+# v0.4 (R1 리뷰 1 I7): 봉인 템플릿 id가 `v1#2`/`v2#2` → `v1#c`/`v2#c`로 **바뀌었는데** 버전이 그대로였다.
+# 한 버전 문자열이 서로 다른 템플릿을 봉인하는 두 설정을 가리키게 되는 것 — B1의 새 관문이 막으려던 바로 그
+# 실패다. 배포된 D1 데이터(`artifacts/datasets/d1-robot/d1`)는 `d1-robot-v0.3`을 옛 id와 함께 고정하고 있고
+# 그것이 옳다: 그 데이터는 그 설정으로 만들어졌다.
+version: d1-robot-v0.4
 
 # 레코드의 `versions.config_digest`에 드는 설정 파일. 네 경로를 전부 이름으로 적는다 — 빠지면 생성기가 기본 경로로
 # 대신하지 않고 거절한다(지문에 든 파일이 어느 것인지 설정만 보고 알 수 있어야 한다). 컨트롤러 설정은 하네스
@@ -55,7 +59,10 @@ split:
   #     origin_group은 `robot/<profile>/<계열>/goal-<영역>`이라 prefix로 그 계열 전부(어느 영역이든)가 걸린다.
   holdout_prefixes: ["robot/E1/family-n9-b4c5-zFLR"]
   holdout_domains: []
-  #   - 지시 문구 템플릿 변형 3번 (`configs/sim/tidy_clutter.yaml` instruction.v1_templates/v2_templates의 번호 2).
-  holdout_templates: ["v1#2", "v2#2"]
+  #   - 지시 문구 템플릿 변형 `c` (`configs/sim/tidy_clutter.yaml` instruction.v1_templates/v2_templates의 id `c`).
+  #     **D1 데이터는 옛 id(`v1#2`·`v2#2`)로 봉인돼 있다** — 그때의 템플릿은 번호로 id를 삼았고 문장도 달랐다(s0.2).
+  #     지금 이 설정으로 다시 생성하면 s0.3의 템플릿을 쓰므로 id도 새것이라야 한다. 생성기가 봉인 id가 장면 설정에
+  #     실제로 있는지 검사하므로(`scripts/generate_episodes.py`) 어긋나면 조용히 봉인이 풀리지 않고 멈춘다.
+  holdout_templates: ["v1#c", "v2#c"]
   #   - 개념 계열: 지시의 목표 영역이 zoneF("앞쪽 보관 영역")인 계열 — train은 zoneL/zoneR만 목표로 한다.
   holdout_concepts: ["robot:goal-zone:zoneF"]

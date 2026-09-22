@@ -281,6 +281,28 @@ def test_contract_digest_covers_the_four_parts_and_moves_with_one_byte():
     assert contract_differences(base, base) == [] and contract_differences(None, base) == ["missing"]
 
 
+def test_the_r1_serializer_change_moves_the_contract_digest_so_old_checkpoints_are_refused(tmp_path, monkeypatch):
+    """Task R1 A2: 풀어 놓은 목표를 모델 입력에서 뺀 것은 `serialize.py`의 변경이므로 digest가 바뀐다 — P1~P3의
+    체크포인트(`ts0.5` 서식으로 학습된 것)는 적재에서 거절되고, 별도 가드가 필요 없다."""
+    from robo_jev import train as training
+    from test_train import tiny_config
+
+    source = (REPO / "src" / "robo_jev" / "model" / "serialize.py").read_bytes()
+    assert b'TOKEN_SERIALIZER_VERSION = "ts0.6"' in source
+    old_source = source.replace(b'TOKEN_SERIALIZER_VERSION = "ts0.6"', b'TOKEN_SERIALIZER_VERSION = "ts0.5"')
+    base = contract_digest("00" * 32)
+    assert contract_differences(base, contract_digest("00" * 32, serialize_source=old_source)) == ["serialize_py"]
+
+    # 그 차이가 실제로 적재를 막는다: 옛 서식의 digest를 단 체크포인트는 지금 체크아웃에서 재개되지 않는다.
+    with training.Trainer(tiny_config(tmp_path, max_steps=1)) as trainer:
+        trainer.run_step()
+        path = trainer.save(tmp_path / "ts05.pt")
+    original = training.contract_digest
+    monkeypatch.setattr(training, "contract_digest", lambda sha, **kw: original(sha, serialize_source=old_source, **kw))
+    with pytest.raises(ValueError, match="serialize_py"):
+        training.Trainer(tiny_config(tmp_path, max_steps=2), resume=path)
+
+
 def test_train_manifest_carries_the_contract_digest_and_resume_refuses_a_different_checkout(tmp_path, monkeypatch):
     from robo_jev import train as training
     from test_train import tiny_config
