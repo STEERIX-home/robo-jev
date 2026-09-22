@@ -497,3 +497,186 @@ def test_a_split_can_ask_for_its_per_tick_predictions_without_moving_the_eval_se
     splits[0]["store_predictions"] = True
     everything = evaluate_suite(judge, load_eval_suite(_suite_file(tmp_path, splits=splits)), tokenizer=tokenizer, items=items)
     assert all("per_record" in row for key, row in everything["splits"]["d0/dev"]["model"].items() if key != "_all")
+
+
+# --------------------------------------------------------------------------
+# P3 — 대조군 하나 더, 상시 기준군 하나 더, 그리고 두 가지 평균
+# --------------------------------------------------------------------------
+
+
+def _commitment_streams(streams, *, hold_at=(1,)):
+    """fixture 스트림에 **commitment를 심는다** — D0 fixture는 commitment가 비어 있어 이 층이 아예 없다.
+
+    `hold_at` 틱은 `hold` 후보를 붙잡고 있고(라벨은 `c1`/`c2`이므로 **비-commitment 층**), 나머지 틱은 `c1`을
+    붙잡고 있다(라벨 안에 있으므로 **commitment 층**). 곧 한 레코드가 두 층을 모두 낸다."""
+    out = []
+    for record in copy.deepcopy(list(streams)):
+        for index, tick in enumerate(record["ticks"]):
+            reference = "c7" if index in hold_at else "c1"
+            key = next(c["key"] for c in tick["request"]["candidates"]["q_main"] if c["id"] == reference)
+            tick["request"]["commitment"] = {"action_ref": reference, "key": key, "phase": "approach", "held_ticks": 3, "last_switch_tick": 0}
+            tick["request"]["state"]["commitment"] = dict(tick["request"]["commitment"])
+            tick["request"]["state"]["exec"] = {"seq": index, "action_ref": reference, "phase": "approach"}
+            tick["request"]["exec_history"] = f"main={reference} phase=approach path=p0 speed=0 force=0 gripper=open stop=0 ack=ok"
+            for label in tick["labels"]:  # 계약: 부가 질문 라벨의 참조는 그 틱의 commitment와 같아야 한다
+                if "conditioned_on" in label:
+                    label["conditioned_on"] = f"{reference}/approach"
+        out.append(record)
+    return out
+
+
+def _stream_items(records, tokenizer, *, window_ticks=30):
+    return [
+        Item(index=index, kind="stream", record_id=record["episode_id"], split="dev", domain="robot", material="stream",
+             record=record, layout=serialize_request(record, tokenizer, layout="stream_l1a", window_ticks=window_ticks),
+             tokens=1, question_types={"q_main": "choice"})
+        for index, record in enumerate(records)
+    ]
+
+
+def test_the_mechanical_baseline_answers_the_commitment_then_the_observe_gate_and_reads_nothing_else(streams):
+    """B3 — "commitment가 있으면 그것, 없으면 `observe`"를 상시 열로 (P3 B3).
+
+    이 열은 대조군이 **보존하는 필드만** 읽는다. 어떤 모델 주장도 이 열을 넘지 못하면 주장이 아니므로, 그 값이
+    보고서에 늘 있어야 하고 계산이 시험으로 묶여 있어야 한다."""
+    from robo_jev.evaluate import MECHANICAL_BASELINE_POLICY, aggregate, mechanical_baseline_predictions
+
+    tokenizer = WhitespaceTokenizer()
+    records = _commitment_streams(streams[:2], hold_at=(1,))
+    predictions = mechanical_baseline_predictions(_stream_items(records, tokenizer))
+    assert predictions and all(set(p["probabilities"]) == {"q_main"} for p in predictions)  # 정의된 질문에만 답한다
+    by_tick = {(p["record_id"], p["tick"]): p for p in predictions}
+    for record in records:
+        for index in range(len(record["ticks"])):
+            entry = by_tick[(record["episode_id"], index)]
+            ids = entry["candidates"]["q_main"]
+            chosen = ids[int(entry["probabilities"]["q_main"].argmax())]
+            assert chosen == ("c7" if index == 1 else "c1")  # commitment 그대로
+    table = aggregate(predictions)
+    ticks = sum(len(record["ticks"]) for record in records)
+    # 손으로 센 기대값: 그 틱의 commitment가 허용 집합 안이면 맞다 (정책이 읽는 것은 그 줄뿐이다)
+    expected = sum(
+        int(("c7" if index == 1 else "c1") in next(label["candidate_ids"] for label in tick["labels"] if label["question_id"] == "q_main"))
+        for record in records
+        for index, tick in enumerate(record["ticks"])
+    )
+    assert table["q_main"]["n"] == ticks
+    assert table["q_main"]["accuracy"] == pytest.approx(expected / ticks) and 0 < expected < ticks
+    assert "commitment" in MECHANICAL_BASELINE_POLICY and "observe" in MECHANICAL_BASELINE_POLICY
+
+    # commitment를 지우면 `observe` 후보(c6)로 물러난다 — 그리고 라벨이 c1/c2이므로 전부 틀린다
+    blind = copy.deepcopy(records)
+    for record in blind:
+        for tick in record["ticks"]:
+            tick["request"]["commitment"] = None
+            tick["request"]["state"].pop("commitment", None)
+            tick["request"]["state"].pop("exec", None)
+            tick["labels"] = [label for label in tick["labels"] if "conditioned_on" not in label]  # 계약: commitment 없으면 부가 라벨도 없다
+    fallback = mechanical_baseline_predictions(_stream_items(blind, tokenizer))
+    assert all(entry["candidates"]["q_main"][int(entry["probabilities"]["q_main"].argmax())] == "c6" for entry in fallback)
+    blind_expected = sum(
+        int("c6" in next(label["candidate_ids"] for label in tick["labels"] if label["question_id"] == "q_main"))
+        for record in blind for tick in record["ticks"]
+    )
+    assert aggregate(fallback)["q_main"]["accuracy"] == pytest.approx(blind_expected / ticks)
+
+
+def test_rolling_the_commitment_keeps_the_reference_inside_this_tick_s_own_candidate_list(streams):
+    """B2 — commitment를 굴리되 **이 틱의 다른 후보로** 굴린다 (P3 B2).
+
+    기증 틱의 참조를 그대로 실으면 그 id가 이 틱의 후보 목록에 없다(실측 16.9 %만 들어맞는다). 하네스는 commitment의
+    후보 자리를 예약하므로 그런 입력은 계약 밖이고, 그때 대조군이 낮은 것은 읽지 못해서가 아니라 본 적 없는 입력이기
+    때문이 된다. 그래서 자리만 굴린다 — 참조는 언제나 이 틱의 실제 후보이고, 언제나 원래와 다르다."""
+    from robo_jev.evaluate import context_shuffle_records
+
+    records = _commitment_streams(streams[:3], hold_at=(1,))
+    rolled = context_shuffle_records(records, robot="state_commitment")
+    assert len(rolled) == len(records)
+    moved = 0
+    for before, after in zip(records, rolled):
+        for own, new in zip(before["ticks"], after["ticks"]):
+            ids = [c["id"] for c in new["request"]["candidates"]["q_main"]]
+            assert [c["id"] for c in own["request"]["candidates"]["q_main"]] == ids  # 후보 줄은 그대로다
+            reference = new["request"]["commitment"]["action_ref"]
+            assert reference in ids                                    # (i) 내부 정합성
+            assert reference != own["request"]["commitment"]["action_ref"]  # 언제나 굴렸다
+            assert new["request"]["state"]["commitment"]["action_ref"] == reference
+            assert new["request"]["state"]["exec"]["action_ref"] == reference
+            assert new["request"]["exec_history"].split(" ")[0] == f"main={reference}"   # 실행 이력도 같은 참조
+            assert new["request"]["exec_history"].split(" ")[1:] == own["request"]["exec_history"].split(" ")[1:]
+            assert new["request"]["commitment"]["key"] == next(c["key"] for c in new["request"]["candidates"]["q_main"] if c["id"] == reference)
+            moved += 1
+    assert moved == sum(len(record["ticks"]) for record in records)
+
+    # 표준 상태 섞기가 하던 일은 그대로 한다 — 목표가 기증 편의 것으로 바뀐다
+    plain = context_shuffle_records(records, robot="state")
+    assert rolled[0]["ticks"][0]["request"]["state"]["goal"] == plain[0]["ticks"][0]["request"]["state"]["goal"]
+    assert plain[0]["ticks"][0]["request"]["commitment"]["action_ref"] == records[0]["ticks"][0]["request"]["commitment"]["action_ref"]
+
+    # commitment가 없는 틱은 만들어 주지 않는다 — 없는 것은 굴릴 것이 없다
+    empty = copy.deepcopy(records)
+    for record in empty:
+        for tick in record["ticks"]:
+            tick["request"]["commitment"] = {}
+            tick["request"]["state"]["commitment"] = {}
+    untouched = context_shuffle_records(empty, robot="state_commitment")
+    assert all(tick["request"]["commitment"] == {} for record in untouched for tick in record["ticks"])
+
+    with pytest.raises(ValueError, match="state_commitment"):
+        context_shuffle_records(records, robot="commitment")
+
+
+def test_the_tick_weighted_and_the_episode_balanced_mean_are_both_reported_and_can_disagree():
+    """A3 — 편마다 크기가 다르면 두 평균이 갈린다. 갈리는 것 자체가 결과의 일부라 **둘 다** 낸다 (P3 A3)."""
+    from robo_jev.evaluate import episode_bootstrap
+
+    model = [{"episode_id": "big", "n": 300, "graded": 300, "correct": 300},
+             {"episode_id": "s1", "n": 20, "graded": 20, "correct": 0},
+             {"episode_id": "s2", "n": 20, "graded": 20, "correct": 0}]
+    control = [{"episode_id": "big", "n": 300, "graded": 300, "correct": 150},
+               {"episode_id": "s1", "n": 20, "graded": 20, "correct": 10},
+               {"episode_id": "s2", "n": 20, "graded": 20, "correct": 10}]
+    out = episode_bootstrap(model, control)
+    assert out["accuracy"] == pytest.approx(300 / 340)               # 틱 가중: 큰 편이 끈다
+    assert out["episode_balanced_accuracy"] == pytest.approx(1 / 3)  # 편 균등: 한 편이 한 표
+    assert out["margin"] == pytest.approx(300 / 340 - 170 / 340)
+    assert out["episode_balanced_margin"] == pytest.approx(1 / 3 - 0.5)
+    for key in ("accuracy_ci", "episode_balanced_accuracy_ci", "margin_ci", "episode_balanced_margin_ci"):
+        low, high = out[key]
+        assert low <= high
+    assert out["margin"] > 0 > out["episode_balanced_margin"]  # **부호가 갈린다** — 그 사실이 결과의 일부다
+    assert isinstance(out["episode_balanced_margin_includes_zero"], bool)
+
+    # 편 크기가 같으면 두 평균이 같다
+    same = [{"episode_id": name, "n": 10, "graded": 10, "correct": value} for name, value in (("a", 3), ("b", 7))]
+    both = episode_bootstrap(same)
+    assert both["accuracy"] == both["episode_balanced_accuracy"] == pytest.approx(0.5)
+
+
+def test_the_two_new_columns_run_and_do_not_move_the_eval_set_identity(tmp_path):
+    """P3의 두 열은 **무엇을 더 재는지**를 바꿀 뿐 무엇을 점수 매기는지를 바꾸지 않는다 — `store_predictions`와 같다.
+
+    그래서 켜고 끈 두 설정의 해시가 같아야 하고(같지 않으면 P3의 run들끼리도 나란히 놓을 수 없다), 옛 설정의 해시는
+    이 열들이 생기기 전과 같아야 한다(P1의 `79d09793eab5…`)."""
+    from robo_jev.evaluate import eval_suite_identity, evaluate_suite, load_eval_suite, load_suite_items
+
+    tokenizer = WhitespaceTokenizer()
+    plain = load_eval_suite(_suite_file(tmp_path))
+    assert plain["columns"]["commitment_shuffle"] is False and plain["columns"]["mechanical_baseline"] is False  # 기본은 꺼짐
+
+    columns = {**plain["columns"], "commitment_shuffle": True, "mechanical_baseline": True}
+    asked = load_eval_suite(_suite_file(tmp_path, columns=columns))
+    items = load_suite_items(asked, tokenizer=tokenizer)
+    assert eval_suite_identity(asked, items)["sha256"] == eval_suite_identity(plain, load_suite_items(plain, tokenizer=tokenizer))["sha256"]
+
+    judge = Judge.from_config(seed=5, vocab_size=SMALL_VOCAB)
+    table = evaluate_suite(judge, asked, tokenizer=tokenizer, items=items)["splits"]["d0/dev"]
+    assert table["commitment_shuffle_kind"] == "state_commitment" and "mechanical_baseline_policy" in table
+    assert table["commitment_shuffle"]["_all"]["n"] == table["context_shuffle"]["_all"]["n"]
+    assert table["mechanical_baseline"]["q_main"]["n"] == table["model"]["q_main"]["n"]
+    intervals = table["episode_bootstrap"]["q_main"]
+    assert set(intervals["commitment_shuffle"]) == {"control_accuracy", "margin", "margin_ci", "margin_half_width", "margin_includes_zero"}
+    assert "episode_balanced_accuracy" in intervals
+
+    # 스트림이 없는 분할에는 두 열이 없다
+    assert "commitment_shuffle" not in table.get("d0/dev_singles", {})

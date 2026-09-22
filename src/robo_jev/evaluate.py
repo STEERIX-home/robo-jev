@@ -22,13 +22,22 @@
   **지시 섞기**(`instruction_shuffle`, kind `instruction`; 로봇 스트림만)는 지시·목표 **텍스트**만 굴리고 구조화된 goal·물리
   상태·후보를 그대로 두는 둘째 열이다 — 상태에 달린 답(경로·그리퍼·속도·힘·완료·정지)은 여기서도 맞는 것이 정상이고, `goal`
   줄의 `target=`·`zone=`이 남아 있으므로 이 열과 같다는 것은 "텍스트가 불필요하다"는 뜻일 뿐 "문맥이 불필요하다"는 뜻이 아니다.
+  **commitment 섞기**(`commitment_shuffle`, kind `state_commitment`; P3 B2)는 상태 섞기 **에 더해** 이 틱의
+  `commitment.action_ref`를 이 틱의 다른 후보로 옮기는 셋째 대조군이다 — 표준 열은 그 줄을 일부러 남기고, 이 데이터에서는
+  정답이 바로 그 id인 틱이 다수라 표준 열이 답을 그대로 베껴 넘긴다. 표준 열은 P1·P2와의 비교를 위해 **바꾸지 않는다**.
+  이 열은 부가 질문 라벨의 `conditioned_on`도 함께 옮기므로(계약 검사) **`q_main`에서만 읽는다**.
 * 규칙 기준군 (docs/02, `robo_jev.harness.rule_judge`): 로봇 틱마다 규칙 판단기의 10개 답을 같은 후보 목록 위의 확률로
   바꿔 같은 지표를 낸다 — 하네스만으로 풀리는 범위의 기준. 이 함수만 하네스를 import하므로 :mod:`robo_jev.train` 은
   이 모듈을 import하지 않는다(docs/06 §1의 경계는 학습 코드 쪽에 둔다).
+* **기계적 기준군** (`mechanical_baseline`, P3 B3): "commitment가 있으면 그것, 없으면 `observe`" — 대조군이 보존하는
+  필드만 읽는 정책의 답(:func:`mechanical_baseline_predictions`). 규칙 판정기·소형 scorer와 나란한 상시 기준선이고,
+  **이 열을 넘지 못하는 모델 주장은 주장이 아니다**. GPU pass가 필요 없다.
 * **편 단위 불확실성** (Task P2 B): 틱은 편(에피소드) 안에서 상관되어 있어 독립 단위는 틱이 아니라 편이다. 그래서
   :func:`aggregate` 가 질문 칸마다 편 단위 집계(``per_episode``)를 표에 남기고, :func:`episode_bootstrap` 이 편을
   표본 단위로 재표집해 정확도의 구간과 **대조군 대비 여유의 쌍 구간**을 낸다 — 그 구간이 0을 포함하는 여유는
-  판정이 아니다. (P1은 `_predictions`를 표를 쓰기 전에 버려서 이 수를 산출물로 낼 수 없었다.)
+  판정이 아니다. (P1은 `_predictions`를 표를 쓰기 전에 버려서 이 수를 산출물로 낼 수 없었다.) 편마다 크기가 다르므로
+  같은 재표집에서 **틱 가중 평균과 편 균등 평균을 둘 다** 낸다(`episode_balanced_*`; P3 A3) — 둘이 갈리면 그 사실이
+  결과의 일부다.
 """
 
 from __future__ import annotations
@@ -62,6 +71,7 @@ __all__ = [
     "label_metrics",
     "load_eval_suite",
     "load_suite_items",
+    "mechanical_baseline_predictions",
     "predict_items",
     "rule_judge_predictions",
     "selective_metrics",
@@ -153,6 +163,66 @@ def rule_judge_predictions(items: list[Item]) -> list[dict[str, Any]]:
                     "probabilities": probabilities,
                     "candidates": {qid: list(ids) for qid, ids in entry["candidate_mapping"].items() if qid in probabilities},
                     "labels": list(tick.get("labels", [])), "question_types": dict(item.question_types),
+                }
+            )
+    return out
+
+
+#: 기계적 기준군이 답하는 질문. 이 정책은 `q_main`에만 정의된다 — 다른 질문에는 대응하는 "하던 것" 필드가 없다.
+MECHANICAL_BASELINE_QUESTION = "q_main"
+#: 그 정책을 한 줄로 (보고서·표에 그대로 싣는다).
+MECHANICAL_BASELINE_POLICY = (
+    "answer the tick's own commitment.action_ref if there is one, otherwise the observe gate key "
+    "— both are fields the state shuffle preserves, so this column reads nothing"
+)
+
+
+def _tick_commitment(request: dict[str, Any]) -> str | None:
+    """이 틱의 commitment 참조 — 모델이 보는 자리(`request.commitment`)를 먼저 읽고 없으면 상태 쪽."""
+    for source in (request.get("commitment"), (request.get("state") or {}).get("commitment")):
+        if isinstance(source, dict) and source.get("action_ref") is not None:
+            return str(source["action_ref"])
+    return None
+
+
+def mechanical_baseline_predictions(items: list[Item]) -> list[dict[str, Any]]:
+    """**상시 기준군 열** — 아무것도 읽지 않는 정책의 답 (:data:`MECHANICAL_BASELINE_POLICY`), 모델 예측과 같은 꼴.
+
+    왜 열인가 (P3 B3). 판정 칸의 표준 대조군(상태 섞기)은 `commitment`·`exec`·실행 이력을 **일부러 남긴다** — 그것이
+    그 틱의 실행 이력이기 때문이다. 그런데 이 데이터에서는 정답이 바로 그 `commitment.action_ref`인 틱이 다수라,
+    "commitment가 있으면 그것, 없으면 `observe`"라는 정책이 아무 판단 없이 높은 값을 받는다 (P2 판정 칸에서 0.890).
+    그러므로 **어떤 모델 주장도 이 열을 넘지 못하면 주장이 아니다**. 규칙 판정기(목표를 읽는다)·소형 scorer(패턴)와
+    나란한 셋째 기준선이고, 이 열도 편 단위 집계를 남겨 같은 쌍 부트스트랩에 들어간다.
+
+    `q_main`에만 답한다 — 다른 질문에는 대응하는 "하던 것 계속하기" 필드가 없다. commitment 참조가 이 틱의 후보
+    목록에 없으면(하네스는 자리를 예약하므로 D1에서는 0건이다) `observe` 키로 물러난다."""
+    out: list[dict[str, Any]] = []
+    for item in items:
+        if item.kind != "stream":
+            continue
+        for index, tick in enumerate(item.record["ticks"]):
+            mapping = item.layout["ticks"][index]["candidate_mapping"].get(MECHANICAL_BASELINE_QUESTION)
+            if not mapping:
+                continue
+            ids = list(mapping)
+            commitment = _tick_commitment(tick["request"])
+            chosen = commitment if commitment in ids else None
+            if chosen is None:
+                entries = tick["request"].get("candidates", {}).get(MECHANICAL_BASELINE_QUESTION) or []
+                keys = {str(entry.get("id")): str(entry.get("key") or "") for entry in entries if isinstance(entry, dict)}
+                chosen = next((cid for cid in ids if keys.get(cid, "").startswith("observe")), None)
+            vector = torch.zeros(len(ids))
+            if chosen is None:
+                vector += 1.0 / len(ids)  # 답할 것이 없으면 균등 — 정책이 정의되지 않은 틱은 점수를 받지 않는다는 뜻이다
+            else:
+                vector[ids.index(chosen)] = 1.0
+            out.append(
+                {
+                    "record_id": item.record_id, "tick": index, "kind": "stream", "split": item.split, "group": item.record_id,
+                    "probabilities": {MECHANICAL_BASELINE_QUESTION: vector},
+                    "candidates": {MECHANICAL_BASELINE_QUESTION: ids},
+                    "labels": [label for label in tick.get("labels", []) if label.get("question_id") == MECHANICAL_BASELINE_QUESTION],
+                    "question_types": dict(item.question_types),
                 }
             )
     return out
@@ -333,8 +403,19 @@ def episode_bootstrap(
         correct = sum(int(source[name]["correct"]) for name in names if name in source)
         return (correct / graded) if graded else None
 
+    def _balanced(source: dict[str, dict[str, Any]], names: list[str]) -> float | None:
+        """**편 균등 평균** — 편마다 자기 정확도를 내고 그것들을 평균한다 (편이 길든 짧든 한 표) (P3 A3)."""
+        values = [
+            int(source[name]["correct"]) / int(source[name]["graded"])
+            for name in names
+            if name in source and int(source[name]["graded"])
+        ]
+        return (sum(values) / len(values)) if values else None
+
     accuracies: list[float] = []
     margins: list[float] = []
+    balanced_accuracies: list[float] = []
+    balanced_margins: list[float] = []
     rng = random.Random(seed)
     size = len(groups)
     for _ in range(int(resamples)):
@@ -343,19 +424,30 @@ def episode_bootstrap(
         if value is None:
             continue
         accuracies.append(value)
+        balanced = _balanced(model, drawn)
+        if balanced is not None:
+            balanced_accuracies.append(balanced)
         if paired:
             other = _accuracy(control, drawn)
             if other is not None:
                 margins.append(value - other)
+            other_balanced = _balanced(control, drawn)
+            if balanced is not None and other_balanced is not None:
+                balanced_margins.append(balanced - other_balanced)
     accuracies.sort()
+    balanced_accuracies.sort()
     low, high = (1.0 - level) / 2.0, 1.0 - (1.0 - level) / 2.0
     accuracy = _accuracy(model, groups)
+    balanced_accuracy = _balanced(model, groups)
     out: dict[str, Any] = {
         "episodes": size, "n": sum(int(model[name]["n"]) for name in groups),
         "graded": sum(int(model[name]["graded"]) for name in groups),
         "resamples": int(resamples), "seed": int(seed), "level": level, "unit": "episode",
         "accuracy": accuracy,
         "accuracy_ci": [_quantile(accuracies, low), _quantile(accuracies, high)] if accuracies else None,
+        # 편마다 크기가 다르므로 **틱 가중**(위)과 **편 균등**(아래) 두 평균을 함께 낸다 — 갈리면 그 사실이 결과다 (P3 A3).
+        "episode_balanced_accuracy": balanced_accuracy,
+        "episode_balanced_accuracy_ci": [_quantile(balanced_accuracies, low), _quantile(balanced_accuracies, high)] if balanced_accuracies else None,
     }
     if out["accuracy_ci"] is not None:
         out["accuracy_half_width"] = (out["accuracy_ci"][1] - out["accuracy_ci"][0]) / 2.0
@@ -369,6 +461,16 @@ def episode_bootstrap(
             "margin_ci": interval,
             "margin_half_width": (interval[1] - interval[0]) / 2.0,
             "margin_includes_zero": bool(interval[0] <= 0.0 <= interval[1]),
+        })  # fmt: skip
+    if paired and balanced_margins:
+        balanced_margins.sort()
+        control_balanced = _balanced(control, groups)
+        interval = [_quantile(balanced_margins, low), _quantile(balanced_margins, high)]
+        out.update({
+            "episode_balanced_control_accuracy": control_balanced,
+            "episode_balanced_margin": None if (balanced_accuracy is None or control_balanced is None) else balanced_accuracy - control_balanced,
+            "episode_balanced_margin_ci": interval,
+            "episode_balanced_margin_includes_zero": bool(interval[0] <= 0.0 <= interval[1]),
         })  # fmt: skip
     return out
 
@@ -628,7 +730,7 @@ def holding_twin_preference(predictions: list[dict[str, Any]], records: list[dic
 #: 로봇 상태 섞기가 기증 틱에서 가져오는 상태 구간 — 목표·물체·영역·장면·물체별 파생 값. 나머지(t·robot·exec·events·commitment·
 #: image·geom·extractor)와 요청의 후보·commitment·실행 이력은 이 틱의 것이다.
 _ROLLED_STATE_KEYS = ("goal", "objects", "zones", "scene")
-_ROBOT_SHUFFLE_KINDS = ("state", "instruction")
+_ROBOT_SHUFFLE_KINDS = ("state", "instruction", "state_commitment")
 
 
 def _ids(entries: Any) -> list[str]:
@@ -713,6 +815,62 @@ def _roll_stream_state(own_state: dict, donor_state: dict) -> dict:
     return rolled
 
 
+def _commitment_position(request: dict, ids: list[str]) -> int | None:
+    """이 요청의 commitment가 자기 `q_main` 후보 목록에서 몇 번째인가 (없으면 None)."""
+    reference = _tick_commitment(request)
+    return ids.index(reference) if reference is not None and reference in ids else None
+
+
+def _roll_commitment(own_tick: dict, donor_request: dict) -> bool:
+    """이 틱의 commitment를 **이 틱의 다른 후보**로 굴린다 — 자리는 기증 틱의 commitment 자리로 고른다 (P3 B2).
+
+    왜 이렇게만 굴리는가. 기증 틱의 참조를 그대로(또는 물체·영역 id만 다시 매핑해) 실으면 그 id가 이 틱의 후보
+    목록에 **없다** — D1 `ood_dev` 2,530틱 실측으로 16.9 %만 들어맞는다. 그런데 하네스는 commitment의 후보 자리를
+    **예약**하므로(`robo_jev.harness.robot`) 이 틱의 commitment는 2,033/2,033에서 후보 목록 안에 있다. 곧 날것의
+    굴리기는 계약을 깨는 입력을 만들고, 그때 대조군이 낮은 것은 "읽지 못해서"가 아니라 "본 적 없는 입력이라서"가
+    된다. 그래서 **자리만 굴린다**: 참조는 언제나 이 틱의 실제 후보이고, commitment가 있는 틱에서는 언제나 원래와
+    다른 후보가 된다(후보가 둘 이상이면).
+
+    commitment가 없는 틱은 그대로 둔다 — 없는 것은 새로 만들지 않는다. 바꾸는 자리는 `request.commitment`·
+    `state.commitment`·`state.exec`의 `action_ref`(와 `key`)와 실행 이력 줄의 `main=`뿐이고, 국면·속도·힘·그리퍼·
+    후보 줄은 이 틱의 것 그대로다.
+
+    **부가 질문 라벨의 `conditioned_on`도 같이 고친다.** 계약(:mod:`robo_jev.contracts`)이 부가 질문 라벨의
+    `conditioned_on`이 그 틱의 commitment와 **같아야 한다**고 검사하므로, 고치지 않으면 굴린 레코드는 직렬화 전에
+    거부된다. 답(`candidate_ids`)은 건드리지 않고 참조만 옮긴다. 그 결과 **이 열은 `q_main`에서만 읽을 수 있다** —
+    부가 질문의 답은 원래 commitment에 조건화된 전문가 답이라 굴린 뒤에는 그 답이 맞는지가 다른 물음이 된다.
+    돌려주는 값은 실제로 굴렸는가다."""
+    own_request = own_tick["request"]
+    entries = (own_request.get("candidates") or {}).get("q_main") or []
+    ids = [str(entry["id"]) for entry in entries if isinstance(entry, dict) and "id" in entry]
+    own_position = _commitment_position(own_request, ids)
+    if own_position is None or len(ids) < 2:
+        return False
+    donor_entries = (donor_request.get("candidates") or {}).get("q_main") or []
+    donor_ids = [str(entry["id"]) for entry in donor_entries if isinstance(entry, dict) and "id" in entry]
+    target = _commitment_position(donor_request, donor_ids)
+    position = (own_position + 1) % len(ids) if target is None else target % len(ids)
+    if position == own_position:  # 굴린 자리가 제자리면 한 칸 민다 — 이 열의 뜻은 "다른 후보를 붙잡고 있다"다
+        position = (position + 1) % len(ids)
+    reference = ids[position]
+    key = next((str(entry.get("key")) for entry in entries if str(entry.get("id")) == reference and entry.get("key") is not None), None)
+    for holder in (own_request.get("commitment"), (own_request.get("state") or {}).get("commitment"), (own_request.get("state") or {}).get("exec")):
+        if isinstance(holder, dict) and holder.get("action_ref") is not None:
+            holder["action_ref"] = reference
+            if "key" in holder and key is not None:
+                holder["key"] = key
+    history = own_request.get("exec_history")
+    if isinstance(history, str) and history:
+        own_request["exec_history"] = " ".join(
+            f"main={reference}" if field.startswith("main=") else field for field in history.split(" ")
+        )
+    phase = (own_request.get("commitment") or {}).get("phase")
+    for label in own_tick.get("labels") or ():  # 계약이 부가 질문 라벨의 참조를 commitment와 대조한다 (답은 그대로)
+        if isinstance(label, dict) and "conditioned_on" in label:
+            label["conditioned_on"] = f"{reference}/{phase}"
+    return True
+
+
 def _roll_instruction_text(shuffled: dict, donor: dict) -> None:
     donor_texts = [i.get("text") for i in donor["prefix"].get("instructions", [])]
     for position, instruction in enumerate(shuffled["prefix"].get("instructions", [])):
@@ -723,8 +881,10 @@ def _roll_instruction_text(shuffled: dict, donor: dict) -> None:
 def context_shuffle_records(records: list[dict], *, robot: str = "state") -> list[dict]:
     """분할 안에서 문맥을 한 칸 굴린 레코드들 (모듈 설명). 레코드가 하나면 그대로(굴릴 것이 없다).
 
-    `robot`은 로봇 스트림에 무엇을 굴리는지다 — ``"state"``(표준: 구조화된 상태를 id 재매핑으로, 지시 텍스트도 함께) 또는
-    ``"instruction"``(지시·목표 텍스트만; 구조화된 goal·물리 상태·후보는 그대로). 비로봇 단일 요청은 어느 쪽이든 상태 전체를 굴린다.
+    `robot`은 로봇 스트림에 무엇을 굴리는지다 — ``"state"``(표준: 구조화된 상태를 id 재매핑으로, 지시 텍스트도 함께),
+    ``"instruction"``(지시·목표 텍스트만; 구조화된 goal·물리 상태·후보는 그대로), 또는 ``"state_commitment"``(표준
+    상태 섞기 **에 더해** 이 틱의 commitment 참조를 이 틱의 다른 후보로 옮긴다 — :func:`_roll_commitment`, P3 B2).
+    비로봇 단일 요청은 어느 쪽이든 상태 전체를 굴린다.
 
     상태 섞기에서 **기증 틱의 물체가 더 적으면 이 틱의 남는 물체는 그대로 둔다** — 후보의 id가 모두 풀려야 하기 때문이다
     (D1 dev 16.8 % · test 31.2 % · ood_dev 32.9 %의 틱; 굴린 `goal.target_ref`가 그 남은 물체를 가리킨 틱은 0). 즉 굴리기는
@@ -756,10 +916,13 @@ def context_shuffle_records(records: list[dict], *, robot: str = "state") -> lis
                         goal["text"] = donor_goal
             else:
                 for position, tick in enumerate(shuffled["ticks"]):
-                    donor_state = donor_ticks[min(position, len(donor_ticks) - 1)]["request"].get("state") or {}
+                    donor_request = donor_ticks[min(position, len(donor_ticks) - 1)]["request"]
+                    donor_state = donor_request.get("state") or {}
                     own_state = tick["request"].get("state")
                     if isinstance(own_state, dict) and donor_state:
                         tick["request"]["state"] = _roll_stream_state(own_state, donor_state)
+                    if robot == "state_commitment":
+                        _roll_commitment(tick, donor_request)
         out.append(shuffled)
     return out
 
@@ -777,7 +940,9 @@ def evaluate_items(
     shuffle_seed: int | None = 1,
     context_shuffle: bool = True,
     instruction_shuffle: bool = False,
+    commitment_shuffle: bool = False,
     rule_judge: bool = True,
+    mechanical_baseline: bool = False,
     window_ticks: int = 30,
     tokens_per_batch: int = 8192,
     fused: bool = False,
@@ -786,7 +951,9 @@ def evaluate_items(
 ) -> dict[str, Any]:
     """분할 하나의 표: 모델(``model``), 치환한 순서(``permuted`` + ``answer_change``), 문맥 섞기(``context_shuffle`` +
     ``context_shuffle_kind = "state"``: 비로봇은 상태 전체, 로봇 스트림은 id를 재매핑한 구조화 상태 — 모듈 설명), 로봇 스트림만의
-    지시 텍스트 섞기(``instruction_shuffle`` + ``instruction_shuffle_kind``; `instruction_shuffle=True`일 때), 규칙 기준군(``rule_judge``),
+    지시 텍스트 섞기(``instruction_shuffle`` + ``instruction_shuffle_kind``; `instruction_shuffle=True`일 때),
+    commitment 섞기(``commitment_shuffle`` + ``commitment_shuffle_kind``; P3 B2), 규칙 기준군(``rule_judge``),
+    기계적 기준군(``mechanical_baseline`` + ``mechanical_baseline_policy``; P3 B3),
     그리고 질문 칸마다의 **편 단위 95 % 구간**(``episode_bootstrap`` — :func:`split_episode_bootstrap`).
 
     ``store_predictions``(참 또는 질문 칸 이름 목록)이면 **모든 열**이 그 칸에 ``per_record``도 남긴다 — 나중에
@@ -823,8 +990,16 @@ def evaluate_items(
         rolled = context_shuffle_records([item.record for item in streams], robot="instruction")
         result["instruction_shuffle"] = aggregate(predict_items(judge, reserialised(streams, rolled), tokens_per_batch=tokens_per_batch, fused=fused), store_predictions=store_predictions)
         result["instruction_shuffle_kind"] = "instruction"  # 로봇 스트림: 지시·목표 텍스트만 굴림, 구조화 goal·상태·후보 유지
+    if commitment_shuffle and any(item.kind == "stream" for item in items):
+        streams = [item for item in items if item.kind == "stream"]
+        rolled = context_shuffle_records([item.record for item in streams], robot="state_commitment")
+        result["commitment_shuffle"] = aggregate(predict_items(judge, reserialised(streams, rolled), tokens_per_batch=tokens_per_batch, fused=fused), store_predictions=store_predictions)
+        result["commitment_shuffle_kind"] = "state_commitment"  # 상태 섞기 + commitment 참조를 이 틱의 다른 후보로 (P3 B2)
     if rule_judge and any(item.kind == "stream" for item in items):
         result["rule_judge"] = aggregate(rule_judge_predictions(items), store_predictions=store_predictions)
+    if mechanical_baseline and any(item.kind == "stream" for item in items):
+        result["mechanical_baseline"] = aggregate(mechanical_baseline_predictions(items), store_predictions=store_predictions)
+        result["mechanical_baseline_policy"] = MECHANICAL_BASELINE_POLICY  # GPU를 쓰지 않는 상시 기준선 (P3 B3)
     result["episode_bootstrap"] = split_episode_bootstrap(result)
     return result
 
@@ -840,7 +1015,7 @@ def split_episode_bootstrap(table: dict[str, Any], **options: Any) -> dict[str, 
         entry = episode_bootstrap((table["model"].get(qid) or {}).get("per_episode"), **options)
         if entry is None:
             continue
-        for name, column in (("state_shuffle", "context_shuffle"), ("instruction_shuffle", "instruction_shuffle")):
+        for name, column in (("state_shuffle", "context_shuffle"), ("instruction_shuffle", "instruction_shuffle"), ("commitment_shuffle", "commitment_shuffle")):
             rows = ((table.get(column) or {}).get(qid) or {}).get("per_episode")
             control = episode_bootstrap((table["model"].get(qid) or {}).get("per_episode"), rows, **options) if rows else None
             if control is not None and "margin" in control:
@@ -858,8 +1033,11 @@ def split_episode_bootstrap(table: dict[str, Any], **options: Any) -> dict[str, 
 _SUITE_KEYS = ("version", "window_ticks", "shuffle_seed", "tokens_per_batch", "fused", "columns", "tiny_scorer_report", "splits", "note")
 #: 분할 하나의 키.
 _SUITE_SPLIT_KEYS = ("name", "manifest", "domain", "split", "files", "records", "limit", "max_ticks", "selection", "store_predictions", "note")
-#: 열 선택 키 — 모델 열은 언제나 있다.
-_SUITE_COLUMNS = ("permuted", "state_shuffle", "instruction_shuffle", "rule_judge", "selective", "calibration")
+#: P1·P2가 쓴 열 선택 키 — 기본값은 참이고, :func:`eval_suite_identity` 의 payload에 **언제나** 들어간다.
+_LEGACY_SUITE_COLUMNS = ("permuted", "state_shuffle", "instruction_shuffle", "rule_judge", "selective", "calibration")
+#: 열 선택 키 — 모델 열은 언제나 있다. P3가 더한 두 열(`commitment_shuffle`·`mechanical_baseline`)은 **기본이 거짓**이고
+#: 정체 payload에 들어가지 않는다 — 점수를 매긴 모집단을 바꾸지 않으므로 (:func:`eval_suite_identity`).
+_SUITE_COLUMNS = _LEGACY_SUITE_COLUMNS + ("commitment_shuffle", "mechanical_baseline")
 
 
 def load_eval_suite(path: Any) -> dict[str, Any]:
@@ -900,7 +1078,7 @@ def load_eval_suite(path: Any) -> dict[str, Any]:
         "path": str(path), "version": config.get("version"), "window_ticks": int(config.get("window_ticks", 30)),
         "shuffle_seed": config.get("shuffle_seed", 1), "tokens_per_batch": int(config.get("tokens_per_batch", 8192)),
         "fused": bool(config.get("fused", False)),
-        "columns": {key: bool(columns.get(key, True)) for key in _SUITE_COLUMNS},
+        "columns": {key: bool(columns.get(key, key in _LEGACY_SUITE_COLUMNS)) for key in _SUITE_COLUMNS},
         "tiny_scorer_report": config.get("tiny_scorer_report"), "splits": [dict(entry) for entry in splits],
         "note": config.get("note"),
     }
@@ -957,8 +1135,13 @@ def eval_suite_identity(suite: dict[str, Any], items: dict[str, list[Item]], *, 
             "records": [item.record_id for item in chosen],
             "states": sum(len(item.record["ticks"]) if item.kind == "stream" else 1 for item in chosen),
         }
+    # P3가 더한 두 열은 payload에 **넣지 않는다** — `store_predictions`와 같은 이유로, 무엇을 더 재는지를 바꿀 뿐
+    # **무엇을 점수 매기는지**를 바꾸지 않기 때문이다. 그래서 같은 레코드 목록을 쓰는 P3의 run들은 commitment 섞기
+    # 열을 켰든 껐든 한 해시를 공유하고, 켜지 않은 설정의 해시는 P1·P2가 낸 것과 그대로 같다(pilot.yaml `79d09793eab5…`).
+    # 옛 여섯 열은 그대로 둔다 — 빼면 그 해시가 움직여 P1·P2의 값과 나란히 놓을 수 없게 된다.
+    columns = {key: value for key, value in suite["columns"].items() if key in _LEGACY_SUITE_COLUMNS}
     payload = {"version": suite["version"], "window_ticks": suite["window_ticks"], "shuffle_seed": suite["shuffle_seed"],
-               "columns": suite["columns"], "fused": suite["fused"], "splits": per_split}
+               "columns": columns, "fused": suite["fused"], "splits": per_split}
     if tick_stride is not None:
         payload["tick_stride"] = int(tick_stride)
     digest = hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
@@ -1026,7 +1209,8 @@ def evaluate_suite(
             judge, subset, tokenizer=tokenizer,
             shuffle_seed=suite["shuffle_seed"] if columns["permuted"] else None,
             context_shuffle=columns["state_shuffle"], instruction_shuffle=columns["instruction_shuffle"],
-            rule_judge=columns["rule_judge"], window_ticks=suite["window_ticks"],
+            commitment_shuffle=columns["commitment_shuffle"], rule_judge=columns["rule_judge"],
+            mechanical_baseline=columns["mechanical_baseline"], window_ticks=suite["window_ticks"],
             tokens_per_batch=suite["tokens_per_batch"], fused=suite["fused"], return_predictions=True,
             store_predictions=entry.get("store_predictions") or False,
         )  # fmt: skip
