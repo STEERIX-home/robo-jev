@@ -837,3 +837,26 @@ def test_the_state_shuffle_no_longer_freezes_a_tick_on_a_finished_donor_scene(st
     # 감아 돌았으므로 기증자의 두 틱이 번갈아 나온다 — 한 상태에 갇히지 않는다.
     assert rolled_goals[0]["text"] == donor_goals[0]["text"] and rolled_goals[1]["text"] == donor_goals[1]["text"]
     assert rolled_goals[2]["text"] == donor_goals[0]["text"]
+
+
+def test_event_metrics_are_computed_for_every_column_that_has_per_tick_predictions():
+    """C3: 같은 자를 **모든 열**에 댄다 — 규칙 판정기·기계적 기준군 옆에 서지 않으면 "빠르다"가 뜻이 없다."""
+    from robo_jev.evaluate import column_event_metrics
+
+    record = _toy_record([["a"]] * 4 + [["b"]] * 4, events={4: "goal"})
+    for tick in record["ticks"]:
+        tick["labels"].append({"question_id": "q_stop", "kind": "single", "answer": False})
+    rows = _per_record([("ep-toy", i, "a" if i < 4 else "b") for i in range(8)])
+    stop_rows = [{"record_id": "ep-toy", "tick": i, "question": "q_stop", "predicted": "false", "correct": None} for i in range(8)]
+    table = {
+        "model": {"q_main": {"per_record": rows}, "q_stop": {"per_record": stop_rows}},
+        "mechanical_baseline": {"q_main": {"per_record": _per_record([("ep-toy", i, "a") for i in range(8)])}},
+        "rule_judge": {"q_main": {}},  # per_record가 없는 열은 건너뛴다
+    }
+    out = column_event_metrics(table, [record])
+    assert set(out) == {"model", "mechanical_baseline"}
+    assert out["model"]["reaction_delay"]["goal_change"]["median_ticks"] == 0
+    assert out["mechanical_baseline"]["reaction_delay"]["goal_change"]["censored"] == 1  # 늘 `a`라 새 답에 못 든다
+    assert out["model"]["stability"]["switch_rate"] == 0.0
+    assert out["model"]["stop_timing"]["false_alarm_rate"] == 0.0
+    assert "stop_timing" not in out["mechanical_baseline"]
