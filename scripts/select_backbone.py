@@ -45,9 +45,22 @@ DECISION_CELL_RUNS = {
     "2B T1 fp32 master (40)": "p2-2b-t1-fp32.json",
 }
 
-#: 판정 칸을 "라벨이 지금 commitment인가"로 가른 표 (`scripts/decision_cell_strata.py`). 집계 여유는 70 %가
-#: commitment 반복인 모집단에서 잰 값이라 읽기를 희석한다 — 결정 기록은 그 층화를 함께 들고 있어야 한다.
+#: 판정 칸을 "라벨이 지금 commitment인가"로 가른 표 (`scripts/decision_cell_strata.py`). 집계 여유는 commitment
+#: 반복 층에서 잰 값이라 읽기를 희석한다 — 결정 기록은 그 층화를 함께 들고 있어야 한다.
 DECISION_CELL_STRATA = "p2-decision-cell-strata.json"
+
+#: **지금의 모집단** (Task P3 A2): `ood_dev` 분할의 에피소드 **전부**를 통째로 = 24편 2,530틱. 옛 8편 844틱 칸은
+#: `previous_population`으로 남는다 — P1·P2가 published한 값이고 지우지 않는다.
+DECISION_CELL_RUNS_P3 = {
+    "2B T0 (200)": "p3-reeval-2b-t0.json",
+    "2B LoRA (40)": "p3-reeval-2b-lora.json",
+    "2B T1 bf16 (40)": "p3-reeval-2b-t1.json",
+    "4B T0 (200)": "p3-reeval-4b-t0.json",
+    "4B LoRA (40)": "p3-reeval-4b-lora.json",
+    "2B T1 bf16 5 s (40)": "p3-reeval-2b-t1-bf16-5s.json",
+    "2B T1 fp32 master (40)": "p3-reeval-2b-t1-fp32.json",
+}
+DECISION_CELL_STRATA_P3 = "p3-decision-cell-strata.json"
 
 
 def _load(name: str) -> dict[str, Any] | None:
@@ -96,16 +109,40 @@ def _eval_summary(evaluation: dict[str, Any] | None) -> dict[str, Any] | None:
     return out
 
 
-def _decision_cell() -> dict[str, Any] | None:
+def _donor_clause(strata: dict[str, Any] | None) -> str:
+    """대조군의 **기증자 의존성**을, 층화 산출물이 그 모집단에서 잰 수로 (Task P3 C1b, 리뷰 1 C1).
+
+    왜 두 모집단 모두에 붙이는가. 이 결함은 `why_kept`에 한 번 적혀 있었고, 그 아래 `previous_population`의
+    `+0.2570…`은 `state_shuffle_margin_includes_zero: false`만 달고 아무 표지 없이 앉아 있었다. 회전이 다르면
+    그 값이 달라지므로(같은 249틱에서 0.727 → 0.960) 표지는 **값 옆**에 있어야 한다."""
+    donor = (strata or {}).get("donor_rotation") or {}
+    if donor.get("clamped_share") is None:
+        return ""
+    return (
+        " The standard control is DONOR-DEPENDENT: it takes the donor from the next record in the config's list and "
+        f"clamps to the donor's last tick when the donor is shorter, so {donor['clamped_ticks']:,} of this "
+        f"population's {donor['ticks']:,} ticks ({donor['clamped_share'] * 100:.1f} %) are shuffled against a frozen "
+        "final state. Every margin here is therefore one draw from a distribution over donor assignments "
+        "(`donor_rotation`, measured in the strata artifact)."
+    )
+
+
+def _decision_cell(runs: dict[str, str] | None = None, strata_name: str | None = None,
+                   *, unit: str | None = None, reading: str | None = None, note: str | None = None) -> dict[str, Any] | None:
     """판정 칸(`robot/ood_dev` `q_main`)의 run별 모델·대조군·여유와 **편 단위 구간** — 결정 기록이 없던 수다.
 
     P1의 보고서는 "틱이 독립이면 ±0.023~0.034, 완전히 상관이면 ±0.23~0.35"라는 두 한계만 적을 수 있었다
     (`evaluate_items`가 레코드별 예측을 버렸다). 여기 들어가는 값은 편을 표본 단위로 재표집한 실제 구간이고,
     `margin_includes_zero`가 참인 줄의 여유는 **판정이 아니다** (Task P2 B2·B3).
+
+    모집단이 둘이다 (Task P3 A2): 지금 것은 `ood_dev` 24편 전부이고, 옛 8편 칸은 호출자가 `previous_population`
+    으로 붙인다 — P1·P2의 published 값을 지우지 않는다.
     """
+    runs = DECISION_CELL_RUNS if runs is None else runs          # 기본값을 def 시점에 굳히지 않는다 (시험이 모듈 전역을 바꾼다)
+    strata_name = DECISION_CELL_STRATA if strata_name is None else strata_name
     rows: dict[str, Any] = {}
     missing: dict[str, Any] = {}
-    for label, name in DECISION_CELL_RUNS.items():
+    for label, name in runs.items():
         payload = _load(name)
         table = ((payload or {}).get("evaluation") or {}).get("splits", {}).get(DECISION_SPLIT)
         if table is None:
@@ -120,25 +157,32 @@ def _decision_cell() -> dict[str, Any] | None:
             "n": (table["model"].get(DECISION_QUESTION) or {}).get("n"),
             "state_shuffle_accuracy": ((table.get("context_shuffle") or {}).get(DECISION_QUESTION) or {}).get("accuracy"),
             "instruction_shuffle_accuracy": ((table.get("instruction_shuffle") or {}).get(DECISION_QUESTION) or {}).get("accuracy"),
+            "commitment_shuffle_accuracy": ((table.get("commitment_shuffle") or {}).get(DECISION_QUESTION) or {}).get("accuracy"),
             "rule_judge_accuracy": ((table.get("rule_judge") or {}).get(DECISION_QUESTION) or {}).get("accuracy"),
+            "mechanical_baseline_accuracy": ((table.get("mechanical_baseline") or {}).get(DECISION_QUESTION) or {}).get("accuracy"),
             "episode_bootstrap": cell,
         }
     if not rows:
         return None
-    strata = _load(DECISION_CELL_STRATA)
+    strata = _load(strata_name)
     return {
         "split": DECISION_SPLIT, "question": DECISION_QUESTION,
-        "unit": (
+        "primary_stratum": (strata or {}).get("primary_stratum"),
+        "primary_stratum_note": (strata or {}).get("primary_stratum_note"),
+        "population": (strata or {}).get("population"),
+        "donor_rotation": (strata or {}).get("donor_rotation"),   # 이 모집단의 기증자 배정과 길이 고정 (P3 C1b)
+        "unit": unit or (
             "episode — the 844 ticks come from 8 episodes (94/80/67/79/72/70/300/82, so ep-E1-000235 alone is 35.5 % "
             "of the cell); the independent unit is the episode, not the tick"
         ),
-        "reading": (
+        # 읽기 문장 뒤에는 **그 모집단에서 잰** 기증자 의존성이 언제나 붙는다 (리뷰 1 C1)
+        "reading": (reading or (
             "This cell is ~70 % 'repeat your commitment': on 595 of the 844 ticks the expert label IS the tick's own "
             "commitment.action_ref (98.5 % of the 604 ticks that have one), and the state shuffle keeps that line "
             "verbatim, so a policy that reads nothing but the preserved fields scores 751/844 = 0.890. Every whole-cell "
             "margin below is therefore diluted by a stratum that needs no goal. Read `strata` before quoting one."
-        ),
-        "note": (
+        )) + _donor_clause(strata),
+        "note": note or (
             "Each row's controls are that run's own. `episode_bootstrap.state_shuffle.margin_ci` is a PAIRED bootstrap "
             "over episodes (model and its control counted inside the same resample), so it is the interval of the margin "
             "itself; a margin whose interval includes 0 is not a finding. Rows re-evaluated with "
@@ -148,8 +192,8 @@ def _decision_cell() -> dict[str, Any] | None:
         "runs": rows,
         "missing": missing,
         "strata": (
-            {"source": DECISION_CELL_STRATA, **{key: strata[key] for key in ("reading", "mechanism", "runs", "missing") if key in strata}}
-            if strata else {"source": DECISION_CELL_STRATA, "note": "not produced — run scripts/decision_cell_strata.py"}
+            {"source": strata_name, **{key: strata[key] for key in ("reading", "mechanism", "runs", "missing") if key in strata}}
+            if strata else {"source": strata_name, "note": "not produced — run scripts/decision_cell_strata.py"}
         ),
     }
 
@@ -249,7 +293,41 @@ def build(selection_text: str | None) -> dict[str, Any]:
             a = attribution["candidates"][model_id]
             entry["attribution"] = {"tokens": a.get("tokens"), "eager_ms": a.get("eager_ms"), "profiler": {k: v for k, v in a.get("profiler", {}).items() if k != "top_kernels_us_per_forward"}, "graph": a.get("graph"), "weight_read_lower_bound_ms": a.get("weight_read_lower_bound_ms"), "decomposition": a.get("decomposition")}
         out["candidates"][model_id] = entry
-    out["decision_cell"] = _decision_cell()
+    # 지금의 모집단(24편 2,530틱)이 주 기록이고, 옛 8편 칸은 그 안에 `previous_population`으로 남는다 (Task P3 A2·E).
+    current = _decision_cell(
+        DECISION_CELL_RUNS_P3, DECISION_CELL_STRATA_P3,
+        unit=(
+            "episode — the 2,530 ticks come from ALL 24 episodes of the ood_dev split, taken whole "
+            "(configs/eval/p3-decision-cell.yaml); the independent unit is the episode, not the tick. The largest "
+            "episode is 11.9 % of the ticks and 30.3 % of the primary stratum (was 35.5 % / 63.9 % in the 8-episode cell)"
+        ),
+        reading=(
+            "Read the primary stratum (`strata.runs[*].non_commitment`): the 525 ticks whose expert label is NOT the "
+            "tick's own commitment.action_ref. The other 2,005 are 'repeat your commitment', where the state shuffle "
+            "copies the answer through verbatim and the mechanical baseline is 1.000 by construction. The whole-cell "
+            "row is kept only so P1's and P2's published numbers stay comparable; it is not the result. On the 844 "
+            "ticks the two populations share, the model column is identical (844/844) while the state-shuffle column "
+            "differs on 9.7 % — the clamp below is what moves it (Task P3 C1b)."
+        ),
+        note=(
+            "Each row's controls are that run's own. `episode_bootstrap.*.margin_ci` is a PAIRED bootstrap over "
+            "episodes; a margin whose interval includes 0 is not a finding. `commitment_shuffle` is a third control "
+            "(state shuffle + the tick's commitment moved to another candidate of the same tick) and is interpretable "
+            "on the primary stratum only — on the commitment stratum it falsifies the stored label. "
+            "`mechanical_baseline` reads nothing ('the commitment if there is one, else observe') and no model claim "
+            "on this cell is a claim until it clears that column."
+        ),
+    )
+    previous = _decision_cell()
+    if current is not None and previous is not None:
+        current["previous_population"] = {
+            "why_kept": (
+                "the 8-episode / 844-tick cell P1 and P2 published. Not deleted — scoped: every number in it is a "
+                "value measured on THAT population, with THAT donor rotation (Task P3 A1/C1b)"
+            ),
+            **previous,
+        }
+    out["decision_cell"] = current if current is not None else previous
     if attribution and "Qwen/Qwen3.5-9B" in attribution.get("candidates", {}):
         a = attribution["candidates"]["Qwen/Qwen3.5-9B"]
         out["attribution_9b"] = {"eager_ms": a.get("eager_ms"), "profiler": {k: v for k, v in a.get("profiler", {}).items() if k != "top_kernels_us_per_forward"}, "graph": a.get("graph"), "weight_read_lower_bound_ms": a.get("weight_read_lower_bound_ms"), "decomposition": a.get("decomposition")}

@@ -230,24 +230,24 @@ def test_a_scope_without_a_pre_registered_tolerance_is_not_judged_by_another_sco
     """
     module = script()
     continuous, split = _snapshot_pair()
-    assert set(module.RESUME_TOLERANCES) == {"t0"}  # 등록된 것은 T0뿐이다
     assert module.RESUME_TOLERANCES["t0"] == module.RESUME_TOLERANCE
+    assert "lora" not in module.RESUME_TOLERANCES  # LoRA 범위는 아직 두 run 기준선을 재지 않았다
 
     t0 = module.compare_resume(continuous, split, steps=20, mode="t0")
     assert t0["passed"] is True and t0["verdict"] == "pass" and t0["tolerance"] == module.RESUME_TOLERANCE
 
-    t1 = module.compare_resume(continuous, split, steps=20, mode="t1")
-    assert t1["passed"] is None and t1["verdict"] == "tolerance-unregistered" and t1["tolerance"] is None
-    assert t1["exact_criteria_passed"] is True  # 정수 기준(위치·뽑힌 단위·step 수·빠진 tensor)은 그대로 잰다
-    assert t1["worst_loss_abs"] == 0.0 and t1["tensors"] == 2
+    lora = module.compare_resume(continuous, split, steps=20, mode="lora")
+    assert lora["passed"] is None and lora["verdict"] == "tolerance-unregistered" and lora["tolerance"] is None
+    assert lora["exact_criteria_passed"] is True  # 정수 기준(위치·뽑힌 단위·step 수·빠진 tensor)은 그대로 잰다
+    assert lora["worst_loss_abs"] == 0.0 and lora["tensors"] == 2
     # 무엇을 쟀는지는 남는다 — 등록된 오차가 생기면 그대로 다시 판정할 수 있게
-    assert t1["would_pass_under"]["t0"] is True
+    assert lora["would_pass_under"]["t0"] is True
     split["losses"][7] += 0.5
-    broken = module.compare_resume(continuous, split, steps=20, mode="t1")
+    broken = module.compare_resume(continuous, split, steps=20, mode="lora")
     assert broken["passed"] is None and broken["would_pass_under"]["t0"] is False
     # 정수 기준이 깨지면 오차와 무관하게 떨어진다 — 등록 여부가 면허가 되지는 않는다
     split["sampler"]["cursors"]["robot"] = 4
-    assert module.compare_resume(continuous, split, steps=20, mode="t1")["passed"] is False
+    assert module.compare_resume(continuous, split, steps=20, mode="lora")["passed"] is False
 
 
 def _gate_report(tmp_path, **checks):
@@ -293,3 +293,110 @@ def test_the_launcher_gate_reads_the_key_for_the_scope_it_is_about_to_launch(tmp
     assert module.main(["--gate", "t0", "--gate-report", str(report)]) == 0
     assert module.main(["--gate", "t1", "--gate-report", str(report)]) == 3
     assert module.main(["--gate", "lora", "--gate-report", str(report)]) == 2
+
+
+# --------------------------------------------------------------------------
+# P3 D — 허용 오차의 사전 등록: 두 run 기준선, 그리고 0에 가까운 분모
+# --------------------------------------------------------------------------
+
+
+def test_the_relative_l2_criterion_skips_a_tensor_whose_own_norm_is_below_the_floor():
+    """P2 A1b에서 `bias` 한 tensor가 **절대 차이 4.85e-7**인데 비 0.16으로 걸렸다 — 분모가 ≈3e-6이었기 때문이다.
+
+    그런 tensor는 상대 기준에서 빼고 절대 기준으로만 본다. 바닥 위의 tensor는 그대로 판정한다 — 가드가 기준을
+    통째로 꺼 버리면 안 된다."""
+    module = script()
+    continuous, split = _snapshot_pair()
+    continuous["parameters"]["bias"] = torch.full((1,), 3e-6)
+    split["parameters"]["bias"] = torch.full((1,), 3e-6 + 4.85e-7)
+    result = module.compare_resume(continuous, split, steps=20)
+    rows = {row["tensor"]: row for row in result["parameters"]}
+    assert rows["bias"]["relative_l2"] > module.RESUME_TOLERANCE["param_rel_l2"]  # 비는 그대로 적는다
+    assert rows["bias"]["relative_l2_judged"] is False and result["relative_l2_not_judged"] == ["bias"]
+    assert result["worst_param_relative_l2"] == rows["U.weight"]["relative_l2"]
+    assert result["relative_l2_reference_floor"] == module.RELATIVE_L2_REFERENCE_FLOOR
+    assert result["passed"] is True  # 분모 때문에 떨어지지 않는다
+
+    # 바닥 위의 tensor는 여전히 상대 기준으로 떨어진다
+    over = copy.deepcopy(continuous)
+    broken = copy.deepcopy(continuous)
+    broken["parameters"]["U.weight"] = broken["parameters"]["U.weight"] * 1.5
+    judged = module.compare_resume(over, broken, steps=20)
+    assert judged["passed"] is False and judged["worst_param_relative_l2"] > module.RESUME_TOLERANCE["param_rel_l2"]
+
+
+def test_the_tolerance_is_derived_from_the_two_run_spread_by_the_rule_fixed_beforehand():
+    """D — 사전 등록의 산술. 규칙은 :data:`RESUME_TOLERANCE_RULE`이고 **값을 보기 전에** 파일에 있었다.
+
+    본 값에 맞춰 오차를 고치는 것은 이 프로젝트가 금하는 수다. 그래서 규칙이 함수이고, 그 함수가 시험에 묶여 있다."""
+    module = script()
+    assert module.TOLERANCE_SAFETY_FACTOR == 2.0 and "round up to one significant figure" in module.RESUME_TOLERANCE_RULE
+    assert module._round_up_one_significant_figure(0.0876) == pytest.approx(0.09)
+    assert module._round_up_one_significant_figure(0.0006) == pytest.approx(0.0006)
+    assert module._round_up_one_significant_figure(0.0) == 0.0
+
+    spread = {"worst_loss_abs": 0.0876, "worst_loss_rel": 0.0459,
+              "worst_param_max_abs": 5.7e-4, "worst_param_relative_l2": 9.34e-4}
+    derived = module.derive_tolerance(spread)
+    assert derived["loss_abs"] == pytest.approx(0.2)      # 2 × 0.0876 = 0.1752 → 0.2
+    assert derived["loss_rel"] == pytest.approx(0.1)      # 2 × 0.0459 = 0.0918 → 0.1
+    assert derived["param_max_abs"] == pytest.approx(module.RESUME_TOLERANCE["param_max_abs"])  # T0보다 조이지 않는다
+    assert derived["param_rel_l2"] == pytest.approx(module.RESUME_TOLERANCE["param_rel_l2"])
+    # 퍼짐이 T0의 값을 넘으면 그만큼 느슨해진다
+    wider = module.derive_tolerance({**spread, "worst_param_max_abs": 0.04, "worst_param_relative_l2": 0.3})
+    assert wider["param_max_abs"] == pytest.approx(0.08) and wider["param_rel_l2"] == pytest.approx(0.6)
+
+
+def test_the_two_run_spread_is_measured_without_a_verdict():
+    """기준선은 **측정**이지 판정이 아니다 — `passed`를 돌려주면 사전 등록의 순서가 무너진다."""
+    module = script()
+    first, second = _snapshot_pair(steps=5)
+    second["losses"][2] += 0.06
+    second["parameters"]["U.weight"] = second["parameters"]["U.weight"] + 1e-4
+    spread = module.measure_spread(first, second)
+    assert "passed" not in spread and "verdict" not in spread
+    assert spread["worst_loss_abs"] == pytest.approx(0.06) and spread["steps"] == 5
+    assert spread["worst_param_max_abs"] == pytest.approx(1e-4, rel=1e-2)
+    assert spread["sampler_position_equal"] and spread["drawn_units_equal"]
+    assert spread["relative_l2_reference_floor"] == module.RELATIVE_L2_REFERENCE_FLOOR
+    assert len(spread["parameters_worst"]) <= 8
+    assert "no restart" in spread["unit"]
+    import inspect
+
+    assert "--check" in inspect.getsource(module.main) and "baseline" in module.CHECKS
+
+
+def test_the_t1_tolerance_is_the_registered_rule_applied_to_the_measured_baseline():
+    """D — 등록된 값이 **규칙의 산출물**인지 확인한다. 값을 보고 고쳤다면 이 시험이 떨어진다.
+
+    두 run 기준선(`artifacts/reports/p3-acceptance.json`의 `checks.baseline_t1`, 5 step, 재시작 없음)의 실측
+    최악값은 loss |Δ| 0.023574 · 상대 0.826 % · 최대 절대 차 5.819e-4 · (가드를 통과한) 상대 L2 6.31e-4였다."""
+    module = script()
+    measured = {"worst_loss_abs": 0.023574, "worst_loss_rel": 0.008258,
+                "worst_param_max_abs": 5.819e-4, "worst_param_relative_l2": 6.31e-4}
+    assert module.derive_tolerance(measured) == module.RESUME_TOLERANCES["t1"] == module.RESUME_TOLERANCE_T1
+    assert module.RESUME_TOLERANCE_T1["loss_abs"] == pytest.approx(0.05)   # 2 × 0.023574 = 0.047 → 0.05
+    # 나머지 셋은 T0의 값이 더 크므로 그대로 — 느슨해지기만 한다
+    for key in ("loss_rel", "param_max_abs", "param_rel_l2"):
+        assert module.RESUME_TOLERANCE_T1[key] == module.RESUME_TOLERANCE[key]
+    assert module.RESUME_TOLERANCE == {"loss_abs": 0.02, "loss_rel": 0.02, "param_max_abs": 0.01, "param_rel_l2": 0.05}  # T0은 건드리지 않았다
+
+
+def test_the_t1_gate_now_returns_a_verdict_instead_of_stopping_on_an_unregistered_tolerance(tmp_path):
+    """D — 게이트가 **판정한다**. 등록 전에는 exit 3(`tolerance-unregistered`)이었다 (P2 리뷰 1 N4의 남은 절반)."""
+    module = script()
+    continuous, split = _snapshot_pair(steps=6)
+    inside = module.compare_resume(continuous, split, steps=6, mode="t1")
+    assert inside["passed"] is True and inside["verdict"] == "pass" and inside["tolerance"] == module.RESUME_TOLERANCE_T1
+
+    # 등록된 오차 **밖**의 loss 차이는 떨어진다 — 오차가 있다는 것이 통과를 뜻하지 않는다
+    split["losses"][3] += module.RESUME_TOLERANCE_T1["loss_abs"] * 2
+    outside = module.compare_resume(continuous, split, steps=6, mode="t1")
+    assert outside["passed"] is False and outside["verdict"] == "fail"
+
+    for verdict, expected in (({"passed": True, "verdict": "pass", "scope": "t1"}, 0),
+                              ({"passed": False, "verdict": "fail", "scope": "t1"}, 2)):
+        report = _gate_report(tmp_path, resume_t1=verdict)
+        assert module.resume_gate(report, "t1")["exit_code"] == expected
+    # 아직 등록되지 않은 범위는 그대로 멈춘다
+    assert module.resume_gate(_gate_report(tmp_path, resume_lora={"passed": None, "verdict": "tolerance-unregistered", "scope": "lora"}), "lora")["exit_code"] == 3

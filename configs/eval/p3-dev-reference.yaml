@@ -1,0 +1,57 @@
+# Task P3 A2 — **참고용 칸**. `p3-decision-cell.yaml`과 **같은 규칙**을 `dev` 분할에 적용한 것이다:
+# 그 분할의 에피소드 **전부를, 통째로**. 48편 3,762틱.
+#
+# **선택에 쓰지 않는다**(`selection: false`). 판정은 봉인 계열(`ood_dev`)에서 하고 이 칸은 대조로만 읽는다 —
+# 게다가 Task 2c의 소형 scorer가 `robot/dev`의 `q_main`을 **패턴으로 풀린다**고 표시한 칸이다(docs/06 Task 2b).
+#
+# **왜 만들어 두는가**(P3 A1의 실측, `artifacts/reports/p3-population.json`). 두 분할의 비-commitment 층은 모양이
+# 다르다 — `dev` 579틱은 `hold` 528 + `grasp` 49 + `place` 2로 사실상 **편 끝의 `hold` 꼬리뿐**이고, `observe`
+# 라벨은 **하나도 없다**. `ood_dev` 525틱은 `hold` 251 + `observe` 210 + `grasp` 61 + `place` 3이고 `observe`는
+# 24편 가운데 3편에만 있다. 즉 "읽어야 답이 나오는" 관측 게이트 틱은 봉인 계열에만 있다. 이 칸의 값을 인용할 때는
+# 그 사실을 함께 적는다.
+#
+# **비용**: 3,762틱 × 열 수 × (틱·pass당 2B 57 ms) — 판정 칸(2,530틱)의 1.49배다. P3에서는 예산 때문에 판정 칸을
+# 먼저 돌렸고, 이 칸을 실제로 잰 run은 보고서에 적는다.
+
+version: eval-p3-dev-reference-v0.1
+window_ticks: 30
+shuffle_seed: 1
+tokens_per_batch: 8192
+fused: true
+
+columns:
+  permuted: false
+  state_shuffle: true
+  instruction_shuffle: true
+  commitment_shuffle: true
+  rule_judge: true
+  mechanical_baseline: true
+  selective: false
+  calibration: false
+
+tiny_scorer_report: artifacts/reports/tiny-scorer.json
+
+splits:
+  - name: robot/dev
+    manifest: artifacts/datasets/d1-robot/d1-rollout-labels/manifest.json
+    domain: robot
+    split: dev
+    files: ["episodes/*/streams.jsonl"]
+    selection: false          # 계산하되 checkpoint 선택에 쓰지 않는다 (docs/03:224)
+    note: "D1 dev **48편 전부**, 통째로 = 3,762틱. 참고용 — 이 칸의 q_main은 Task 2c가 패턴 칸으로 표시했다"
+    records: [ep-E0-000114, ep-E0-000116, ep-E0-000117, ep-E0-000118,
+              ep-E0-000125, ep-E0-000126, ep-E0-000128, ep-E0-000139,
+              ep-E0-000142, ep-E0-000143, ep-E0-000149, ep-E0-000153,
+              ep-E0-000156, ep-E0-000169, ep-E0-000174, ep-E0-000179,
+              ep-E0-000193, ep-E0-000204, ep-E0-000208, ep-E0-000222,
+              ep-E0-000223, ep-E0-000224, ep-E0-000229, ep-E0-000237,
+              ep-E0-000238, ep-E0-000258, ep-E0-000266, ep-E0-000267,
+              ep-E0-000296, ep-E0-000298, ep-E1-000118, ep-E1-000124,
+              ep-E1-000129, ep-E1-000130, ep-E1-000132, ep-E1-000135,
+              ep-E1-000147, ep-E1-000160, ep-E1-000169, ep-E1-000192,
+              ep-E1-000200, ep-E1-000226, ep-E1-000238, ep-E1-000257,
+              ep-E1-000265, ep-E1-000271, ep-E1-000283, ep-E1-000294]
+    store_predictions: [q_main]
+
+note: >
+  봉인(`ood_test`)은 여기에도 없다.

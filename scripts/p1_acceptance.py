@@ -33,7 +33,7 @@ from robo_jev.gpu import DEFAULT_FRACTION, limit_gpu_memory, memory_report, requ
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "scripts"))
 
-CHECKS = ("frozen", "trains", "resume")
+CHECKS = ("frozen", "trains", "resume", "baseline")
 DEFAULT_CONFIG = REPO / "configs" / "train" / "qwen35-2b-pilot.yaml"
 
 #: **비교 전에 고정한** 재개 허용 오차 (C3). 정수(위치·step 수·뽑힌 단위)는 정확히 같아야 하고, 수치는 아래 안이어야 한다.
@@ -52,7 +52,38 @@ RESUME_TOLERANCE = {
 #: "재개가 깨졌다"로 읽히지만 실제로 깬 것은 **오차가 그 범위에 등록돼 있지 않다**는 사실이다. 본 값에 맞춰
 #: 오차를 고치는 것은 이 프로젝트가 금하는 수이므로, 등록될 때까지 그 범위의 판정은 `passed: None`이고 게이트는
 #: 멈춘다(사전 등록 절차: 재시작 없는 같은 설정 두 run의 벌어짐을 먼저 기록하고, 그 위에 오차를 고정한다).
-RESUME_TOLERANCES: dict[str, dict[str, float]] = {"t0": RESUME_TOLERANCE}
+#: **T1 범위의 사전 등록 허용 오차** (P3 D, 2026-09-22). :data:`RESUME_TOLERANCE_RULE` 을 `checks.baseline_t1`의
+#: 두 run 기준선에 그대로 적용한 값이다 — 재시작 없는 두 프로세스를 같은 설정·seed로 5 step씩 돌려
+#: (`artifacts/reports/p3-acceptance.json`, 914.8 s) 잰 최악값은 loss |Δ| **0.023574**(step 3, 상대 0.826 %),
+#: 학습 대상 tensor의 최대 절대 차 **5.819e-4**(readout `V.weight`), 분모 가드를 통과한 tensor의 최대 상대 L2
+#: **6.31e-4**였다. 규칙대로 ×2 → 유효숫자 한 자리 올림 → T0보다 느슨하게만: loss_abs 0.047 → **0.05**, 나머지
+#: 셋은 T0의 값이 더 커서 그대로다. **값을 보고 고친 것은 없다** — 규칙이 먼저 파일에 있었고 여기 적용만 했다.
+#:
+#: **이 값의 한계는 함께 적는다**: 이 경로에서 잰 "재시작 없는 두 run" 쌍은 둘뿐이고 서로 2.7배 다르다 —
+#: P2 보고서 A1b의 쌍(`continuous` 대 `first`, 3 step)은 최악 **0.0641**이었고 이 쌍은 0.0236이다. 한 쌍에서 고정한
+#: 오차는 이미 관측된 퍼짐보다 **작다**. 그래서 이 오차 아래에서 P2가 남긴 6 step 재개 결과(최악 0.0876)는
+#: `passed: false`가 되고, 그 false는 "재개가 깨졌다"가 아니라 "이 오차가 한 쌍에서 나왔다"는 뜻이다.
+#: 이월: 쌍을 최소 셋 재서 그 최댓값 위에 다시 고정한다(쌍당 ≈7.6분).
+RESUME_TOLERANCE_T1 = {"loss_abs": 0.05, "loss_rel": 0.02, "param_max_abs": 0.01, "param_rel_l2": 0.05}
+
+RESUME_TOLERANCES: dict[str, dict[str, float]] = {"t0": RESUME_TOLERANCE, "t1": RESUME_TOLERANCE_T1}
+
+#: 상대 L2의 **0에 가까운 분모 가드** (P2 A1b에서 `bias` 한 tensor가 절대 차이 4.85e-7인데 자기 norm이 ≈3e-6이라
+#: 비 0.16으로 걸렸다). 자기 L2 norm이 이 값보다 작은 tensor는 **상대** 기준에서 빼고 절대 기준(`param_max_abs`)으로만
+#: 본다 — 원소 수가 몇이든 norm이 1e-3 아래인 tensor는 사실상 0이고, 그 위의 비는 분모가 정하는 수다. |p| ≈ 0.03에서
+#: bf16 눈금 한 칸이 1.22e-4이므로 1e-3은 그 여덟 칸이다. **값을 보기 전에 고정했다** (P3 D).
+RELATIVE_L2_REFERENCE_FLOOR = 1e-3
+
+#: 사전 등록 규칙 — **재시작 없는 두 run의 퍼짐**에서 그 범위의 허용 오차를 만드는 방법. 값을 보기 전에 고정한다
+#: (P2가 남긴 이월 항목: T1은 재시작이 전혀 없는 두 프로세스의 loss가 이미 0.064 벌어진다).
+#: 규칙: 기준마다 **두 run 사이 최악값 × :data:`TOLERANCE_SAFETY_FACTOR`**를 유효숫자 한 자리로 **올림**하고,
+#: T0의 값보다 **느슨해지기만** 한다(T1 경로가 T0보다 조용할 리 없으므로 더 조이지 않는다).
+TOLERANCE_SAFETY_FACTOR = 2.0
+RESUME_TOLERANCE_RULE = (
+    "run the same config twice with no restart (two separate processes, same seed), take the worst run-to-run "
+    "value of each criterion, multiply by TOLERANCE_SAFETY_FACTOR, round up to one significant figure, and never "
+    "go below the t0 tolerance. Fixed in this file before the baseline was measured."
+)
 
 #: T1·LoRA에서 "움직였다"고 보는 최소 변화 — 이보다 작으면 업데이트가 빠진 것이다.
 MOVE_EPSILON = 1e-9
@@ -289,9 +320,13 @@ def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: 
             parameters.append({"tensor": name, "missing": True})
             continue
         difference = (tensor.float() - other.float())
+        reference = float(tensor.float().norm())
         parameters.append({
             "tensor": name, "max_abs": float(difference.abs().max()),
-            "relative_l2": float(difference.norm() / tensor.float().norm().clamp_min(1e-12)),
+            "relative_l2": float(difference.norm()) / max(reference, 1e-12),
+            "reference_l2": reference,
+            # 자기 norm이 바닥 아래면 상대 기준에서 뺀다 — 그 비는 분모가 정하는 수다 (P3 D, RELATIVE_L2_REFERENCE_FLOOR)
+            "relative_l2_judged": bool(reference >= RELATIVE_L2_REFERENCE_FLOOR),
             "bit_identical": bool(torch.equal(tensor, other)),
         })  # fmt: skip
     sampler_equal = continuous["sampler"] == split["sampler"]
@@ -299,7 +334,9 @@ def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: 
     worst_loss = max((row["abs"] for row in loss_rows), default=0.0)
     worst_loss_rel = max((row["rel"] for row in loss_rows), default=0.0)
     worst_param = max((row.get("max_abs", 0.0) for row in parameters), default=0.0)
-    worst_rel = max((row.get("relative_l2", 0.0) for row in parameters), default=0.0)
+    judged = [row for row in parameters if row.get("relative_l2_judged")]
+    worst_rel = max((row.get("relative_l2", 0.0) for row in judged), default=0.0)
+    skipped = [row["tensor"] for row in parameters if "relative_l2" in row and not row.get("relative_l2_judged")]
     exact = bool(
         sampler_equal
         and units_equal
@@ -336,10 +373,95 @@ def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: 
         "would_pass_under": {name: (exact and _within(value)) for name, value in sorted(RESUME_TOLERANCES.items())},
         "losses": loss_rows, "worst_loss_abs": worst_loss, "worst_loss_rel": worst_loss_rel,
         "parameters": parameters, "worst_param_max_abs": worst_param, "worst_param_relative_l2": worst_rel,
+        "relative_l2_reference_floor": RELATIVE_L2_REFERENCE_FLOOR,
+        "relative_l2_not_judged": skipped,  # 자기 norm이 바닥 아래라 **절대 기준으로만** 본 tensor들
         "bit_identical_tensors": sum(1 for row in parameters if row.get("bit_identical")), "tensors": len(parameters),
         "sampler_position_equal": sampler_equal, "drawn_units_equal": units_equal,
         "optimizer_steps": {"continuous": continuous["optimizer_steps"], "split": split["optimizer_steps"]},
         "passed": passed,
+    }
+
+
+# --------------------------------------------------------------------------
+# D — 재개 허용 오차의 **사전 등록**: 재시작 없는 두 run의 퍼짐을 먼저 잰다
+# --------------------------------------------------------------------------
+
+
+def _round_up_one_significant_figure(value: float) -> float:
+    """0.0876 → 0.09, 0.0006 → 0.0006, 0.0 → 0.0. 규칙이 정한 반올림 (:data:`RESUME_TOLERANCE_RULE`)."""
+    import math
+
+    if value <= 0:
+        return 0.0
+    exponent = math.floor(math.log10(value))
+    scale = 10.0 ** exponent
+    return float(f"{math.ceil(value / scale) * scale:.10g}")
+
+
+def measure_spread(first: dict[str, Any], second: dict[str, Any]) -> dict[str, Any]:
+    """**판정 없이** 두 snapshot의 run 간 퍼짐만 잰다 — :func:`compare_resume` 과 같은 계산, 같은 분모 가드.
+
+    사전 등록은 순서가 전부다: 이 수를 먼저 적고, 그 위에 오차를 고정하고, 그 다음에 판정한다. 그래서 이 함수는
+    `passed`를 돌려주지 않는다."""
+    measured = compare_resume(first, second, steps=int(second.get("step") or 0), mode="__spread__")
+    return {
+        "unit": "two runs of the same config, same seed, **no restart** (two separate processes)",
+        "steps": measured["steps"],
+        "losses": measured["losses"],
+        "worst_loss_abs": measured["worst_loss_abs"], "worst_loss_rel": measured["worst_loss_rel"],
+        "worst_param_max_abs": measured["worst_param_max_abs"], "worst_param_relative_l2": measured["worst_param_relative_l2"],
+        "relative_l2_reference_floor": measured["relative_l2_reference_floor"],
+        "relative_l2_not_judged": measured["relative_l2_not_judged"],
+        "bit_identical_tensors": measured["bit_identical_tensors"], "tensors": measured["tensors"],
+        "sampler_position_equal": measured["sampler_position_equal"], "drawn_units_equal": measured["drawn_units_equal"],
+        "optimizer_steps": measured["optimizer_steps"],
+        "parameters_worst": sorted(measured["parameters"], key=lambda row: -row.get("max_abs", 0.0))[:8],
+    }
+
+
+def derive_tolerance(spread: dict[str, Any], *, floor: dict[str, float] = RESUME_TOLERANCE) -> dict[str, float]:
+    """퍼짐 → 허용 오차, :data:`RESUME_TOLERANCE_RULE` 그대로 (안전 계수 → 유효숫자 한 자리 올림 → T0보다 느슨하게)."""
+    pairs = (
+        ("loss_abs", "worst_loss_abs"), ("loss_rel", "worst_loss_rel"),
+        ("param_max_abs", "worst_param_max_abs"), ("param_rel_l2", "worst_param_relative_l2"),
+    )
+    return {
+        key: max(float(floor[key]), _round_up_one_significant_figure(TOLERANCE_SAFETY_FACTOR * float(spread[name] or 0.0)))
+        for key, name in pairs
+    }
+
+
+def check_baseline(mode: str, *, steps: int = 5, run_dir: Path, config_path: Path = DEFAULT_CONFIG, python: str | None = None) -> dict[str, Any]:
+    """그 학습 범위의 **두 run 기준선** — 같은 설정·seed로 재시작 없이 두 번 돌려 퍼짐을 적는다 (P3 D).
+
+    두 run은 진짜로 다른 프로세스다(이 스크립트를 `--phase continuous`로 두 번 띄운다). 그래야 kernel 선택·
+    atomics 순서 같은 프로세스 간 차이가 그대로 들어온다 — 재개 게이트가 견뎌야 하는 잡음이 바로 그것이다."""
+    import torch
+
+    python = python or sys.executable
+    started = time.perf_counter()
+    phases = []
+    snapshots = []
+    for index in ("a", "b"):
+        directory = run_dir / f"baseline-{mode}-{index}"
+        phase_started = time.perf_counter()
+        command = [python, str(REPO / "scripts" / "p1_acceptance.py"), "--phase", "continuous", "--steps", str(steps),
+                   "--run-dir", str(directory), "--config", str(config_path), "--resume-modes", mode]
+        completed = subprocess.run(command, cwd=REPO, capture_output=True, text=True, check=False)
+        print(completed.stdout[-2000:], file=sys.stderr, flush=True)
+        if completed.returncode != 0:
+            return {"check": "baseline", "scope": mode, "steps": steps, "failed_run": index, "stderr": completed.stderr[-4000:], "phases": phases}
+        phases.append({"run": index, "seconds": round(time.perf_counter() - phase_started, 1), "stdout_tail": completed.stdout.strip().splitlines()[-1:]})
+        snapshots.append(torch.load(directory / f"continuous-{mode}.pt", map_location="cpu", weights_only=False))
+
+    spread = measure_spread(snapshots[0], snapshots[1])
+    return {
+        "check": "baseline", "scope": mode, "rule": RESUME_TOLERANCE_RULE,
+        "safety_factor": TOLERANCE_SAFETY_FACTOR,
+        "spread": spread,
+        "derived_tolerance": derive_tolerance(spread),
+        "registered_tolerance": dict(RESUME_TOLERANCES[mode]) if mode in RESUME_TOLERANCES else None,
+        "seconds": round(time.perf_counter() - started, 1), "phases": phases,
     }
 
 
@@ -408,7 +530,7 @@ def resume_gate(report_path: Path | str, mode: str) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    parser.add_argument("--check", default="frozen,trains,resume", help="frozen | trains | resume, 쉼표로")
+    parser.add_argument("--check", default="frozen,trains,resume", help="frozen | trains | resume | baseline, 쉼표로")
     parser.add_argument("--config", default=str(DEFAULT_CONFIG))
     parser.add_argument("--steps", type=int, default=20, help="resume: 연속 실행의 step 수 (절반에서 저장·재시작)")
     parser.add_argument("--train-steps", dest="train_steps", type=int, default=3, help="trains: LoRA·T1의 step 수")
@@ -454,6 +576,9 @@ def main(argv: list[str] | None = None) -> int:
         elif name == "trains":
             for mode in (m.strip() for m in args.trains_modes.split(",") if m.strip()):
                 out["checks"][f"trains_{mode}"] = check_trains(mode, steps=args.train_steps, config_path=Path(args.config))
+        elif name == "baseline":
+            for mode in (m.strip() for m in args.resume_modes.split(",") if m.strip()):
+                out["checks"][f"baseline_{mode}"] = check_baseline(mode, steps=args.steps, run_dir=run_dir, config_path=Path(args.config))
         else:
             for mode in (m.strip() for m in args.resume_modes.split(",") if m.strip()):
                 # t0의 자리 이름은 그대로 둔다 — P1의 런처가 `checks.resume.passed`를 본다. 다른 범위는
@@ -465,7 +590,9 @@ def main(argv: list[str] | None = None) -> int:
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(json.dumps({**out, "gpu": {**out["gpu"], "memory_at_end": memory_report()}}, ensure_ascii=False, indent=1, default=str) + "\n", encoding="utf-8")
     print(json.dumps({name: check.get("passed") for name, check in out["checks"].items()}, ensure_ascii=False))
-    return 0 if all(check.get("passed") for check in out["checks"].values()) else 1
+    # 기준선은 판정이 아니라 측정이다 — `passed`가 없다고 실패로 세지 않는다
+    verdicts = [check.get("passed") for name, check in out["checks"].items() if not name.startswith("baseline_")]
+    return 0 if all(verdicts) else 1
 
 
 if __name__ == "__main__":
