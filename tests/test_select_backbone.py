@@ -143,3 +143,45 @@ def test_the_decision_cell_block_reads_the_reevaluations_and_says_which_margins_
 
     monkeypatch.setattr(module, "DECISION_CELL_RUNS", {"missing": "nope.json"})
     assert module._decision_cell() is None
+
+
+def test_the_decision_record_carries_the_new_population_and_keeps_the_old_one_as_previous(tmp_path, monkeypatch):
+    """P3 A2/E — 결정 기록의 주 칸은 **24편 2,530틱**이고, P1·P2가 published한 8편 칸은 지우지 않고 범위를 적는다."""
+    module = script()
+    import json
+
+    def report(accuracy, control, n):
+        return json.dumps({"evaluation": {
+            "eval_set": {"sha256": "hash" + str(n)},
+            "splits": {"robot/ood_dev": {
+                "model": {"q_main": {"n": n, "accuracy": accuracy}},
+                "context_shuffle": {"q_main": {"accuracy": control}},
+                "commitment_shuffle": {"q_main": {"accuracy": 0.18}},
+                "mechanical_baseline": {"q_main": {"accuracy": 0.875}},
+                "episode_bootstrap": {"q_main": {"episodes": 24, "accuracy": accuracy,
+                                                 "state_shuffle": {"margin": accuracy - control, "margin_ci": [0.02, 0.17], "margin_includes_zero": False}}},
+            }},
+        }})
+
+    monkeypatch.setattr(module, "REPORTS", tmp_path)
+    monkeypatch.setattr(module, "DECISION_CELL_RUNS", {"2B T1 fp32 master (40)": "old.json"})
+    monkeypatch.setattr(module, "DECISION_CELL_RUNS_P3", {"2B T1 fp32 master (40)": "new.json"})
+    (tmp_path / "old.json").write_text(report(0.994, 0.904, 844), encoding="utf-8")
+    (tmp_path / "new.json").write_text(report(0.916, 0.860, 2530), encoding="utf-8")
+    (tmp_path / module.DECISION_CELL_STRATA_P3).write_text(json.dumps({
+        "primary_stratum": "non_commitment",
+        "primary_stratum_note": "the ticks whose label is NOT the commitment",
+        "population": {"episodes": 24, "ticks": 2530, "non_commitment_ticks": 525},
+        "reading": "read the primary stratum", "mechanism": {}, "runs": {}, "missing": {},
+    }), encoding="utf-8")
+
+    out = module.build(None)
+    cell = out["decision_cell"]
+    assert cell["runs"]["2B T1 fp32 master (40)"]["n"] == 2530  # 주 칸은 새 모집단이다
+    assert cell["primary_stratum"] == "non_commitment" and cell["population"]["episodes"] == 24
+    assert "ALL 24 episodes" in cell["unit"] and "DONOR-DEPENDENT" in cell["reading"]
+    assert cell["runs"]["2B T1 fp32 master (40)"]["mechanical_baseline_accuracy"] == 0.875
+    assert cell["runs"]["2B T1 fp32 master (40)"]["commitment_shuffle_accuracy"] == 0.18
+    previous = cell["previous_population"]
+    assert previous["runs"]["2B T1 fp32 master (40)"]["n"] == 844 and "not deleted" in previous["why_kept"].lower()
+    assert "35.5 %" in previous["unit"]  # 옛 칸은 옛 구성을 그대로 들고 있다

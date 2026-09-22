@@ -264,6 +264,33 @@ def run_strata(table: dict[str, Any], ticks: list[dict[str, Any]], **options: An
         out[name] = block
     if columns.get("state_shuffle"):
         out["state_shuffle_repeats_the_commitment"] = repeats_the_commitment(columns["state_shuffle"], ticks)
+    out["primary_stratum_by_key_family"] = by_key_family(columns, [row for row in ticks if not row["is_commitment"]])
+    return out
+
+
+def by_key_family(columns: dict[str, list[dict[str, Any]] | None], rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """주 지표 층을 **답의 키 갈래**로 더 쪼갠다 — 여유가 어느 갈래에서 나오는지 (구간은 붙이지 않는다).
+
+    왜. 이 층은 `hold`(편 끝의 완료 꼬리)·`observe`(관측 게이트)·`grasp`(첫 틱)로 이루어져 있고 셋은 서로 다른 물음이다.
+    "읽기가 필요한 층"이라는 이름 하나로 묶어 놓으면 목표를 읽어야 답이 나오는 갈래와 실행 상태만으로 풀리는 갈래가
+    한 수에 섞인다. 갈래별 n은 작으므로 **점추정만** 적고 판정은 층 전체의 구간으로 한다."""
+    keep = {(row["episode_id"], row["tick"]): row["key"] for row in rows}
+    families = sorted({key for key in keep.values()})
+    out: dict[str, Any] = {}
+    for family in families:
+        wanted = {tick for tick, value in keep.items() if value == family}
+        block: dict[str, Any] = {
+            "n": len(wanted),
+            "episodes": len({episode for episode, _ in wanted}),
+        }
+        for column, predictions in columns.items():
+            if not predictions:
+                continue
+            graded = [row for row in predictions if (str(row["record_id"]), int(row["tick"])) in wanted and row["correct"] is not None]
+            block[column] = (sum(1 for row in graded if row["correct"]) / len(graded)) if graded else None
+        if block.get("model") is not None and block.get("state_shuffle") is not None:
+            block["state_shuffle_margin"] = block["model"] - block["state_shuffle"]
+        out[family] = block
     return out
 
 
