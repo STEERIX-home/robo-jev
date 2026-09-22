@@ -209,6 +209,13 @@ def test_zero_shot_prompts_use_single_token_codes_and_score_on_the_tiny_qwen(sin
     assert result["prompts"] == 3 + len(posed[0]["candidate_mapping"]) + len(posed[2]["candidate_mapping"])  # 틱 0·2 (stride 2)
     assert {"choice", "boolean", "q_main", "_all"} <= set(result["table"])
     assert 0.0 <= result["table"]["_all"]["accuracy"] <= 1.0 and result["table"]["_all"]["nll"] > 0
+    # 예측은 **레코드마다 하나**로 합쳐 나온다 (R1 fix round 1): 무학습 채점은 질문 하나가 프롬프트 하나라
+    # 예측도 질문마다 나지만, 대조 쌍 검사는 한 레코드의 여러 질문을 한 자리에서 본다.
+    merged = result["predictions"]
+    assert len(merged) == 1 + 2  # 단일 요청 하나 + 채점한 두 틱
+    by_single = next(item for item in merged if item["kind"] == "single")
+    assert set(by_single["probabilities"]) == {q["id"] for q in single["request"]["questions"]}
+    assert set(by_single["candidates"]) == set(by_single["probabilities"]) and len(by_single["labels"]) == 3
 
 
 # --------------------------------------------------------------------------

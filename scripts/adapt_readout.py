@@ -329,6 +329,13 @@ def run_zero_shot(config: dict[str, Any], *, eval_config: str | Path = DEFAULT_E
         records = [item.record for item in subset]
         result = zero_shot_label_scores(model_id, records, backbone=backbone, tokenizer=tokenizer, shuffle_seed=shuffle_seed, tick_stride=tick_stride, batch=batch)
         result["seconds"] = round(time.perf_counter() - started, 1)
+        # C3-d의 대조 쌍 표는 **무학습 열에도** 붙는다 (R1 fix round 1): 이 열에 대조군·규칙은 없지만 "지시가
+        # 바뀌면 답도 바뀌는가"는 모델 하나로 답할 수 있는 질문이고, 그것이 이 쌍 표가 재는 전부다.
+        predictions = result.pop("predictions", [])
+        if any((record.get("provenance") or {}).get("contrast") for record in records):
+            from robo_jev.evaluate import contrast_pair_check
+
+            result["contrast_pairs"] = contrast_pair_check(predictions, records)
         # 학습한 run의 표와 같은 자리에 오게 `model` 별칭을 둔다 (요약·선정이 한 꼴로 읽는다). 대조군·규칙 열은 없다 — 무학습이다.
         result["model"] = result["table"]
         # 프롬프트 수는 **상태 수가 아니다** ((틱 × 질문)마다 하나) — 상태 열에 프롬프트 수를 흘려보내지 않는다 (P1 리뷰 1 I9).
