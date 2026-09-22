@@ -252,7 +252,15 @@ def _pairs(item: dict) -> str:
 
 #: 모델의 입력에서 빼는 **풀어 놓은 목표** 필드 (Task R1 A1, docs/08 §3). 레코드에는 그대로 있고 전문가·라벨·규칙
 #: 판정기가 읽는다 — 빠지는 것은 두 layout의 모델이 보는 텍스트뿐이다. 남는 것은 버전과 지시 **문장**이다.
-HIDDEN_GOAL_FIELDS = ("target_ref", "target_desc", "target_zone", "forbidden_contact", "fragile", "priority")
+HIDDEN_GOAL_FIELDS = (
+    # 로봇 배치의 스키마 키
+    "target_ref", "target_desc", "target_zone", "forbidden_contact", "fragile", "priority",
+    # 비로봇 L0 배치의 스키마 키 (R1 리뷰 1 I12). docs/08 §3.2는 **두 배치 모두** 풀어 놓은 목표가 빠진다고
+    # 적었지만 `HIDDEN_GOAL_FIELDS`가 로봇 스키마의 이름만 들고 있어, 4,200 레코드 중 1,052건이 `goal` 줄에
+    # `color=green zone=zoneC`를 그대로 실었다(T0 학습 항목의 91.8 %). spatial은 색·영역, dom은 목표 요소와
+    # 그 종류다 — 셋 다 지시 문장이 이미 말하는 것이고, 물체·요소 줄의 `desc`·`name`이 짝지을 근거를 준다.
+    "color", "zone", "element", "kind", "deadline_h",
+)  # fmt: skip
 #: 모델의 입력에서 빼는 물체의 정적 필드 — 금지·취약은 장면 속성이 아니라 **지시 문장**이 말한다.
 HIDDEN_OBJECT_FIELDS = ("attributes",)
 

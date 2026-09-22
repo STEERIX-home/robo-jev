@@ -631,10 +631,50 @@ def _model_text(out: dict, tokenizer) -> str:
 def assert_no_resolved_goal(text: str, where: str) -> None:
     for marker in LEAKED_GOAL_MARKERS:
         assert marker not in text, (where, marker)
+    assert_goal_line_is_only_text(text, where)
+
+
+def assert_goal_line_is_only_text(text: str, where: str) -> None:
+    """`goal` 줄은 **버전과 문장뿐**이다 (Task R1 A1, 리뷰 1 I12).
+
+    표지 목록(:data:`LEAKED_GOAL_MARKERS`)은 로봇 배치의 스키마 이름이라 비로봇에는 너무 무디다 — `rules` 영역은
+    상태에 과제의 **규칙 목록**을 싣고 그 줄이 `priority=`·`when=zone:…`를 정당하게 쓴다. 두 배치에 같이 걸 수 있는
+    정확한 문장은 이것이다: 목표 줄에 `text` 말고 다른 `k=v`가 있으면 그것이 풀어 놓은 목표다.
+    """
     for line in text.splitlines():
-        if line.startswith("goal"):
-            for marker in LEAKED_GOAL_LINE_MARKERS:
-                assert marker not in line, (where, marker, line)
+        if not line.startswith("goal"):
+            continue
+        for marker in LEAKED_GOAL_LINE_MARKERS:
+            assert marker not in line, (where, marker, line)
+        if not line.startswith("goal "):
+            continue  # `goal=<문장>` — 목표가 문장 하나인 레코드(D0 fixture)는 그 자체가 지시다
+        keys = {token.split("=", 1)[0] for token in line.split() if "=" in token}
+        # `version`·`t_ms`는 지시가 **언제 몇 번째로** 왔는지이지 그 내용이 아니다 — 사건 줄이 이미 말한다.
+        assert keys <= {"text", "version", "t_ms"}, (where, sorted(keys - {"text", "version", "t_ms"}), line)
+
+
+def test_no_resolved_goal_field_reaches_the_model_in_the_non_robot_pilot_records(tokenizer):
+    """**비로봇 L0의 목표 누출** (R1 리뷰 1 I12). docs/08 §3.2는 "두 배치 모두" 풀어 놓은 목표가 빠진다고 적었지만
+    `HIDDEN_GOAL_FIELDS`가 로봇 스키마의 이름(`target_ref`·`target_zone`…)만 들고 있어 비로봇의 `goal` 줄은
+    `color=green zone=zoneC`를 그대로 실었다 — R1이 배포한 4,200 레코드 중 **1,052건**, T0 학습 항목의 91.8 %다.
+
+    네 영역을 **실제로 생성해** 본다(fixture가 아니라 생성기의 출력이다 — 옛 시험이 D0 fixture와 로봇 에피소드
+    하나만 봐서 이 누출을 못 봤다). 레코드의 `state.goal`에는 그 필드가 **남아 있다**: 빠지는 것은 모델이 보는
+    텍스트뿐이고, 라벨과 규칙은 그대로 구조화된 목표를 읽는다.
+    """
+    from robo_jev.data.generate import generate_records
+
+    records = generate_records(count=60, seed=11)
+    seen_hidden = 0
+    for index, record in enumerate(records):
+        text = _model_text(serialize_request(record, tokenizer, layout="state_first"), tokenizer)
+        assert_goal_line_is_only_text(text, f"pilot[{index}] {record.get('origin_group')}")
+        goal = ((record.get("request") or {}).get("state") or {}).get("goal") or {}
+        seen_hidden += bool(set(goal) & set(serialize_module.HIDDEN_GOAL_FIELDS))
+        assert goal.get("text")  # 문장은 남는다 — 이제 그것이 유일한 단서다
+        assert goal["text"] in text  # 그리고 모델이 그것을 본다
+    # 검사가 "그냥 목표가 없는 레코드"를 재는 것이 아님을 못 박는다: 절반 이상이 숨긴 필드를 레코드에 들고 있다.
+    assert seen_hidden >= len(records) // 2, seen_hidden
 
 
 def test_no_resolved_goal_field_reaches_the_model_in_either_layout(tokenizer, single, stream, three_questions):
