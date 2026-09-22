@@ -76,6 +76,30 @@ RESUME_TOLERANCE_T1 = {"loss_abs": 0.2, "loss_rel": 0.08, "param_max_abs": 0.01,
 
 RESUME_TOLERANCES: dict[str, dict[str, float]] = {"t0": RESUME_TOLERANCE, "t1": RESUME_TOLERANCE_T1}
 
+#: **어느 기준이 그 범위의 판정을 지는가** (R2 A1g, 2026-09-23 — 사용자 승인 아래, 게이트 실패를 **본 뒤에** 한
+#: 규칙 변경이다. 그 사실과 근거는 보고서 `.superpowers/sdd/task-r2-report.md` A1g에 그대로 적혀 있다).
+#:
+#: `t1`에서 loss 기준을 판정에서 **뺐다**. 등록된 값(0.2 / 0.08)은 **느슨해지지 않았다** — 역할만 "판정"에서
+#: "기록"으로 바뀌었다. 근거는 R2 A1e의 실측이다: 같은 6 step 일정에서 **재시작이 전혀 없는** 세 프로세스의
+#: 쌍마다 최악 |Δloss|가 :data:`NO_RESTART_LOSS_SPREAD` 이고(0.0786 · 0.3304 · 0.4090, loss 1.0~1.7에서
+#: ±25 %), 재개한 쌍의 0.3150은 그 **안**이다. 곧 이 경로에서 loss는 재개의 옳고 그름을 가리지 못한다 —
+#: 옳은 재개를 통과시킬 만큼 느슨한 오차(≥ 0.9)는 깨진 재개도 통과시키기 때문이다. 가려내는 것은 정수 기준
+#: (sampler 위치·뽑힌 단위·optimizer step 수·빠진 tensor)과 parameter 기준이고, R2의 재개는 그 둘을 등록값의
+#: **15분의 1**로 통과했다. T0·LoRA는 그대로 loss도 판정한다 — 그 경로들은 이 상자에서 비트 결정적이다.
+RESUME_VERDICT_CRITERIA: dict[str, tuple[str, ...]] = {"t0": ("loss", "param"), "lora": ("loss", "param"), "t1": ("param",)}
+
+#: 그 범위에서 **재시작 없이** 잰 같은 step 수의 쌍들의 최악 |Δloss| — 기록된 loss 옆에 함께 찍어
+#: "이 차이가 잡음 안인가"를 읽게 한다 (R2 A1e, `artifacts/reports/r2-diagnostic.json` + `r2-acceptance.json`).
+NO_RESTART_LOSS_SPREAD: dict[str, dict[str, Any]] = {
+    "t1": {
+        "steps": 6,
+        "unit": "three separate processes, same config and seed, **no restart**; every pairing",
+        "source": "artifacts/reports/r2-diagnostic.json + the resume check's own `continuous` run",
+        "worst_loss_abs": [0.078615, 0.330375, 0.408990],
+        "worst_loss_rel": [0.049404, 0.238616, 0.244923],
+    },
+}
+
 #: 상대 L2의 **0에 가까운 분모 가드** (P2 A1b에서 `bias` 한 tensor가 절대 차이 4.85e-7인데 자기 norm이 ≈3e-6이라
 #: 비 0.16으로 걸렸다). 자기 L2 norm이 이 값보다 작은 tensor는 **상대** 기준에서 빼고 절대 기준(`param_max_abs`)으로만
 #: 본다 — 원소 수가 몇이든 norm이 1e-3 아래인 tensor는 사실상 0이고, 그 위의 비는 분모가 정하는 수다. |p| ≈ 0.03에서
@@ -400,8 +424,8 @@ def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: 
     worst_loss = max((row["abs"] for row in loss_rows), default=0.0)
     worst_loss_rel = max((row["rel"] for row in loss_rows), default=0.0)
     worst_param = max((row.get("max_abs", 0.0) for row in parameters), default=0.0)
-    judged = [row for row in parameters if row.get("relative_l2_judged")]
-    worst_rel = max((row.get("relative_l2", 0.0) for row in judged), default=0.0)
+    judged_rows = [row for row in parameters if row.get("relative_l2_judged")]
+    worst_rel = max((row.get("relative_l2", 0.0) for row in judged_rows), default=0.0)
     skipped = [row["tensor"] for row in parameters if "relative_l2" in row and not row.get("relative_l2_judged")]
     exact = bool(
         sampler_equal
@@ -411,12 +435,16 @@ def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: 
         and not any(row.get("missing") for row in parameters)
     )
 
-    def _within(tolerance: dict[str, float]) -> bool:
-        return bool(
-            (worst_loss <= tolerance["loss_abs"] or worst_loss_rel <= tolerance["loss_rel"])
-            and worst_param <= tolerance["param_max_abs"]
-            and worst_rel <= tolerance["param_rel_l2"]
-        )
+    carried = RESUME_VERDICT_CRITERIA.get(mode, ("loss", "param"))
+
+    def _within(tolerance: dict[str, float], *, criteria: tuple[str, ...] = carried) -> bool:
+        """그 범위의 **판정을 지는 기준만** 견준다 (:data:`RESUME_VERDICT_CRITERIA`)."""
+        ok = True
+        if "loss" in criteria:
+            ok = ok and (worst_loss <= tolerance["loss_abs"] or worst_loss_rel <= tolerance["loss_rel"])
+        if "param" in criteria:
+            ok = ok and worst_param <= tolerance["param_max_abs"] and worst_rel <= tolerance["param_rel_l2"]
+        return bool(ok)
 
     registered = RESUME_TOLERANCES.get(mode)
     passed: bool | None
@@ -436,7 +464,17 @@ def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: 
             else f"no tolerance is pre-registered for scope {mode!r} (RESUME_TOLERANCES); the gate stops instead of borrowing another scope's"
         ),
         "verdict": verdict, "exact_criteria_passed": exact,
-        "would_pass_under": {name: (exact and _within(value)) for name, value in sorted(RESUME_TOLERANCES.items())},
+        "verdict_criteria": list(carried), "loss_criterion_judged": "loss" in carried,
+        # loss가 판정을 지지 않는 범위에서는 **기록**이다 — 재시작 없는 같은 step 수 쌍의 퍼짐을 옆에 찍는다
+        "loss_diagnostic": {
+            "worst_loss_abs": worst_loss, "worst_loss_rel": worst_loss_rel,
+            "registered_but_not_judged": (None if "loss" in carried else {k: v for k, v in (registered or {}).items() if k.startswith("loss")}),
+            "no_restart_spread": NO_RESTART_LOSS_SPREAD.get(mode),
+            "no_restart_worst": (max(NO_RESTART_LOSS_SPREAD[mode]["worst_loss_abs"]) if mode in NO_RESTART_LOSS_SPREAD else None),
+            "inside_no_restart_spread": (worst_loss <= max(NO_RESTART_LOSS_SPREAD[mode]["worst_loss_abs"]) if mode in NO_RESTART_LOSS_SPREAD else None),
+            "same_steps": (NO_RESTART_LOSS_SPREAD[mode]["steps"] == int(steps) if mode in NO_RESTART_LOSS_SPREAD else None),
+        },
+        "would_pass_under": {name: (exact and _within(value, criteria=RESUME_VERDICT_CRITERIA.get(name, ("loss", "param")))) for name, value in sorted(RESUME_TOLERANCES.items())},
         "losses": loss_rows, "worst_loss_abs": worst_loss, "worst_loss_rel": worst_loss_rel,
         "parameters": parameters, "worst_param_max_abs": worst_param, "worst_param_relative_l2": worst_rel,
         "relative_l2_reference_floor": RELATIVE_L2_REFERENCE_FLOOR,

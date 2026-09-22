@@ -392,10 +392,17 @@ def test_the_t1_gate_now_returns_a_verdict_instead_of_stopping_on_an_unregistere
     inside = module.compare_resume(continuous, split, steps=6, mode="t1")
     assert inside["passed"] is True and inside["verdict"] == "pass" and inside["tolerance"] == module.RESUME_TOLERANCE_T1
 
-    # 등록된 오차 **밖**의 loss 차이는 떨어진다 — 오차가 있다는 것이 통과를 뜻하지 않는다
-    split["losses"][3] += module.RESUME_TOLERANCE_T1["loss_abs"] * 2
+    # 등록된 오차 **밖**의 차이는 떨어진다 — 오차가 있다는 것이 통과를 뜻하지 않는다. `t1`의 판정을 지는
+    # 기준은 R2 A1g부터 parameter(+정수)이므로 그 기준으로 본다; loss는 같은 크기로 벌려도 `t1`을 떨어뜨리지
+    # 않고(기록일 뿐이다) **`t0`는 떨어뜨린다**.
+    split["parameters"]["U.weight"] = split["parameters"]["U.weight"] + module.RESUME_TOLERANCE_T1["param_max_abs"] * 2
     outside = module.compare_resume(continuous, split, steps=6, mode="t1")
     assert outside["passed"] is False and outside["verdict"] == "fail"
+
+    continuous, split = _snapshot_pair(steps=6)
+    split["losses"][3] += module.RESUME_TOLERANCE_T1["loss_abs"] * 2
+    assert module.compare_resume(continuous, split, steps=6, mode="t1")["passed"] is True
+    assert module.compare_resume(continuous, split, steps=6, mode="t0")["passed"] is False
 
     for verdict, expected in (({"passed": True, "verdict": "pass", "scope": "t1"}, 0),
                               ({"passed": False, "verdict": "fail", "scope": "t1"}, 2)):
@@ -477,3 +484,45 @@ def test_a_relative_config_path_does_not_break_the_report_header():
     assert module._repo_relative("configs/train/qwen35-2b-r2.yaml") == "configs/train/qwen35-2b-r2.yaml"
     assert module._repo_relative(module.REPO / "configs" / "train" / "qwen35-2b-r2.yaml") == "configs/train/qwen35-2b-r2.yaml"
     assert module._repo_relative("/etc/hosts") == "/etc/hosts"
+
+
+# --------------------------------------------------------------------------
+# R2 A1g — `t1`의 판정에서 loss 기준을 뺀다 (사용자 승인, 실패를 본 **뒤**의 규칙 변경)
+# --------------------------------------------------------------------------
+
+
+def test_the_t1_verdict_rests_on_the_exact_and_parameter_criteria_and_reports_the_loss():
+    """R2 A1g — 이 경로에서 **loss는 재개의 옳고 그름을 가리지 못한다**(A1e).
+
+    같은 6 step 일정에서 **재시작이 전혀 없는** 세 run의 쌍마다 최악 |Δloss|가 0.0786 · 0.3304 · 0.4090
+    (loss 1.0~1.7에서 ±25 %)이고, 재개한 쌍의 0.3150은 그 퍼짐 안이다. 옳은 재개를 통과시킬 만큼 느슨한
+    오차(≥ 0.9)는 깨진 재개도 통과시킨다. 그래서 `t1`의 판정은 **정수 기준 + parameter 기준**이 지고
+    loss는 퍼짐과 함께 **적기만** 한다. **등록된 loss 값은 느슨해지지 않았다** — 판정에서 빠졌을 뿐이다."""
+    module = script()
+    assert module.RESUME_VERDICT_CRITERIA["t0"] == ("loss", "param")
+    assert module.RESUME_VERDICT_CRITERIA["lora"] == ("loss", "param")
+    assert module.RESUME_VERDICT_CRITERIA["t1"] == ("param",)
+    # 등록값은 그대로다 — 값을 보고 늘린 것이 아니다
+    assert module.RESUME_TOLERANCE_T1 == {"loss_abs": 0.2, "loss_rel": 0.08, "param_max_abs": 0.01, "param_rel_l2": 0.05}
+    spread = module.NO_RESTART_LOSS_SPREAD["t1"]
+    assert spread["steps"] == 6 and len(spread["worst_loss_abs"]) == 3
+    assert max(spread["worst_loss_abs"]) == pytest.approx(0.408990, abs=1e-5)
+
+    continuous, split = _snapshot_pair(steps=6)
+    # loss만 크게 벌어진 쌍: t1은 통과하고(판정이 loss를 보지 않는다) t0는 떨어진다
+    split["losses"][3] += 1.0
+    t1 = module.compare_resume(continuous, split, steps=6, mode="t1")
+    assert t1["passed"] is True and t1["verdict"] == "pass"
+    assert t1["loss_criterion_judged"] is False
+    assert t1["loss_diagnostic"]["worst_loss_abs"] == pytest.approx(1.0)
+    assert t1["loss_diagnostic"]["inside_no_restart_spread"] is False   # 1.0 > 0.409
+    assert t1["loss_diagnostic"]["no_restart_worst"] == pytest.approx(0.408990, abs=1e-5)
+    assert module.compare_resume(continuous, split, steps=6, mode="t0")["passed"] is False
+
+    # parameter 기준은 그대로 판정한다 — 그것이 이제 판정을 진다
+    split["parameters"]["U.weight"] = split["parameters"]["U.weight"] + 1.0
+    outside = module.compare_resume(continuous, split, steps=6, mode="t1")
+    assert outside["passed"] is False and outside["verdict"] == "fail"
+    # 정수 기준도 그대로 — 뽑힌 단위가 다르면 무슨 일이 있어도 떨어진다
+    broken = module.compare_resume(continuous, {**split, "units": [["x", 0]]}, steps=6, mode="t1")
+    assert broken["passed"] is False and broken["exact_criteria_passed"] is False
