@@ -53,19 +53,26 @@ RESUME_TOLERANCE = {
 #: "재개가 깨졌다"로 읽히지만 실제로 깬 것은 **오차가 그 범위에 등록돼 있지 않다**는 사실이다. 본 값에 맞춰
 #: 오차를 고치는 것은 이 프로젝트가 금하는 수이므로, 등록될 때까지 그 범위의 판정은 `passed: None`이고 게이트는
 #: 멈춘다(사전 등록 절차: 재시작 없는 같은 설정 두 run의 벌어짐을 먼저 기록하고, 그 위에 오차를 고정한다).
-#: **T1 범위의 사전 등록 허용 오차** (P3 D, 2026-09-22). :data:`RESUME_TOLERANCE_RULE` 을 `checks.baseline_t1`의
-#: 두 run 기준선에 그대로 적용한 값이다 — 재시작 없는 두 프로세스를 같은 설정·seed로 5 step씩 돌려
-#: (`artifacts/reports/p3-acceptance.json`, 914.8 s) 잰 최악값은 loss |Δ| **0.023574**(step 3, 상대 0.826 %),
-#: 학습 대상 tensor의 최대 절대 차 **5.819e-4**(readout `V.weight`), 분모 가드를 통과한 tensor의 최대 상대 L2
-#: **6.31e-4**였다. 규칙대로 ×2 → 유효숫자 한 자리 올림 → T0보다 느슨하게만: loss_abs 0.047 → **0.05**, 나머지
-#: 셋은 T0의 값이 더 커서 그대로다. **값을 보고 고친 것은 없다** — 규칙이 먼저 파일에 있었고 여기 적용만 했다.
+#: **T1 범위의 사전 등록 허용 오차** — **세 쌍**에서 (R2 A1, 2026-09-23). P3가 남긴 이월 항목("쌍을 최소 셋 재서
+#: 그 최댓값 위에 다시 고정한다")을 그대로 닫은 값이다. :data:`RESUME_TOLERANCE_RULE` 은 셋째 쌍을 재기 **전에**
+#: 고쳐 커밋했고(`19292e4`), 여기 적용만 했다.
 #:
-#: **이 값의 한계는 함께 적는다**: 이 경로에서 잰 "재시작 없는 두 run" 쌍은 둘뿐이고 서로 2.7배 다르다 —
-#: P2 보고서 A1b의 쌍(`continuous` 대 `first`, 3 step)은 최악 **0.0641**이었고 이 쌍은 0.0236이다. 한 쌍에서 고정한
-#: 오차는 이미 관측된 퍼짐보다 **작다**. 그래서 이 오차 아래에서 P2가 남긴 6 step 재개 결과(최악 0.0876)는
-#: `passed: false`가 되고, 그 false는 "재개가 깨졌다"가 아니라 "이 오차가 한 쌍에서 나왔다"는 뜻이다.
-#: 이월: 쌍을 최소 셋 재서 그 최댓값 위에 다시 고정한다(쌍당 ≈7.6분).
-RESUME_TOLERANCE_T1 = {"loss_abs": 0.05, "loss_rel": 0.02, "param_max_abs": 0.01, "param_rel_l2": 0.05}
+#: 세 쌍의 최악값 (`PRIOR_BASELINE_PAIRS["t1"]` 둘 + `artifacts/reports/r2-acceptance.json`의 `checks.baseline_t1`):
+#:
+#:   | 쌍 | 데이터 | step | loss \|Δ\| | loss 상대 | param 최대 절대 | param 상대 L2 |
+#:   | P2 2026-09-21 | D1  | 3 | 0.064136 | 1.778 % | (snapshot 없음) | (없음) |
+#:   | P3 2026-09-22 | D1  | 5 | 0.023574 | 0.826 % | 5.819e-4 | 6.31e-4 |
+#:   | R2 2026-09-23 | R1  | 5 | **0.076560** | **3.933 %** | **6.079e-4** | **9.124e-4** |
+#:
+#: 곧 셋의 퍼짐은 **3.2배**(0.0236 ~ 0.0766)이고 **가장 큰 쌍이 가장 마지막에 나왔다** — 한 쌍으로 오차를 고정하는
+#: 것이 왜 위험한지가 이 표다. 규칙대로 ×2 → 유효숫자 한 자리 올림 → T0보다 느슨하게만:
+#: loss_abs 0.1531 → **0.2**, loss_rel 0.0787 → **0.08**, param 둘은 T0의 값이 더 커서 그대로(**0.01**·**0.05**).
+#:
+#: **한계는 그대로 적는다**: 셋 가운데 둘은 D1 데이터, 하나는 R1 데이터다 — 같은 *경로*(2B·T1·fp32 master·5초 구간)
+#: 이지만 같은 *설정*은 아니다. 그리고 0.2는 느슨하다: 이 오차는 "재개가 다른 데이터·다른 optimizer 상태로
+#: 이어가는 것"(loss를 0.1 이상 **일관되게** 움직인다)을 잡되, 그보다 작은 어긋남은 이 경로의 프로세스 간 잡음과
+#: 구분하지 못한다. 정수 기준(sampler 위치·뽑힌 단위·step 수·빠진 tensor)이 그 구분의 대부분을 지고 있다.
+RESUME_TOLERANCE_T1 = {"loss_abs": 0.2, "loss_rel": 0.08, "param_max_abs": 0.01, "param_rel_l2": 0.05}
 
 RESUME_TOLERANCES: dict[str, dict[str, float]] = {"t0": RESUME_TOLERANCE, "t1": RESUME_TOLERANCE_T1}
 
@@ -117,6 +124,17 @@ PRIOR_BASELINE_PAIRS: dict[str, list[dict[str, Any]]] = {
             "worst_loss_rel": 0.00825756566314512,
             "worst_param_max_abs": 0.000581890344619751,
             "worst_param_relative_l2": 0.0006311355571226999,
+        },
+        {
+            "label": "R2 (2026-09-23) — `--check baseline` 두 프로세스, 5 step",
+            "unit": "two runs of the same config, same seed, **no restart** (two separate processes)",
+            "source": "artifacts/reports/r2-acceptance.json",
+            "config": "configs/train/qwen35-2b-r2.yaml (R1 데이터, rollout 라벨판)",
+            "steps": 5,
+            "worst_loss_abs": 0.07655954360961914,
+            "worst_loss_rel": 0.0393281228574283,
+            "worst_param_max_abs": 0.0006078882142901421,
+            "worst_param_relative_l2": 0.0009123694716359487,
         },
     ],
 }

@@ -366,19 +366,22 @@ def test_the_two_run_spread_is_measured_without_a_verdict():
     assert "--check" in inspect.getsource(module.main) and "baseline" in module.CHECKS
 
 
-def test_the_t1_tolerance_is_the_registered_rule_applied_to_the_measured_baseline():
-    """D — 등록된 값이 **규칙의 산출물**인지 확인한다. 값을 보고 고쳤다면 이 시험이 떨어진다.
+def test_the_t1_tolerance_is_the_registered_rule_applied_to_every_measured_baseline_pair():
+    """D(P3) → A1(R2) — 등록된 값이 **규칙의 산출물**인지 확인한다. 값을 보고 고쳤다면 이 시험이 떨어진다.
 
-    두 run 기준선(`artifacts/reports/p3-acceptance.json`의 `checks.baseline_t1`, 5 step, 재시작 없음)의 실측
-    최악값은 loss |Δ| 0.023574 · 상대 0.826 % · 최대 절대 차 5.819e-4 · (가드를 통과한) 상대 L2 6.31e-4였다."""
+    R2에서 셋째 쌍이 들어오며 규칙이 "잰 쌍 전부의 최악값"이 됐고, **가장 큰 쌍이 가장 마지막에 나왔다**:
+    P2 0.064136 · P3 0.023574 · **R2 0.076560**(상대 3.933 %, 최대 절대 차 6.079e-4, 상대 L2 9.124e-4).
+    셋의 퍼짐은 3.2배다 — P3가 한 쌍에서 고정한 0.05는 이미 관측된 퍼짐보다 작았다."""
     module = script()
-    measured = {"worst_loss_abs": 0.023574, "worst_loss_rel": 0.008258,
-                "worst_param_max_abs": 5.819e-4, "worst_param_relative_l2": 6.31e-4}
-    assert module.derive_tolerance(measured) == module.RESUME_TOLERANCES["t1"] == module.RESUME_TOLERANCE_T1
-    assert module.RESUME_TOLERANCE_T1["loss_abs"] == pytest.approx(0.05)   # 2 × 0.023574 = 0.047 → 0.05
-    # 나머지 셋은 T0의 값이 더 크므로 그대로 — 느슨해지기만 한다
-    for key in ("loss_rel", "param_max_abs", "param_rel_l2"):
+    assert len(module.PRIOR_BASELINE_PAIRS["t1"]) == module.MINIMUM_BASELINE_PAIRS == 3
+    assert module.derive_tolerance(module.PRIOR_BASELINE_PAIRS["t1"]) == module.RESUME_TOLERANCES["t1"] == module.RESUME_TOLERANCE_T1
+    assert module.RESUME_TOLERANCE_T1["loss_abs"] == pytest.approx(0.2)    # 2 × 0.076560 = 0.1531 → 0.2
+    assert module.RESUME_TOLERANCE_T1["loss_rel"] == pytest.approx(0.08)   # 2 × 0.039328 = 0.0787 → 0.08
+    # param 둘은 T0의 값이 더 크므로 그대로 — 느슨해지기만 한다
+    for key in ("param_max_abs", "param_rel_l2"):
         assert module.RESUME_TOLERANCE_T1[key] == module.RESUME_TOLERANCE[key]
+    # 한 쌍(P3)만으로 고정하면 나왔을 값 — 이 시험이 그 차이를 기록으로 남긴다
+    assert module.derive_tolerance(module.PRIOR_BASELINE_PAIRS["t1"][1]) == {"loss_abs": 0.05, "loss_rel": 0.02, "param_max_abs": 0.01, "param_rel_l2": 0.05}
     assert module.RESUME_TOLERANCE == {"loss_abs": 0.02, "loss_rel": 0.02, "param_max_abs": 0.01, "param_rel_l2": 0.05}  # T0은 건드리지 않았다
 
 
@@ -449,10 +452,10 @@ def test_the_pairs_already_measured_on_the_t1_path_are_recorded_with_their_prove
 
     module = script()
     prior = module.PRIOR_BASELINE_PAIRS["t1"]
-    assert len(prior) == 2 and all(pair["source"].endswith(".json") for pair in prior)
+    assert len(prior) == 3 and all(pair["source"].endswith(".json") for pair in prior)
     assert all("no restart" in pair["unit"] for pair in prior)
 
-    p2, p3 = prior
+    p2, p3, r2 = prior
     assert p2["worst_param_max_abs"] is None and p2["worst_param_relative_l2"] is None
     # 저장된 보고서와 대조한다 — 있으면 반드시 맞아야 하고, 없는 체크아웃에서는 규칙의 산술만 시험한다
     report = Path(module.REPO) / p2["source"]
@@ -460,11 +463,12 @@ def test_the_pairs_already_measured_on_the_t1_path_are_recorded_with_their_prove
         losses = json.loads(report.read_text(encoding="utf-8"))["checks"]["resume_t1"]["losses"][: p2["steps"]]
         assert p2["worst_loss_abs"] == pytest.approx(max(row["abs"] for row in losses))
         assert p2["worst_loss_rel"] == pytest.approx(max(row["rel"] for row in losses))
-    report = Path(module.REPO) / p3["source"]
-    if report.is_file():
-        spread = json.loads(report.read_text(encoding="utf-8"))["checks"]["baseline_t1"]["spread"]
-        for key in ("worst_loss_abs", "worst_loss_rel", "worst_param_max_abs", "worst_param_relative_l2"):
-            assert p3[key] == pytest.approx(spread[key])
+    for pair in (p3, r2):
+        report = Path(module.REPO) / pair["source"]
+        if report.is_file():
+            spread = json.loads(report.read_text(encoding="utf-8"))["checks"]["baseline_t1"]["spread"]
+            for key in ("worst_loss_abs", "worst_loss_rel", "worst_param_max_abs", "worst_param_relative_l2"):
+                assert pair[key] == pytest.approx(spread[key]), (pair["label"], key)
 
 
 def test_a_relative_config_path_does_not_break_the_report_header():
