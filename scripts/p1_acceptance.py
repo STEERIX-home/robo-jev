@@ -125,6 +125,18 @@ PRIOR_BASELINE_PAIRS: dict[str, list[dict[str, Any]]] = {
 MOVE_EPSILON = 1e-9
 
 
+def _repo_relative(path: str | Path) -> str:
+    """저장소 안의 경로는 저장소 기준 상대 경로로 — worktree의 절대 경로를 보고서에 남기지 않는다.
+
+    `--config configs/…`처럼 **이미 상대 경로**로 받은 값이 `Path.relative_to(REPO)`에서 떨어지던 자리를 함께
+    막는다(R2 A1에서 첫 run이 여기서 죽었다)."""
+    resolved = Path(path).resolve()
+    try:
+        return str(resolved.relative_to(REPO))
+    except ValueError:
+        return str(path)
+
+
 def _runner() -> Any:
     import importlib.util
 
@@ -511,7 +523,7 @@ def check_baseline(mode: str, *, steps: int = 5, run_dir: Path, config_path: Pat
     prior = [dict(pair) for pair in PRIOR_BASELINE_PAIRS.get(mode, [])]
     measured = {**spread, "label": f"R2 ({dt.date.today().isoformat()}) — `--check baseline` 두 프로세스, {steps} step",
                 "source": "this report (checks.baseline_%s.spread)" % mode,
-                "config": str(config_path.relative_to(REPO)) if str(config_path).startswith(str(REPO)) else str(config_path)}  # fmt: skip
+                "config": _repo_relative(config_path)}  # fmt: skip
     pairs = [*prior, measured]
     return {
         "check": "baseline", "scope": mode, "rule": RESUME_TOLERANCE_RULE,
@@ -627,7 +639,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--check: 알 수 없는 검사 {unknown} (있는 것: {list(CHECKS)})")
     out: dict[str, Any] = {
         "task": "p1-acceptance", "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-        "config": str(Path(args.config).relative_to(REPO)) if str(Path(args.config).resolve()).startswith(str(REPO)) else args.config,
+        "config": _repo_relative(args.config),
         "gpu": {"guard": guard, "memory_at_start": memory_report()}, "checks": {},
     }
     existing = Path(args.out)

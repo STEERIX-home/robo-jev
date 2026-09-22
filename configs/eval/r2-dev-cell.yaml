@@ -1,0 +1,56 @@
+# Task R2 B2 — **둘째 칸**: `dev` 분할 42편 전부. 판정 칸(`r1-decision-cell.yaml`)과 **나란히** 읽되
+# 선택에는 쓰지 않는다(`selection: false`).
+#
+# 왜 있는가. R1 수정 라운드가 코퍼스를 정직하게 만들면서 판정 칸의 주 층이 540 → **235틱**으로 줄었다
+# (P3의 525보다도 작다). 235틱·26편에서 나오는 구간은 넓고, 넓은 구간은 "0을 포함한다"를 값싸게 만든다.
+# 그래서 같은 열·같은 규칙으로 더 큰 둘째 칸을 함께 읽는다 — 두 칸이 같은 방향을 가리키는지가 읽을 것이다.
+#
+# **이 칸은 판정 칸이 아니다.** `dev`는 봉인 계열이 아니라 학습 분할과 같은 계열(zoneF 개념·템플릿 `c`·prefix가
+# 빠지지 않은 편들)이고, 여기서 잘 나오는 것은 일반화가 아니라 계열 안의 성과다. checkpoint 선택·주장에 쓰지
+# 않으며(`selection: false`), 보고서에서도 판정 칸 옆의 **둘째 읽기**로만 적는다. 봉인(`ood_test`)은 여기에도 없다.
+#
+# 계약·열·대조군 정의는 `r1-decision-cell.yaml`과 글자 그대로 같다 — 두 칸을 나란히 놓으려면 그래야 한다.
+
+version: eval-r2-dev-cell-v0.1
+window_ticks: 30
+shuffle_seed: 1
+tokens_per_batch: 8192
+fused: true
+
+columns:
+  permuted: false
+  state_shuffle: true
+  instruction_shuffle: true
+  commitment_shuffle: true
+  rule_judge: true
+  mechanical_baseline: true
+  event_metrics: true
+  selective: false
+  calibration: false
+
+tiny_scorer_report: artifacts/reports/r1-tiny-scorer.json
+
+splits:
+  - name: robot/dev
+    manifest: artifacts/datasets/r1-robot/r1/manifest.json
+    domain: robot
+    split: dev
+    files: ["episodes/*/streams.jsonl"]
+    selection: false
+    note: "`dev` 42편 전부, 통째로 (`r1-robot-v0.2`). **선택에 쓰지 않는 둘째 칸**이다 — 봉인 계열이 아니므로 여기의 여유는 일반화 주장이 아니다. 판정 칸(`ood_dev` 26편 235틱)의 주 층이 좁아 구간이 넓으므로, 같은 열을 더 큰 모집단에서 한 번 더 읽는 자리다"
+    records: [ep-E0-400101, ep-E0-400125, ep-E0-400129, ep-E0-400130, ep-E0-400132,
+              ep-E0-400137, ep-E0-400141, ep-E0-400147, ep-E0-400149, ep-E0-400161,
+              ep-E0-400162, ep-E0-400171, ep-E0-400173,
+              ep-E1-410101, ep-E1-410111, ep-E1-410117, ep-E1-410124, ep-E1-410133,
+              ep-E1-410146, ep-E1-410148, ep-E1-410154, ep-E1-410156, ep-E1-410180,
+              ep-E1-410184, ep-E1-410198, ep-E1-410217, ep-E1-410218, ep-E1-410219,
+              ep-E1-410225, ep-E1-410235, ep-E1-410255,
+              ep-E2-420105, ep-E2-420113, ep-E2-420115, ep-E2-420144, ep-E2-420158,
+              ep-E2-420168, ep-E2-420170, ep-E2-420186, ep-E2-420197, ep-E2-420232,
+              ep-E2-420235]
+    store_predictions: [q_main, q_stop]
+
+note: >
+  Task R2 B2의 둘째 칸. 판정 칸과 같은 열·같은 쌍 부트스트랩이고, 다른 것은 모집단과 `selection: false`뿐이다.
+  두 칸의 구간을 **나란히** 적는다 — 어느 하나를 고르는 것이 아니라, 좁은 판정 칸의 읽기가 더 큰 칸에서도
+  같은 방향인지를 본다.

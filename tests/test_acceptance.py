@@ -465,3 +465,11 @@ def test_the_pairs_already_measured_on_the_t1_path_are_recorded_with_their_prove
         spread = json.loads(report.read_text(encoding="utf-8"))["checks"]["baseline_t1"]["spread"]
         for key in ("worst_loss_abs", "worst_loss_rel", "worst_param_max_abs", "worst_param_relative_l2"):
             assert p3[key] == pytest.approx(spread[key])
+
+
+def test_a_relative_config_path_does_not_break_the_report_header():
+    """R2 A1 — 첫 run이 여기서 죽었다: `--config configs/…`(상대 경로)가 `relative_to(REPO)`에서 떨어졌다."""
+    module = script()
+    assert module._repo_relative("configs/train/qwen35-2b-r2.yaml") == "configs/train/qwen35-2b-r2.yaml"
+    assert module._repo_relative(module.REPO / "configs" / "train" / "qwen35-2b-r2.yaml") == "configs/train/qwen35-2b-r2.yaml"
+    assert module._repo_relative("/etc/hosts") == "/etc/hosts"
