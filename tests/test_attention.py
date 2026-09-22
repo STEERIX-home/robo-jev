@@ -341,5 +341,6 @@ def test_a_mid_stream_instruction_change_leaves_the_window_like_any_tick_token(s
     assert all(bool(mask[inside, index]) for index in v2)
     assert not any(bool(mask[outside, index]) for index in v2)
     assert all(bool(mask[outside, index]) for index in range(out["prefix_end"]))  # 정적 prefix는 남는다
-    # 그 틱의 goal 줄은 여전히 v2를 싣는다 (압축 참조, 서식 v0.3).
-    assert any(line.startswith("goal v2 ") for line in state_text_of(1 + WINDOW_TICKS + 1).splitlines())
+    # 그 틱의 goal 줄은 여전히 v2를 싣는다 — 서식 v0.4에서는 **버전만** 남으므로(Task R1 A1) 지시 문장은
+    # `goal_text_period_ticks`마다의 재적재와 지시 조각에서만 온다.
+    assert any(line == "goal v2" for line in state_text_of(1 + WINDOW_TICKS + 1).splitlines())
