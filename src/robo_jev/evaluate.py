@@ -176,6 +176,17 @@ MECHANICAL_BASELINE_POLICY = (
     "— both are fields the state shuffle preserves, so this column reads nothing"
 )
 
+#: commitment 섞기 열을 **어디서 읽을 수 있는가**. 열 옆에 같이 실린다 — 범위가 파일 밖에 있으면
+#: 읽을 수 없는 칸의 "0을 제외한다"가 기계가 읽는 기록으로 남는다 (P3 B2, 리뷰 1 I3).
+COMMITMENT_SHUFFLE_QUESTION = "q_main"
+COMMITMENT_SHUFFLE_SCOPE = (
+    "interpretable on q_main only, and there on the non-commitment (primary) stratum. The roll moves this tick's "
+    "commitment reference to another candidate of the same tick and rewrites every auxiliary label's conditioned_on "
+    "with it, so the auxiliary answers — which are the expert's answers under the ORIGINAL commitment — are falsified "
+    "rather than made goal-blind. On q_main's commitment stratum the stored label IS the original commitment, so it "
+    "is falsified there too. No margin is reported for the questions this column cannot be read on."
+)
+
 
 def _tick_commitment(request: dict[str, Any]) -> str | None:
     """이 틱의 commitment 참조 — 모델이 보는 자리(`request.commitment`)를 먼저 읽고 없으면 상태 쪽."""
@@ -889,6 +900,11 @@ def context_shuffle_records(records: list[dict], *, robot: str = "state") -> lis
     상태 섞기에서 **기증 틱의 물체가 더 적으면 이 틱의 남는 물체는 그대로 둔다** — 후보의 id가 모두 풀려야 하기 때문이다
     (D1 dev 16.8 % · test 31.2 % · ood_dev 32.9 %의 틱; 굴린 `goal.target_ref`가 그 남은 물체를 가리킨 틱은 0). 즉 굴리기는
     대다수 틱에서 완전하고 나머지에서는 부분적이다 (D1 리뷰 2 N3).
+
+    **기증자가 더 짧으면 길이가 고정된다.** 기증 틱은 `min(position, len(donor) - 1)`에서 읽으므로 기증자의 끝을 넘는
+    틱은 전부 기증자의 **마지막(끝난) 상태** 하나와 섞인다. 곧 이 열의 값은 **설정의 편 순서**에 달려 있다 — P3 판정
+    칸에서 20.7 %, 옛 8편 칸에서 30.1 %의 틱이 고정되고, 같은 249틱의 대조군이 두 회전 사이에서 0.727 → 0.960으로
+    움직였다 (P3 C1b; 모집단별 실측은 `scripts/decision_cell_strata.py`의 `donor_rotation`).
     """
     if robot not in _ROBOT_SHUFFLE_KINDS:
         raise ValueError(f"robot은 {_ROBOT_SHUFFLE_KINDS} 중 하나다: {robot!r}")
@@ -916,6 +932,10 @@ def context_shuffle_records(records: list[dict], *, robot: str = "state") -> lis
                         goal["text"] = donor_goal
             else:
                 for position, tick in enumerate(shuffled["ticks"]):
+                    # **길이 고정**: 기증자가 더 짧으면 그 뒤의 틱은 전부 기증자의 **마지막(끝난) 상태** 하나와 섞인다.
+                    # 이것이 대조군을 기증자 배정에 의존하게 만든다 — P3 판정 칸에서 20.7 %(524/2,530), 옛 8편 칸에서
+                    # 30.1 %(254/844)의 틱이 그렇고, 두 회전 사이에서 예측의 9.7 %가 움직였다 (P3 C1b;
+                    # `scripts/decision_cell_strata.py`의 `donor_rotation`이 모집단마다 다시 센다).
                     donor_request = donor_ticks[min(position, len(donor_ticks) - 1)]["request"]
                     donor_state = donor_request.get("state") or {}
                     own_state = tick["request"].get("state")
@@ -995,6 +1015,7 @@ def evaluate_items(
         rolled = context_shuffle_records([item.record for item in streams], robot="state_commitment")
         result["commitment_shuffle"] = aggregate(predict_items(judge, reserialised(streams, rolled), tokens_per_batch=tokens_per_batch, fused=fused), store_predictions=store_predictions)
         result["commitment_shuffle_kind"] = "state_commitment"  # 상태 섞기 + commitment 참조를 이 틱의 다른 후보로 (P3 B2)
+        result["commitment_shuffle_scope"] = COMMITMENT_SHUFFLE_SCOPE  # 이 열을 어디서 읽는가 — 값 옆에 (리뷰 1 I3)
     if rule_judge and any(item.kind == "stream" for item in items):
         result["rule_judge"] = aggregate(rule_judge_predictions(items), store_predictions=store_predictions)
     if mechanical_baseline and any(item.kind == "stream" for item in items):
@@ -1018,8 +1039,15 @@ def split_episode_bootstrap(table: dict[str, Any], **options: Any) -> dict[str, 
         for name, column in (("state_shuffle", "context_shuffle"), ("instruction_shuffle", "instruction_shuffle"), ("commitment_shuffle", "commitment_shuffle")):
             rows = ((table.get(column) or {}).get(qid) or {}).get("per_episode")
             control = episode_bootstrap((table["model"].get(qid) or {}).get("per_episode"), rows, **options) if rows else None
-            if control is not None and "margin" in control:
-                entry[name] = {key: control[key] for key in ("control_accuracy", "margin", "margin_ci", "margin_half_width", "margin_includes_zero")}
+            if control is None or "margin" not in control:
+                continue
+            if column == "commitment_shuffle" and qid != COMMITMENT_SHUFFLE_QUESTION:
+                # 이 열은 부가 질문에서 답 자체가 뒤집힌다 — 정확도는 남기되 **여유와 판정 표지는 내지 않는다**.
+                # 읽을 수 없는 칸의 `margin_includes_zero: false`는 기계가 읽는 거짓 발견이다 (리뷰 1 I3).
+                entry[name] = {"control_accuracy": control["control_accuracy"], "out_of_scope": COMMITMENT_SHUFFLE_SCOPE,
+                               "margin": None, "margin_ci": None, "margin_half_width": None, "margin_includes_zero": None}
+                continue
+            entry[name] = {key: control[key] for key in ("control_accuracy", "margin", "margin_ci", "margin_half_width", "margin_includes_zero")}
         out[qid] = entry
     return out
 

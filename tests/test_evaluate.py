@@ -526,6 +526,10 @@ def _commitment_streams(streams, *, hold_at=(1,)):
 
 
 def _stream_items(records, tokenizer, *, window_ticks=30):
+    """스트림 레코드들을 그대로 :class:`~robo_jev.sampler.Item` 으로 — 샘플러를 거치지 않는 fixture용 어댑터.
+
+    `_commitment_streams`가 심은 commitment를 그대로 둔 채 열 하나만 부르고 싶을 때 쓴다(`tokens`는 이 시험들이
+    배치를 나누지 않으므로 1로 둔다)."""
     return [
         Item(index=index, kind="stream", record_id=record["episode_id"], split="dev", domain="robot", material="stream",
              record=record, layout=serialize_request(record, tokenizer, layout="stream_l1a", window_ticks=window_ticks),
@@ -625,6 +629,16 @@ def test_rolling_the_commitment_keeps_the_reference_inside_this_tick_s_own_candi
     with pytest.raises(ValueError, match="state_commitment"):
         context_shuffle_records(records, robot="commitment")
 
+    # **굴린 레코드는 계약 안에 남는다** — 이 열의 논거가 "굴린 참조는 언제나 이 틱의 실제 후보"이므로, 그 말이
+    # 참이면 굴린 레코드가 직렬화 검사를 그대로 통과해야 한다. 부가 라벨의 `conditioned_on`을 같이 옮기는 이유이기도
+    # 하다(옮기지 않으면 여기서 막힌다). 리뷰 1 M5 — 보고서 B2의 주장을 시험이 들고 있게 한다.
+    from robo_jev.contracts import validate_record
+
+    for record in rolled:
+        validate_record(record)
+    for record in plain:
+        validate_record(record)
+
 
 def test_the_tick_weighted_and_the_episode_balanced_mean_are_both_reported_and_can_disagree():
     """A3 — 편마다 크기가 다르면 두 평균이 갈린다. 갈리는 것 자체가 결과의 일부라 **둘 다** 낸다 (P3 A3)."""
@@ -680,3 +694,32 @@ def test_the_two_new_columns_run_and_do_not_move_the_eval_set_identity(tmp_path)
 
     # 스트림이 없는 분할에는 두 열이 없다
     assert "commitment_shuffle" not in table.get("d0/dev_singles", {})
+
+
+def test_the_commitment_shuffle_column_carries_its_scope_and_no_margin_where_it_cannot_be_read():
+    """리뷰 1 I3 — 이 열은 `q_main`에서만 읽을 수 있는데 여유와 판정 표지가 **모든 질문 칸에** 나갔다.
+
+    부가 질문의 답은 **원래** commitment에 조건화된 전문가 답이라, 참조를 옮기면 대조군이 목표를 못 읽어서 틀리는
+    것이 아니라 **답 자체가 뒤집힌다**. 그런 칸의 `margin_includes_zero: false`는 기계가 읽는 거짓 발견이고, 그것이
+    P2-I2가 일어난 방식이다. 그래서 범위를 값 옆에 적고 읽을 수 없는 칸에서는 여유를 내지 않는다."""
+    from robo_jev.evaluate import COMMITMENT_SHUFFLE_SCOPE, split_episode_bootstrap
+
+    rows = [{"episode_id": name, "n": 10, "graded": 10, "correct": value} for name, value in (("a", 9), ("b", 8))]
+    worse = [{"episode_id": name, "n": 10, "graded": 10, "correct": value} for name, value in (("a", 2), ("b", 1))]
+    table = {
+        "model": {"q_main": {"per_episode": rows}, "q_done": {"per_episode": rows}, "_all": {"per_episode": rows}},
+        "context_shuffle": {qid: {"per_episode": worse} for qid in ("q_main", "q_done", "_all")},
+        "commitment_shuffle": {qid: {"per_episode": worse} for qid in ("q_main", "q_done", "_all")},
+    }
+    out = split_episode_bootstrap(table)
+
+    main = out["q_main"]["commitment_shuffle"]
+    assert main["margin"] > 0 and main["margin_includes_zero"] is False and "out_of_scope" not in main
+    for qid in ("q_done", "_all"):
+        entry = out[qid]["commitment_shuffle"]
+        assert entry["control_accuracy"] == pytest.approx(0.15)     # 정확도는 남는다 — 재지 않은 것이 아니다
+        assert entry["out_of_scope"] == COMMITMENT_SHUFFLE_SCOPE    # 왜 못 읽는지가 값 옆에 있다
+        assert entry["margin"] is None and entry["margin_ci"] is None and entry["margin_includes_zero"] is None
+        # 같은 칸의 **표준 대조군**은 그대로 판정한다 — 범위는 이 열만의 것이다
+        assert out[qid]["state_shuffle"]["margin_includes_zero"] is False
+    assert "q_main" in COMMITMENT_SHUFFLE_SCOPE and "falsified" in COMMITMENT_SHUFFLE_SCOPE
