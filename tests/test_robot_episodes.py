@@ -824,3 +824,41 @@ def test_the_r1_schedule_mixes_the_three_profiles_by_weight_without_repeating_an
     counts = Counter(profile for profile, _ in schedule)
     assert counts == {"E0": 80, "E1": 160, "E2": 160}
     assert seed_schedule(config, 400)[:17] == seed_schedule(config, 17)  # --resume의 전제
+
+
+def test_the_model_sees_only_the_instruction_text_change_in_an_instruction_contrast_pair(smoke):
+    """C3-d QA (Task R1): `instruction` 대조 쌍은 이제 **주 계기**다 — 서식 v0.4에서 구조화된 목표가 모델 입력 밖이라
+    base와 sibling의 직렬화 차이가 **지시 문장(과 버전)뿐**이기 때문이다. 전문가용 `allowed_diff_paths`의 여섯 잎 가운데
+    넷(`target_ref`·`target_desc`·`target_zone`·`t_ms`)은 모델에 닿지 않는다.
+
+    쌍의 후보 **순서**는 정답 위치 편향을 막으려 섞으므로, 비교는 순서를 되돌린 사본에서 한다.
+    """
+    import copy as _copy
+
+    from robo_jev.data.robot_contrast import allowed_diff_paths, build_pairs
+    from robo_jev.model.serialize import serialize_request
+    from robo_jev.model.tokenizer import WhitespaceTokenizer
+
+    expert = smoke["expert"]
+    tokenizer = WhitespaceTokenizer()
+    checked = 0
+    for record in smoke["records"].values():
+        pairs, _ = build_pairs(record, expert=expert)
+        by_id = {row["request"]["request_id"]: row for row in pairs}
+        for sibling in (row for row in pairs if row["provenance"].get("kind") == "instruction" and row["provenance"].get("derivation") == "contrast"):
+            base = by_id[sibling["provenance"]["contrast"]["sibling_id"]]
+            assert allowed_diff_paths("instruction", "", base["request"]["state"]) >= {"state.goal.text", "state.goal.version"}
+            aligned = _copy.deepcopy(sibling)
+            for question, source in zip(aligned["request"]["questions"], base["request"]["questions"]):
+                order = {entry["id"]: index for index, entry in enumerate(source["criteria"])}
+                question["criteria"].sort(key=lambda entry: order.get(entry["id"], len(order)))
+            base_lines = tokenizer.decode(serialize_request(base, tokenizer)["tokens"]).splitlines()
+            sibling_lines = tokenizer.decode(serialize_request(aligned, tokenizer)["tokens"]).splitlines()
+            differing = [(a, b) for a, b in zip(base_lines, sibling_lines) if a != b]
+            assert len(base_lines) == len(sibling_lines)
+            assert differing, "지시가 바뀐 쌍인데 모델이 보는 텍스트가 같다"
+            for a, b in differing:
+                assert a.startswith("goal ") and b.startswith("goal "), (a, b)
+                assert "target" not in a + b and "zone=" not in a + b
+            checked += 1
+    assert checked, "instruction 쌍이 하나도 없다"

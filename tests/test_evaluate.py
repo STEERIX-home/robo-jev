@@ -723,3 +723,117 @@ def test_the_commitment_shuffle_column_carries_its_scope_and_no_margin_where_it_
         # 같은 칸의 **표준 대조군**은 그대로 판정한다 — 범위는 이 열만의 것이다
         assert out[qid]["state_shuffle"]["margin_includes_zero"] is False
     assert "q_main" in COMMITMENT_SHUFFLE_SCOPE and "falsified" in COMMITMENT_SHUFFLE_SCOPE
+
+
+# --------------------------------------------------------------------------
+# Task R1 Stage C — 사건을 재는 지표, 지시 대조군의 승격, 기증자 고정의 제거
+# --------------------------------------------------------------------------
+
+
+def _per_record(rows):
+    """`aggregate(..., store_predictions=…)`의 `per_record` 꼴로 (record_id, tick, question, predicted)."""
+    return [{"record_id": rid, "tick": tick, "question": "q_main", "predicted": pid, "correct": None} for rid, tick, pid in rows]
+
+
+def _toy_record(labels, *, events=None, episode_id="ep-toy"):
+    """라벨과 사건만 있는 최소 스트림 레코드 — 새 지표는 예측과 라벨·사건만 읽는다."""
+    ticks = []
+    for index, answer in enumerate(labels):
+        state = {"goal": {"version": 1 + sum(1 for e in (events or {}) if e <= index and (events or {})[e] == "goal"), "text": "t"}}
+        state["events"] = [{"kind": "object_moved", "sim_ms": index * 100}] if (events or {}).get(index) == "world" else []
+        ticks.append({
+            "t": index, "sim_ms": index * 100, "request": {"state": state, "candidates": {"q_main": []}},
+            "labels": [{"question_id": "q_main", "kind": "valid_set", "candidate_ids": list(answer)}],
+        })  # fmt: skip
+    return {"schema_version": "stream-v0", "episode_id": episode_id, "prefix": {"instructions": [{"version": 1, "t_ms": 0, "text": "t"}]}, "ticks": ticks}
+
+
+def test_reaction_delay_counts_the_ticks_to_the_new_answer_and_censors_what_never_arrives():
+    """C3-a: 사건 틱마다 모델의 argmax가 **그 틱의 새 정답 집합**에 처음 드는 데 걸린 틱 수. 상한 안에 들지 못하면
+    값을 지어내지 않고 검열로 센다 — 상한을 평균에 섞으면 "느리게 반응함"과 "반응하지 않음"이 같은 수가 된다."""
+    from robo_jev.evaluate import reaction_delay
+
+    record = _toy_record([["a"]] * 3 + [["b"]] * 5 + [["c"]] * 4, events={3: "goal", 8: "world"})
+    quick = _per_record([("ep-toy", i, "a") for i in range(3)] + [("ep-toy", i, "b") for i in range(3, 8)] + [("ep-toy", i, "c") for i in range(8, 12)])
+    out = reaction_delay(quick, [record])
+    assert out["goal_change"]["events"] == 1 and out["goal_change"]["median_ticks"] == 0 and out["goal_change"]["censored"] == 0
+    assert out["world_event"]["events"] == 1 and out["world_event"]["median_ticks"] == 0
+
+    slow = _per_record([("ep-toy", i, "a") for i in range(3)] + [("ep-toy", i, "a") for i in range(3, 6)] + [("ep-toy", i, "b") for i in range(6, 8)] + [("ep-toy", i, "b") for i in range(8, 12)])
+    out = reaction_delay(slow, [record])
+    assert out["goal_change"]["median_ticks"] == 3  # 세 틱 늦게 새 답으로 갔다
+    assert out["world_event"]["censored"] == 1 and out["world_event"]["censored_rate"] == 1.0
+    assert out["horizon_ticks"] == 30
+
+
+def test_answer_stability_reads_only_the_stretches_where_the_label_did_not_move():
+    """C3-b: 사건이 없는데 답이 흔들리는 것은 반응이 아니라 잡음이다. 라벨이 그대로인 구간에서만 센다."""
+    from robo_jev.evaluate import answer_stability
+
+    record = _toy_record([["a"]] * 6)
+    steady = answer_stability(_per_record([("ep-toy", i, "a") for i in range(6)]), [record])
+    assert steady["switch_rate"] == 0.0 and steady["round_trips"] == 0 and steady["hold_ticks_median"] == 6
+
+    flapping = answer_stability(_per_record([("ep-toy", i, "a" if i % 2 == 0 else "b") for i in range(6)]), [record])
+    assert flapping["switch_rate"] == 1.0 and flapping["round_trips"] == 4 and flapping["hold_ticks_median"] == 1
+    assert flapping["segments"] == 1 and flapping["steps"] == 5
+
+
+def test_stop_timing_reports_the_delay_after_a_stop_and_the_false_alarms_when_there_is_none():
+    """C3-c: 정지가 필요해진 틱부터 `q_stop ≥ 0.5`(참 후보가 argmax)까지의 틱 수와, 정지가 필요 없는 틱의 오경보율."""
+    from robo_jev.evaluate import stop_timing
+
+    record = _toy_record([["a"]] * 6)
+    for index, tick in enumerate(record["ticks"]):
+        tick["labels"].append({"question_id": "q_stop", "kind": "single", "answer": index in (2, 3)})
+    rows = [{"record_id": "ep-toy", "tick": index, "question": "q_stop", "predicted": value, "correct": None}
+            for index, value in enumerate(["false", "true", "false", "true", "false", "false"])]
+    out = stop_timing(rows, [record])
+    assert out["onsets"] == 1 and out["median_ticks"] == 1 and out["censored"] == 0
+    assert out["quiet_ticks"] == 4 and out["false_alarm_rate"] == 0.25  # 틱 1의 참이 오경보
+
+
+def test_the_instruction_shuffle_replaces_every_place_the_model_reads_the_instruction(streams):
+    """C2: `goal` 줄에서 구조화된 목표가 빠졌으므로 **지시 섞기가 "지시를 읽는가"를 재는 열**이다. 그러려면 모델이
+    지시 문장을 보는 **세 자리**(prefix 조각, 주기적 `goal … text=`, `ev instruction_changed text=`)가 전부 바뀌어야
+    한다 — 하나라도 남으면 이 열이 진짜 지시를 흘린다."""
+    episodes = [copy.deepcopy(record) for record in streams[:2]]
+    # D0 fixture의 두 에피소드는 지시 문장이 같다 — 섞기가 실제로 바꾸는지 보려면 달라야 한다.
+    for number, episode in enumerate(episodes):
+        text = f"지시 {number}: 대상을 영역 {number}로 옮겨라"
+        for instruction in episode["prefix"]["instructions"]:
+            instruction["text"] = text
+        for tick in episode["ticks"]:
+            state = tick["request"]["state"]
+            state["goal"]["text"] = text
+            state["events"] = [{"kind": "instruction_changed", "sim_ms": int(tick.get("sim_ms", 0)), "version": int(state["goal"].get("version", 1)), "text": text}]
+    rolled = context_shuffle_records(episodes, robot="instruction")
+    own_text = episodes[0]["prefix"]["instructions"][0]["text"]
+    donor_text = episodes[1]["prefix"]["instructions"][0]["text"]
+    assert own_text != donor_text
+    tokenizer = WhitespaceTokenizer()
+    text = tokenizer.decode(serialize_request(rolled[0], tokenizer, layout="stream_l1a")["tokens"])
+    assert donor_text in text and own_text not in text
+    for record in rolled:
+        validate_record(record)
+
+
+def test_the_state_shuffle_no_longer_freezes_a_tick_on_a_finished_donor_scene(streams):
+    """C2 (P3 C1b 이월): 옛 규칙은 기증자가 짧으면 그 뒤의 틱을 전부 기증자의 **마지막(끝난) 상태** 하나에 묶었고,
+    그래서 이 열의 값이 설정의 편 순서에 달려 있었다. 이제 회전을 길이로 짝짓고 남는 차이는 감아 돈다."""
+    from robo_jev.evaluate import donor_rotation
+
+    episodes = [copy.deepcopy(record) for record in streams[:3]]
+    for length, episode in zip((2, 5, 9), episodes):
+        episode["ticks"] = (episode["ticks"] * 5)[:length]
+    rows = donor_rotation(episodes)
+    assert [row["ticks"] for row in rows] == [2, 5, 9]  # 길이 순으로 짝짓는다
+    assert [row["donor_ticks"] for row in rows] == [5, 9, 2]
+    rolled = context_shuffle_records(episodes, robot="state")
+    longest = next(record for record in rolled if len(record["ticks"]) == 9)
+    donor = next(record for record in episodes if len(record["ticks"]) == 2)
+    rolled_goals = [tick["request"]["state"]["goal"] for tick in longest["ticks"]]
+    donor_goals = [tick["request"]["state"]["goal"] for tick in donor["ticks"]]
+    # 감아 돌았으므로 기증자의 두 틱이 번갈아 나온다 — 한 상태에 갇히지 않는다.
+    assert rolled_goals[0]["text"] == donor_goals[0]["text"] and rolled_goals[1]["text"] == donor_goals[1]["text"]
+    assert rolled_goals[2]["text"] == donor_goals[0]["text"]
