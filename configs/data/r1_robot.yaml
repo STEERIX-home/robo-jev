@@ -1,0 +1,60 @@
+# R1 로봇 에피소드 생성 설정 (docs/04 §5·§6, docs/08 §3·§8·§9; Task R1 Stage B).
+#
+#   uv run python scripts/generate_episodes.py --config configs/data/r1_robot.yaml \
+#       --count 400 --out artifacts/datasets/r1-robot/r1 [--resume]
+#
+# D1과 다른 것은 셋이다. (1) 모델의 입력에서 풀어 놓은 목표가 빠졌고(서식 v0.4, `ts0.6`) 지시 문장이 대상·목적지·
+# 제약을 **전부** 말한다(`s0.3`의 금지 물체 슬롯). (2) 에피소드가 **사건이 잦다**: 지시 변경 1~3회, 외란 3~6회를
+# 에피소드가 끝나기 전의 창에, 완료 뒤 꼬리는 1 s → 0.3 s, 정체 감시(`h0.8`)가 스스로 풀 수 없는 반복을 끊는다.
+# (3) 프로파일이 셋이다 — E0(사건 없음) 20 %, E1(D1의 값) 40 %, E2(사건 잦음) 40 %.
+version: r1-robot-v0.1
+
+# 레코드의 `versions.config_digest`에 드는 설정 파일. 네 경로를 전부 이름으로 적는다 — 빠지면 생성기가 기본 경로로
+# 대신하지 않고 거절한다.
+sim_config: configs/sim/tidy_clutter.yaml
+harness_config: configs/harness/robot.yaml
+expert_config: configs/sim/expert_v0.yaml
+events_config: configs/sim/events.yaml
+
+# 프로파일 섞는 비중 (Task R1 B2-iv): E0 20 % · E1 40 % · E2 40 %. 일정은 이 비중대로 번갈아 세며 같은 설정·count면
+# 같은 일정이고 count를 늘려도 앞부분은 그대로다(`--resume`의 전제).
+profiles: [E0, E1, E2]
+profile_weights: [20, 40, 40]
+seeds:
+  # D1(100~499)과 겹치지 않는 구간에서 센다 — 같은 장면을 다시 만들지 않는다.
+  base: 400100
+  dagger_cycle_offset: 100000
+
+episode:
+  control_steps_per_tick: 5      # 판단 틱 10Hz = 50Hz 제어 5회
+  # 완료 뒤 꼬리 (Task R1 B2-v): D1의 10틱(1 s)은 홀드아웃 2,530틱 중 251틱을 "정답≠commitment지만 읽을 것이 없는"
+  # `hold` 꼬리로 채웠다. 0.3 s면 완료가 안정됐음을 보이기에 충분하다.
+  tail_ticks_after_done: 3
+  # 최대 길이는 장면 설정의 episode.max_ms(45 s)다.
+
+target_episodes: 400
+
+# 틱 대조 쌍 (docs/04 §3). **instruction을 먼저** 둔다 (Task R1 B3): 지시 대조 쌍이 이제 주 계기다 — 모델이 보는
+# 차이가 텍스트뿐인 쌍이기 때문이다(`goal` 줄에 구조화된 목표가 없으므로 base와 sibling의 직렬화 차이는 `text`와
+# `version`뿐이다). 에피소드마다 종류별 ≤ 1, 합쳐 ≤ per_episode.
+contrast:
+  per_episode: 3
+  kinds: [instruction, forbidden, zone_boundary]
+
+split:
+  weights:
+    train: 70
+    dev: 10
+    calibration: 10
+    test: 10
+  holdout_groups: []
+  # ood(ood_dev/ood_test, group 해시로 반분)는 holdout으로만 만든다. 봉인 목록은 docs/04 §5 표와 같다.
+  #   - E1 계열 하나 (일정의 첫 E1 에피소드 seed 400100의 계열; 결정적: `family_id(build_plan(sim_config, 400100, "E1"))`).
+  holdout_prefixes: ["robot/E1/family-n7-b6c1-zFLR"]
+  holdout_domains: []
+  #   - 지시 문구 템플릿 변형 `c` (`configs/sim/tidy_clutter.yaml` instruction.v1_templates/v2_templates의 id `c`).
+  #     **새 id다**: R1의 템플릿은 문장이 달라졌으므로 D1의 `v1#2` 봉인이 조용히 새 문장에 걸리지 않게 id를 바꿨다.
+  holdout_templates: ["v1#c", "v2#c"]
+  #   - 개념 계열: 지시의 목표 영역이 zoneF("앞쪽 보관 영역")인 계열 — train은 zoneL/zoneR만 목표로 한다.
+  #     지시 변경이 영역을 zoneF로 바꾸는 에피소드도 `plan_concepts`가 잡아 같이 봉인된다.
+  holdout_concepts: ["robot:goal-zone:zoneF"]

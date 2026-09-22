@@ -74,7 +74,7 @@ __all__ = [
 #: 놓기 정체 감시(`place_stalled`), 빈 자리 없는 영역의 후보는 `path=blocked`(D1-prep 리뷰 1). h0.7 = 밀기 명령 구간을
 #: stand-off 여유(접촉 거리 − 실측 도달, `push_reach_mm`)만큼 늘림, 놓기 정체 감시의 절대 상한(`m_place_total`), 경로 답과
 #: 무관한 `conflict{zone_full}` 기록(D1-prep 리뷰 2 N7·N2·N4).
-HARNESS_VERSION = "h0.7"
+HARNESS_VERSION = "h0.8"
 
 #: 결합 행동의 기능. 이 셋만 `기능:대상:접근:목적지` 키를 갖는다.
 JOINT_FUNCTIONS = ("grasp", "place", "push")
@@ -334,6 +334,7 @@ class RobotHarness:
         self._failure_streak: dict[str, Any] | None = None
         #: 놓기 정체(`place_stalled`)로 이 에피소드 동안 제외한 놓기점 (영역 id → xy 목록). 에피소드 안에서만 든다.
         self._stalled_place_points: dict[str, list[tuple[float, float]]] = {}
+        self._reset_stall_ledger()
 
     @classmethod
     def from_config_path(
@@ -346,6 +347,67 @@ class RobotHarness:
         self.adapter = GroundTruthAdapter(self.config["perception"])
         self._failure_streak = None
         self._stalled_place_points = {}
+        self._reset_stall_ledger()
+
+    def _reset_stall_ledger(self) -> None:
+        """정체 장부 (h0.8, Task R1 B2-v). 에피소드 안에서만 든다 — 놓기 정체 장부와 같은 수명이다."""
+        #: 기하가 젊어지지 않은 채 이어진 관측 게이트 틱 수 (진행 기준, `m_observe`).
+        self._observe_ticks = 0
+        #: 진행과 무관하게 이어진 관측 게이트 틱 수 (절대 상한, `m_observe_total`) — `m_place_total`과 대칭.
+        self._observe_total = 0
+        #: 그 구간에서 본 대상 기하의 가장 젊은 나이. 이보다 젊어지면 진행이다.
+        self._observe_age: int | None = None
+        #: 이어진 hold·정지 틱 수 (`m_hold`). 완료 꼬리(`gate=done`)는 세지 않는다.
+        self._hold_ticks = 0
+
+    def _stall_reason(self) -> dict[str, Any] | None:
+        """상한에 이른 정체가 있으면 그 기록, 없으면 `None`. 기록을 내면 장부를 비운다."""
+        caps = self.compose_config
+        limit_observe = int(caps.get("m_observe", 0) or 10**9)
+        limit_total = int(caps.get("m_observe_total", 0) or 10**9)
+        if self._observe_ticks >= limit_observe or self._observe_total >= limit_total:
+            reason = {
+                "kind": "observe_stalled",
+                "ticks": int(self._observe_ticks),
+                "total_ticks": int(self._observe_total),
+                "cap": "progress" if self._observe_ticks >= limit_observe else "total",
+            }
+            self._reset_stall_ledger()
+            return reason
+        if self._hold_ticks >= int(caps.get("m_hold", 0) or 10**9):
+            reason = {"kind": "hold_stalled", "ticks": int(self._hold_ticks)}
+            self._reset_stall_ledger()
+            return reason
+        return None
+
+    def _note_stall_outcome(self, out: dict[str, Any], request: dict[str, Any]) -> None:
+        """이 틱의 결과로 정체 장부를 갱신한다 (:meth:`compose`가 부른다)."""
+        if out.get("command") is None:
+            return  # 폐기된 요청은 이 에피소드의 진행이 아니다
+        gate = out.get("gate")
+        adopted = out.get("adopted") or {}
+        if gate == "observe":
+            self._observe_total += 1
+            age = self._target_geometry_age((request.get("request", request)).get("state") or {})
+            if age is not None and (self._observe_age is None or age < self._observe_age):
+                self._observe_ticks = 0  # 진행: 대상 기하가 실제로 젊어졌다
+            else:
+                self._observe_ticks += 1
+            self._observe_age = age if age is not None else self._observe_age
+        else:
+            self._observe_ticks = self._observe_total = 0
+            self._observe_age = None
+        if gate != "done" and str(adopted.get("path_kind")) == "hold":
+            self._hold_ticks += 1
+        else:
+            self._hold_ticks = 0
+
+    @staticmethod
+    def _target_geometry_age(state: dict[str, Any]) -> int | None:
+        """지시 대상의 기하 나이(ms). 대상이 없거나 상태에 없으면 `None`."""
+        target = str((state.get("goal") or {}).get("target_ref") or "")
+        entry = next((item for item in state.get("objects") or () if str(item.get("id")) == target), None)
+        return int(entry.get("age_ms", 0)) if isinstance(entry, dict) else None
 
     # ------------------------------------------------------------------
     # 질문 세트 (docs/08 §4)
@@ -1164,7 +1226,17 @@ class RobotHarness:
     # 조합 규칙 v0 (docs/08 §5)
     # ------------------------------------------------------------------
 
-    def compose(
+    def compose(self, request: dict[str, Any], results: dict[str, Any], commitment: dict[str, Any] | None, now_ms: int) -> dict[str, Any]:
+        """한 틱의 조합. 정체 감시(h0.8)가 앞뒤를 감싼다 — 안쪽은 :meth:`_compose`다.
+
+        감시는 **틱 사이에 남는 장부**라서 여기 있다: 연속 관측 게이트(기하가 젊어지지 않는)와 연속 hold·정지 틱을
+        세고, 상한에 이르면 :meth:`_compose`가 그 틱을 재계획 게이트로 내보낸다 (docs/04 §3, Task R1 B2-v).
+        """
+        out = self._compose(request, results, commitment, now_ms)
+        self._note_stall_outcome(out, request)
+        return out
+
+    def _compose(
         self,
         request: dict[str, Any],
         results: dict[str, Any],
@@ -1225,6 +1297,18 @@ class RobotHarness:
             "goal_version": goal_version,
             "candidate_set_version": set_version,
         }
+
+        # 1a. 정체 감시 (h0.8, Task R1 B2-v) --------------------------------
+        # 스스로 풀 수 없는 반복 — 팔이 카메라를 가린 채 관측을 되풀이하거나(ep-E1-000235), 금지 물체 곁에서
+        # 정지가 풀리지 않거나 경로가 막힌 채 hold를 되풀이하는(ep-E1-000244) 구간 — 을 재계획 게이트로 끊는다.
+        # **반사·정지보다 먼저** 본다: 풀리지 않는 정지가 바로 그 정체이기 때문이다. 물러남 경로로 나가 팔이
+        # 실제로 그 자리를 뜬다.
+        stall = self._stall_reason()
+        if stall is not None:
+            records.append(stall)
+            return self._compose_gate(
+                header, state, candidates, paths, commitment, gripper_now, records, gate="instr", escape=True
+            )
 
         # 1. 반사·정지 ---------------------------------------------------
         reflex = any(
@@ -1525,8 +1609,13 @@ class RobotHarness:
         records: list[dict[str, Any]],
         *,
         gate: str,
+        escape: bool = False,
     ) -> dict[str, Any]:
-        """게이팅 분기. commitment를 해제하고 부가 답을 버린다 (docs/08 §5.2, §5.4)."""
+        """게이팅 분기. commitment를 해제하고 부가 답을 버린다 (docs/08 §5.2, §5.4).
+
+        `escape`는 정체 감시가 부른 재계획이다(h0.8): hold가 아니라 **물러남** 경로를 0이 아닌 속도로 명령해 팔이
+        실제로 그 자리를 뜬다 — 금지 물체 곁의 정지처럼 제자리에서는 풀 수 없는 조건이 있기 때문이다.
+        """
         carrying = state["robot"].get("holding") is not None
         key = {"done": "hold", "instr": "replan", "observe": "hold" if carrying else "observe"}[gate]
         main = _id_for_key(key, candidates)
@@ -1537,7 +1626,8 @@ class RobotHarness:
             )
         records.append({"kind": "aux_discarded", "reason": gate})
 
-        hold_path = _path_of_kind(paths, "hold")
+        escape_speed = int(self.compose_config.get("stall_escape_speed_level", 1)) if escape else 0
+        hold_path = (_path_of_kind(paths, "retreat") if escape else None) or _path_of_kind(paths, "hold")
         command, executed = self._command(
             header,
             action_ref=main,
@@ -1546,13 +1636,13 @@ class RobotHarness:
             path_entry=paths.get(hold_path),
             paths=paths,
             waypoints={},
-            speed_level=0,
+            speed_level=escape_speed,
             force_level=0,
             gripper=gripper,
             stop=False,
             state=state,
             records=records,
-            branch=key,
+            branch=None if escape else key,
         )
         adopted = {
             "main": main,
@@ -1561,7 +1651,7 @@ class RobotHarness:
             "path": executed["id"],
             "path_kind": executed["kind"],
             "waypoint": executed["waypoint"],
-            "speed": 0,
+            "speed": escape_speed,
             "force": 0,
             "gripper": gripper,
             "stop": False,

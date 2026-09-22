@@ -30,6 +30,7 @@ __all__ = [
     "family_signature",
     "merge_profile",
     "origin_group",
+    "template_entries",
 ]
 
 _ATTRIBUTES = ("fragile", "forbidden")
@@ -202,7 +203,10 @@ def build_plan(config: dict[str, Any], seed: int, profile: str) -> ScenePlan:
     objects = _sample_objects(settings, rng)
     zones = _sample_zones(settings, rng)
     instructions, objects = _sample_instructions(settings, rng, objects, zones, grid_ms, seed=int(seed))
-    disturbances = _sample_disturbances(settings, rng, objects, grid_ms)
+    disturbances = _sample_disturbances(
+        settings, rng, objects, grid_ms,
+        targets=[step.target for step in instructions if step.target], seed=int(seed),
+    )
     plan = ScenePlan(
         seed=int(seed),
         profile=profile,
@@ -320,6 +324,13 @@ def _sample_objects(settings: dict[str, Any], rng: np.random.Generator) -> tuple
 def _sample_layout(spec: dict[str, Any], rng: np.random.Generator) -> tuple[SceneObject, ...]:
     count = int(rng.integers(spec["count_min"], spec["count_max"] + 1))
     palette = list(spec["palette"])
+    if count > len(palette):
+        # 색은 팔레트의 **순열**이라 물체가 팔레트보다 많으면 색이 겹치고, 그러면 한 장면에 같은 설명의 물체가
+        # 둘 생긴다 — 지시 문장이 대상·제약을 `<색> <모양>`으로만 부르는 서식 v0.4에서는 풀 수 없는 장면이다.
+        raise ValueError(
+            f"물체 {count}개가 팔레트 {len(palette)}색보다 많다 — 같은 설명의 물체가 생긴다 "
+            "(objects.palette를 늘리거나 count_max를 줄여라)"
+        )
     colour_indices = rng.permutation(len(palette))[:count]
 
     x_low, x_high = spec["spawn_x_mm"]
@@ -372,6 +383,17 @@ def _sample_layout(spec: dict[str, Any], rng: np.random.Generator) -> tuple[Scen
                 yaw_deg=float(rng.uniform(-180.0, 180.0)),
                 attributes=(),
             )
+        )
+
+    labels = dict(spec["shape_labels"])
+    described = [obj.describe(labels) for obj in objects]
+    if len(set(described)) != len(described):
+        # 지시 문장이 대상·제약을 `<색> <모양>`으로만 부르므로(서식 v0.4에서 `attr=`·구조화 목표가 모델 입력 밖이다)
+        # 같은 설명이 두 물체에 붙으면 그 장면은 **풀 수 없다**. 색은 팔레트의 순열이라 보통 유일하지만, 설정이
+        # 팔레트보다 많은 물체를 부르면 여기서 멈춘다 — 조용히 애매한 장면을 만들지 않는다 (s0.3, Task R1 B1).
+        duplicates = sorted({name for name in described if described.count(name) > 1})
+        raise ValueError(
+            f"한 장면에 같은 설명의 물체가 둘 이상이다: {duplicates} — objects.palette를 늘리거나 count_max를 줄여라"
         )
 
     with_attributes = _assign_attributes(objects, spec, rng)
@@ -494,6 +516,51 @@ def _sample_zones(settings: dict[str, Any], rng: np.random.Generator) -> tuple[Z
     )
 
 
+def template_entries(spec: dict[str, Any], family: str) -> list[tuple[str, str]]:
+    """``<family>_templates`` → (변형 id, 템플릿 텍스트) 목록.
+
+    항목은 ``{id: …, text: …}``(계약 v0.4)이거나 문자열(옛 서식, id는 번호)이다. 변형 id는 `Instruction.template`
+    (``v1#<id>``)에 적히고 docs/04 §5의 템플릿 holdout이 그것으로 봉인한다 — 그래서 템플릿 **문장**이 바뀌면 id도
+    바꿔 옛 봉인이 조용히 새 문장에 걸리지 않게 한다.
+    """
+    entries = spec.get(f"{family}_templates") or []
+    out: list[tuple[str, str]] = []
+    for index, item in enumerate(entries):
+        if isinstance(item, dict):
+            out.append((str(item["id"]), str(item["text"])))
+        else:
+            out.append((str(index), str(item)))
+    return out
+
+
+def _has_final_consonant(word: str) -> bool:
+    """마지막 글자에 받침이 있는가 (한글 음절만 본다)."""
+    if not word:
+        return False
+    code = ord(word[-1])
+    return 0xAC00 <= code <= 0xD7A3 and (code - 0xAC00) % 28 != 0
+
+
+def _object_particle(word: str) -> str:
+    """목적격 조사를 붙인다 (``파란 원통`` → ``파란 원통을``, ``빨간 상자`` → ``빨간 상자를``).
+
+    지시 문장이 이제 모델의 **유일한** 단서이므로 조사가 맞아야 한다 — D1의 템플릿은 `{shape}를`로 고정이라
+    "원통를"을 냈다.
+    """
+    return word + ("을" if _has_final_consonant(word) else "를")
+
+
+def _listed_ko(names: Sequence[str]) -> str:
+    """한국어 나열: 하나면 그대로, 여럿이면 마지막만 `와/과`로 잇는다 (``빨간 상자와 초록 원통``)."""
+    items = [name for name in names if name]
+    if not items:
+        return ""
+    if len(items) == 1:
+        return items[0]
+    head = ", ".join(items[:-1])
+    return head + ("과 " if _has_final_consonant(head) else "와 ") + items[-1]
+
+
 def _sample_instructions(
     settings: dict[str, Any],
     rng: np.random.Generator,
@@ -507,7 +574,8 @@ def _sample_instructions(
     spec = settings["instruction"]
     labels = dict(settings["objects"]["shape_labels"])
     plain = [obj for obj in objects if not obj.attributes]
-    fragile = next((obj for obj in objects if "fragile" in obj.attributes), None)
+    fragile = [obj for obj in objects if "fragile" in obj.attributes]
+    forbidden = [obj for obj in objects if "forbidden" in obj.attributes]
     if not plain:
         raise RuntimeError("지시를 만들 수 있는 평범한 물체가 없다 — 속성 개수를 줄여라")
 
@@ -530,73 +598,137 @@ def _sample_instructions(
     if first.id in {obj.id for obj in objects} and first not in objects:
         objects = tuple(first if obj.id == first.id else obj for obj in objects)  # 옮겨진 대상
         plain = [first if obj.id == first.id else obj for obj in plain]
-    # 텍스트는 변형 0으로 먼저 채우고 :func:`_phrase_instructions`가 맨 뒤에 변형을 고른다.
-    text = _instruction_text(spec, "v1", 0, first, zone, labels, fragile=fragile)
-    protected = (fragile.id,) if fragile else ()
+    # 텍스트는 첫 변형으로 먼저 채우고 :func:`_phrase_instructions`가 맨 뒤에 변형을 고른다.
+    v1_entries = template_entries(spec, "v1")
+    text = _instruction_text(v1_entries[0][1], "v1", first, zone, labels, fragile=fragile, forbidden=forbidden)
+    # 지시가 "건드리지 마라"로 부른 물체 — 취약 물체 **전부**다(문장이 전부를 부르므로; s0.3). 금지 접촉 물체는
+    # 장면 속성이라 `goal.forbidden_contact`가 따로 나른다.
+    protected = tuple(obj.id for obj in fragile)
     steps = [
-        Instruction(version=1, sim_ms=0, text=text, target=first.id, zone=zone.id, protected=protected, template="v1#0")
+        Instruction(
+            version=1, sim_ms=0, text=text, target=first.id, zone=zone.id,
+            protected=protected, template=f"v1#{v1_entries[0][0]}",
+        )
     ]
 
     if not spec.get("enabled", False):
         return tuple(steps), objects
 
-    others = [obj for obj in plain if obj.id != first.id]
-    if not others:
-        return tuple(steps), objects
-    second = others[int(rng.integers(len(others)))]
-    # v2의 대상도 같은 영역 밖이어야 한다(영역은 v1의 것으로 고정이므로 대상만 바꾼다). 영역 밖의 다른 대상이
-    # 없으면 지시 변경은 없다 — 틱 0에 끝난 두 번째 목표를 만들지 않는다.
-    fixed = _target_outside_zone(second, zone, others, (zone,), unit=_hash_unit(seed, "target-fix"))
-    if fixed is None:
-        return tuple(steps), objects
-    second, _ = fixed
-    low, high = spec["change_window_ms"]
-    at_ms = _quantise(float(rng.uniform(low, high)), grid_ms)
-    at_ms = min(max(at_ms, _quantise(low, grid_ms) + grid_ms), _quantise(high, grid_ms))
-    steps.append(
-        Instruction(
-            version=2,
-            sim_ms=at_ms,
-            text=_instruction_text(spec, "v2", 0, first, zone, labels, second=second),
-            target=second.id,
-            zone=zone.id,
-            # v2는 제약을 다시 말하지 않지만 v1의 보호 물체는 그대로다 — 지시는 덧붙는다 (docs/08 §3.1).
-            protected=protected,
-            template="v2#0",
+    # **지시 변경 여러 번** (s0.3, Task R1 B2-ii). 횟수는 주 난수가 아니라 seed 해시로 고른다 — 변경이 한 번인
+    # 프로파일(E0·E1)의 난수 소비를 도입 전과 똑같이 두기 위해서다(같은 seed의 E1 장면·일정은 D1과 같다).
+    low_n, high_n = (int(value) for value in spec.get("changes", (1, 1)))
+    count = min(high_n, low_n + int(_hash_unit(seed, "changes") * (high_n - low_n + 1)))
+    window_low, window_high = spec["change_window_ms"]
+    gap = int(spec.get("min_gap_ms", 0))
+    zone_change_unit = float(spec.get("zone_change_probability", 0.0))
+    times: list[int] = []
+    used = {first.id}
+    current_zone = zone
+    previous = first
+    for index in range(count):
+        others = [obj for obj in plain if obj.id not in used]
+        if not others:
+            break  # 바꿀 평범한 물체가 없다 — 조용히 같은 대상을 다시 부르지 않는다
+        nxt = others[int(rng.integers(len(others)))]
+        # 가끔 목표 영역도 바꾼다 (두 번째 변경부터 — 첫 변경은 D1과 같은 일정이어야 한다).
+        target_zone = current_zone
+        if index > 0 and len(zones) > 1 and _hash_unit(seed, "zone-change", index) < zone_change_unit:
+            options = [area for area in zones if area.id != current_zone.id]
+            target_zone = options[
+                _weighted_index(
+                    _hash_unit(seed, "zone-pick", index),
+                    [1.0 if weights is None else weights[zones.index(area)] for area in options],
+                )
+            ]
+        # 새 대상도 목표 영역 밖이어야 한다(영역은 위에서 정했으므로 대상만 바꾼다). 영역 밖의 다른 대상이
+        # 없으면 거기서 멈춘다 — 틱 0에 끝난 목표를 만들지 않는다.
+        unit = _hash_unit(seed, "target-fix") if index == 0 else _hash_unit(seed, "target-fix", index)
+        fixed = _target_outside_zone(nxt, target_zone, others, (target_zone,), unit=unit)
+        if fixed is None:
+            break
+        nxt, _ = fixed
+        at_ms = _schedule_change(rng, window_low, window_high, grid_ms, times, gap)
+        if at_ms is None:
+            break  # 창 안에 간격을 지킬 자리가 없다 — 실제로 만든 수는 계획에 그대로 드러난다
+        times.append(at_ms)
+        used.add(nxt.id)
+        steps.append(
+            Instruction(
+                version=len(steps) + 1,
+                sim_ms=at_ms,
+                text=_instruction_text(
+                    template_entries(spec, "v2")[0][1], "v2", previous, target_zone, labels, second=nxt
+                ),
+                target=nxt.id,
+                zone=target_zone.id,
+                # 변경은 제약을 다시 말하지 않지만 v1의 보호 물체는 그대로다 — 지시는 덧붙는다 (docs/08 §3.1).
+                protected=protected,
+                template=f"v2#{template_entries(spec, 'v2')[0][0]}",
+            )
         )
-    )
+        previous, current_zone = nxt, target_zone
+    steps[1:] = sorted(steps[1:], key=lambda step: step.sim_ms)
+    steps[1:] = [replace(step, version=index + 2) for index, step in enumerate(steps[1:])]
     return tuple(steps), objects
 
 
+def _schedule_change(
+    rng: np.random.Generator, low: float, high: float, grid_ms: int, taken: Sequence[int], gap: int
+) -> int | None:
+    """지시 변경 시각 하나. 창 안에서 뽑아 격자에 내리고 이미 잡힌 시각과 `gap` 이상 떨어진 것만 쓴다.
+
+    첫 시각(`taken`이 비었을 때)은 도입 전과 **같은 난수 한 번**을 쓴다 — 같은 seed의 E1 일정이 D1과 같도록.
+    """
+    for _ in range(_SCHEDULE_ATTEMPTS):
+        at_ms = _quantise(float(rng.uniform(low, high)), grid_ms)
+        at_ms = min(max(at_ms, _quantise(low, grid_ms) + grid_ms), _quantise(high, grid_ms))
+        if all(abs(at_ms - other) >= gap for other in taken):
+            return at_ms
+        if not taken:
+            return at_ms
+    return None
+
+
 def _instruction_text(
-    spec: dict[str, Any],
-    version: str,
-    variant: int,
+    template: str,
+    family: str,
     first: SceneObject,
     zone: Zone,
     labels: dict[str, str],
     *,
-    fragile: SceneObject | None = None,
+    fragile: Sequence[SceneObject] = (),
+    forbidden: Sequence[SceneObject] = (),
     second: SceneObject | None = None,
 ) -> str:
-    """지시 텍스트 — 설정 `instruction.<version>_templates[variant]`에 슬롯(`{color} {shape} {zone} {fragile}`, v2는
-    `{color2} {shape2}`)을 채운다. 변형은 표현만 다르고 구조화된 목표(대상·영역·보호 물체)는 같다."""
-    templates = spec[f"{version}_templates"]
-    template = str(templates[variant])
-    if version == "v1":
+    """지시 텍스트 — 템플릿의 슬롯을 채운다.
+
+    v1의 슬롯은 `{color} {shape} {zone} {fragile} {forbidden}`, 변경(v2 계열)은 `{color} {shape} {color2} {shape2}
+    {zone}`이다. **제약 슬롯은 그 속성의 물체 전부를 나열한다** (s0.3, Task R1 B1): 서식 v0.4에서 물체 소개 줄의
+    `attr=`와 구조화된 목표가 모델 입력 밖이므로, 문장이 부르지 않은 제약은 모델이 알 길이 없다. 변형은 표현만
+    다르고 구조화된 목표(대상·영역·보호 물체)는 같다.
+    """
+    target = first.describe(labels)
+    slots: dict[str, str] = {
+        "color": first.colour_ko,
+        "shape": labels[first.shape],
+        "zone": zone.desc,
+        "target": target,
+        "target_ul": _object_particle(target),
+    }
+    if family == "v1":
         return template.format(
-            color=first.colour_ko,
-            shape=labels[first.shape],
-            zone=zone.desc,
-            fragile=fragile.describe(labels) if fragile else "취약한 물체",
+            **slots,
+            fragile=_listed_ko([obj.describe(labels) for obj in fragile]) or "취약한 물체",
+            forbidden=_listed_ko([obj.describe(labels) for obj in forbidden]) or "표시된 물체",
         )
     assert second is not None
+    target2 = second.describe(labels)
     return template.format(
-        color=first.colour_ko,
-        shape=labels[first.shape],
+        **slots,
         color2=second.colour_ko,
         shape2=labels[second.shape],
-        zone=zone.desc,
+        target2=target2,
+        target2_ul=_object_particle(target2),
     )
 
 
@@ -608,32 +740,36 @@ def _phrase_instructions(
     *,
     group: str,
 ) -> tuple[Instruction, ...]:
-    """지시마다 문구 템플릿 변형을 고른다 (v1·v2 각각 `<version>_templates`에서 하나, `template_weights`의 비중으로).
-    구조화된 목표는 그대로다. 변형은 **origin group의 해시**가 정한다 — 같은 group의 에피소드는 같은 변형(v1·v2는 따로)."""
+    """지시마다 문구 템플릿 변형을 고른다 (v1과 변경(v2 계열) 각각 `<family>_templates`에서 하나, `template_weights`의
+    비중으로). 구조화된 목표는 그대로다. 변형은 **origin group의 해시**가 정한다 — 같은 group의 에피소드는 같은
+    변형(v1과 변경은 따로)이고, 한 에피소드의 변경 v2·v3·v4는 **같은 변형**을 쓴다(문구가 틱마다 흔들리지 않는다)."""
     spec = settings["instruction"]
     labels = dict(settings["objects"]["shape_labels"])
     by_id = {obj.id: obj for obj in objects}
     zone_by_id = {zone.id: zone for zone in zones}
-    fragile = next((obj for obj in objects if "fragile" in obj.attributes), None)
+    fragile = [obj for obj in objects if "fragile" in obj.attributes]
+    forbidden = [obj for obj in objects if "forbidden" in obj.attributes]
     phrased: list[Instruction] = []
-    first_target = by_id[instructions[0].target] if instructions and instructions[0].target else None
+    previous = by_id[instructions[0].target] if instructions and instructions[0].target else None
     for step in instructions:
-        version = f"v{step.version}"
-        templates = spec.get(f"{version}_templates")
-        if not templates or step.target is None or step.zone is None:
+        family = "v1" if step.version == 1 else "v2"
+        entries = template_entries(spec, family)
+        if not entries or step.target is None or step.zone is None:
             phrased.append(step)
             continue
         weights = spec.get("template_weights")
-        if weights and len(weights) != len(templates):
-            raise ValueError(f"instruction.template_weights는 {version}_templates와 길이가 같아야 한다")
-        variant = _weighted_index(_hash_unit(group, "template", version), weights or [1.0] * len(templates))
+        if weights and len(weights) != len(entries):
+            raise ValueError(f"instruction.template_weights는 {family}_templates와 길이가 같아야 한다")
+        variant = _weighted_index(_hash_unit(group, "template", family), weights or [1.0] * len(entries))
+        template_id, template = entries[variant]
         target = by_id[step.target]
         zone = zone_by_id[step.zone]
-        if step.version == 1:
-            text = _instruction_text(spec, "v1", variant, target, zone, labels, fragile=fragile)
+        if family == "v1":
+            text = _instruction_text(template, "v1", target, zone, labels, fragile=fragile, forbidden=forbidden)
         else:
-            text = _instruction_text(spec, "v2", variant, first_target or target, zone, labels, second=target)
-        phrased.append(Instruction(**{**asdict(step), "text": text, "template": f"{version}#{variant}"}))
+            text = _instruction_text(template, "v2", previous or target, zone, labels, second=target)
+            previous = target
+        phrased.append(Instruction(**{**asdict(step), "text": text, "template": f"{family}#{template_id}"}))
     return tuple(phrased)
 
 
@@ -706,7 +842,17 @@ def _sample_disturbances(
     rng: np.random.Generator,
     objects: tuple[SceneObject, ...],
     grid_ms: int,
+    *,
+    targets: Sequence[str] = (),
+    seed: int = 0,
 ) -> tuple[Disturbance, ...]:
+    """외란 일정. `disturbance.target_share`가 0보다 크면 그 비율만큼은 **지시의 대상**을 민다 (s0.3, Task R1 B2-iii).
+
+    까닭: 아무 물체나 밀면 대부분 결정과 무관한 사건이 된다(D1의 `object_moved` 467건 중 대상은 1/물체 수). 사람이
+    같은 자리에서 일하는 어수선한 탁자에서는 대상 자신이 밀리는 일이 흔하고, 그때라야 사건이 **결정을 바꾼다**
+    (commitment가 표류로 풀리고 다시 고르게 된다). 어느 외란을 대상으로 돌릴지는 주 난수가 아니라 seed 해시가
+    정하므로 도입 전 seed의 일정(시각·변위)은 그대로다.
+    """
     spec = settings["disturbance"]
     low, high = spec["count"]
     count = int(rng.integers(low, high + 1))
@@ -731,7 +877,9 @@ def _sample_disturbances(
             )
     times.sort()
 
-    return tuple(
+    # 난수 소비 순서는 도입 전과 같다(시각 → 물체 → 변위 → 회전): 대상 쪽으로 돌리는 것은 **뽑은 뒤**의 교체이고
+    # seed 해시가 정하므로, `target_share`가 0인 프로파일(E0·E1)의 일정은 D1과 비트 단위로 같다.
+    sampled = [
         Disturbance(
             sim_ms=at_ms,
             object=objects[int(rng.integers(len(objects)))].id,
@@ -742,4 +890,13 @@ def _sample_disturbances(
             delta_yaw_deg=float(rng.uniform(*spec["delta_yaw_deg"])),
         )
         for at_ms in times
-    )
+    ]
+    share = float(spec.get("target_share", 0.0))
+    if share > 0.0 and targets:
+        sampled = [
+            replace(item, object=str(targets[index % len(targets)]))
+            if _hash_unit(seed, "disturb-target", index) < share
+            else item
+            for index, item in enumerate(sampled)
+        ]
+    return tuple(sampled)

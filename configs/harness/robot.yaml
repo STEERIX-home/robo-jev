@@ -7,7 +7,7 @@
 # 실행기와 공유하는 수치(수명·속도 수준·힘 수준·그리퍼 폭·도달 범위)는 여기 **복사하지
 # 않는다**. 컨트롤러 설정이 그 단일 출처이고 하네스가 그것을 읽는다 — 두 곳에 적으면
 # 언젠가 어긋나고, 그때 하네스는 컨트롤러가 거절할 명령을 만든다.
-version: h0.7
+version: h0.8
 controller_config: configs/controller/osc_v0.yaml
 
 # 질문 세트 v0 (docs/08 §4). 세트는 하네스 버전으로 고정하고 후보만 틱마다 바뀐다.
@@ -188,6 +188,18 @@ compose:
   m_place_total: 45
   place_progress_mm: 2
   place_stall_exclusion_mm: 60
+  # 관측·hold 정체 감시 (h0.8, Task R1 B2-v) — 놓기 정체와 대칭이다. **스스로 풀 수 없는 반복**을 재계획 게이트로
+  # 끊고 물러남 경로로 나간다(`stall_escape_speed_level`). 근거(D1 실측):
+  #   - `ep-E1-000235`: 157틱(15.7 s)을 `observe` 게이트에 묶였다. 관측 자세의 팔 `link6`이 카메라에서 대상으로 가는
+  #     광선을 막아 가시 비율 0.0이 고정됐다. 근본 원인은 앞단에서 고쳤고(자기 가림 이어 들기, s0.3·pw0.2) 이 감시는
+  #     남는 경우의 바닥이다. `m_observe`는 **진행** 기준(대상 기하가 젊어지면 다시 센다), `m_observe_total`은 진행과
+  #     무관한 절대 상한이다 — `m_place`/`m_place_total`과 같은 규칙.
+  #   - `ep-E1-000244`: 금지 물체 60mm 안에서 `q_stop`이 참으로 굳어 120틱(12 s)을 제자리에 섰다. 정지는 제자리에서
+  #     풀 수 없으므로(정지 틱은 다른 답을 적용하지 않는다) `m_hold`가 걸리면 물러남 경로로 그 자리를 뜬다.
+  m_observe: 8
+  m_observe_total: 24
+  m_hold: 15
+  stall_escape_speed_level: 1
 
 # 국면 판정과 국면별 목표점 (docs/08 §3.2 `commitment`의 국면, §5.6).
 #   approach → 접근점, grasp → 파지점, lift → 현재 XY에서 이동 높이까지 수직 상승,

@@ -15,6 +15,7 @@ import yaml
 from helpers import CONTROLLER_CONFIG, SIM_CONFIG
 
 from robo_jev.sim.environment import Environment
+from robo_jev.sim.scene import merge_profile
 
 CONFIG = yaml.safe_load(SIM_CONFIG.read_text(encoding="utf-8"))
 PERIOD_MS = 1000 // CONFIG["simulator"]["control_hz"]
@@ -115,8 +116,9 @@ def test_scene_matches_the_task_description(env):
 
 
 def test_instruction_change_is_scheduled_inside_the_window(env):
-    """docs/02 §1: 에피소드 도중(5~15초)에 지시가 바뀐다."""
-    low, high = CONFIG["instruction"]["change_window_ms"]
+    """docs/02 §1: 에피소드 도중에 지시가 바뀐다. 창은 **프로파일 병합 뒤**의 값이다 — s0.3부터 기본값은 사건이
+    잦은 E2의 것([1500, 9000])이고 E1이 D1의 값([5000, 15000])으로 덮는다."""
+    low, high = merge_profile(CONFIG, env.profile)["instruction"]["change_window_ms"]
     for seed in range(8):
         env.reset(seed=seed)
         changes = [step for step in env.plan.instructions if step.version > 1]

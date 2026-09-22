@@ -631,3 +631,30 @@ def test_reconstruction_is_a_value_and_does_not_hold_the_observation():
 def test_an_unknown_source_age_is_refused():
     with pytest.raises(ValueError, match="관측 시각"):
         extract(reconstruction(geom_ms=500), robot_block(observed_at_ms=500), now_ms=100)
+
+
+def test_a_stationary_object_hidden_only_by_the_robot_keeps_its_geometry_age():
+    """**자기 가림 이어 들기** (pw0.2, Task R1 B2-v). 앞단은 로봇의 자세를 알고 있으므로 팔이 가린 구간은 예측
+    가능한 결측이다 — 움직이지 않은 물체(`self_tracked`)는 추적이 이어 들고 기하 나이가 자라지 않는다. 그것이
+    없으면 팔이 관측 자세에서 카메라를 가리는 장면(`ep-E1-000235`, 157틱)이 스스로 풀리지 않는다.
+
+    이어 든 값임은 상태에 남는다: 자세는 마지막 관측의 것이고 정밀도는 `occluded` 등급이다.
+    """
+    adapter = GroundTruthAdapter(PERCEPTION)
+    first = observation()
+    extract(adapter.reconstruct(first), adapter.robot(first), now_ms=0)
+
+    carried = occluded(first, pos_mm=(120, 200, -80))  # 로봇에만 가렸고 **움직이지 않았다**
+    carried["objects"][1]["self_tracked"] = True
+    carried["tick"], carried["sim_time_ms"] = 4, 400
+    state = extract(adapter.reconstruct(carried), adapter.robot(carried), now_ms=400)
+    entry = next(item for item in state["objects"] if item["id"] == "o1")
+    assert entry["age_ms"] == 0 and entry["last_seen_ms"] == 400
+    assert entry["pose_mm"] == [120, 200, -80]
+    assert entry["precision_mm"] == PERCEPTION["precision_mm"]["occluded"]
+
+    # 같은 가림인데 앞단이 이어 들지 않으면(움직였다) 나이는 자란다 — 규칙이 "가렸으니 0"이 아니다.
+    lost = occluded(first)
+    lost["tick"], lost["sim_time_ms"] = 8, 800
+    state = extract(adapter.reconstruct(lost), adapter.robot(lost), now_ms=800)
+    assert next(item for item in state["objects"] if item["id"] == "o1")["age_ms"] == 400

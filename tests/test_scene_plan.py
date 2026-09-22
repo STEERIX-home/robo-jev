@@ -81,8 +81,10 @@ def test_schedules_sit_on_the_fixed_grid_not_the_control_period():
 
 
 def test_disturbances_keep_the_minimum_gap_and_the_window():
-    low, high = CONFIG["disturbance"]["window_ms"]
-    gap = CONFIG["disturbance"]["min_gap_ms"]
+    # 창·간격은 **프로파일 병합 뒤**의 값이다 — s0.3부터 기본값은 E2의 것이고 E1이 D1의 값으로 덮는다.
+    spec = merge_profile(CONFIG, "E1")["disturbance"]
+    low, high = spec["window_ms"]
+    gap = spec["min_gap_ms"]
     for seed in range(12):
         times = [item.sim_ms for item in build_plan(CONFIG, seed, "E1").disturbances]
         assert times == sorted(times)
@@ -97,8 +99,9 @@ def test_impossible_disturbance_schedule_raises_instead_of_under_generating():
     impossible["disturbance"]["window_ms"] = [1200, 1400]
     impossible["disturbance"]["min_gap_ms"] = 5000
 
+    # E2는 기본값을 그대로 쓰는 프로파일이라 이 모순이 그대로 간다 (E1은 자기 창을 덮어쓴다).
     with pytest.raises(RuntimeError, match="외란"):
-        build_plan(impossible, 3, "E1")
+        build_plan(impossible, 3, "E2")
 
 
 def test_impossible_attribute_counts_raise_instead_of_under_assigning():
@@ -255,14 +258,15 @@ def test_instructions_carry_the_structured_goal_next_to_the_text():
             assert objects[step.target].attributes == ()  # 지시의 대상은 평범한 물체다
             assert zones[step.zone].desc in step.text
         assert objects[first.target].describe(labels) in first.text
-        if first.template == "v1#0":
+        if first.template == "v1#a":
             assert first.text.startswith(objects[first.target].describe(labels))
         assert second.target != first.target
         assert objects[second.target].describe(labels) in second.text
         assert second.zone == first.zone
         # v1은 취약 물체를 "건드리지 마라"로 부른다. 그 id도 구조화되어 있다.
         fragile = [obj.id for obj in plan.objects if "fragile" in obj.attributes]
-        assert first.protected == (fragile[0],) if fragile else first.protected == ()
+        # v1은 취약 물체를 **전부** 부르므로(s0.3) 구조화된 보호 목록도 전부다.
+        assert first.protected == tuple(fragile)
 
 
 def test_the_structured_goal_round_trips_through_json():
@@ -281,3 +285,94 @@ def test_a_plan_without_structured_fields_still_loads():
             step.pop(key)
     plan = ScenePlan.from_json(data)
     assert plan.instructions[0].target is None and plan.instructions[0].protected == ()
+
+
+# --------------------------------------------------------------------------
+# s0.3 — 사건이 잦은 에피소드 (Task R1 Stage B)
+# --------------------------------------------------------------------------
+
+
+def test_no_two_objects_in_a_scene_share_a_description():
+    """지시 문장이 대상·제약을 `<색> <모양>`으로만 부르므로(서식 v0.4) 같은 설명이 둘이면 장면이 풀리지 않는다.
+    색이 팔레트의 순열이라 보통 유일하고, 설정이 팔레트보다 많은 물체를 부르면 생성기가 **거절**한다."""
+    labels = dict(CONFIG["objects"]["shape_labels"])
+    for profile in ("E0", "E1", "E2"):
+        for seed in range(20):
+            described = [obj.describe(labels) for obj in build_plan(CONFIG, seed, profile).objects]
+            assert len(set(described)) == len(described), (profile, seed, described)
+
+    crowded = copy.deepcopy(CONFIG)
+    crowded["objects"]["palette"] = crowded["objects"]["palette"][:2]
+    crowded["objects"]["count_min"] = crowded["objects"]["count_max"] = 6
+    crowded["profiles"]["E2"].pop("objects", None)
+    with pytest.raises(ValueError, match="같은 설명"):
+        build_plan(crowded, 3, "E2")
+
+
+def test_e2_changes_the_instruction_several_times_inside_the_window():
+    """지시 변경 여러 번 (s0.3, Task R1 B2-ii): 횟수는 `instruction.changes` 안, 시각은 창 안이고 간격을 지키며,
+    대상은 매번 다른 **평범한** 물체다. 제약은 덧붙는다 — 변경 지시는 제약을 다시 말하지 않지만 보호 목록은 같다."""
+    spec = merge_profile(CONFIG, "E2")["instruction"]
+    low, high = spec["change_window_ms"]
+    counts = set()
+    for seed in range(30):
+        plan = build_plan(CONFIG, seed, "E2")
+        changes = [step for step in plan.instructions if step.version > 1]
+        counts.add(len(changes))
+        assert len(changes) <= spec["changes"][1]
+        assert [step.version for step in plan.instructions] == list(range(1, len(plan.instructions) + 1))
+        times = [step.sim_ms for step in changes]
+        assert times == sorted(times)
+        assert all(low - GRID_MS <= at <= high for at in times)
+        assert all(b - a >= spec["min_gap_ms"] for a, b in itertools.pairwise(times))
+        targets = [step.target for step in plan.instructions]
+        assert len(set(targets)) == len(targets)  # 같은 대상을 다시 부르지 않는다
+        plain = {obj.id for obj in plan.objects if not obj.attributes}
+        assert all(step.target in plain for step in plan.instructions)
+        assert all(step.protected == plan.instructions[0].protected for step in plan.instructions)
+    assert len(counts) >= 3 and max(counts) == spec["changes"][1], counts  # 여러 횟수가 나오고 상한에 닿는다
+
+
+def test_e2_schedules_more_disturbances_and_inside_the_episode():
+    """외란이 **실제로 일어나게** (s0.3, Task R1 B2-iii): 창이 에피소드가 끝나기 전이라야 적용된다. D1의
+    `[1200, 20000]`은 평균 9.2 s로 끝나는 에피소드에서 절반이 예정만 되고 끝났다."""
+    spec = merge_profile(CONFIG, "E2")["disturbance"]
+    low, high = spec["window_ms"]
+    assert high <= merge_profile(CONFIG, "E2")["episode"]["max_ms"]
+    counts = []
+    for seed in range(20):
+        times = [item.sim_ms for item in build_plan(CONFIG, seed, "E2").disturbances]
+        counts.append(len(times))
+        assert spec["count"][0] <= len(times) <= spec["count"][1]
+        assert all(low - GRID_MS <= at <= high for at in times)
+        assert all(b - a >= spec["min_gap_ms"] for a, b in itertools.pairwise(times))
+    e1 = [len(build_plan(CONFIG, seed, "E1").disturbances) for seed in range(20)]
+    assert sum(counts) > 2 * sum(e1)  # E2가 E1보다 확실히 잦다
+
+
+def test_the_e1_profile_reproduces_the_d1_schedule_so_its_episodes_can_be_replayed():
+    """E0·E1의 장면·지시·외란 일정은 s0.2(D1)와 **같다**: 변경 횟수·영역 변경은 주 난수를 쓰지 않고(seed 해시),
+    변경이 한 번이면 난수 소비가 도입 전과 같다. 그래서 `ep-E1-000235`·`ep-E1-000244`를 재생할 수 있다."""
+    for profile in ("E0", "E1"):
+        for seed in (100, 235, 244, 295):
+            plan = build_plan(CONFIG, seed, profile)
+            changes = [step for step in plan.instructions if step.version > 1]
+            assert len(changes) <= 1
+            spec = merge_profile(CONFIG, profile)["disturbance"]
+            assert spec["count"][1] <= 3 and len(plan.disturbances) <= 3
+
+
+def test_the_instruction_lists_every_constraint_object_by_name():
+    """서식 v0.4에서 물체 소개 줄의 `attr=`와 구조화된 목표가 모델 입력 밖이므로, 문장이 부르지 않은 제약은 모델이
+    알 길이 없다 — v1 문장은 취약 물체와 금지 물체를 **전부** 부른다 (s0.3, Task R1 B1)."""
+    labels = dict(CONFIG["objects"]["shape_labels"])
+    for seed in range(15):
+        plan = build_plan(CONFIG, seed, "E2")
+        text = plan.instructions[0].text
+        for obj in plan.objects:
+            if obj.attributes:
+                assert obj.describe(labels) in text, (seed, obj.id, obj.attributes, text)
+        assert "건드리지 마라" in text
+        # 변경 지시는 제약을 다시 말하지 않는다 — 모델이 v1의 제약을 기억해야 한다.
+        for step in plan.instructions[1:]:
+            assert "건드리지 마라" not in step.text
