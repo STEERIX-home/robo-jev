@@ -1,8 +1,10 @@
 # Task R1 D2 — 4B 형제 (무학습 눈금만; 학습은 2B가 주 트랙이다, HANDOFF 결정 3).
 extends: qwen35-4b-pilot.yaml
 run_name: r1-4b
+# **rollout 라벨판이 아니라 기본 manifest다** (Task R1 D2의 이월): 128k 키프레임 rollout은 2 h CPU라 GPU 첫 눈금과
+# 나란히 돌렸고, 그 라벨은 2,000틱의 `q_main`만 바꾼다(전체 train 틱의 ≈5 %). R2가 `r1-rollout-labels`로 돌린다.
 dataset_manifests:
-  - path: artifacts/datasets/r1-robot/r1-rollout-labels/manifest.json
+  - path: artifacts/datasets/r1-robot/r1/manifest.json
     domain: robot
     files: ["episodes/*/streams.jsonl"]
   - path: artifacts/datasets/r1/single/manifest.json

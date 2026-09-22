@@ -1,0 +1,55 @@
+# Task R1 D2 — **새 계기의 판정 칸**. 규칙은 P3와 같은 한 줄이다: `ood_dev` 분할의 **에피소드 전부를, 통째로**.
+#
+# 무엇이 달라졌는가. (1) 데이터가 R1이다 — 모델이 보는 텍스트에 풀어 놓은 목표가 없고(서식 v0.4) 에피소드는
+# 사건이 잦다. (2) 그래서 **지시 섞기가 "지시를 읽는가"를 재는 열**이다(docs/08 §10) — `goal` 줄에 target·zone이
+# 남아 있던 P1~P3에서는 그 열이 "텍스트가 불필요하다"만 말했다. (3) 상태 섞기의 기증자 고정을 없앴다(회전을
+# 편 길이로 짝짓고 남는 차이는 감아 돈다) — 값이 바뀌므로 P1~P3의 상태 섞기 값과 **나란히** 적는다.
+# (4) `columns.event_metrics`가 반응 지연·안정성·`q_stop` 지연/오경보를 **모든 열**에 붙인다.
+#
+# 옛 체크포인트는 계약 digest가 달라 이 집합으로 돌릴 수 없다(Task R1 A2). P1~P3의 값은 "옛 계약·옛 모집단"이다.
+#
+# 봉인(`ood_test`)은 여기에 없다. `test`도 없다(선택에 쓰지 않는다).
+
+version: eval-r1-decision-cell-v0.1
+window_ticks: 30
+shuffle_seed: 1
+tokens_per_batch: 8192
+fused: true
+
+columns:
+  permuted: false
+  state_shuffle: true        # 표준 대조군 (기증자 고정을 없앤 판)
+  instruction_shuffle: true  # **"지시를 읽는가" 열** (Task R1 C2)
+  commitment_shuffle: true   # P3 B2 — 주 층에서만 읽는다
+  rule_judge: true           # 구조화된 목표를 읽는다 — 상한이다
+  mechanical_baseline: true  # GPU pass 없음 — 이 열을 넘지 못하면 주장이 아니다
+  event_metrics: true        # Task R1 C3 — 반응 지연·안정성·`q_stop` 지연/오경보
+  selective: false
+  calibration: false
+
+tiny_scorer_report: artifacts/reports/r1-tiny-scorer.json
+
+splits:
+  - name: robot/ood_dev
+    manifest: artifacts/datasets/r1-robot/r1/manifest.json
+    domain: robot
+    split: ood_dev
+    files: ["episodes/*/streams.jsonl"]
+    selection: true
+    note: "봉인 계열(zoneF 개념·템플릿 `c`·prefix) **26편 전부**, 통째로 = 3,517틱. **판정 칸**(q_main)이 여기 있다"
+    records: [ep-E0-400103, ep-E0-400115, ep-E0-400118, ep-E0-400140, ep-E0-400153,
+              ep-E0-400155, ep-E0-400177,
+              ep-E1-410104, ep-E1-410145, ep-E1-410160, ep-E1-410175, ep-E1-410194,
+              ep-E1-410196, ep-E1-410203, ep-E1-410215,
+              ep-E2-420109, ep-E2-420118, ep-E2-420129, ep-E2-420155, ep-E2-420167,
+              ep-E2-420177, ep-E2-420182, ep-E2-420195, ep-E2-420208, ep-E2-420239,
+              ep-E2-420256]
+    # 주 지표(P3 B1)는 **정답이 그 틱의 현재 commitment가 아닌 틱**이다. 그 층과 새 사건 지표를 다시 세려면
+    # 틱별 예측이 있어야 한다. `q_stop`도 켠다 — C3-c의 지연·오경보가 그 열을 읽는다.
+    store_predictions: [q_main, q_stop]
+
+note: >
+  이 집합으로 나온 수는 `artifacts/reports/r1-reeval-*.json`에 남는다. `commitment_shuffle`·`mechanical_baseline`·
+  `event_metrics`는 평가 집합의 정체(해시)에 들어가지 않는다 — 무엇을 더 재는지를 바꿀 뿐 무엇을 점수 매기는지를
+  바꾸지 않기 때문이다. 표의 `episode_bootstrap`이 편(에피소드)을 표본 단위로 재표집한 95 % 구간이고, 대조군 칸의
+  `margin_ci`는 **같은 편에서 짝지은** 차이의 구간이다 — 0을 포함하면 그 여유는 판정이 아니다.
