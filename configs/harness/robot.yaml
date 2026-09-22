@@ -7,7 +7,7 @@
 # 실행기와 공유하는 수치(수명·속도 수준·힘 수준·그리퍼 폭·도달 범위)는 여기 **복사하지
 # 않는다**. 컨트롤러 설정이 그 단일 출처이고 하네스가 그것을 읽는다 — 두 곳에 적으면
 # 언젠가 어긋나고, 그때 하네스는 컨트롤러가 거절할 명령을 만든다.
-version: h0.8
+version: h0.9
 controller_config: configs/controller/osc_v0.yaml
 
 # 질문 세트 v0 (docs/08 §4). 세트는 하네스 버전으로 고정하고 후보만 틱마다 바뀐다.
@@ -196,9 +196,44 @@ compose:
   #     무관한 절대 상한이다 — `m_place`/`m_place_total`과 같은 규칙.
   #   - `ep-E1-000244`: 금지 물체 60mm 안에서 `q_stop`이 참으로 굳어 120틱(12 s)을 제자리에 섰다. 정지는 제자리에서
   #     풀 수 없으므로(정지 틱은 다른 답을 적용하지 않는다) `m_hold`가 걸리면 물러남 경로로 그 자리를 뜬다.
+  # h0.9 (R1 리뷰 1 C1): h0.8의 감시는 **순환의 주기만 정했다**. `m_hold`=15에서 발동해 commitment를 풀어도 다음
+  # 틱에 같은 후보가 그대로 다시 뽑혀 또 15틱을 기다렸고, 한 틱짜리 물러남은 실행기의 힘 반사(`force_limit_n` 30N
+  # 초과면 속도 계수 0)가 묶어 둔 자리를 벗어나지 못했다. 400편 중 27편이 45초를 그 순환에 썼고 읽기 틱의 60.6 %가
+  # 거기서 나왔다. 넷을 더한다.
+  #   - `stall_cooldown_ticks`: 발동한 결합 키를 이만큼 **후보 목록에서 뺀다**(관측은 게이트·채택만). 후보 집합이
+  #     다시 만들어지므로 전문가·모델·라벨이 같은 집합 위에서 답한다.
+  #   - `m_hold_total`: 쿨다운을 넘나들며 한 키로 쓴 hold 틱의 절대 상한(`m_place_total`과 대칭). 이르면 그 키는
+  #     남은 에피소드 동안 빠진다(`hold_exhausted`).
+  #   - `observe_max_age_ms`: 지시 대상의 기하가 이보다 늙으면 관측 게이트가 아니라 **재계획**이다. 게이트가 영영
+  #     뜨는 편(`ep-E2-420114`, 39.1 s)과 게이트가 안 뜬 채 유령 기하로 다가가는 편(`ep-E2-420242`, 37.7 s)은 같은
+  #     결함의 두 방향이다.
+  #   - `stall_dead_ticks`: hold·관측 틱마다 오르고 실제로 움직인 틱마다 한 칸 내리는 장부의 상한(탈출 틱은 세지도
+  #     비우지도 않는다). 인수 기준이 재는 양과 같다 — 통째로 비우면 "15틱 hold → 탈출 → 한 틱 접근 → 다시 hold"가
+  #     영원히 0으로 남는다. 400편 실측: 완료한 373편 중 이 장부가 24를 넘는 편은 5편, 27편의 `max_ms`는 23편이 30 이상.
+  #   - `stall_window_*`: 편 **전체**의 정체를 보는 창 — 최근 100틱(최소 50틱) 중 hold·관측이 이 비율을 넘으면
+  #     정체다. 400편 실측으로 고른 값이다: 완료한 373편은 이 창의 최대값이 p90 0.09·9편만 0.25 이상인데,
+  #     `max_ms` 27편은 중앙값 0.90이다. 감시 발동 수나 "가장 긴 죽은 구간"과 달리 감시가 감출 수 없다.
+  #   - `stall_escape_ticks`·`stall_escape_progress_mm`·`stall_abort_firings`: 물러남을 여러 틱 이어 걸고, 그러고도
+  #     말단이 이만큼 움직이지 않았거나 진행 없이 이만큼 발동했으면 `stall_exhausted` — 에피소드는 `max_ms`가
+  #     아니라 **명시적 이유**로 끝난다. 45초를 죽은 틱으로 채우는 것보다 정직하다.
   m_observe: 8
   m_observe_total: 24
   m_hold: 15
+  # 경로 종류와 무관하게 **팔이 멈춰 있는** 틱의 상한 (h0.9). 놓기 readiness 대기는 제 감시가 보므로 빼고 센다.
+  # `ep-E0-400122`는 `place` commitment를 `direct` 경로로 든 채 419틱을 힘 반사 아래 서 있었다 — hold·관측
+  # 감시로는 보이지 않는 세 번째 얼굴이다.
+  m_still: 10
+  m_hold_total: 45
+  observe_max_age_ms: 8000
+  stall_cooldown_ticks: 20
+  stall_escape_ticks: 5
+  stall_escape_check_ticks: 2
+  stall_escape_progress_mm: 5
+  stall_dead_ticks: 18
+  stall_window_ticks: 100
+  stall_window_min_ticks: 80
+  stall_window_share: 0.25
+  stall_abort_firings: 6
   stall_escape_speed_level: 1
 
 # 국면 판정과 국면별 목표점 (docs/08 §3.2 `commitment`의 국면, §5.6).

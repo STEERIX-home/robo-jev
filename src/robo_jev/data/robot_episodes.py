@@ -327,6 +327,12 @@ def generate_episode(
             if done_streak >= tail_ticks + 1:
                 terminated = "done_tail"
                 break
+            if harness.stalled_out is not None:
+                # 정체 감시가 결정으로 풀 수 없는 정체를 확인했다 (h0.9, R1 리뷰 1 C1): 팔이 물러남으로도
+                # 움직이지 않았거나 진행 없이 발동만 되풀이했다. 남은 시간을 죽은 틱으로 채우는 대신
+                # **명시적 이유**로 끝낸다 — `max_ms`는 "왜"를 말하지 않는다.
+                terminated = "stall_exhausted"
+                break
             if scene.get("episode_over"):
                 terminated = "max_ms"
                 break
@@ -335,6 +341,8 @@ def generate_episode(
         wall_s = time.perf_counter() - started
         outcome = _outcome(scene, plan, env, done_tick if terminated == "done_tail" else None, ticks, terminated)
         outcome["first_done_tick"] = first_done_tick
+        # 정체로 끝났으면 그 까닭(`arm_pinned`·`no_progress`)을 레코드에 남긴다 — "왜 안 끝났나"를 데이터가 말한다.
+        outcome["stall"] = harness.stalled_out
         versions = {"expert": expert.version, "generator": GENERATOR_VERSION, "sim": env.serializer_version}
         provenance = {
             "generator": GENERATOR_VERSION,

@@ -401,11 +401,13 @@ def test_a_stand_in_policy_keeps_its_own_executed_history_while_labels_come_from
     assert record["provenance"]["outcome"]["done"] is False
     differing = assert_history_follows_the_executed_tick(record)
     assert differing >= 10
-    # 정체 감시(h0.8)가 `m_hold`틱째에 재계획 게이트로 끊는다 — 제자리 hold만 하는 정책은 그것을 부르는 정책이다.
+    # 정체 감시(h0.9)가 상한 틱째에 재계획 게이트로 끊는다 — 제자리 hold만 하는 정책은 그것을 부르는 정책이다.
+    # 상한은 둘 중 먼저 오는 것이다: 이어진 hold 경로(`m_hold`)와 **움직이지 않는 팔**(`m_still`).
     from robo_jev.data.robot_episodes import config_paths
     from robo_jev.harness.robot import load_harness_config
 
-    limit = int(load_harness_config(config_paths(CONFIG)["harness_config"])["compose"]["m_hold"])
+    caps = load_harness_config(config_paths(CONFIG)["harness_config"])["compose"]
+    limit = min(int(caps["m_hold"]), int(caps["m_still"]))
     stalled = 0
     for index, tick in enumerate(record["ticks"]):
         keys = {entry["id"]: entry["key"] for entry in tick["request"]["candidates"]["q_main"]}
@@ -419,7 +421,9 @@ def test_a_stand_in_policy_keeps_its_own_executed_history_while_labels_come_from
         label = next(item for item in tick["labels"] if item["question_id"] == "q_main")
         assert label["candidate_ids"] != [hold]  # 전문가는 파지를 고른다
         assert label["source"] == "expert_v0"
-    assert stalled == 1
+    # 감시가 한 번 걸리고 물러남을 `stall_escape_ticks`틱까지 **이어서** 건다 (h0.9): 한 틱으로는 실행기의 힘 반사가
+    # 묶어 둔 자리를 벗어나지 못했다. 팔이 그래도 안 움직이면 두 틱째에 갈라 에피소드를 끝낸다.
+    assert 1 <= stalled <= int(caps["stall_escape_ticks"]), stalled
 
 
 def test_smoke_labels_never_reach_the_input_area(smoke):
@@ -781,12 +785,44 @@ def test_every_instruction_change_inside_a_tick_reaches_the_model_as_an_event(sm
     assert seen == changes, (seen, changes)
 
 
-def test_the_two_pathological_episodes_finish_instead_of_stalling():
-    """`ep-E1-000235`(관측 157틱)와 `ep-E1-000244`(죽은 hold 120틱)를 R1 설정으로 재생한다 (Task R1 B2-v).
+#: R1 코퍼스가 `max_ms`로 끝낸 27편 가운데 **네 가지 모양**을 하나씩 (리뷰 1 C1·I3·I4). 같은 결함의 네 얼굴이다.
+#:   - `ep-E2-420249` — 경로가 막힌 채 같은 commitment로 hold를 되풀이한다(감시가 15틱마다 끊고 같은 후보가 다시 뽑힌다).
+#:   - `ep-E2-420208` — 접촉력 50N으로 힘 반사가 걸려 팔이 한 밀리미터도 움직이지 않는다(I4의 편: 주 층의 61.3 %).
+#:   - `ep-E2-420114` — 관측 게이트가 영영 뜬다(450틱 중 308틱, 대상 기하 39.1 s).
+#:   - `ep-E2-420242` — 게이트가 **안 뜬 채** 유령 기하(37.7 s)로 다가간다. I3의 두 방향 중 나머지.
+#:   - `ep-E0-400122` — `place` commitment를 `direct` 경로로 든 채 419틱을 선다. hold·관측 감시가 못 보는 모양.
+LIMIT_CYCLE_EPISODES = (("E2", 420249), ("E2", 420208), ("E2", 420114), ("E2", 420242), ("E0", 400122))
 
-    E1 프로파일의 장면·일정은 D1과 **같으므로**(`test_the_e1_profile_reproduces_the_d1_schedule…`) 같은 에피소드다.
-    셋이 바뀌었다: 앞단이 자기 가림 구간의 정지한 물체를 이어 들고(`pw0.2`), 정체 감시가 스스로 풀 수 없는 반복을
-    재계획·물러남으로 끊고(`h0.8`), 완료 뒤 꼬리가 3틱이다. 둘 다 `max_ms`가 아니라 **완료**로 끝난다.
+
+def _stall_shape(record):
+    """(끝난 이유, 완료 여부, 마지막 100틱의 hold·관측 비율, 가장 긴 hold·관측 구간). 완료 꼬리는 빼고 센다."""
+    ticks = [tick for tick in record["ticks"] if str((tick.get("usage") or {}).get("gate")) != "done"]
+    dead = [
+        bool(str((tick.get("usage") or {}).get("gate")) == "observe" or str((tick.get("adopted") or {}).get("path_kind")) == "hold")
+        for tick in ticks
+    ]
+    run = longest = 0
+    for value in dead:
+        run = run + 1 if value else 0
+        longest = max(longest, run)
+    tail = dead[-100:]
+    outcome = record["provenance"]["outcome"]
+    return outcome["terminated"], bool(outcome["done"]), (sum(tail) / len(tail) if tail else 0.0), longest
+
+
+@pytest.mark.parametrize(("profile", "seed"), (("E1", 235), ("E1", 244), *LIMIT_CYCLE_EPISODES))
+def test_the_limit_cycle_episodes_end_for_a_reason_instead_of_burning_the_clock(profile, seed):
+    """정체 감시의 **극한 순환**이 끊긴다 (h0.9, 리뷰 1 C1).
+
+    D1의 두 편(`ep-E1-000235` 관측 157틱, `ep-E1-000244` 죽은 hold 120틱)과 R1이 `max_ms`로 끝낸 27편의 네 모양을
+    새 하네스로 재생한다. h0.8은 `m_hold`=15에서 감시를 걸고 **같은 후보를 바로 다시 채택**했으므로 순환의 주기만
+    정했다 — "가장 긴 죽은 구간"이 언제나 정확히 15라서 정체 지표가 0을 냈고, 27편이 45초를 그 순환에 썼다.
+
+    h0.9가 지키는 것 둘. (1) 에피소드는 **완료되거나 `max_ms`가 아닌 명시적 이유**(`stall_exhausted`)로 끝난다 —
+    "왜 안 끝났나"를 데이터가 말한다. (2) 마지막 100틱의 죽은 틱(hold·관측, 완료 꼬리 제외)이 **30 이하**이고,
+    100틱보다 긴 편에서는 그 비율이 0.3 미만이다. 짧은 편에서 몫이 아니라 **수**를 재는 까닭: 팔이 20틱째에
+    굳으면 34틱짜리 에피소드가 남고 몫의 분모가 짧아진다(`ep-E2-420200` 0.471, 죽은 틱 16). 그 몫은 순환이
+    남았다는 뜻이 아니라 에피소드가 짧다는 뜻이며, 보고서가 편마다 실측을 적는다.
     """
     from robo_jev.data.robot_episodes import config_paths
     from robo_jev.harness.robot import load_harness_config
@@ -794,17 +830,19 @@ def test_the_two_pathological_episodes_finish_instead_of_stalling():
     config = _r1_config()
     caps = load_harness_config(config_paths(config)["harness_config"])["compose"]
     expert = Expert()
-    for seed in (235, 244):
-        record = generate_episode("E1", seed, policy=expert, expert=expert, config=config)
-        outcome = record["provenance"]["outcome"]
-        assert outcome["done"] is True and outcome["terminated"] == "done_tail", (seed, outcome)
-        gates = [(tick.get("usage") or {}).get("gate") for tick in record["ticks"]]
-        assert gates.count("observe") <= caps["m_observe"], (seed, gates.count("observe"))
-        runs, longest = 0, 0
-        for gate, adopted in zip(gates, (tick["adopted"] for tick in record["ticks"])):
-            runs = runs + 1 if (gate != "done" and adopted and adopted.get("path_kind") == "hold") else 0
-            longest = max(longest, runs)
-        assert longest <= caps["m_hold"], (seed, longest)
+    record = generate_episode(profile, seed, policy=expert, expert=expert, config=config)
+    terminated, done, share, longest = _stall_shape(record)
+    assert done or terminated == "stall_exhausted", (profile, seed, record["provenance"]["outcome"])
+    assert terminated != "max_ms", (profile, seed, terminated)
+    dead = round(share * min(100, len([t for t in record["ticks"] if str((t.get("usage") or {}).get("gate")) != "done"])))
+    assert dead <= 30, (profile, seed, dead, share)
+    if len(record["ticks"]) >= 100:
+        assert share < 0.3, (profile, seed, share)
+    # 감시는 상한 안에서 끊는다 — 구간 하나가 `m_hold`를 넘으면 감시가 걸리지 않은 것이다.
+    assert longest <= max(int(caps["m_hold"]), int(caps["m_observe_total"])), (profile, seed, longest)
+    if not done:
+        stall = record["provenance"]["outcome"]["stall"]
+        assert stall["reason"] in ("arm_pinned", "no_progress"), stall
 
 
 def test_the_generator_refuses_a_holdout_template_id_the_scene_config_does_not_have(tmp_path):
