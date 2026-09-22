@@ -38,7 +38,9 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-from robo_jev.evaluate import episode_bootstrap, load_eval_suite  # noqa: E402
+from robo_jev.evaluate import (  # noqa: E402
+    COMMITMENT_SHUFFLE_SCOPE, episode_bootstrap, load_eval_suite, split_episode_bootstrap,
+)
 
 REPORTS = REPO / "artifacts" / "reports"
 DEFAULT_SUITE = REPO / "configs" / "eval" / "pilot-decision-cell.yaml"
@@ -98,6 +100,13 @@ def cell_ticks(suite_path: Any = DEFAULT_SUITE, *, root: Any = REPO, split: str 
     return dataset_ticks(base, entry["records"])
 
 
+def cell_records(suite_path: Any = DEFAULT_SUITE, *, split: str = SPLIT) -> list[str]:
+    """평가 집합이 고른 편들을 **설정에 적힌 순서 그대로**. 기증자 회전이 이 순서에서 나온다 (:func:`donor_rotation`)."""
+    suite = load_eval_suite(suite_path)
+    entry = next(item for item in suite["splits"] if item["name"] == split)
+    return [str(name) for name in (entry.get("records") or [])]
+
+
 def dataset_ticks(base: Any, episodes: list[str]) -> list[dict[str, Any]]:
     """데이터셋에서 곧바로 — 평가 집합을 거치지 않고 편 목록만으로 (A1의 분할 전체 보기)."""
     base = Path(base)
@@ -108,6 +117,8 @@ def dataset_ticks(base: Any, episodes: list[str]) -> list[dict[str, Any]]:
             label = next((row for row in tick.get("labels", []) if row.get("question_id") == QUESTION), None)
             if label is None:
                 continue
+            # `record_ticks`는 그 **레코드 전체**의 틱 수다 — 기증자 길이 고정(:func:`donor_rotation`)은 라벨이 아니라
+            # 편 길이가 정하므로, 라벨 없는 틱이 있어도 회전을 옳게 세려면 이 수가 필요하다.
             allowed = list(label.get("candidate_ids") or [])
             candidates = tick["request"]["candidates"][QUESTION]
             keys = {candidate["id"]: candidate.get("key") for candidate in candidates}
@@ -116,7 +127,7 @@ def dataset_ticks(base: Any, episodes: list[str]) -> list[dict[str, Any]]:
                 "episode_id": episode_id, "tick": index, "label": allowed, "commitment": commitment,
                 "is_commitment": bool(commitment is not None and commitment in allowed),
                 "key": str(keys.get(allowed[0]) if allowed else None).split(":")[0],
-                "rule": label.get("rule"),
+                "rule": label.get("rule"), "record_ticks": len(record["ticks"]),
                 # 아무것도 읽지 않는 기계적 정책의 답 — commitment가 있으면 그것, 없으면 `observe` 게이트 키
                 "mechanical": commitment if commitment is not None else next((c["id"] for c in candidates if str(c.get("key", "")).startswith("observe")), None),
             })  # fmt: skip
@@ -147,6 +158,37 @@ def mechanism(ticks: list[dict[str, Any]]) -> dict[str, Any]:
         "non_commitment_key_families": dict(Counter(row["key"] for row in others).most_common()),
         "non_commitment_per_episode": dict(Counter(row["episode_id"] for row in others).most_common()),
         "ticks_per_episode": dict(Counter(row["episode_id"] for row in ticks).most_common()),
+    }
+
+
+def donor_rotation(ticks: list[dict[str, Any]], order: list[str]) -> dict[str, Any]:
+    """표준 대조군의 **기증자 배정**과 길이 고정이 덮는 틱 수 — 이 모집단에서, 편 길이만으로 (P3 C1b).
+
+    :func:`robo_jev.evaluate.context_shuffle_records` 는 기증자를 **설정 목록의 다음 레코드**로 고르고,
+    `_roll_stream_state`는 기증자의 틱을 ``min(position, len(donor) - 1)``에서 읽는다. 그래서 기증자가 더 짧은
+    편에서는 그 길이를 넘는 틱이 전부 기증자의 **마지막(끝난) 상태** 하나와 섞인다. 몇 틱이 그렇게 되는지는
+    모델이 아니라 **설정의 편 순서와 편 길이**가 정한다 — 곧 이 블록은 대조군 값이 어느 draw에서 나왔는지다.
+    이 수가 파일 안에 있어야 `reading`이 기증자 의존성을 자기 파일의 수로 말할 수 있다 (리뷰 1 C1·I1)."""
+    length: dict[str, int] = {}
+    for row in ticks:  # 라벨 없는 틱이 있어도 편 길이는 record_ticks가 안다 (없으면 본 틱의 최대 색인 + 1)
+        name = row["episode_id"]
+        length[name] = max(length.get(name, 0), int(row.get("record_ticks") or 0), int(row["tick"]) + 1)
+    names = [name for name in order if name in length] or sorted(length)
+    per_episode: dict[str, Any] = {}
+    clamped = total = 0
+    for position, name in enumerate(names):
+        donor = names[(position + 1) % len(names)]
+        short = max(0, length[name] - length[donor])
+        per_episode[name] = {"donor": donor, "ticks": length[name], "donor_ticks": length[donor], "clamped_ticks": short}
+        clamped, total = clamped + short, total + length[name]
+    return {
+        "rule": (
+            "the donor is the NEXT record in the config's list, and _roll_stream_state reads it at "
+            "min(position, len(donor) - 1) — so every tick past the donor's end is shuffled against the donor's "
+            "final, finished state. Which donor a record draws is a property of the config's order, not of the model."
+        ),
+        "ticks": total, "clamped_ticks": clamped, "clamped_share": clamped / total if total else None,
+        "per_episode": per_episode,
     }
 
 
@@ -265,7 +307,7 @@ def run_strata(table: dict[str, Any], ticks: list[dict[str, Any]], **options: An
     if columns.get("state_shuffle"):
         out["state_shuffle_repeats_the_commitment"] = repeats_the_commitment(columns["state_shuffle"], ticks)
     primary = [row for row in ticks if not row["is_commitment"]]
-    out["primary_stratum_by_key_family"] = by_key_family(columns, primary)
+    out["primary_stratum_by_key_family"] = by_key_family(columns, primary, **options)
     if columns.get("state_shuffle"):
         out["primary_stratum_leave_one_episode_out"] = leave_one_episode_out(columns["model"], columns["state_shuffle"], primary, **options)
     return out
@@ -295,12 +337,14 @@ def leave_one_episode_out(model_rows: list[dict[str, Any]], control_rows: list[d
     return out
 
 
-def by_key_family(columns: dict[str, list[dict[str, Any]] | None], rows: list[dict[str, Any]]) -> dict[str, Any]:
+def by_key_family(columns: dict[str, list[dict[str, Any]] | None], rows: list[dict[str, Any]], **options: Any) -> dict[str, Any]:
     """주 지표 층을 **답의 키 갈래**로 더 쪼갠다 — 여유가 어느 갈래에서 나오는지 (구간은 붙이지 않는다).
 
     왜. 이 층은 `hold`(편 끝의 완료 꼬리)·`observe`(관측 게이트)·`grasp`(첫 틱)로 이루어져 있고 셋은 서로 다른 물음이다.
     "읽기가 필요한 층"이라는 이름 하나로 묶어 놓으면 목표를 읽어야 답이 나오는 갈래와 실행 상태만으로 풀리는 갈래가
-    한 수에 섞인다. 갈래별 n은 작으므로 **점추정만** 적고 판정은 층 전체의 구간으로 한다."""
+    한 수에 섞인다. 판정은 여전히 **층 전체의 구간**이 하지만, 갈래의 여유에도 층과 **같은 쌍 부트스트랩**(편이 표본
+    단위)을 붙여 둔다 — "여유가 전부 `grasp`에서 나온다"는 이 과제의 결론 하나가 그 구간에 기대고 있고, 그 구간이
+    산출물 밖 스크래치 스크립트에만 있으면 `git clone` 뒤에는 재현되지 않는다 (리뷰 1 I4)."""
     keep = {(row["episode_id"], row["tick"]): row["key"] for row in rows}
     families = sorted({key for key in keep.values()})
     out: dict[str, Any] = {}
@@ -317,6 +361,13 @@ def by_key_family(columns: dict[str, list[dict[str, Any]] | None], rows: list[di
             block[column] = (sum(1 for row in graded if row["correct"]) / len(graded)) if graded else None
         if block.get("model") is not None and block.get("state_shuffle") is not None:
             block["state_shuffle_margin"] = block["model"] - block["state_shuffle"]
+            paired = episode_bootstrap(
+                stratum_per_episode(columns["model"] or [], wanted),
+                stratum_per_episode(columns["state_shuffle"] or [], wanted), **options,
+            ) or {}
+            block["state_shuffle_margin_ci"] = paired.get("margin_ci")
+            block["state_shuffle_margin_includes_zero"] = paired.get("margin_includes_zero")
+            block["state_shuffle_margin_episode_balanced"] = paired.get("episode_balanced_margin")
         out[family] = block
     return out
 
@@ -330,25 +381,67 @@ PRIMARY_STRATUM_NOTE = (
 )
 
 
+def _share(value: float) -> str:
+    """0~1의 몫을 이 프로젝트의 표기로 — 언제나 "20.8 %"다."""
+    return f"{value * 100:.1f} %"
+
+
+def reading_text(population: dict[str, Any], mechanism: dict[str, Any], donor: dict[str, Any] | None = None) -> str:
+    """이 파일 **자신의 수**에서 "무엇을 인용하라"를 만든다 (P3 리뷰 1 C1).
+
+    왜 손으로 쓰지 않는가. 이 필드의 일은 다음 독자에게 인용할 층을 지시하는 것이고, 손으로 쓴 문단은 모집단이
+    바뀌어도 그대로 다시 찍힌다 — 실제로 P3의 산출물이 P2의 문단(844·595·249·8편)을 글자 그대로 실었고, 그 문단은
+    이 과제가 **반박한** 주장("4B T0가 자기 대조군에 진다")까지 들고 있었다. 위의 `population`·`mechanism`·
+    `donor_rotation`에서 문장을 만들면 모집단이 바뀌는 순간 문장이 같이 바뀐다. 판정(어느 run이 이겼는가)은 여기
+    적지 않는다 — 판정은 `runs[*]`의 구간이 하고, 이 문장은 **어디를 보라**만 말한다."""
+    ticks, nc = int(population["ticks"]), int(population["non_commitment_ticks"])
+    commitment = int(mechanism["label_is_the_commitment"])
+    families = " · ".join(f"{name} {count}" for name, count in (population.get("key_families") or {}).items())
+    policy = mechanism["mechanical_policy"]
+    largest, largest_b = population["largest_episode"], population["largest_episode_of_the_non_commitment_stratum"]
+    out = [
+        f"This cell is {population['episodes']} episodes / {ticks:,} {QUESTION} ticks.",
+        f"The primary metric is the {PRIMARY_STRATUM} stratum: the {nc:,} ticks "
+        f"({_share(nc / ticks)} of them) whose expert label is NOT the tick's own commitment.action_ref — key families {families}.",
+        f"The other {commitment:,} ({_share(commitment / ticks)}) are 'repeat your commitment', where the standard state "
+        f"shuffle keeps that line verbatim: the policy that reads nothing but the preserved fields scores "
+        f"{policy['correct']:,}/{ticks:,} = {policy['accuracy']:.3f} on the whole cell.",
+        f"The largest episode ({largest['episode_id']}) is {_share(largest['share_of_all_ticks'])} of the ticks and "
+        f"{_share(largest_b['share_of_the_stratum'])} of the primary stratum, and the sampling unit is the episode — so "
+        f"quote a margin only with its paired episode-clustered interval, and an interval that contains zero is not a finding.",
+    ]
+    if donor and donor.get("clamped_share") is not None:
+        out.append(
+            f"The standard control is DONOR-DEPENDENT: {donor['rule']} On this population that clamps "
+            f"{donor['clamped_ticks']:,} of {donor['ticks']:,} ticks ({_share(donor['clamped_share'])}) onto a frozen "
+            f"final state (`donor_rotation` in this file), so a state-shuffle value is one draw from a distribution "
+            f"over donor assignments."
+        )
+    out.append(
+        "Read `runs[*].non_commitment`. `whole_cell` is kept only so earlier published numbers stay comparable; "
+        "it is not the result."
+    )
+    return " ".join(out)
+
+
 def build(*, suite_path: Any = DEFAULT_SUITE, reports: Any = REPORTS, runs: dict[str, str] | None = None,
-          split: str = SPLIT, task: str = "p2-decision-cell-strata", reading: str | None = None) -> dict[str, Any]:
+          split: str = SPLIT, task: str = "p2-decision-cell-strata", reading: str | None = None,
+          records: list[str] | None = None) -> dict[str, Any]:
     reports = Path(reports)
     ticks = cell_ticks(suite_path, split=split)
+    population = population_composition(ticks)
+    found = mechanism(ticks)
+    donor = donor_rotation(ticks, records if records is not None else cell_records(suite_path, split=split))
     out: dict[str, Any] = {
         "task": task,
         "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "split": split, "question": QUESTION, "suite": str(suite_path),
         "primary_stratum": PRIMARY_STRATUM, "primary_stratum_note": PRIMARY_STRATUM_NOTE,
-        "reading": reading or (
-            "The decision cell is ~70 % 'repeat your commitment', which dilutes every aggregate margin: on 595 of its "
-            "844 ticks the expert label IS the tick's own commitment.action_ref, and the state shuffle keeps that line "
-            "verbatim. Read the two strata separately. On the 249 ticks that need the goal read, the properly-trained "
-            "fp32 T1 beats its own goal-blind control by a wide margin while the 4B T0 loses to its own control. "
-            "Both strata are 8 episodes and one of them (ep-E1-000235) is 300 of the 844 ticks and 159 of the 249, "
-            "so every number here carries the same paired episode-clustered interval and the same caveat."
-        ),
-        "population": population_composition(ticks),
-        "mechanism": mechanism(ticks),
+        # 읽기 문장은 **이 파일의 수에서 만든다** — 손으로 쓴 문단은 모집단이 바뀌어도 그대로 다시 찍힌다 (리뷰 1 C1)
+        "reading": reading or reading_text(population, found, donor),
+        "population": population,
+        "donor_rotation": donor,
+        "mechanism": found,
         "runs": {},
         "missing": {},
     }
@@ -400,6 +493,44 @@ def build_population(splits: list[str], *, manifest: Any = DEFAULT_MANIFEST, sui
     return out
 
 
+def rescope(path: Any) -> dict[str, Any]:
+    """이미 저장된 재평가 보고서의 `episode_bootstrap`을 **GPU 없이** 지금의 규칙으로 다시 낸다 (리뷰 1 I3).
+
+    왜 여기인가. 이 스크립트는 바로 그 보고서들의 편 단위 집계에서 구간을 다시 내는 CPU 경로다 — 같은 계산을
+    :func:`robo_jev.evaluate.split_episode_bootstrap` 로 그대로 돌리면 저장된 블록이 **비트 단위로** 다시 나온다
+    (부트스트랩의 seed가 고정이다). 그래서 commitment 섞기 열의 범위를 뒤늦게 적는 데 재실행이 필요 없다.
+
+    무엇을 바꾸는가. 열 옆의 `commitment_shuffle_scope` 한 줄과, `q_main`이 아닌 질문의 commitment 섞기 여유·
+    판정 표지다(:data:`robo_jev.evaluate.COMMITMENT_SHUFFLE_SCOPE`). **그 밖의 모든 값이 저장된 것과 같은지를
+    확인하고**, 다르면 아무것도 쓰지 않고 멈춘다 — 이 경로가 측정을 바꿀 수는 없어야 한다."""
+    path = Path(path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    changed: dict[str, Any] = {}
+    for name, table in ((payload.get("evaluation") or {}).get("splits") or {}).items():
+        if "commitment_shuffle" not in table:
+            continue
+        stored = table.get("episode_bootstrap")
+        rebuilt = split_episode_bootstrap({key: value for key, value in table.items() if key != "episode_bootstrap"})
+        kept = {qid: {k: v for k, v in entry.items() if k != "commitment_shuffle"} for qid, entry in rebuilt.items()}
+        was = {qid: {k: v for k, v in entry.items() if k != "commitment_shuffle"} for qid, entry in (stored or {}).items()}
+        if kept != was:  # 이 경로는 측정을 바꾸지 않는다 — 다르면 멈춘다
+            raise SystemExit(f"{path}: 다시 낸 구간이 저장된 것과 다르다 ({name}) — 재실행이 필요하다")
+        table["commitment_shuffle_scope"] = COMMITMENT_SHUFFLE_SCOPE
+        table["episode_bootstrap"] = rebuilt
+        changed[name] = sum(1 for entry in rebuilt.values() if (entry.get("commitment_shuffle") or {}).get("out_of_scope"))
+    if changed:
+        payload["rescoped"] = {
+            "at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "by": "scripts/decision_cell_strata.py --rescope",
+            "what": "added commitment_shuffle_scope and withdrew the commitment-shuffle margin on the questions that "
+                    "column cannot be read on (P3 review 1 I3). CPU only, no re-run.",
+            "verified": "every other value of episode_bootstrap was re-derived from the stored per-episode counts and "
+                        "compared to the stored one; identical.",
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    return changed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--suite", default=str(DEFAULT_SUITE))
@@ -410,15 +541,23 @@ def main(argv: list[str] | None = None) -> int:
                         help="이것을 주면 층화 대신 **모집단 구성만** 낸다 (쉼표로 나눈 split 이름)")
     parser.add_argument("--population-suites", dest="population_suites", default=None,
                         help="모집단 보기에 견줄 평가 집합들 — `이름=경로`를 쉼표로")
+    parser.add_argument("--rescope", nargs="+", default=None, metavar="REPORT",
+                        help="이미 저장된 재평가 보고서들의 commitment 섞기 열에 범위를 적는다 (:func:`rescope`; GPU 없음)")
+    parser.add_argument("--reading", default=None,
+                        help="읽기 문장을 직접 준다 — 기본은 이 파일의 `population`·`donor_rotation`·`mechanism`에서 **생성**한다")
     parser.add_argument("--out", default=str(REPORTS / "p2-decision-cell-strata.json"))
     args = parser.parse_args(argv)
+    if args.rescope:
+        for name in args.rescope:
+            print(f"{name}: {rescope(name)}")
+        return 0
     if args.population_splits:
         suites = dict(pair.split("=", 1) for pair in args.population_suites.split(",")) if args.population_suites else None
         payload = build_population([name.strip() for name in args.population_splits.split(",")], suites=suites)
         summary = ", ".join(f"{name} {block['whole_split']['episodes']}편 {block['whole_split']['ticks']}틱" for name, block in payload["splits"].items())
     else:
         payload = build(suite_path=args.suite, reports=args.reports, runs=RUN_SETS[args.runs], split=args.split,
-                        task=f"{args.runs}-decision-cell-strata")
+                        task=f"{args.runs}-decision-cell-strata", reading=args.reading)
         summary = f"{len(payload['runs'])} runs, {len(payload['missing'])} missing"
     target = Path(args.out)
     target.parent.mkdir(parents=True, exist_ok=True)

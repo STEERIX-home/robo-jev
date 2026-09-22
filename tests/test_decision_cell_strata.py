@@ -25,6 +25,16 @@ def script():
     return module
 
 
+@functools.lru_cache(maxsize=4)
+def real(suite=None):
+    """실제 데이터의 판정 칸 — 편마다 한 번만 읽는다 (여러 시험이 같은 모집단을 본다). 돌려준 목록은 읽기 전용."""
+    module = script()
+    return tuple(module.cell_ticks(suite) if suite else module.cell_ticks())
+
+
+P3_SUITE = REPO / "configs" / "eval" / "p3-decision-cell.yaml"
+
+
 def _ticks():
     """두 편 × 다섯 틱. 편 A는 commitment 넷 + 비-commitment 하나, 편 B는 그 반대."""
     rows = []
@@ -250,3 +260,142 @@ def test_the_primary_stratum_carries_a_leave_one_episode_out_refit():
 
     # 대조군 열이 없으면 이 블록도 없다 (있다고 주장하지 않는다)
     assert "primary_stratum_leave_one_episode_out" not in module.run_strata({"model": {"q_main": {"per_record": _per_record(ticks, model)}}}, ticks)
+
+
+# --------------------------------------------------------------------------
+# 리뷰 1 — 읽기 문장은 **이 파일의 수에서** 나온다, 기증자 회전, 갈래별 구간
+# --------------------------------------------------------------------------
+
+
+def test_the_reading_sentence_is_generated_from_this_cells_own_numbers():
+    """C1 — 이 과제가 반박한 주장이 이 과제의 산출물 안에 있었다.
+
+    `build()`는 `reading=`을 받았지만 `main()`이 넘기지 않아 `--runs p3`가 **P2의 문단을 그대로** 재생산했다
+    ("595 of its 844 ticks", "the 4B T0 loses to its own control", "Both strata are 8 episodes"). 문장을 모집단의
+    수에서 만들면 그 일이 구조적으로 불가능해진다: 새 모집단의 문장에는 옛 칸의 수가 들어갈 자리가 없다.
+    이 시험은 옛 문단 위에서 **실패한다** — 그것이 이 시험의 일이다."""
+    module = script()
+    new = list(real(P3_SUITE))
+    text = module.reading_text(
+        module.population_composition(new), module.mechanism(new),
+        module.donor_rotation(new, module.cell_records(P3_SUITE)),
+    )
+    assert "24 episodes / 2,530" in text and "525 ticks" in text and "2,005" in text
+    assert "2,214/2,530 = 0.875" in text                      # 아무것도 읽지 않는 열이 문장 안에 있다
+    assert "hold 251 · observe 210 · grasp 61 · place 3" in text
+    assert "11.9 %" in text and "30.3 %" in text and "20.7 %" in text
+    # 옛 모집단의 수는 하나도 들어 있지 않다 (여기 있으면 그것이 바로 C1이다)
+    for stale in ("844", "595", "249", "8 episodes", "35.5 %", "63.9 %"):
+        assert stale not in text
+    # 판정 문장은 여기 적지 않는다 — 판정은 `runs[*]`의 구간이 한다
+    for verdict in ("loses to its own control", "by a wide margin", "beats"):
+        assert verdict not in text
+
+    old = list(real())
+    was = module.reading_text(
+        module.population_composition(old), module.mechanism(old),
+        module.donor_rotation(old, module.cell_records()),
+    )
+    assert "8 episodes / 844" in was and "249 ticks" in was and "751/844 = 0.890" in was and "30.1 %" in was
+    assert "2,530" not in was and "525" not in was
+
+
+def test_the_generated_reading_is_what_the_script_writes_and_a_flag_can_override_it(tmp_path):
+    """`main()`이 그 문장을 실제로 싣는가 — C1의 원인은 계산이 아니라 `main()`이 넘기지 않은 것이었다."""
+    module = script()
+    out = tmp_path / "strata.json"
+    assert module.main(["--suite", str(P3_SUITE), "--runs", "p3", "--reports", str(tmp_path), "--out", str(out)]) == 0
+    payload = json.loads(out.read_text(encoding="utf-8"))
+    assert payload["reading"].startswith("This cell is 24 episodes / 2,530")
+    assert "844" not in payload["reading"] and payload["donor_rotation"]["clamped_ticks"] == 524
+
+    assert module.main(["--suite", str(P3_SUITE), "--runs", "p3", "--reports", str(tmp_path),
+                        "--reading", "quote nothing", "--out", str(out)]) == 0
+    assert json.loads(out.read_text(encoding="utf-8"))["reading"] == "quote nothing"
+
+
+def test_the_donor_rotation_is_measured_for_the_population_it_sits_in():
+    """C1b/리뷰 1 I1 — 대조군 값이 **어느 draw에서 나왔는지**가 파일 안에 있어야 한다.
+
+    기증자는 설정 목록의 다음 레코드이고 더 짧으면 마지막 틱에 고정된다. 이 수는 모델이 아니라 설정의 편 순서와
+    편 길이만으로 정해지므로 CPU에서 그대로 다시 나온다 — 8편 회전 254/844 = 30.1 %, 24편 회전 524/2,530 = 20.7 %."""
+    module = script()
+    new = module.donor_rotation(list(real(P3_SUITE)), module.cell_records(P3_SUITE))
+    assert new["ticks"] == 2530 and new["clamped_ticks"] == 524
+    assert round(new["clamped_share"], 4) == 0.2071
+    assert new["per_episode"]["ep-E1-000235"] == {"donor": "ep-E1-000244", "ticks": 300, "donor_ticks": 300, "clamped_ticks": 0}
+
+    old = module.donor_rotation(list(real()), module.cell_records())
+    assert old["ticks"] == 844 and old["clamped_ticks"] == 254 and round(old["clamped_share"], 4) == 0.3009
+    # P2의 +0.257을 만든 짝: 300틱짜리가 82틱짜리를 받아 218틱이 얼어붙은 완료 상태와 섞였다
+    assert old["per_episode"]["ep-E1-000235"] == {"donor": "ep-E1-000263", "ticks": 300, "donor_ticks": 82, "clamped_ticks": 218}
+    assert sum(entry["clamped_ticks"] for entry in old["per_episode"].values()) == 254
+
+
+def test_each_key_family_carries_the_same_paired_interval_as_its_stratum():
+    """리뷰 1 I4 — "여유가 전부 `grasp`에서 나온다"는 결론이 산출물에 없는 구간에 기대고 있었다.
+
+    fixture: 편 A만 대조군이 틀리는 갈래 하나 + 두 열이 같은 갈래 하나. 갈래의 구간은 층과 **같은 쌍 부트스트랩**
+    이어야 하고, 두 열이 같은 갈래는 0을 포함해야 한다."""
+    module = script()
+    ticks = _ticks()
+    for row in ticks:  # 비-commitment 층을 두 갈래로 가른다
+        if not row["is_commitment"]:
+            row["key"] = "grasp" if row["episode_id"] == "ep-A" else "observe"
+    model = {(row["episode_id"], row["tick"]): True for row in ticks}
+    control = {(row["episode_id"], row["tick"]): (row["episode_id"] == "ep-B") for row in ticks}
+    families = module.run_strata(_table(ticks, model, control), ticks)["primary_stratum_by_key_family"]
+
+    from robo_jev.evaluate import episode_bootstrap
+
+    assert set(families) == {"grasp", "observe"}
+    assert families["grasp"]["n"] == 1 and families["grasp"]["state_shuffle_margin"] == 1.0
+    assert families["grasp"]["state_shuffle_margin_includes_zero"] is False
+    assert families["observe"]["state_shuffle_margin"] == 0.0 and families["observe"]["state_shuffle_margin_includes_zero"] is True
+    wanted = {(row["episode_id"], row["tick"]) for row in ticks if row["key"] == "grasp" and not row["is_commitment"]}
+    paired = episode_bootstrap(
+        module.stratum_per_episode(_per_record(ticks, model), wanted),
+        module.stratum_per_episode(_per_record(ticks, control), wanted),
+    )
+    assert families["grasp"]["state_shuffle_margin_ci"] == paired["margin_ci"]
+    assert families["grasp"]["state_shuffle_margin_episode_balanced"] == paired["episode_balanced_margin"]
+
+
+def test_rescoping_a_saved_report_touches_only_the_commitment_shuffle_scope(tmp_path):
+    """리뷰 1 I3 — 이미 저장된 보고서에 범위를 적는 길은 **재실행이 아니다**.
+
+    부트스트랩의 seed가 고정이라 저장된 블록은 CPU에서 비트 단위로 다시 나온다. 그러므로 이 경로는 범위와
+    `q_main` 밖의 여유 말고는 **아무것도 바꿀 수 없어야** 하고, 달라지면 쓰지 않고 멈춰야 한다."""
+    module = script()
+    from robo_jev.evaluate import COMMITMENT_SHUFFLE_SCOPE, split_episode_bootstrap
+
+    rows = [{"episode_id": name, "n": 10, "graded": 10, "correct": value} for name, value in (("a", 9), ("b", 8))]
+    worse = [{"episode_id": name, "n": 10, "graded": 10, "correct": value} for name, value in (("a", 2), ("b", 1))]
+    table = {
+        "model": {qid: {"per_episode": rows} for qid in ("q_main", "q_done")},
+        "context_shuffle": {qid: {"per_episode": worse} for qid in ("q_main", "q_done")},
+        "commitment_shuffle": {qid: {"per_episode": worse} for qid in ("q_main", "q_done")},
+        "commitment_shuffle_kind": "state_commitment",
+    }
+    stale = split_episode_bootstrap(table)
+    stale["q_done"]["commitment_shuffle"] = {"control_accuracy": 0.15, "margin": 0.7, "margin_ci": [0.5, 0.9],
+                                             "margin_half_width": 0.2, "margin_includes_zero": False}
+    report = tmp_path / "reeval.json"
+    report.write_text(json.dumps({"evaluation": {"splits": {module.SPLIT: {**table, "episode_bootstrap": stale}}}}), encoding="utf-8")
+
+    assert module.main(["--rescope", str(report)]) == 0
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    split = payload["evaluation"]["splits"][module.SPLIT]
+    assert split["commitment_shuffle_scope"] == COMMITMENT_SHUFFLE_SCOPE
+    assert split["episode_bootstrap"]["q_done"]["commitment_shuffle"]["margin"] is None          # 거짓 발견이 걷혔다
+    assert split["episode_bootstrap"]["q_main"]["commitment_shuffle"]["margin_includes_zero"] is False  # 읽을 수 있는 칸은 그대로
+    assert split["episode_bootstrap"]["q_main"]["state_shuffle"] == stale["q_main"]["state_shuffle"]
+    assert payload["rescoped"]["by"].endswith("--rescope")
+
+    # 저장된 다른 값이 다시 낸 것과 다르면 **쓰지 않고 멈춘다** — 이 경로가 측정을 바꿀 수는 없다
+    split["episode_bootstrap"]["q_main"]["state_shuffle"]["margin"] = 0.123
+    report.write_text(json.dumps(payload), encoding="utf-8")
+    import pytest
+
+    with pytest.raises(SystemExit):
+        module.rescope(report)

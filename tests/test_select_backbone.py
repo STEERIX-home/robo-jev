@@ -126,6 +126,7 @@ def test_the_decision_cell_block_reads_the_reevaluations_and_says_which_margins_
     # 층화가 없으면 있다고 하지 않는다 (P2 리뷰 1 I1)
     assert cell["strata"]["source"] == module.DECISION_CELL_STRATA and "not produced" in cell["strata"]["note"]
     assert "70 %" in cell["reading"] and "0.890" in cell["reading"] and "35.5 %" in cell["unit"]
+    assert "DONOR-DEPENDENT" not in cell["reading"]  # 재지 않은 것은 주장하지 않는다 (층화 파일이 아직 없다)
     assert row["model_accuracy"] == 0.454 and row["state_shuffle_accuracy"] == 0.289 and row["n"] == 844
     assert row["instruction_shuffle_accuracy"] == 0.468 and row["rule_judge_accuracy"] == 0.821
     assert row["episode_bootstrap"]["state_shuffle"]["margin_includes_zero"] is False
@@ -172,16 +173,28 @@ def test_the_decision_record_carries_the_new_population_and_keeps_the_old_one_as
         "primary_stratum": "non_commitment",
         "primary_stratum_note": "the ticks whose label is NOT the commitment",
         "population": {"episodes": 24, "ticks": 2530, "non_commitment_ticks": 525},
+        # 기증자 의존성은 **잰 수**로 온다 — 결정 기록은 그 수에서 표지를 만든다 (리뷰 1 C1)
+        "donor_rotation": {"ticks": 2530, "clamped_ticks": 524, "clamped_share": 524 / 2530, "per_episode": {}},
         "reading": "read the primary stratum", "mechanism": {}, "runs": {}, "missing": {},
+    }), encoding="utf-8")
+    (tmp_path / module.DECISION_CELL_STRATA).write_text(json.dumps({
+        "donor_rotation": {"ticks": 844, "clamped_ticks": 254, "clamped_share": 254 / 844, "per_episode": {}},
+        "reading": "the old cell's own reading", "mechanism": {}, "runs": {}, "missing": {},
     }), encoding="utf-8")
 
     out = module.build(None)
     cell = out["decision_cell"]
     assert cell["runs"]["2B T1 fp32 master (40)"]["n"] == 2530  # 주 칸은 새 모집단이다
     assert cell["primary_stratum"] == "non_commitment" and cell["population"]["episodes"] == 24
+    # 기증자 표지는 그 모집단이 **잰 수**를 들고 온다 — 두 모집단이 서로 다른 수를 든다 (리뷰 1 C1)
     assert "ALL 24 episodes" in cell["unit"] and "DONOR-DEPENDENT" in cell["reading"]
+    assert "524 of this population's 2,530 ticks (20.7 %)" in cell["reading"]
+    assert cell["donor_rotation"]["clamped_ticks"] == 524
     assert cell["runs"]["2B T1 fp32 master (40)"]["mechanical_baseline_accuracy"] == 0.875
     assert cell["runs"]["2B T1 fp32 master (40)"]["commitment_shuffle_accuracy"] == 0.18
     previous = cell["previous_population"]
     assert previous["runs"]["2B T1 fp32 master (40)"]["n"] == 844 and "not deleted" in previous["why_kept"].lower()
     assert "35.5 %" in previous["unit"]  # 옛 칸은 옛 구성을 그대로 들고 있다
+    # 옛 칸의 +0.257도 **자기 회전의** 표지를 단다 — `why_kept`에 한 번 적는 것으로는 값 옆이 비어 있다
+    assert "DONOR-DEPENDENT" in previous["reading"] and "254 of this population's 844 ticks (30.1 %)" in previous["reading"]
+    assert previous["donor_rotation"]["clamped_ticks"] == 254

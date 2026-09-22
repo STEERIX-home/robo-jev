@@ -109,6 +109,24 @@ def _eval_summary(evaluation: dict[str, Any] | None) -> dict[str, Any] | None:
     return out
 
 
+def _donor_clause(strata: dict[str, Any] | None) -> str:
+    """대조군의 **기증자 의존성**을, 층화 산출물이 그 모집단에서 잰 수로 (Task P3 C1b, 리뷰 1 C1).
+
+    왜 두 모집단 모두에 붙이는가. 이 결함은 `why_kept`에 한 번 적혀 있었고, 그 아래 `previous_population`의
+    `+0.2570…`은 `state_shuffle_margin_includes_zero: false`만 달고 아무 표지 없이 앉아 있었다. 회전이 다르면
+    그 값이 달라지므로(같은 249틱에서 0.727 → 0.960) 표지는 **값 옆**에 있어야 한다."""
+    donor = (strata or {}).get("donor_rotation") or {}
+    if donor.get("clamped_share") is None:
+        return ""
+    return (
+        " The standard control is DONOR-DEPENDENT: it takes the donor from the next record in the config's list and "
+        f"clamps to the donor's last tick when the donor is shorter, so {donor['clamped_ticks']:,} of this "
+        f"population's {donor['ticks']:,} ticks ({donor['clamped_share'] * 100:.1f} %) are shuffled against a frozen "
+        "final state. Every margin here is therefore one draw from a distribution over donor assignments "
+        "(`donor_rotation`, measured in the strata artifact)."
+    )
+
+
 def _decision_cell(runs: dict[str, str] | None = None, strata_name: str | None = None,
                    *, unit: str | None = None, reading: str | None = None, note: str | None = None) -> dict[str, Any] | None:
     """판정 칸(`robot/ood_dev` `q_main`)의 run별 모델·대조군·여유와 **편 단위 구간** — 결정 기록이 없던 수다.
@@ -152,16 +170,18 @@ def _decision_cell(runs: dict[str, str] | None = None, strata_name: str | None =
         "primary_stratum": (strata or {}).get("primary_stratum"),
         "primary_stratum_note": (strata or {}).get("primary_stratum_note"),
         "population": (strata or {}).get("population"),
+        "donor_rotation": (strata or {}).get("donor_rotation"),   # 이 모집단의 기증자 배정과 길이 고정 (P3 C1b)
         "unit": unit or (
             "episode — the 844 ticks come from 8 episodes (94/80/67/79/72/70/300/82, so ep-E1-000235 alone is 35.5 % "
             "of the cell); the independent unit is the episode, not the tick"
         ),
-        "reading": reading or (
+        # 읽기 문장 뒤에는 **그 모집단에서 잰** 기증자 의존성이 언제나 붙는다 (리뷰 1 C1)
+        "reading": (reading or (
             "This cell is ~70 % 'repeat your commitment': on 595 of the 844 ticks the expert label IS the tick's own "
             "commitment.action_ref (98.5 % of the 604 ticks that have one), and the state shuffle keeps that line "
             "verbatim, so a policy that reads nothing but the preserved fields scores 751/844 = 0.890. Every whole-cell "
             "margin below is therefore diluted by a stratum that needs no goal. Read `strata` before quoting one."
-        ),
+        )) + _donor_clause(strata),
         "note": note or (
             "Each row's controls are that run's own. `episode_bootstrap.state_shuffle.margin_ci` is a PAIRED bootstrap "
             "over episodes (model and its control counted inside the same resample), so it is the interval of the margin "
@@ -285,11 +305,9 @@ def build(selection_text: str | None) -> dict[str, Any]:
             "Read the primary stratum (`strata.runs[*].non_commitment`): the 525 ticks whose expert label is NOT the "
             "tick's own commitment.action_ref. The other 2,005 are 'repeat your commitment', where the state shuffle "
             "copies the answer through verbatim and the mechanical baseline is 1.000 by construction. The whole-cell "
-            "row is kept only so P1's and P2's published numbers stay comparable; it is not the result. Also: the "
-            "state-shuffle control is DONOR-DEPENDENT — it takes the donor from the next record in the config's list "
-            "and clamps to the donor's last tick when the donor is shorter, so 20.7 % of this population's ticks are "
-            "shuffled against a frozen final state. On the 844 ticks the two populations share, the model column is "
-            "identical (844/844) while the state-shuffle column differs on 9.7 %."
+            "row is kept only so P1's and P2's published numbers stay comparable; it is not the result. On the 844 "
+            "ticks the two populations share, the model column is identical (844/844) while the state-shuffle column "
+            "differs on 9.7 % — the clamp below is what moves it (Task P3 C1b)."
         ),
         note=(
             "Each row's controls are that run's own. `episode_bootstrap.*.margin_ci` is a PAIRED bootstrap over "
