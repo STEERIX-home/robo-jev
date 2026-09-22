@@ -155,3 +155,74 @@ def test_the_real_decision_cell_is_seventy_percent_commitment_repetition():
     assert found["ticks_per_episode"]["ep-E1-000235"] == 300
     assert sorted(found["ticks_per_episode"].values()) == [67, 70, 72, 79, 80, 82, 94, 300]
     assert found["non_commitment_per_episode"]["ep-E1-000235"] == 159
+
+
+# --------------------------------------------------------------------------
+# P3 — 모집단 구성과 새 열들
+# --------------------------------------------------------------------------
+
+
+def test_the_population_block_names_the_largest_episode_and_what_the_stratum_is_made_of():
+    """A1/N2 — "249틱"은 실제보다 균형 있게 읽힌다. 층의 크기가 아니라 **몇 편에서 왔는지**를 같이 적는다."""
+    module = script()
+    found = module.population_composition(_ticks())
+    assert found["episodes"] == 2 and found["ticks"] == 10
+    assert found["non_commitment_ticks"] == 5 and found["non_commitment_share"] == 0.5
+    assert found["key_families"] == {"observe": 5}
+    assert found["largest_episode"]["ticks"] == 5 and found["largest_episode"]["share_of_all_ticks"] == 0.5
+    stratum = found["largest_episode_of_the_non_commitment_stratum"]
+    assert stratum["episode_id"] == "ep-B" and stratum["ticks"] == 4 and stratum["share_of_the_stratum"] == 0.8
+    assert found["episodes_with_no_non_commitment_tick"] == []
+    assert found["per_episode"]["ep-A"] == {"ticks": 5, "non_commitment_ticks": 1, "non_commitment_share": 0.2, "key_families": {"observe": 1}}
+
+
+def test_the_strata_table_carries_the_commitment_shuffle_margin_the_baselines_and_both_means():
+    """B2·B3·A3의 열들이 층화 표에 그대로 들어온다 — 없는 열은 조용히 빠진다(옛 보고서도 다시 만들어진다)."""
+    module = script()
+    ticks = _ticks()
+    model = {(row["episode_id"], row["tick"]): True for row in ticks}
+    control = {(row["episode_id"], row["tick"]): row["is_commitment"] for row in ticks}
+    table = _table(ticks, model, control)
+    table["commitment_shuffle"] = {"q_main": {"per_record": _per_record(ticks, dict.fromkeys(control, False))}}
+    table["mechanical_baseline"] = {"q_main": {"per_record": _per_record(ticks, control)}}
+    strata = module.run_strata(table, ticks)
+
+    block = strata["non_commitment"]
+    assert block["commitment_shuffle"] == 0.0 and block["commitment_shuffle_margin"] == 1.0
+    assert block["commitment_shuffle_margin_includes_zero"] is False
+    assert block["mechanical_baseline"] == 0.0 and "mechanical_baseline_margin" not in block  # 기준선은 여유를 세우지 않는다
+    assert block["model_episode_balanced"] == 1.0
+    assert block["state_shuffle_margin_episode_balanced"] == 1.0
+    assert isinstance(block["state_shuffle_margin_episode_balanced_ci"], list)
+
+    without = module.run_strata(_table(ticks, model, control), ticks)
+    assert "commitment_shuffle" not in without["non_commitment"] and "mechanical_baseline" not in without["non_commitment"]
+    assert module.PRIMARY_STRATUM == "non_commitment"
+
+
+def test_the_new_population_is_the_whole_ood_dev_split_and_no_episode_owns_the_stratum():
+    """A1/A2 — 새 모집단의 실측. 이 수들이 P3의 판정을 받치므로 시험이 들고 있어야 한다.
+
+    옛 칸(8편)과 새 칸(24편 전부)을 같은 함수로 재서 나란히 둔다: 한 편의 몫이 35.5 % → 11.9 %,
+    읽기가 필요한 층에서 63.9 % → 30.3 %로 내려가고, **24편 모두가 그 층에 틱을 낸다**."""
+    module = script()
+    old = module.population_composition(module.cell_ticks())
+    new = module.population_composition(module.cell_ticks(module.REPO / "configs" / "eval" / "p3-decision-cell.yaml"))
+
+    assert old["episodes"] == 8 and old["ticks"] == 844 and old["non_commitment_ticks"] == 249
+    assert round(old["largest_episode"]["share_of_all_ticks"], 4) == 0.3555
+    assert round(old["largest_episode_of_the_non_commitment_stratum"]["share_of_the_stratum"], 4) == 0.6386
+
+    assert new["episodes"] == 24 and new["ticks"] == 2530 and new["non_commitment_ticks"] == 525
+    assert new["key_families"] == {"hold": 251, "observe": 210, "grasp": 61, "place": 3}
+    assert new["largest_episode"]["episode_id"] == "ep-E1-000235" and new["largest_episode"]["ticks"] == 300
+    assert round(new["largest_episode"]["share_of_all_ticks"], 4) == 0.1186
+    assert round(new["largest_episode_of_the_non_commitment_stratum"]["share_of_the_stratum"], 4) == 0.3029
+    assert new["episodes_with_no_non_commitment_tick"] == []
+    assert min(entry["non_commitment_ticks"] for entry in new["per_episode"].values()) == 3
+    assert sorted(new["per_episode"]) == module.split_episodes(module.DEFAULT_MANIFEST, "ood_dev")
+
+    # 아무것도 읽지 않는 정책은 넓힌 모집단에서도 여전히 0.875다 — 희석은 줄었지만 사라지지 않았다
+    found = module.mechanism(module.cell_ticks(module.REPO / "configs" / "eval" / "p3-decision-cell.yaml"))
+    assert found["label_is_the_commitment"] == 2005 and round(found["share_of_all_ticks"], 4) == 0.7925
+    assert found["mechanical_policy"]["correct"] == 2214 and round(found["mechanical_policy"]["accuracy"], 4) == 0.8751
