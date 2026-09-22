@@ -312,13 +312,15 @@ commitment 층에서는 **일곱 줄 모두** 여유가 0을 넘는다(+0.020 ~ 
 
 실행: `python -m pytest tests/test_tiny_scorer.py -q`. 통과 산출물은 분할별 (규칙, 소형 scorer, 문맥 섞기) 표다. 인수 기준은 성능이 아니라 **표가 있다는 것**이다 — 이 값이 backbone 실험의 해석 기준이 된다.
 
+**R1에서 다시 찍는다 (2026-09-22, Task R1 D1).** 이 표는 **모델이 보는 텍스트**에 대한 표지다. 서식 v0.4가 풀어 놓은 목표를 모델 입력에서 뺐으므로(docs/08 §3.2) D1의 표지는 무효다 — 같은 조리법(`configs/baselines/tiny_scorer_r1.yaml`: 모델 크기·epoch·lr·stride·표지 기준 동일)으로 R1 데이터에서 다시 학습·평가해 `artifacts/reports/r1-tiny-scorer.json`에 남긴다. 기대: 로봇 dev/test `q_main`의 표지가 **벗겨지거나** 최소한 규칙 판정기를 못 이긴다 — 아니면 Stage A가 덜 닫힌 것이다. 두 표를 나란히 읽는 것이 이 재실행의 전부다.
+
 ### Task 3: 시뮬레이션·컨트롤러·스크립트 전문가·로봇 스트림 하네스
 
 **Files:** `sim/environment.py`, `sim/expert.py`, `sim/controller.py`, `sim/label.py`, `harness/robot.py`, `harness/rule_judge.py`, `data/episode.py`, `configs/sim/tidy_clutter.yaml`, `configs/harness/robot.yaml`, `configs/controller/osc_v0.yaml`, `tests/test_sim_replay.py`, `tests/test_controller.py`, `tests/test_harness.py`.
 
 **Interfaces:** `Environment.reset(seed: int) -> dict`, `step(command: dict) -> dict`, `snapshot() -> bytes`, `restore(snapshot: bytes) -> None`. `Controller.apply(command: dict, now_ms: int) -> dict`는 수명 검사·혼합·정지 전이·반사·그리퍼 이벤트를 처리하고 ACK를 반환한다. `Expert.act(observation: dict, commitment: dict | None) -> dict`는 10질문의 답과 국면을 반환한다. `build_request(observation: dict, exec_history: dict, commitment: dict | None) -> dict`는 10질문 스트림 요청(결합 후보·경유점·실행 이력)을 만든다. `compose(request: dict, results: dict, commitment: dict | None, now_ms: int) -> dict`는 [조합 규칙 v0](08-streaming-io-and-data-contract.md)를 적용해 명령·채택·전환 기록을 반환한다. `rule_judge(request: dict) -> dict`는 모델과 같은 결과 형식을 반환한다. `rollout_event(snapshot: bytes, action: dict, event: dict, seed: int) -> dict`는 success/failure/censored와 evidence를 반환한다.
 
-- [ ] E0의 reset·목표·성공 판정과 전체 snapshot 저장/복원을 만든다. E1의 다물체 장면(6~10개, 취약·금지 속성), 지시 변경 일정(5~15초), 외란 일정을 seed·모의 시간으로 정의한다.
+- [ ] E0의 reset·목표·성공 판정과 전체 snapshot 저장/복원을 만든다. E1의 다물체 장면(6~10개, 취약·금지 속성), 지시 변경 일정(5~15초), 외란 일정을 seed·모의 시간으로 정의한다. (2026-09-22, Task R1 B2: **프로파일이 셋**이다 — E0(사건 없음)·E1(D1의 값)·**E2(사건 잦음: 지시 변경 3~5회 1.2~8 s, 외란 4~7회, 그 일부는 지시의 대상을 민다)**. E0·E1의 장면·일정은 s0.2와 비트 단위로 같다. 정체 감시(`m_observe`/`m_observe_total`/`m_hold`)와 앞단의 자기 가림 이어 들기(`pw0.2`)가 스스로 풀 수 없는 반복을 없앴다 — D1의 두 병적 에피소드가 `max_ms`에서 **완료**로 바뀐다; docs/04 §3)
 - [ ] `Controller`에 명령 수명(관측 deadline 200ms, 발행 lease 300ms, 순번 역행 폐기), 100ms 혼합과 전환 구간 충돌 검사, 정지 전이, 반사, 그리퍼 이벤트(readiness·ID·ACK·멱등)를 구현한다. 늦은 응답에 lease가 새로 붙지 않고, `stop`이 혼합을 우회하며, 같은 그리퍼 상태가 반복돼도 이벤트가 한 번만 나는 검사를 둔다.
 - [ ] `Expert`를 국면(접근·파지·들기·이동·놓기·밀기)과 국소 경유점 플래너, 가림·차단 시 관측·보류 규칙으로 구현하고 10Hz로 에피소드를 실행해 스트림 레코드를 기록한다.
 - [ ] 하네스가 IK·충돌 여유·거리 등 기하 값을 관측된 자세로 계산해 결합 행동 후보(최대 32개)와 관측·보류·재계획 후보, 경유점 후보(≤3)를 만들고 10질문을 붙인다. 정답을 알고 후보를 줄이거나 정렬하지 않는 검사와 후보 포함률 집계를 추가한다.
