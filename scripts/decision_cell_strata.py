@@ -81,7 +81,16 @@ R1_RUNS = {
     "4B zero-shot": "r1-reeval-4b-zeroshot.json",
     "2B T0 (200)": "r1-reeval-2b-t0.json",
 }
-RUN_SETS = {"p2": STRATA_RUNS, "p3": P3_RUNS, "r1": R1_RUNS}
+#: Task R2의 run들 — 고친 재료(`r1-robot-v0.2`) 위의 **첫 제대로 된 학습**. 로봇 manifest는 rollout 라벨판이다.
+R2_RUNS = {
+    "2B T1 fp32 master (233 = 1 epoch)": "r2-reeval-2b-t1-fp32-233.json",
+    "2B T1 fp32 master (40)": "r2-reeval-2b-t1-fp32-40.json",
+    "2B T0 (200)": "r2-reeval-2b-t0.json",
+    "4B T0 (200)": "r2-reeval-4b-t0.json",
+}
+#: 같은 run들을 **선택에 쓰지 않는 둘째 칸**(`dev` 42편, `configs/eval/r2-dev-cell.yaml`)에서 읽은 보고서.
+R2_DEV_RUNS = {name: report.replace("r2-reeval-", "r2-dev-") for name, report in R2_RUNS.items()}
+RUN_SETS = {"p2": STRATA_RUNS, "p3": P3_RUNS, "r1": R1_RUNS, "r2": R2_RUNS, "r2dev": R2_DEV_RUNS}
 
 
 # --------------------------------------------------------------------------
@@ -380,15 +389,19 @@ def by_key_family(columns: dict[str, list[dict[str, Any]] | None], rows: list[di
                 continue
             graded = [row for row in predictions if (str(row["record_id"]), int(row["tick"])) in wanted and row["correct"] is not None]
             block[column] = (sum(1 for row in graded if row["correct"]) / len(graded)) if graded else None
-        if block.get("model") is not None and block.get("state_shuffle") is not None:
-            block["state_shuffle_margin"] = block["model"] - block["state_shuffle"]
+        # **대조군 열 전부**에 층과 같은 쌍 부트스트랩을 붙인다 (R2 C1). R1까지는 상태 섞기만 있었는데, R2의
+        # 한 줄짜리 답은 지시 섞기의 여유이고 "그 여유가 `grasp`에서 나오는가"는 같은 꼴로 물어야 한다.
+        for column in CONTROL_COLUMNS:
+            if block.get("model") is None or block.get(column) is None:
+                continue
+            block[f"{column}_margin"] = block["model"] - block[column]
             paired = episode_bootstrap(
                 stratum_per_episode(columns["model"] or [], wanted),
-                stratum_per_episode(columns["state_shuffle"] or [], wanted), **options,
+                stratum_per_episode(columns[column] or [], wanted), **options,
             ) or {}
-            block["state_shuffle_margin_ci"] = paired.get("margin_ci")
-            block["state_shuffle_margin_includes_zero"] = paired.get("margin_includes_zero")
-            block["state_shuffle_margin_episode_balanced"] = paired.get("episode_balanced_margin")
+            block[f"{column}_margin_ci"] = paired.get("margin_ci")
+            block[f"{column}_margin_includes_zero"] = paired.get("margin_includes_zero")
+            block[f"{column}_margin_episode_balanced"] = paired.get("episode_balanced_margin")
         out[family] = block
     return out
 

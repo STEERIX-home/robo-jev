@@ -406,3 +406,35 @@ def test_rescoping_a_saved_report_touches_only_the_commitment_shuffle_scope(tmp_
 
     with pytest.raises(SystemExit):
         module.rescope(report)
+
+
+def test_every_control_column_gets_its_paired_interval_in_the_key_family_table():
+    """Task R2 C1 — **지시 섞기**의 갈래별 구간도 산출물에 있어야 한다.
+
+    R1까지 갈래 표는 상태 섞기의 여유만 구간과 함께 실었다. R2의 한 줄짜리 답은 **지시 섞기**의 여유이고,
+    "여유가 `grasp`에서 나오는가"는 같은 꼴로 그 열에도 물어야 한다 — 없으면 갈래별 지시 섞기 판정이 다시
+    스크래치 스크립트로 내려간다(리뷰 1 I4가 상태 섞기에서 고친 바로 그 자리다)."""
+    module = script()
+    ticks = _ticks()
+    for row in ticks:
+        if not row["is_commitment"]:
+            row["key"] = "grasp" if row["episode_id"] == "ep-A" else "observe"
+    model = {(row["episode_id"], row["tick"]): True for row in ticks}
+    control = {(row["episode_id"], row["tick"]): (row["episode_id"] == "ep-B") for row in ticks}
+    instruction = {(row["episode_id"], row["tick"]): False for row in ticks}
+    families = module.run_strata(_table(ticks, model, control, instruction=instruction), ticks)["primary_stratum_by_key_family"]
+
+    from robo_jev.evaluate import episode_bootstrap
+
+    for column in ("state_shuffle", "instruction_shuffle"):
+        for family in ("grasp", "observe"):
+            assert f"{column}_margin_ci" in families[family], (column, family)
+            assert f"{column}_margin_includes_zero" in families[family]
+    assert families["grasp"]["instruction_shuffle_margin"] == 1.0
+    wanted = {(row["episode_id"], row["tick"]) for row in ticks if row["key"] == "observe" and not row["is_commitment"]}
+    paired = episode_bootstrap(
+        module.stratum_per_episode(_per_record(ticks, model), wanted),
+        module.stratum_per_episode(_per_record(ticks, instruction), wanted),
+    )
+    assert families["observe"]["instruction_shuffle_margin_ci"] == paired["margin_ci"]
+    assert families["observe"]["instruction_shuffle_margin_episode_balanced"] == paired["episode_balanced_margin"]
