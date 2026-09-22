@@ -52,7 +52,21 @@ RESUME_TOLERANCE = {
 #: "재개가 깨졌다"로 읽히지만 실제로 깬 것은 **오차가 그 범위에 등록돼 있지 않다**는 사실이다. 본 값에 맞춰
 #: 오차를 고치는 것은 이 프로젝트가 금하는 수이므로, 등록될 때까지 그 범위의 판정은 `passed: None`이고 게이트는
 #: 멈춘다(사전 등록 절차: 재시작 없는 같은 설정 두 run의 벌어짐을 먼저 기록하고, 그 위에 오차를 고정한다).
-RESUME_TOLERANCES: dict[str, dict[str, float]] = {"t0": RESUME_TOLERANCE}
+#: **T1 범위의 사전 등록 허용 오차** (P3 D, 2026-09-22). :data:`RESUME_TOLERANCE_RULE` 을 `checks.baseline_t1`의
+#: 두 run 기준선에 그대로 적용한 값이다 — 재시작 없는 두 프로세스를 같은 설정·seed로 5 step씩 돌려
+#: (`artifacts/reports/p3-acceptance.json`, 914.8 s) 잰 최악값은 loss |Δ| **0.023574**(step 3, 상대 0.826 %),
+#: 학습 대상 tensor의 최대 절대 차 **5.819e-4**(readout `V.weight`), 분모 가드를 통과한 tensor의 최대 상대 L2
+#: **6.31e-4**였다. 규칙대로 ×2 → 유효숫자 한 자리 올림 → T0보다 느슨하게만: loss_abs 0.047 → **0.05**, 나머지
+#: 셋은 T0의 값이 더 커서 그대로다. **값을 보고 고친 것은 없다** — 규칙이 먼저 파일에 있었고 여기 적용만 했다.
+#:
+#: **이 값의 한계는 함께 적는다**: 이 경로에서 잰 "재시작 없는 두 run" 쌍은 둘뿐이고 서로 2.7배 다르다 —
+#: P2 보고서 A1b의 쌍(`continuous` 대 `first`, 3 step)은 최악 **0.0641**이었고 이 쌍은 0.0236이다. 한 쌍에서 고정한
+#: 오차는 이미 관측된 퍼짐보다 **작다**. 그래서 이 오차 아래에서 P2가 남긴 6 step 재개 결과(최악 0.0876)는
+#: `passed: false`가 되고, 그 false는 "재개가 깨졌다"가 아니라 "이 오차가 한 쌍에서 나왔다"는 뜻이다.
+#: 이월: 쌍을 최소 셋 재서 그 최댓값 위에 다시 고정한다(쌍당 ≈7.6분).
+RESUME_TOLERANCE_T1 = {"loss_abs": 0.05, "loss_rel": 0.02, "param_max_abs": 0.01, "param_rel_l2": 0.05}
+
+RESUME_TOLERANCES: dict[str, dict[str, float]] = {"t0": RESUME_TOLERANCE, "t1": RESUME_TOLERANCE_T1}
 
 #: 상대 L2의 **0에 가까운 분모 가드** (P2 A1b에서 `bias` 한 tensor가 절대 차이 4.85e-7인데 자기 norm이 ≈3e-6이라
 #: 비 0.16으로 걸렸다). 자기 L2 norm이 이 값보다 작은 tensor는 **상대** 기준에서 빼고 절대 기준(`param_max_abs`)으로만

@@ -364,3 +364,39 @@ def test_the_two_run_spread_is_measured_without_a_verdict():
     import inspect
 
     assert "--check" in inspect.getsource(module.main) and "baseline" in module.CHECKS
+
+
+def test_the_t1_tolerance_is_the_registered_rule_applied_to_the_measured_baseline():
+    """D — 등록된 값이 **규칙의 산출물**인지 확인한다. 값을 보고 고쳤다면 이 시험이 떨어진다.
+
+    두 run 기준선(`artifacts/reports/p3-acceptance.json`의 `checks.baseline_t1`, 5 step, 재시작 없음)의 실측
+    최악값은 loss |Δ| 0.023574 · 상대 0.826 % · 최대 절대 차 5.819e-4 · (가드를 통과한) 상대 L2 6.31e-4였다."""
+    module = script()
+    measured = {"worst_loss_abs": 0.023574, "worst_loss_rel": 0.008258,
+                "worst_param_max_abs": 5.819e-4, "worst_param_relative_l2": 6.31e-4}
+    assert module.derive_tolerance(measured) == module.RESUME_TOLERANCES["t1"] == module.RESUME_TOLERANCE_T1
+    assert module.RESUME_TOLERANCE_T1["loss_abs"] == pytest.approx(0.05)   # 2 × 0.023574 = 0.047 → 0.05
+    # 나머지 셋은 T0의 값이 더 크므로 그대로 — 느슨해지기만 한다
+    for key in ("loss_rel", "param_max_abs", "param_rel_l2"):
+        assert module.RESUME_TOLERANCE_T1[key] == module.RESUME_TOLERANCE[key]
+    assert module.RESUME_TOLERANCE == {"loss_abs": 0.02, "loss_rel": 0.02, "param_max_abs": 0.01, "param_rel_l2": 0.05}  # T0은 건드리지 않았다
+
+
+def test_the_t1_gate_now_returns_a_verdict_instead_of_stopping_on_an_unregistered_tolerance(tmp_path):
+    """D — 게이트가 **판정한다**. 등록 전에는 exit 3(`tolerance-unregistered`)이었다 (P2 리뷰 1 N4의 남은 절반)."""
+    module = script()
+    continuous, split = _snapshot_pair(steps=6)
+    inside = module.compare_resume(continuous, split, steps=6, mode="t1")
+    assert inside["passed"] is True and inside["verdict"] == "pass" and inside["tolerance"] == module.RESUME_TOLERANCE_T1
+
+    # 등록된 오차 **밖**의 loss 차이는 떨어진다 — 오차가 있다는 것이 통과를 뜻하지 않는다
+    split["losses"][3] += module.RESUME_TOLERANCE_T1["loss_abs"] * 2
+    outside = module.compare_resume(continuous, split, steps=6, mode="t1")
+    assert outside["passed"] is False and outside["verdict"] == "fail"
+
+    for verdict, expected in (({"passed": True, "verdict": "pass", "scope": "t1"}, 0),
+                              ({"passed": False, "verdict": "fail", "scope": "t1"}, 2)):
+        report = _gate_report(tmp_path, resume_t1=verdict)
+        assert module.resume_gate(report, "t1")["exit_code"] == expected
+    # 아직 등록되지 않은 범위는 그대로 멈춘다
+    assert module.resume_gate(_gate_report(tmp_path, resume_lora={"passed": None, "verdict": "tolerance-unregistered", "scope": "lora"}), "lora")["exit_code"] == 3
