@@ -74,7 +74,14 @@ STRATA_RUNS = {
 }
 #: 같은 run들을 **P3의 새 모집단**(24편 전부)에서 다시 잰 보고서.
 P3_RUNS = {name: report.replace("p2-reeval-", "p3-reeval-") for name, report in STRATA_RUNS.items()}
-RUN_SETS = {"p2": STRATA_RUNS, "p3": P3_RUNS}
+#: Task R1의 run들 — **새 계기의 첫 눈금**(서식 v0.4·R1 데이터). 옛 체크포인트는 계약 digest가 달라 거절되므로
+#: P1~P3의 run은 여기 없다; 그 값들은 "옛 계약·옛 모집단"으로 범위를 붙여 보존한다.
+R1_RUNS = {
+    "2B zero-shot": "r1-reeval-2b-zeroshot.json",
+    "4B zero-shot": "r1-reeval-4b-zeroshot.json",
+    "2B T0 (200)": "r1-reeval-2b-t0.json",
+}
+RUN_SETS = {"p2": STRATA_RUNS, "p3": P3_RUNS, "r1": R1_RUNS}
 
 
 # --------------------------------------------------------------------------
@@ -542,6 +549,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--split", default=SPLIT, help="평가 집합 안의 분할 이름")
     parser.add_argument("--runs", default="p2", choices=sorted(RUN_SETS), help="어느 재평가 묶음의 층화 표인가")
     parser.add_argument("--reports", default=str(REPORTS))
+    parser.add_argument("--manifest", default=str(DEFAULT_MANIFEST), help="모집단 구성을 읽을 데이터셋 manifest")
     parser.add_argument("--population-splits", dest="population_splits", default=None,
                         help="이것을 주면 층화 대신 **모집단 구성만** 낸다 (쉼표로 나눈 split 이름)")
     parser.add_argument("--population-suites", dest="population_suites", default=None,
@@ -558,7 +566,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if args.population_splits:
         suites = dict(pair.split("=", 1) for pair in args.population_suites.split(",")) if args.population_suites else None
-        payload = build_population([name.strip() for name in args.population_splits.split(",")], suites=suites)
+        payload = build_population([name.strip() for name in args.population_splits.split(",")], manifest=args.manifest, suites=suites)
         summary = ", ".join(f"{name} {block['whole_split']['episodes']}편 {block['whole_split']['ticks']}틱" for name, block in payload["splits"].items())
     else:
         payload = build(suite_path=args.suite, reports=args.reports, runs=RUN_SETS[args.runs], split=args.split,
