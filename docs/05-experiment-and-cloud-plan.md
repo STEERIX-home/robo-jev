@@ -147,6 +147,31 @@ GPU 비용 = 실제 node_hours × 해당 노드 시간 단가
 
 예를 들어 D1의 로봇 400 에피소드는 120,000틱 × 600 token = 72M, 비로봇 2,000상태 × 4,000 token = 8M으로 1 epoch가 80M tokens다. 3 epoch는 240M이다. 8 GPU 노드 합계 5,000 tokens/s라는 가상 실측값을 넣으면 순수 학습 약 13.3시간이며 여기에 기타 비용이 붙는다. 스트림은 prefix를 에피소드당 한 번만 처리하고 틱의 새 토큰만 세지만, 무상태 L0 요청은 틱마다 prefix를 다시 세므로 같은 데이터라도 토큰이 약 2.3배다. 이 처리량은 관측값이 아닌 계산 예시다.
 
+### 실행 절차 — 실행기와 사람이 정하는 것 (2026-09-23, Task R3b)
+
+run을 클라우드로 보내는 절차는 `scripts/launch_run.py`의 여섯 명령이다. **공급자·계정·인스턴스·시간 단가는 여기서 정하지 않는다** — 그것은 사용자 결정이고, 첫 유료 run은 사용자 승인이 있어야 뜬다. 실행기가 하는 일은 그 결정을 **명세에 적고 지키는 것**이다.
+
+```bash
+# 1) 명세를 만든다 (원격을 건드리지 않는다). 데이터는 경로와 sha256만 적힌다.
+uv run python scripts/launch_run.py prepare --config configs/train/qwen35-2b-r2.yaml --mode t1     --run-id <run-id> --manifest artifacts/runs-plan/<run-id>.json     --backend ssh --host <호스트> --user <사용자> --identity ~/.ssh/<키>     --remote-dir /mnt/persist/robojev/runs/<run-id> --remote-repo /mnt/persist/robojev/robo-jev     --remote-python 'uv run python' --gpus 1     --hourly-usd <콘솔의 시간 단가> --max-wall-hours <h> --max-gpu-hours <h> --max-usd <$>     --price-source '<예약 직전 콘솔의 상품·수량·지역>' --seconds-per-step <가정> --assumption '<그 가정>'
+# 2) 묶음을 올리고 원격에서 분리 실행한다 (실행기가 죽어도 run은 산다)
+uv run python scripts/launch_run.py launch --manifest …
+# 3) 진행·예상 비용을 읽어 명세를 갱신한다
+uv run python scripts/launch_run.py status --manifest … --wait
+# 4) 산출물을 가져와 sha256을 대조한다 (원격이 잰 값 ↔ 가져와 다시 잰 값)
+uv run python scripts/launch_run.py fetch  --manifest … --dest artifacts/runs/<run-id>
+# 5) 멈춘다 — **확인될 때까지 기다리고, 확인 못 하면 `unknown`**이다 (종료 코드 3)
+uv run python scripts/launch_run.py cancel --manifest … --confirm-timeout 120
+# 6) 가져온 checkpoint에서 잇는다 (등록되고 대조된 것에서만; 상한은 기본이 **남은** 예산이다)
+uv run python scripts/launch_run.py resume --manifest … --from <가져온 checkpoint> --run-id <child> --out …
+```
+
+**상한의 산술.** 세 상한은 하나의 벽시계 마감으로 환산되고 가장 이른 것이 구속한다: `max_wall_hours`, `max_gpu_hours / gpus`, `max_usd / hourly_usd`. 단가는 **노드** 단가이고(§5 표가 GPU당과 노드당을 나눠 적는다) `gpu_hours = 벽시계 × gpus`다. 그 마감을 재는 것은 실행기가 아니라 **원격 러너**이므로 실행기가 죽어도, ssh가 끊겨도 지켜진다 — 넘으면 checkpoint를 쓴 뒤 `failed(reason=budget)`이고 명세에 구속한 상한의 이름(`budget_limit`)이 남는다.
+
+**산정 예 — R2의 fp32 T1 1 epoch를 클라우드로 보낸다면** (명세를 만들어 봤고 **실행하지 않았다**; Task R3b B3). 실측 기준은 GB10에서의 15,555.9 s = **4.32 h**(233 step, 66.76 s/step — 적재와 26.35 GB checkpoint 쓰기 5회를 포함한다). 1×H100 80 GB를 **$2.5/h로 가정**하면 1 epoch ≈ **$10.80**이다. 이 수의 전제는 **H100 대 GB10의 처리량 배수를 아직 재지 않았다**는 것이다 — 1.0× 가정의 상한이고, 첫 클라우드 run의 tokens/s가 나오면 대체한다(§6 앞 문단의 재산정 규칙과 같다). 공개 표(§5)의 실제 값은 Lambda 1×H100 PCIe $3.29 · Runpod 표시값 $2.89이므로 $2.5는 낙관적인 가정이고, 예약 직전 콘솔의 값을 명세의 `budget.price_source`에 복사한다. 상한은 `max_wall_hours 6` · `max_gpu_hours 6` · `max_usd 12.5`로 두면 마감은 **5.0 h**이고 구속하는 것은 **`max_usd`**다(4.32 h 예상에 0.68 h 여유 — 넉넉하지 않다. 넘으면 checkpoint를 쓰고 `failed(budget)`으로 끝나며 `resume`으로 잇는다).
+
+**카드 크기, 이 run의 것.** 2B의 fp32 master T1은 R2 실측 peak allocated **56.05 GiB** / reserved 57.68 GiB다 — 80 GB 카드(= 74.5 GiB)에 들고 여유는 16.8 GiB = **22.6 %**로 §4의 "실사용 장치 메모리의 최소 10 %가 남는다" 기준을 통과한다(다만 GB10 통합 메모리에서 잰 값이므로 첫 run의 200 step에서 다시 확인한다). **4B의 fp32 master T1은 이 카드에 들지 않는다**: optimizer step의 바닥만 **94.0 GiB**(Task P2 산술, 03 §5)로 activation 이전에 이미 74.5 GiB를 넘는다. 필요한 것은 **H200 141 GB(131 GiB) 또는 B200 180 GB 한 장**, 아니면 optimizer/parameter sharding(FSDP)인데 이 학습기는 `world_size: 1`이라 그것부터 만들어야 한다. 저장은 checkpoint 하나가 26.35 GB이고 `checkpoint_every 50` + `keep_steps [40]`이면 디스크에 두 개(52.7 GB)가 남는다 — §7의 영속 볼륨에 두고 회수 시간을 비용에 더한다.
+
 ## 7. 저장·재개·종료 설정
 
 원본 데이터·동결 checkpoint는 영속 저장소, 실행 중 임시 shard·cache는 로컬 SSD에 둔다. 언어 모델 약 27B의 BF16 가중치는 약 54GB이며, vision 등 포함 범위에 따른 실제 export 크기를 별도 집계한다. optimizer와 master state를 포함한 재개본은 구현에 따라 수백 GB다. 초기에 영속 2TB·노드 scratch 1TB 이상을 예산 대상으로 두고 실제 checkpoint 크기로 조정한다.
