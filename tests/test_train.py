@@ -10,6 +10,7 @@ import json
 import math
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 import torch
@@ -21,8 +22,10 @@ from robo_jev.model.judge import Judge
 from robo_jev.model.stream import StreamState, replay_layout
 from robo_jev.model.tokenizer import WhitespaceTokenizer
 from robo_jev.sampler import load_items, tick_weights, valid_label_ticks
+from robo_jev.checkpoint import load_checkpoint
 from robo_jev.train import (
     MasterWeightAdamW,
+    RESUME_FREE_KEYS,
     Trainer,
     build_optimizer,
     detach_stream_state,
@@ -797,3 +800,28 @@ def test_the_master_weight_flag_is_run_identity_only_where_it_changes_the_optimi
     frozen = _BF16Fixture(MASTER_PROBE["start"], 8, frozen=True)
     frozen.backbone.weight.requires_grad_(False)
     assert bool(fp32_master_weights(frozen)) is False
+
+
+def test_a_step_named_in_checkpoint_keep_steps_is_saved_under_its_own_name(tmp_path):
+    """Task R2 B1 — 긴 run의 **중간 한 점**을 끝까지 남긴다.
+
+    `checkpoint_every`가 쓰는 `checkpoint.pt`는 덮어쓰기라 세션이 죽어도 한 시간만 잃지만 **비교점**은 남기지
+    못한다. R2는 233 step 1 epoch을 돌리며 40 step 시점(P2의 40 step T1과 같은 예산)을 나란히 읽어야 하므로,
+    그 step에서 `checkpoint-step40.pt`를 따로 쓴다. 재개의 정체는 바뀌지 않는다 — 같은 상태를 한 번 더 쓸 뿐이다."""
+    config = resolve_config(tiny_config(tmp_path, max_steps=3, checkpoint_every=None, checkpoint_keep_steps=[1, 2]))
+    assert config["checkpoint_keep_steps"] == [1, 2]
+    with Trainer(config) as trainer:
+        result = trainer.run()
+    run_dir = Path(result["run_dir"])
+    assert (run_dir / "checkpoint.pt").is_file()
+    for step in (1, 2):
+        kept = run_dir / f"checkpoint-step{step}.pt"
+        assert kept.is_file(), f"{kept}가 없다"
+        assert int(load_checkpoint(kept)["step"]) == step
+    assert not (run_dir / "checkpoint-step3.pt").exists()  # 마지막 step은 `checkpoint.pt`가 들고 있다
+
+    # 재개에서 자유로운 키다 — 중간 저장 지점을 바꿨다고 이어가기가 거절되면 안 된다
+    assert "checkpoint_keep_steps" in RESUME_FREE_KEYS
+    for bad in ("40", [0], [1.5], [2, 2]):
+        with pytest.raises(ValueError, match="checkpoint_keep_steps"):
+            resolve_config(tiny_config(tmp_path, checkpoint_keep_steps=bad))

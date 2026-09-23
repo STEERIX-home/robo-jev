@@ -1,0 +1,22 @@
+# Task R2 — 고친 재료(`r1-robot-v0.2`) 위의 학습 설정 (2B). `qwen35-2b-r1.yaml`을 그대로 잇고 **라벨판만** 바꾼다.
+#
+#   uv run python scripts/adapt_readout.py --config configs/train/qwen35-2b-r2.yaml --mode t0 --steps 200 \
+#       --eval-config configs/eval/r1-decision-cell.yaml --out artifacts/reports/r2-2b-t0.json
+#   uv run python scripts/adapt_readout.py --config configs/train/qwen35-2b-r2.yaml --mode t1 --steps 233 \
+#       --set checkpoint_every=50 --set 'checkpoint_keep_steps=[40]' --no-eval --out artifacts/reports/r2-2b-t1-fp32.json
+#
+# **무엇이 R1과 다른가: 로봇 manifest가 rollout 라벨판이다.** R1의 Deviation 1이 남긴 항목 — 128k 키프레임 rollout은
+# 2 h CPU라 R1의 GPU 첫 눈금과 나란히 돌았고 그 라벨(2,000틱의 `q_main`, 전체 train 틱의 ≈5 %)은 R1의 T0에 들어가지
+# 못했다. P1의 T0는 `d1-rollout-labels`로 학습했으므로 R1 행만 그 점에서 짝이 맞지 않았다. R2는 셋 다 rollout
+# 라벨판으로 돌려 그 결을 맞춘다. R1의 T0 행은 지우지 않고 **부모 버전**으로 남는다.
+#
+# 조리법(learning rate·구간·accumulation·seed)은 P1·D1·R1과 **같다**. 옛 체크포인트는 계약 digest가 달라 거절된다
+# (`serialize_py`·`harness_version`이 R1에서 둘 다 움직였다).
+extends: qwen35-2b-r1.yaml
+run_name: r2-2b
+dataset_manifests:
+  - path: artifacts/datasets/r1-robot/r1-rollout-labels/manifest.json
+    domain: robot
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r1/single/manifest.json
+    domain: non_robot

@@ -406,3 +406,55 @@ def test_rescoping_a_saved_report_touches_only_the_commitment_shuffle_scope(tmp_
 
     with pytest.raises(SystemExit):
         module.rescope(report)
+
+
+def test_every_control_column_gets_its_paired_interval_in_the_key_family_table():
+    """Task R2 C1 — **지시 섞기**의 갈래별 구간도 산출물에 있어야 한다.
+
+    R1까지 갈래 표는 상태 섞기의 여유만 구간과 함께 실었다. R2의 한 줄짜리 답은 **지시 섞기**의 여유이고,
+    "여유가 `grasp`에서 나오는가"는 같은 꼴로 그 열에도 물어야 한다 — 없으면 갈래별 지시 섞기 판정이 다시
+    스크래치 스크립트로 내려간다(리뷰 1 I4가 상태 섞기에서 고친 바로 그 자리다)."""
+    module = script()
+    ticks = _ticks()
+    for row in ticks:
+        if not row["is_commitment"]:
+            row["key"] = "grasp" if row["episode_id"] == "ep-A" else "observe"
+    model = {(row["episode_id"], row["tick"]): True for row in ticks}
+    control = {(row["episode_id"], row["tick"]): (row["episode_id"] == "ep-B") for row in ticks}
+    instruction = {(row["episode_id"], row["tick"]): False for row in ticks}
+    families = module.run_strata(_table(ticks, model, control, instruction=instruction), ticks)["primary_stratum_by_key_family"]
+
+    from robo_jev.evaluate import episode_bootstrap
+
+    for column in ("state_shuffle", "instruction_shuffle"):
+        for family in ("grasp", "observe"):
+            assert f"{column}_margin_ci" in families[family], (column, family)
+            assert f"{column}_margin_includes_zero" in families[family]
+    assert families["grasp"]["instruction_shuffle_margin"] == 1.0
+    wanted = {(row["episode_id"], row["tick"]) for row in ticks if row["key"] == "observe" and not row["is_commitment"]}
+    paired = episode_bootstrap(
+        module.stratum_per_episode(_per_record(ticks, model), wanted),
+        module.stratum_per_episode(_per_record(ticks, instruction), wanted),
+    )
+    assert families["observe"]["instruction_shuffle_margin_ci"] == paired["margin_ci"]
+    assert families["observe"]["instruction_shuffle_margin_episode_balanced"] == paired["episode_balanced_margin"]
+
+
+def test_the_leave_one_episode_out_check_runs_for_every_control_column():
+    """Task R2 C1 — 한 줄짜리 답은 **지시 섞기**의 여유이므로 "한 편을 빼도 0을 제외하는가"도 그 열에 물어야 한다.
+
+    옛 키(상태 섞기)는 자리를 지킨다 — 옛 보고서를 다시 만드는 경로가 그 이름을 읽는다."""
+    module = script()
+    ticks = _ticks()
+    model = {(row["episode_id"], row["tick"]): True for row in ticks}
+    control = {(row["episode_id"], row["tick"]): (row["episode_id"] == "ep-B") for row in ticks}
+    instruction = {(row["episode_id"], row["tick"]): False for row in ticks}
+    strata = module.run_strata(_table(ticks, model, control, instruction=instruction), ticks)
+
+    by_control = strata["primary_stratum_leave_one_episode_out_by_control"]
+    assert set(by_control) == {"state_shuffle", "instruction_shuffle"}
+    assert by_control["state_shuffle"] == strata["primary_stratum_leave_one_episode_out"]
+    # 모든 틱에서 대조군이 틀리는 지시 섞기 열은 어느 편을 빼도 여유가 1.0이다
+    drops = by_control["instruction_shuffle"]["drops"]
+    assert drops and all(row["margin"] == 1.0 for row in drops.values())
+    assert by_control["instruction_shuffle"]["every_drop_excludes_zero"] is True

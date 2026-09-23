@@ -366,19 +366,22 @@ def test_the_two_run_spread_is_measured_without_a_verdict():
     assert "--check" in inspect.getsource(module.main) and "baseline" in module.CHECKS
 
 
-def test_the_t1_tolerance_is_the_registered_rule_applied_to_the_measured_baseline():
-    """D — 등록된 값이 **규칙의 산출물**인지 확인한다. 값을 보고 고쳤다면 이 시험이 떨어진다.
+def test_the_t1_tolerance_is_the_registered_rule_applied_to_every_measured_baseline_pair():
+    """D(P3) → A1(R2) — 등록된 값이 **규칙의 산출물**인지 확인한다. 값을 보고 고쳤다면 이 시험이 떨어진다.
 
-    두 run 기준선(`artifacts/reports/p3-acceptance.json`의 `checks.baseline_t1`, 5 step, 재시작 없음)의 실측
-    최악값은 loss |Δ| 0.023574 · 상대 0.826 % · 최대 절대 차 5.819e-4 · (가드를 통과한) 상대 L2 6.31e-4였다."""
+    R2에서 셋째 쌍이 들어오며 규칙이 "잰 쌍 전부의 최악값"이 됐고, **가장 큰 쌍이 가장 마지막에 나왔다**:
+    P2 0.064136 · P3 0.023574 · **R2 0.076560**(상대 3.933 %, 최대 절대 차 6.079e-4, 상대 L2 9.124e-4).
+    셋의 퍼짐은 3.2배다 — P3가 한 쌍에서 고정한 0.05는 이미 관측된 퍼짐보다 작았다."""
     module = script()
-    measured = {"worst_loss_abs": 0.023574, "worst_loss_rel": 0.008258,
-                "worst_param_max_abs": 5.819e-4, "worst_param_relative_l2": 6.31e-4}
-    assert module.derive_tolerance(measured) == module.RESUME_TOLERANCES["t1"] == module.RESUME_TOLERANCE_T1
-    assert module.RESUME_TOLERANCE_T1["loss_abs"] == pytest.approx(0.05)   # 2 × 0.023574 = 0.047 → 0.05
-    # 나머지 셋은 T0의 값이 더 크므로 그대로 — 느슨해지기만 한다
-    for key in ("loss_rel", "param_max_abs", "param_rel_l2"):
+    assert len(module.PRIOR_BASELINE_PAIRS["t1"]) == module.MINIMUM_BASELINE_PAIRS == 3
+    assert module.derive_tolerance(module.PRIOR_BASELINE_PAIRS["t1"]) == module.RESUME_TOLERANCES["t1"] == module.RESUME_TOLERANCE_T1
+    assert module.RESUME_TOLERANCE_T1["loss_abs"] == pytest.approx(0.2)    # 2 × 0.076560 = 0.1531 → 0.2
+    assert module.RESUME_TOLERANCE_T1["loss_rel"] == pytest.approx(0.08)   # 2 × 0.039328 = 0.0787 → 0.08
+    # param 둘은 T0의 값이 더 크므로 그대로 — 느슨해지기만 한다
+    for key in ("param_max_abs", "param_rel_l2"):
         assert module.RESUME_TOLERANCE_T1[key] == module.RESUME_TOLERANCE[key]
+    # 한 쌍(P3)만으로 고정하면 나왔을 값 — 이 시험이 그 차이를 기록으로 남긴다
+    assert module.derive_tolerance(module.PRIOR_BASELINE_PAIRS["t1"][1]) == {"loss_abs": 0.05, "loss_rel": 0.02, "param_max_abs": 0.01, "param_rel_l2": 0.05}
     assert module.RESUME_TOLERANCE == {"loss_abs": 0.02, "loss_rel": 0.02, "param_max_abs": 0.01, "param_rel_l2": 0.05}  # T0은 건드리지 않았다
 
 
@@ -389,10 +392,17 @@ def test_the_t1_gate_now_returns_a_verdict_instead_of_stopping_on_an_unregistere
     inside = module.compare_resume(continuous, split, steps=6, mode="t1")
     assert inside["passed"] is True and inside["verdict"] == "pass" and inside["tolerance"] == module.RESUME_TOLERANCE_T1
 
-    # 등록된 오차 **밖**의 loss 차이는 떨어진다 — 오차가 있다는 것이 통과를 뜻하지 않는다
-    split["losses"][3] += module.RESUME_TOLERANCE_T1["loss_abs"] * 2
+    # 등록된 오차 **밖**의 차이는 떨어진다 — 오차가 있다는 것이 통과를 뜻하지 않는다. `t1`의 판정을 지는
+    # 기준은 R2 A1g부터 parameter(+정수)이므로 그 기준으로 본다; loss는 같은 크기로 벌려도 `t1`을 떨어뜨리지
+    # 않고(기록일 뿐이다) **`t0`는 떨어뜨린다**.
+    split["parameters"]["U.weight"] = split["parameters"]["U.weight"] + module.RESUME_TOLERANCE_T1["param_max_abs"] * 2
     outside = module.compare_resume(continuous, split, steps=6, mode="t1")
     assert outside["passed"] is False and outside["verdict"] == "fail"
+
+    continuous, split = _snapshot_pair(steps=6)
+    split["losses"][3] += module.RESUME_TOLERANCE_T1["loss_abs"] * 2
+    assert module.compare_resume(continuous, split, steps=6, mode="t1")["passed"] is True
+    assert module.compare_resume(continuous, split, steps=6, mode="t0")["passed"] is False
 
     for verdict, expected in (({"passed": True, "verdict": "pass", "scope": "t1"}, 0),
                               ({"passed": False, "verdict": "fail", "scope": "t1"}, 2)):
@@ -400,3 +410,181 @@ def test_the_t1_gate_now_returns_a_verdict_instead_of_stopping_on_an_unregistere
         assert module.resume_gate(report, "t1")["exit_code"] == expected
     # 아직 등록되지 않은 범위는 그대로 멈춘다
     assert module.resume_gate(_gate_report(tmp_path, resume_lora={"passed": None, "verdict": "tolerance-unregistered", "scope": "lora"}), "lora")["exit_code"] == 3
+
+
+# --------------------------------------------------------------------------
+# R2 A1 — 허용 오차는 **한 쌍이 아니라 잰 쌍 전부**의 최악값 위에 선다
+# --------------------------------------------------------------------------
+
+
+def test_the_rule_takes_the_worst_of_every_measured_pair_not_just_the_last_one():
+    """R2 A1 — 규칙의 개정. **측정 전에** 파일에 넣고 커밋한다 (사전 등록의 순서).
+
+    P3가 한 쌍(최악 0.0236)에서 고정한 오차는 **이미 관측된 퍼짐보다 작았다** — P2의 쌍이 0.0641이었으므로
+    2.7배 차다. 한 쌍은 이 경로의 잡음을 대표하지 못한다. 그래서 규칙이 바뀐다: 그 범위의 **잰 쌍 전부**에서
+    기준마다 최악값을 모으고 그 위에 오차를 세운다. 안전 계수·올림·T0 바닥은 그대로다."""
+    module = script()
+    assert module.MINIMUM_BASELINE_PAIRS == 3
+    assert "every measured" in module.RESUME_TOLERANCE_RULE and "pair" in module.RESUME_TOLERANCE_RULE
+    assert "round up to one significant figure" in module.RESUME_TOLERANCE_RULE
+    assert module.TOLERANCE_SAFETY_FACTOR == 2.0
+
+    pairs = [
+        {"worst_loss_abs": 0.0641, "worst_loss_rel": 0.0178, "worst_param_max_abs": None, "worst_param_relative_l2": None},
+        {"worst_loss_abs": 0.0236, "worst_loss_rel": 0.0083, "worst_param_max_abs": 5.819e-4, "worst_param_relative_l2": 6.31e-4},
+    ]
+    worst = module.worst_of_pairs(pairs)
+    assert worst["worst_loss_abs"] == pytest.approx(0.0641)          # 둘 가운데 큰 쪽
+    assert worst["worst_loss_rel"] == pytest.approx(0.0178)
+    assert worst["worst_param_max_abs"] == pytest.approx(5.819e-4)   # 못 잰 쌍은 그 기준에 기여하지 않는다
+    assert worst["worst_param_relative_l2"] == pytest.approx(6.31e-4)
+    # 아무 쌍도 그 기준을 재지 않았으면 0 — 그러면 T0의 바닥이 그대로 오차가 된다
+    assert module.worst_of_pairs([{"worst_loss_abs": 0.01, "worst_loss_rel": 0.01,
+                                   "worst_param_max_abs": None, "worst_param_relative_l2": None}])["worst_param_max_abs"] == 0.0
+
+    # `derive_tolerance`는 쌍 하나든 목록이든 같은 규칙을 쓴다 (옛 호출 자리를 깨지 않는다)
+    assert module.derive_tolerance(pairs) == module.derive_tolerance(module.worst_of_pairs(pairs))
+    assert module.derive_tolerance(pairs[1]) == module.derive_tolerance([pairs[1]])
+    assert module.derive_tolerance(pairs)["loss_abs"] == pytest.approx(0.2)   # 2 × 0.0641 = 0.1282 → 0.2
+    assert module.derive_tolerance(pairs)["loss_rel"] == pytest.approx(0.04)  # 2 × 0.0178 = 0.0356 → 0.04
+
+
+def test_the_pairs_already_measured_on_the_t1_path_are_recorded_with_their_provenance():
+    """R2 A1 — 앞서 잰 두 쌍은 **보고서에서 읽은 값**이고, 어디서 왔는지가 값 옆에 적혀 있다.
+
+    P2의 쌍은 재시작이 없는 두 프로세스(`continuous`의 앞 3 step 대 `first`의 3 step)이고 그 snapshot은
+    남아 있지 않으므로 **loss 기준만** 잴 수 있다. P3의 쌍은 `measure_spread`가 네 기준을 모두 남겼다."""
+    import json
+    from pathlib import Path
+
+    module = script()
+    prior = module.PRIOR_BASELINE_PAIRS["t1"]
+    assert len(prior) == 3 and all(pair["source"].endswith(".json") for pair in prior)
+    assert all("no restart" in pair["unit"] for pair in prior)
+
+    p2, p3, r2 = prior
+    assert p2["worst_param_max_abs"] is None and p2["worst_param_relative_l2"] is None
+    # 저장된 보고서와 대조한다 — 있으면 반드시 맞아야 하고, 없는 체크아웃에서는 규칙의 산술만 시험한다
+    report = Path(module.REPO) / p2["source"]
+    if report.is_file():
+        losses = json.loads(report.read_text(encoding="utf-8"))["checks"]["resume_t1"]["losses"][: p2["steps"]]
+        assert p2["worst_loss_abs"] == pytest.approx(max(row["abs"] for row in losses))
+        assert p2["worst_loss_rel"] == pytest.approx(max(row["rel"] for row in losses))
+    for pair in (p3, r2):
+        report = Path(module.REPO) / pair["source"]
+        if report.is_file():
+            spread = json.loads(report.read_text(encoding="utf-8"))["checks"]["baseline_t1"]["spread"]
+            for key in ("worst_loss_abs", "worst_loss_rel", "worst_param_max_abs", "worst_param_relative_l2"):
+                assert pair[key] == pytest.approx(spread[key]), (pair["label"], key)
+
+
+def test_a_relative_config_path_does_not_break_the_report_header():
+    """R2 A1 — 첫 run이 여기서 죽었다: `--config configs/…`(상대 경로)가 `relative_to(REPO)`에서 떨어졌다."""
+    module = script()
+    assert module._repo_relative("configs/train/qwen35-2b-r2.yaml") == "configs/train/qwen35-2b-r2.yaml"
+    assert module._repo_relative(module.REPO / "configs" / "train" / "qwen35-2b-r2.yaml") == "configs/train/qwen35-2b-r2.yaml"
+    assert module._repo_relative("/etc/hosts") == "/etc/hosts"
+
+
+# --------------------------------------------------------------------------
+# R2 A1g — `t1`의 판정에서 loss 기준을 뺀다 (사용자 승인, 실패를 본 **뒤**의 규칙 변경)
+# --------------------------------------------------------------------------
+
+
+def test_the_t1_verdict_rests_on_the_exact_and_parameter_criteria_and_reports_the_loss():
+    """R2 A1g — 이 경로에서 **loss는 재개의 옳고 그름을 가리지 못한다**(A1e).
+
+    같은 6 step 일정에서 **재시작이 전혀 없는** 세 run의 쌍마다 최악 |Δloss|가 0.0786 · 0.3304 · 0.4090
+    (loss 1.0~1.7에서 ±25 %)이고, 재개한 쌍의 0.3150은 그 퍼짐 안이다. 옳은 재개를 통과시킬 만큼 느슨한
+    오차(≥ 0.9)는 깨진 재개도 통과시킨다. 그래서 `t1`의 판정은 **정수 기준 + parameter 기준**이 지고
+    loss는 퍼짐과 함께 **적기만** 한다. **등록된 loss 값은 느슨해지지 않았다** — 판정에서 빠졌을 뿐이다."""
+    module = script()
+    assert module.RESUME_VERDICT_CRITERIA["t0"] == ("loss", "param")
+    assert module.RESUME_VERDICT_CRITERIA["lora"] == ("loss", "param")
+    assert module.RESUME_VERDICT_CRITERIA["t1"] == ("param",)
+    # 등록값은 그대로다 — 값을 보고 늘린 것이 아니다
+    assert module.RESUME_TOLERANCE_T1 == {"loss_abs": 0.2, "loss_rel": 0.08, "param_max_abs": 0.01, "param_rel_l2": 0.05}
+    spread = module.NO_RESTART_LOSS_SPREAD["t1"]
+    assert spread["steps"] == 6 and len(spread["worst_loss_abs"]) == 3
+    assert max(spread["worst_loss_abs"]) == pytest.approx(0.408990, abs=1e-5)
+
+    continuous, split = _snapshot_pair(steps=6)
+    # loss만 크게 벌어진 쌍: t1은 통과하고(판정이 loss를 보지 않는다) t0는 떨어진다
+    split["losses"][3] += 1.0
+    t1 = module.compare_resume(continuous, split, steps=6, mode="t1")
+    assert t1["passed"] is True and t1["verdict"] == "pass"
+    assert t1["loss_criterion_judged"] is False
+    assert t1["loss_diagnostic"]["worst_loss_abs"] == pytest.approx(1.0)
+    assert t1["loss_diagnostic"]["inside_no_restart_spread"] is False   # 1.0 > 0.409
+    assert t1["loss_diagnostic"]["no_restart_worst"] == pytest.approx(0.408990, abs=1e-5)
+    assert module.compare_resume(continuous, split, steps=6, mode="t0")["passed"] is False
+
+    # parameter 기준은 그대로 판정한다 — 그것이 이제 판정을 진다
+    split["parameters"]["U.weight"] = split["parameters"]["U.weight"] + 1.0
+    outside = module.compare_resume(continuous, split, steps=6, mode="t1")
+    assert outside["passed"] is False and outside["verdict"] == "fail"
+    # 정수 기준도 그대로 — 뽑힌 단위가 다르면 무슨 일이 있어도 떨어진다
+    broken = module.compare_resume(continuous, {**split, "units": [["x", 0]]}, steps=6, mode="t1")
+    assert broken["passed"] is False and broken["exact_criteria_passed"] is False
+
+
+# --------------------------------------------------------------------------
+# R2 fix round 1 (리뷰 1 I-1) — 판정은 snapshot 없이 **저장된 값만으로** 다시 나와야 한다
+# --------------------------------------------------------------------------
+
+
+def test_the_verdict_rederives_from_the_stored_values_without_a_snapshot(tmp_path):
+    """A1g의 재판정은 이 검사가 남긴 snapshot 둘을 읽어 했는데, 그 파일은 지워졌다 (리뷰 1 I-1).
+
+    판정에 들어가는 값 — 정수 기준 통과 여부, 최악 |Δloss|와 상대값, 최악 parameter 차 둘 — 은 **전부 보고서
+    안에** 있다. 그러므로 "어느 기준 집합이 무엇을 판정했는가"는 GPU도 snapshot도 없이 다시 유도할 수 있어야
+    하고, 그것이 이 재판정이 감사 가능하다는 뜻이다. 재유도는 :func:`compare_resume` 과 **같은 판정부**
+    (:func:`within_tolerance`)를 쓴다 — 둘이 갈라지면 재유도가 증명하는 것이 없다."""
+    import json
+    from pathlib import Path
+
+    module = script()
+    stored = {
+        "check": "resume", "scope": "t1", "steps": 6,
+        "tolerance": dict(module.RESUME_TOLERANCE_T1),
+        "verdict": "pass", "passed": True, "verdict_criteria": ["param"],
+        "exact_criteria_passed": True,
+        "worst_loss_abs": 0.31495535746216774, "worst_loss_rel": 0.22423211227018586,
+        "worst_param_max_abs": 5.959e-4, "worst_param_relative_l2": 3.518e-3,
+        "rejudged": {"before": {"verdict": "fail", "passed": False}},
+    }
+    again = module.rederive_verdict(stored)
+    # 리뷰어가 손으로 한 것과 같은 두 줄: loss가 판정을 지면 떨어지고, parameter가 지면 통과한다
+    assert again["verdicts"]["loss+param"] is False
+    assert again["verdicts"]["param"] is True
+    assert again["verdict_criteria"] == ["param"] and again["passed"] is True
+    assert again["agrees_with_stored"] is True and again["stored"]["verdict"] == "pass"
+    assert again["was"] == {"verdict": "fail", "passed": False}
+    assert "snapshot" not in json.dumps(again["source"]) or "no snapshot" in again["source"]
+
+    # 정수 기준이 깨지면 어느 기준 집합에서도 통과가 아니다 — 오차와 무관한 판정이기 때문이다
+    broken = module.rederive_verdict({**stored, "exact_criteria_passed": False, "verdict": "fail", "passed": False})
+    assert set(broken["verdicts"].values()) == {False} and broken["agrees_with_stored"] is True
+
+    # 저장된 판정과 어긋나면 **그렇다고 말한다** — 조용히 덮어쓰지 않는다
+    lying = module.rederive_verdict({**stored, "verdict": "fail", "passed": False})
+    assert lying["agrees_with_stored"] is False
+
+    # 잰 값이 없으면 재유도하지 않는다
+    with pytest.raises(ValueError, match="worst_param_max_abs"):
+        module.rederive_verdict({key: value for key, value in stored.items() if key != "worst_param_max_abs"})
+
+    # CLI — 보고서 경로 하나로, GPU 없이. 저장된 판정과 맞으면 exit 0
+    report = tmp_path / "acceptance.json"
+    report.write_text(json.dumps({"checks": {"resume_t1": stored}}, ensure_ascii=False), encoding="utf-8")
+    assert module.main(["--rederive", str(report), "--resume-modes", "t1"]) == 0
+    report.write_text(json.dumps({"checks": {"resume_t1": {**stored, "passed": False, "verdict": "fail"}}}, ensure_ascii=False), encoding="utf-8")
+    assert module.main(["--rederive", str(report), "--resume-modes", "t1"]) == 1
+
+    # 저장된 R2의 보고서가 있는 체크아웃에서는 그 값으로도 같은 답이 나와야 한다
+    real = Path(module.REPO) / "artifacts" / "reports" / "r2-acceptance.json"
+    if real.is_file():
+        check = json.loads(real.read_text(encoding="utf-8"))["checks"]["resume_t1"]
+        result = module.rederive_verdict(check)
+        assert result["verdicts"] == {"loss+param": False, "param": True, "loss": False}
+        assert result["agrees_with_stored"] is True and result["was"] == {"verdict": "fail", "passed": False}

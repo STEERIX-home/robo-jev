@@ -25,6 +25,7 @@ import json
 import subprocess
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
@@ -52,21 +53,56 @@ RESUME_TOLERANCE = {
 #: "재개가 깨졌다"로 읽히지만 실제로 깬 것은 **오차가 그 범위에 등록돼 있지 않다**는 사실이다. 본 값에 맞춰
 #: 오차를 고치는 것은 이 프로젝트가 금하는 수이므로, 등록될 때까지 그 범위의 판정은 `passed: None`이고 게이트는
 #: 멈춘다(사전 등록 절차: 재시작 없는 같은 설정 두 run의 벌어짐을 먼저 기록하고, 그 위에 오차를 고정한다).
-#: **T1 범위의 사전 등록 허용 오차** (P3 D, 2026-09-22). :data:`RESUME_TOLERANCE_RULE` 을 `checks.baseline_t1`의
-#: 두 run 기준선에 그대로 적용한 값이다 — 재시작 없는 두 프로세스를 같은 설정·seed로 5 step씩 돌려
-#: (`artifacts/reports/p3-acceptance.json`, 914.8 s) 잰 최악값은 loss |Δ| **0.023574**(step 3, 상대 0.826 %),
-#: 학습 대상 tensor의 최대 절대 차 **5.819e-4**(readout `V.weight`), 분모 가드를 통과한 tensor의 최대 상대 L2
-#: **6.31e-4**였다. 규칙대로 ×2 → 유효숫자 한 자리 올림 → T0보다 느슨하게만: loss_abs 0.047 → **0.05**, 나머지
-#: 셋은 T0의 값이 더 커서 그대로다. **값을 보고 고친 것은 없다** — 규칙이 먼저 파일에 있었고 여기 적용만 했다.
+#: **T1 범위의 사전 등록 허용 오차** — **세 쌍**에서 (R2 A1, 2026-09-23). P3가 남긴 이월 항목("쌍을 최소 셋 재서
+#: 그 최댓값 위에 다시 고정한다")을 그대로 닫은 값이다. :data:`RESUME_TOLERANCE_RULE` 은 셋째 쌍을 재기 **전에**
+#: 고쳐 커밋했고(`19292e4`), 여기 적용만 했다.
 #:
-#: **이 값의 한계는 함께 적는다**: 이 경로에서 잰 "재시작 없는 두 run" 쌍은 둘뿐이고 서로 2.7배 다르다 —
-#: P2 보고서 A1b의 쌍(`continuous` 대 `first`, 3 step)은 최악 **0.0641**이었고 이 쌍은 0.0236이다. 한 쌍에서 고정한
-#: 오차는 이미 관측된 퍼짐보다 **작다**. 그래서 이 오차 아래에서 P2가 남긴 6 step 재개 결과(최악 0.0876)는
-#: `passed: false`가 되고, 그 false는 "재개가 깨졌다"가 아니라 "이 오차가 한 쌍에서 나왔다"는 뜻이다.
-#: 이월: 쌍을 최소 셋 재서 그 최댓값 위에 다시 고정한다(쌍당 ≈7.6분).
-RESUME_TOLERANCE_T1 = {"loss_abs": 0.05, "loss_rel": 0.02, "param_max_abs": 0.01, "param_rel_l2": 0.05}
+#: 세 쌍의 최악값 (`PRIOR_BASELINE_PAIRS["t1"]` 둘 + `artifacts/reports/r2-acceptance.json`의 `checks.baseline_t1`):
+#:
+#:   | 쌍 | 데이터 | step | loss \|Δ\| | loss 상대 | param 최대 절대 | param 상대 L2 |
+#:   | P2 2026-09-21 | D1  | 3 | 0.064136 | 1.778 % | (snapshot 없음) | (없음) |
+#:   | P3 2026-09-22 | D1  | 5 | 0.023574 | 0.826 % | 5.819e-4 | 6.31e-4 |
+#:   | R2 2026-09-23 | R1  | 5 | **0.076560** | **3.933 %** | **6.079e-4** | **9.124e-4** |
+#:
+#: 곧 셋의 퍼짐은 **3.2배**(0.0236 ~ 0.0766)이고 **가장 큰 쌍이 가장 마지막에 나왔다** — 한 쌍으로 오차를 고정하는
+#: 것이 왜 위험한지가 이 표다. 규칙대로 ×2 → 유효숫자 한 자리 올림 → T0보다 느슨하게만:
+#: loss_abs 0.1531 → **0.2**, loss_rel 0.0787 → **0.08**, param 둘은 T0의 값이 더 커서 그대로(**0.01**·**0.05**).
+#:
+#: **한계는 그대로 적는다**: 셋 가운데 둘은 D1 데이터, 하나는 R1 데이터다 — 같은 *경로*(2B·T1·fp32 master·5초 구간)
+#: 이지만 같은 *설정*은 아니다. 그리고 0.2는 느슨하다: 이 오차는 "재개가 다른 데이터·다른 optimizer 상태로
+#: 이어가는 것"(loss를 0.1 이상 **일관되게** 움직인다)을 잡되, 그보다 작은 어긋남은 이 경로의 프로세스 간 잡음과
+#: 구분하지 못한다. 정수 기준(sampler 위치·뽑힌 단위·step 수·빠진 tensor)이 그 구분의 대부분을 지고 있다.
+RESUME_TOLERANCE_T1 = {"loss_abs": 0.2, "loss_rel": 0.08, "param_max_abs": 0.01, "param_rel_l2": 0.05}
 
 RESUME_TOLERANCES: dict[str, dict[str, float]] = {"t0": RESUME_TOLERANCE, "t1": RESUME_TOLERANCE_T1}
+
+#: **어느 기준이 그 범위의 판정을 지는가** (R2 A1g, 2026-09-23 — 사용자 승인 아래, 게이트 실패를 **본 뒤에** 한
+#: 규칙 변경이다. 그 사실과 근거는 보고서 `.superpowers/sdd/task-r2-report.md` A1g에 그대로 적혀 있다).
+#:
+#: `t1`에서 loss 기준을 판정에서 **뺐다**. 등록된 값(0.2 / 0.08)은 **느슨해지지 않았다** — 역할만 "판정"에서
+#: "기록"으로 바뀌었다. 근거는 R2 A1e의 실측이다: 같은 6 step 일정에서 **재시작이 전혀 없는** 세 프로세스의
+#: 쌍마다 최악 |Δloss|가 :data:`NO_RESTART_LOSS_SPREAD` 이고(0.0786 · 0.3304 · 0.4090, loss 1.0~1.7에서
+#: ±25 %), 재개한 쌍의 0.3150은 그 **안**이다. 곧 이 경로에서 loss는 재개의 옳고 그름을 가리지 못한다 —
+#: 옳은 재개를 통과시킬 만큼 느슨한 오차(≥ 0.9)는 깨진 재개도 통과시키기 때문이다. 가려내는 것은 정수 기준
+#: (sampler 위치·뽑힌 단위·optimizer step 수·빠진 tensor)과 parameter 기준이고, R2의 재개는 그 둘을 등록값의
+#: **15분의 1**로 통과했다. T0·LoRA는 그대로 loss도 판정한다 — 그 경로들은 이 상자에서 비트 결정적이다.
+RESUME_VERDICT_CRITERIA: dict[str, tuple[str, ...]] = {"t0": ("loss", "param"), "lora": ("loss", "param"), "t1": ("param",)}
+
+#: 저장된 값만으로 판정을 다시 유도할 때 견주는 기준 집합들 (:func:`rederive_verdict`, R2 fix round 1 / 리뷰 1 I-1).
+#: 셋을 다 적는 것은, 어느 기준이 판정을 졌는지가 **결과를 바꾼 유일한 것**임을 읽는 사람이 직접 보게 하려는 것이다.
+REDERIVED_CRITERIA_SETS: tuple[tuple[str, ...], ...] = (("loss", "param"), ("param",), ("loss",))
+
+#: 그 범위에서 **재시작 없이** 잰 같은 step 수의 쌍들의 최악 |Δloss| — 기록된 loss 옆에 함께 찍어
+#: "이 차이가 잡음 안인가"를 읽게 한다 (R2 A1e, `artifacts/reports/r2-diagnostic.json` + `r2-acceptance.json`).
+NO_RESTART_LOSS_SPREAD: dict[str, dict[str, Any]] = {
+    "t1": {
+        "steps": 6,
+        "unit": "three separate processes, same config and seed, **no restart**; every pairing",
+        "source": "artifacts/reports/r2-diagnostic.json + the resume check's own `continuous` run",
+        "worst_loss_abs": [0.078615, 0.330375, 0.408990],
+        "worst_loss_rel": [0.049404, 0.238616, 0.244923],
+    },
+}
 
 #: 상대 L2의 **0에 가까운 분모 가드** (P2 A1b에서 `bias` 한 tensor가 절대 차이 4.85e-7인데 자기 norm이 ≈3e-6이라
 #: 비 0.16으로 걸렸다). 자기 L2 norm이 이 값보다 작은 tensor는 **상대** 기준에서 빼고 절대 기준(`param_max_abs`)으로만
@@ -79,14 +115,72 @@ RELATIVE_L2_REFERENCE_FLOOR = 1e-3
 #: 규칙: 기준마다 **두 run 사이 최악값 × :data:`TOLERANCE_SAFETY_FACTOR`**를 유효숫자 한 자리로 **올림**하고,
 #: T0의 값보다 **느슨해지기만** 한다(T1 경로가 T0보다 조용할 리 없으므로 더 조이지 않는다).
 TOLERANCE_SAFETY_FACTOR = 2.0
+#: 그 범위의 오차를 고정하기 전에 있어야 하는 **최소 쌍 수** (R2 A1). 한 쌍은 이 경로의 잡음을 대표하지 못한다 —
+#: P2의 쌍(0.0641)과 P3의 쌍(0.0236)이 **2.7배** 달랐고, 뒤엣것 하나로 고정한 오차는 이미 관측된 퍼짐보다 작았다.
+MINIMUM_BASELINE_PAIRS = 3
 RESUME_TOLERANCE_RULE = (
-    "run the same config twice with no restart (two separate processes, same seed), take the worst run-to-run "
-    "value of each criterion, multiply by TOLERANCE_SAFETY_FACTOR, round up to one significant figure, and never "
-    "go below the t0 tolerance. Fixed in this file before the baseline was measured."
+    "run the same config twice with no restart (two separate processes, same seed) and measure the run-to-run "
+    "spread; do this at least MINIMUM_BASELINE_PAIRS times on that scope's path; then, for each criterion, take "
+    "the worst value over every measured pair, multiply by TOLERANCE_SAFETY_FACTOR, round up to one significant "
+    "figure, and never go below the t0 tolerance. A pair that could not measure a criterion does not contribute "
+    "to it. Fixed in this file before the pair that completes the set was measured."
 )
+
+#: 이 범위의 경로에서 **이미 잰** 재시작 없는 쌍들 — 값은 저장된 보고서에서 읽었고, 어디서 왔는지가 함께 적혀
+#: 있다(시험이 보고서와 대조한다). 새로 재는 쌍은 :func:`check_baseline` 이 여기에 이어 붙인다.
+PRIOR_BASELINE_PAIRS: dict[str, list[dict[str, Any]]] = {
+    "t1": [
+        {
+            "label": "P2 (2026-09-21) — `continuous`의 앞 3 step 대 `first`의 3 step",
+            "unit": "two runs of the same config, same seed, **no restart** (two separate processes)",
+            "source": "artifacts/reports/p2-acceptance.json",
+            "config": "configs/train/qwen35-2b-pilot.yaml (D1 데이터)",
+            "steps": 3,
+            "worst_loss_abs": 0.06413567066192627,
+            "worst_loss_rel": 0.017781185372826285,
+            # snapshot(`first-t1.pt`)이 남아 있지 않다 — 이 쌍은 loss 기준에만 기여한다
+            "worst_param_max_abs": None,
+            "worst_param_relative_l2": None,
+        },
+        {
+            "label": "P3 (2026-09-22) — `--check baseline` 두 프로세스, 5 step",
+            "unit": "two runs of the same config, same seed, **no restart** (two separate processes)",
+            "source": "artifacts/reports/p3-acceptance.json",
+            "config": "configs/train/qwen35-2b-pilot.yaml (D1 데이터)",
+            "steps": 5,
+            "worst_loss_abs": 0.023573994636535645,
+            "worst_loss_rel": 0.00825756566314512,
+            "worst_param_max_abs": 0.000581890344619751,
+            "worst_param_relative_l2": 0.0006311355571226999,
+        },
+        {
+            "label": "R2 (2026-09-23) — `--check baseline` 두 프로세스, 5 step",
+            "unit": "two runs of the same config, same seed, **no restart** (two separate processes)",
+            "source": "artifacts/reports/r2-acceptance.json",
+            "config": "configs/train/qwen35-2b-r2.yaml (R1 데이터, rollout 라벨판)",
+            "steps": 5,
+            "worst_loss_abs": 0.07655954360961914,
+            "worst_loss_rel": 0.0393281228574283,
+            "worst_param_max_abs": 0.0006078882142901421,
+            "worst_param_relative_l2": 0.0009123694716359487,
+        },
+    ],
+}
 
 #: T1·LoRA에서 "움직였다"고 보는 최소 변화 — 이보다 작으면 업데이트가 빠진 것이다.
 MOVE_EPSILON = 1e-9
+
+
+def _repo_relative(path: str | Path) -> str:
+    """저장소 안의 경로는 저장소 기준 상대 경로로 — worktree의 절대 경로를 보고서에 남기지 않는다.
+
+    `--config configs/…`처럼 **이미 상대 경로**로 받은 값이 `Path.relative_to(REPO)`에서 떨어지던 자리를 함께
+    막는다(R2 A1에서 첫 run이 여기서 죽었다)."""
+    resolved = Path(path).resolve()
+    try:
+        return str(resolved.relative_to(REPO))
+    except ValueError:
+        return str(path)
 
 
 def _runner() -> Any:
@@ -299,6 +393,21 @@ def run_resume_phase(phase: str, *, steps: int, run_dir: Path, config_path: Path
     raise ValueError(f"phase: continuous | first | second (받은 값: {phase!r})")
 
 
+def within_tolerance(measured: dict[str, float], tolerance: dict[str, float], criteria: Sequence[str]) -> bool:
+    """그 **기준 집합만으로** 잰 값이 허용 오차 안인가 — 게이트의 판정부 한 벌.
+
+    :func:`compare_resume` (snapshot에서 재며 판정한다)과 :func:`rederive_verdict` (저장된 값만으로 다시
+    유도한다)이 **같은** 함수를 쓴다. 둘이 갈라지면 재유도가 증명하는 것이 없기 때문이다. loss는 절대·상대 중
+    하나만 들어도 통과이고(`or`), parameter는 둘 다 들어야 한다 — 처음 등록할 때의 규칙 그대로다.
+    """
+    ok = True
+    if "loss" in criteria:
+        ok = ok and (measured["worst_loss_abs"] <= tolerance["loss_abs"] or measured["worst_loss_rel"] <= tolerance["loss_rel"])
+    if "param" in criteria:
+        ok = ok and measured["worst_param_max_abs"] <= tolerance["param_max_abs"] and measured["worst_param_relative_l2"] <= tolerance["param_rel_l2"]
+    return bool(ok)
+
+
 def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: int, mode: str = "t0") -> dict[str, Any]:
     """두 :func:`_snapshot` 을 그 **학습 범위의** 사전 등록 허용 오차로 견준다 — 게이트의 **판정 부분**만 떼어 둔
     것이라 GPU 없이도 시험할 수 있다 (P1 리뷰 1 M3: 이 판정에 시험이 하나도 없었다).
@@ -334,8 +443,8 @@ def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: 
     worst_loss = max((row["abs"] for row in loss_rows), default=0.0)
     worst_loss_rel = max((row["rel"] for row in loss_rows), default=0.0)
     worst_param = max((row.get("max_abs", 0.0) for row in parameters), default=0.0)
-    judged = [row for row in parameters if row.get("relative_l2_judged")]
-    worst_rel = max((row.get("relative_l2", 0.0) for row in judged), default=0.0)
+    judged_rows = [row for row in parameters if row.get("relative_l2_judged")]
+    worst_rel = max((row.get("relative_l2", 0.0) for row in judged_rows), default=0.0)
     skipped = [row["tensor"] for row in parameters if "relative_l2" in row and not row.get("relative_l2_judged")]
     exact = bool(
         sampler_equal
@@ -345,12 +454,14 @@ def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: 
         and not any(row.get("missing") for row in parameters)
     )
 
-    def _within(tolerance: dict[str, float]) -> bool:
-        return bool(
-            (worst_loss <= tolerance["loss_abs"] or worst_loss_rel <= tolerance["loss_rel"])
-            and worst_param <= tolerance["param_max_abs"]
-            and worst_rel <= tolerance["param_rel_l2"]
-        )
+    carried = RESUME_VERDICT_CRITERIA.get(mode, ("loss", "param"))
+
+    measured = {"worst_loss_abs": worst_loss, "worst_loss_rel": worst_loss_rel,
+                "worst_param_max_abs": worst_param, "worst_param_relative_l2": worst_rel}
+
+    def _within(tolerance: dict[str, float], *, criteria: tuple[str, ...] = carried) -> bool:
+        """그 범위의 **판정을 지는 기준만** 견준다 (:data:`RESUME_VERDICT_CRITERIA`)."""
+        return within_tolerance(measured, tolerance, criteria)
 
     registered = RESUME_TOLERANCES.get(mode)
     passed: bool | None
@@ -370,7 +481,17 @@ def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: 
             else f"no tolerance is pre-registered for scope {mode!r} (RESUME_TOLERANCES); the gate stops instead of borrowing another scope's"
         ),
         "verdict": verdict, "exact_criteria_passed": exact,
-        "would_pass_under": {name: (exact and _within(value)) for name, value in sorted(RESUME_TOLERANCES.items())},
+        "verdict_criteria": list(carried), "loss_criterion_judged": "loss" in carried,
+        # loss가 판정을 지지 않는 범위에서는 **기록**이다 — 재시작 없는 같은 step 수 쌍의 퍼짐을 옆에 찍는다
+        "loss_diagnostic": {
+            "worst_loss_abs": worst_loss, "worst_loss_rel": worst_loss_rel,
+            "registered_but_not_judged": (None if "loss" in carried else {k: v for k, v in (registered or {}).items() if k.startswith("loss")}),
+            "no_restart_spread": NO_RESTART_LOSS_SPREAD.get(mode),
+            "no_restart_worst": (max(NO_RESTART_LOSS_SPREAD[mode]["worst_loss_abs"]) if mode in NO_RESTART_LOSS_SPREAD else None),
+            "inside_no_restart_spread": (worst_loss <= max(NO_RESTART_LOSS_SPREAD[mode]["worst_loss_abs"]) if mode in NO_RESTART_LOSS_SPREAD else None),
+            "same_steps": (NO_RESTART_LOSS_SPREAD[mode]["steps"] == int(steps) if mode in NO_RESTART_LOSS_SPREAD else None),
+        },
+        "would_pass_under": {name: (exact and _within(value, criteria=RESUME_VERDICT_CRITERIA.get(name, ("loss", "param")))) for name, value in sorted(RESUME_TOLERANCES.items())},
         "losses": loss_rows, "worst_loss_abs": worst_loss, "worst_loss_rel": worst_loss_rel,
         "parameters": parameters, "worst_param_max_abs": worst_param, "worst_param_relative_l2": worst_rel,
         "relative_l2_reference_floor": RELATIVE_L2_REFERENCE_FLOOR,
@@ -419,15 +540,32 @@ def measure_spread(first: dict[str, Any], second: dict[str, Any]) -> dict[str, A
     }
 
 
-def derive_tolerance(spread: dict[str, Any], *, floor: dict[str, float] = RESUME_TOLERANCE) -> dict[str, float]:
-    """퍼짐 → 허용 오차, :data:`RESUME_TOLERANCE_RULE` 그대로 (안전 계수 → 유효숫자 한 자리 올림 → T0보다 느슨하게)."""
-    pairs = (
-        ("loss_abs", "worst_loss_abs"), ("loss_rel", "worst_loss_rel"),
-        ("param_max_abs", "worst_param_max_abs"), ("param_rel_l2", "worst_param_relative_l2"),
-    )
+#: 기준 이름 → 퍼짐 기록의 자리.
+_SPREAD_KEYS = (
+    ("loss_abs", "worst_loss_abs"), ("loss_rel", "worst_loss_rel"),
+    ("param_max_abs", "worst_param_max_abs"), ("param_rel_l2", "worst_param_relative_l2"),
+)
+
+
+def worst_of_pairs(spreads: Sequence[dict[str, Any]]) -> dict[str, float]:
+    """잰 쌍 전부에서 **기준마다 최악값**을 모은다 (R2 A1의 규칙 개정).
+
+    어떤 쌍이 그 기준을 재지 못했으면(`None`) 그 쌍은 그 기준에 기여하지 않는다 — 못 잰 것을 0으로 세면 오차가
+    조여지고, 그것이 사전 등록이 막으려는 방향이다."""
     return {
-        key: max(float(floor[key]), _round_up_one_significant_figure(TOLERANCE_SAFETY_FACTOR * float(spread[name] or 0.0)))
-        for key, name in pairs
+        name: max([float(spread[name]) for spread in spreads if spread.get(name) is not None], default=0.0)
+        for _, name in _SPREAD_KEYS
+    }
+
+
+def derive_tolerance(spread: dict[str, Any] | Sequence[dict[str, Any]], *, floor: dict[str, float] = RESUME_TOLERANCE) -> dict[str, float]:
+    """퍼짐(쌍 하나 또는 쌍 목록) → 허용 오차, :data:`RESUME_TOLERANCE_RULE` 그대로.
+
+    쌍 전부의 최악값 → 안전 계수 → 유효숫자 한 자리 올림 → T0보다 느슨하게만."""
+    worst = worst_of_pairs([spread] if isinstance(spread, dict) else list(spread))
+    return {
+        key: max(float(floor[key]), _round_up_one_significant_figure(TOLERANCE_SAFETY_FACTOR * worst[name]))
+        for key, name in _SPREAD_KEYS
     }
 
 
@@ -455,11 +593,22 @@ def check_baseline(mode: str, *, steps: int = 5, run_dir: Path, config_path: Pat
         snapshots.append(torch.load(directory / f"continuous-{mode}.pt", map_location="cpu", weights_only=False))
 
     spread = measure_spread(snapshots[0], snapshots[1])
+    prior = [dict(pair) for pair in PRIOR_BASELINE_PAIRS.get(mode, [])]
+    measured = {**spread, "label": f"R2 ({dt.date.today().isoformat()}) — `--check baseline` 두 프로세스, {steps} step",
+                "source": "this report (checks.baseline_%s.spread)" % mode,
+                "config": _repo_relative(config_path)}  # fmt: skip
+    pairs = [*prior, measured]
     return {
         "check": "baseline", "scope": mode, "rule": RESUME_TOLERANCE_RULE,
         "safety_factor": TOLERANCE_SAFETY_FACTOR,
         "spread": spread,
-        "derived_tolerance": derive_tolerance(spread),
+        # **이 쌍 하나가 아니라 잰 쌍 전부**가 오차를 만든다 (R2 A1). 앞 쌍의 출처는 값 옆에 적혀 있다.
+        "pairs": [{key: pair.get(key) for key in ("label", "source", "config", "steps", "unit", *(name for _, name in _SPREAD_KEYS))} for pair in pairs],
+        "pairs_measured": len(pairs), "pairs_required": MINIMUM_BASELINE_PAIRS,
+        "enough_pairs": len(pairs) >= MINIMUM_BASELINE_PAIRS,
+        "worst_over_pairs": worst_of_pairs(pairs),
+        "derived_tolerance_this_pair_only": derive_tolerance(spread),
+        "derived_tolerance": derive_tolerance(pairs),
         "registered_tolerance": dict(RESUME_TOLERANCES[mode]) if mode in RESUME_TOLERANCES else None,
         "seconds": round(time.perf_counter() - started, 1), "phases": phases,
     }
@@ -528,6 +677,44 @@ def resume_gate(report_path: Path | str, mode: str) -> dict[str, Any]:
             "reason": f"{path}: checks.{key}.passed = true (steps {check.get('steps')})"}  # fmt: skip
 
 
+def rederive_verdict(check: dict[str, Any], *, tolerance: dict[str, float] | None = None,
+                     criteria_sets: Sequence[Sequence[str]] = REDERIVED_CRITERIA_SETS) -> dict[str, Any]:
+    """저장된 `checks.resume_*` 의 **잰 값만으로** 기준 집합마다 판정을 다시 유도한다 — GPU도 snapshot도 없이.
+
+    왜 있는가 (R2 fix round 1, 리뷰 1 I-1). A1g의 재판정은 그 검사가 남긴 snapshot 둘
+    (`artifacts/runs/r2-acceptance/{continuous,split}-t1.pt`)을 읽어 이뤄졌는데, 그 파일은 B1의 50 GB run 앞에서
+    지워졌다. 그러나 **판정에 들어가는 값은 전부 보고서 안에 있다** — 정수 기준의 통과 여부, 최악 |Δloss|와 그
+    상대값, 최악 parameter 차 둘. 그러므로 "loss가 판정을 지면 fail, parameter가 지면 pass"는 저장된 보고서
+    하나로 누구나 다시 유도할 수 있고, 그것이 이 재판정이 **감사 가능하다**는 뜻이다.
+
+    아무 값도 다시 재지 않는다 — 읽고, :func:`within_tolerance` 로 견주고, 저장된 판정과 **맞는지 말한다**.
+    """
+    keys = ("exact_criteria_passed", "worst_loss_abs", "worst_loss_rel", "worst_param_max_abs", "worst_param_relative_l2")
+    absent = [key for key in keys if check.get(key) is None]
+    if absent:
+        raise ValueError(f"저장된 검사에 잰 값이 없다: {absent} — snapshot 없이는 이 판정을 다시 유도할 수 없다")
+    scope = str(check.get("scope") or check.get("mode") or "t0")
+    registered = dict(tolerance or check.get("tolerance") or RESUME_TOLERANCES.get(scope) or {})
+    if not registered:
+        raise ValueError(f"범위 {scope!r}에 허용 오차가 없다 — 다른 범위의 오차로 판정하지 않는다")
+    measured = {key: (bool(check[key]) if key == "exact_criteria_passed" else float(check[key])) for key in keys}
+    exact = measured["exact_criteria_passed"]
+    verdicts = {"+".join(criteria): bool(exact and within_tolerance(measured, registered, criteria)) for criteria in criteria_sets}
+    carried = [str(name) for name in (check.get("verdict_criteria") or RESUME_VERDICT_CRITERIA.get(scope, ("loss", "param")))]
+    passed = verdicts["+".join(carried)]
+    stored = {key: check.get(key) for key in ("verdict", "passed")}
+    return {
+        "source": "the stored check's measured values only — no snapshot, no GPU, nothing re-measured",
+        "scope": scope, "steps": check.get("steps"), "tolerance": registered, "measured": measured,
+        "verdicts": verdicts, "verdict_criteria": carried, "passed": passed,
+        "verdict": "pass" if passed else "fail",
+        "stored": stored,
+        "agrees_with_stored": bool(stored["passed"] is None or bool(stored["passed"]) == passed),
+        # 판정이 한 번 바뀐 검사라면 **무엇이었는지**도 같이 적는다 (A1g의 `rejudged.before`)
+        "was": ((check.get("rejudged") or {}).get("before")),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", default="frozen,trains,resume", help="frozen | trains | resume | baseline, 쉼표로")
@@ -542,11 +729,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gpu-memory-fraction", dest="gpu_memory_fraction", type=float, default=DEFAULT_FRACTION)
     parser.add_argument("--gate", default=None, help="긴 run을 띄우기 전의 관문 — 이 학습 범위(t0 | lora | t1)의 재개 결과만 읽고 종료 코드로 답한다 (GPU를 쓰지 않는다)")
     parser.add_argument("--gate-report", dest="gate_report", default=str(REPO / "artifacts" / "reports" / "p1-acceptance.json"))
+    parser.add_argument("--rederive", default=None, metavar="REPORT",
+                        help="저장된 인수 검사 보고서의 `checks.resume_<mode>`를 **잰 값만으로** 다시 판정한다 (GPU도 snapshot도 없이) — "
+                             "기준 집합마다의 판정을 찍고, 저장된 판정과 어긋나면 exit 1")  # fmt: skip
     args = parser.parse_args(argv)
     if args.gate:
         gate = resume_gate(args.gate_report, args.gate)
         print(json.dumps(gate, ensure_ascii=False))
         return int(gate["exit_code"])
+    if args.rederive:
+        checks = (json.loads(Path(args.rederive).read_text(encoding="utf-8")) or {}).get("checks") or {}
+        agreed = True
+        for mode in (name.strip() for name in args.resume_modes.split(",") if name.strip()):
+            check = checks.get(resume_gate_key(mode))
+            if not isinstance(check, dict):
+                parser.error(f"{args.rederive}: checks.{resume_gate_key(mode)}가 없다 (있는 자리: {sorted(checks)})")
+            result = rederive_verdict(check)
+            print(json.dumps(result, ensure_ascii=False))
+            agreed = agreed and result["agrees_with_stored"]
+        return 0 if agreed else 1
     guard = limit_gpu_memory(args.gpu_memory_fraction)
     print(f"[p1] gpu guard {guard} · memory {memory_report()}", file=sys.stderr, flush=True)
     run_dir = Path(args.run_dir)
@@ -563,7 +764,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error(f"--check: 알 수 없는 검사 {unknown} (있는 것: {list(CHECKS)})")
     out: dict[str, Any] = {
         "task": "p1-acceptance", "generated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
-        "config": str(Path(args.config).relative_to(REPO)) if str(Path(args.config).resolve()).startswith(str(REPO)) else args.config,
+        "config": _repo_relative(args.config),
         "gpu": {"guard": guard, "memory_at_start": memory_report()}, "checks": {},
     }
     existing = Path(args.out)

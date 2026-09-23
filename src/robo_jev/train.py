@@ -178,7 +178,7 @@ DEFAULT_SAMPLER = {
 
 #: 재개할 때 checkpoint의 설정과 달라도 되는 키 — 중단·예산·경로·이름뿐이다(run id는 checkpoint의 것을
 #: 쓴다). 나머지는 run의 정체라 같아야 한다.
-RESUME_FREE_KEYS = ("resume", "stop_after", "max_wall_hours", "checkpoint_every", "artifacts_dir", "run_id", "run_name")
+RESUME_FREE_KEYS = ("resume", "stop_after", "max_wall_hours", "checkpoint_every", "checkpoint_keep_steps", "artifacts_dir", "run_id", "run_name")
 #: 값이 경로·이름인 키 — 문자 그대로가 아니라 **가리키는 내용**(manifest의 identity 블록: 설정 파일 sha256, tokenizer
 #: 파일 sha256·id·revision)으로 대조한다. `dataset_manifests`도 경로는 내용(manifest·파일 sha256)으로, 태그는 그대로.
 RESUME_PATH_KEYS = ("model_config", "tokenizer")
@@ -232,6 +232,8 @@ DEFAULTS: dict[str, Any] = {
     "seed": 17,
     "torch_threads": 1,
     "checkpoint_every": None,
+    # 그 step에서 `checkpoint-step<N>.pt`를 **따로** 남긴다 (덮어쓰이지 않는 비교점; R2 B1의 40 step).
+    "checkpoint_keep_steps": None,
     "artifacts_dir": "artifacts/runs",
     "stop_after": None,
     "resume": None,
@@ -365,6 +367,13 @@ def resolve_config(config: dict) -> dict:
         if "unit" in stop:
             _need(_is_int(stop["unit"]) and stop["unit"] >= 0 and _is_int(stop["chunk"]) and stop["chunk"] >= 0, "stop_after: unit·chunk는 0 이상의 정수여야 한다")
     _need(out["resume"] is None or isinstance(out["resume"], str), "resume: checkpoint 경로(문자열)이거나 null이어야 한다")
+    keep = out["checkpoint_keep_steps"]
+    if keep is None:
+        out["checkpoint_keep_steps"] = []
+    else:
+        _need(isinstance(keep, list) and all(_is_int(step) and step >= 1 for step in keep) and len(set(keep)) == len(keep),
+              f"checkpoint_keep_steps: 서로 다른 1 이상의 정수 목록이거나 null이어야 한다 (받은 값: {keep!r})")  # fmt: skip
+        out["checkpoint_keep_steps"] = sorted(int(step) for step in keep)
     if out["checkpoint_every"] is None:
         out["checkpoint_every"] = out["max_steps"]
     if out["run_id"] is None:
@@ -1385,6 +1394,7 @@ class Trainer:
     def _run_until_done(self) -> dict[str, Any]:
         max_steps = int(self.config["max_steps"])
         every = int(self.config["checkpoint_every"])
+        keep_steps = set(self.config.get("checkpoint_keep_steps") or ())
         stop = self.config["stop_after"]
         while self.step < max_steps:
             if not self.accumulate():
@@ -1395,6 +1405,9 @@ class Trainer:
             if stop is not None and "unit" not in stop and stop["step"] == self.step:
                 self.status = "interrupted"
                 break
+            if self.step in keep_steps:
+                # 덮어쓰이지 않는 비교점 — 긴 run 안의 짧은 예산과 나란히 읽기 위한 것이다 (R2 B1).
+                self.save(self.run_dir / f"checkpoint-step{self.step}.pt")
             if self.step < max_steps and every and self.step % every == 0:
                 self.save()
         if self.step >= max_steps and self.status != "interrupted":

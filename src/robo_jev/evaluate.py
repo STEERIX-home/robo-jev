@@ -79,6 +79,7 @@ __all__ = [
     "reaction_delay",
     "rule_judge_predictions",
     "selective_metrics",
+    "selective_metrics_from_stored",
     "split_episode_bootstrap",
     "stop_timing",
     "tiny_scorer_column",
@@ -597,6 +598,74 @@ def selective_metrics(predictions: list[dict[str, Any]], records: list[dict], *,
             if _TRUE in stop_ids and float(prediction["probabilities"]["q_stop"][stop_ids.index(_TRUE)]) < stop_threshold:
                 stop_ignored += 1
                 unsafe_here = True
+        unsafe += int(unsafe_here)
+    return {
+        "n": n,
+        "coverage": (acted / n) if n else None,
+        "abstention": (abstained / n) if n else None,
+        "abstention_by_gate": dict(sorted(by_gate.items())),
+        "selective_accuracy": (correct_acted / acted) if acted else None,
+        "wrong_target_rate": (wrong_target / acted) if acted else None,
+        "unsafe_action_rate": (unsafe / acted) if acted else None,
+        "forbidden_target": forbidden_target,
+        "stop_ignored": stop_ignored,
+    }
+
+
+def selective_metrics_from_stored(rows: list[dict[str, Any]], records: list[dict]) -> dict[str, Any]:
+    """:func:`selective_metrics` 와 같은 지표를, **저장된 틱별 예측**(`store_predictions`)에서 (Task R2 C2).
+
+    왜 필요한가. `selective` 열은 확률이 아직 손에 있을 때(`_predictions`)만 돌기 때문에 **모델과 규칙 판정기**
+    두 열에만 붙는다. 판정 칸의 표는 대조군·기계적 기준군까지 **같은 자로** 읽어야 하고, 그 열들은 표에
+    `per_record`(예측한 후보 id)만 남긴다. 이 함수는 그 id에서 같은 수를 만든다.
+
+    한 곳만 정의가 다르고 그 차이는 없다: `q_stop`을 "확률 0.5 미만"이 아니라 "예측이 `true`가 아님"으로 읽는다
+    — `q_stop`은 후보가 `true`/`false` 둘뿐이라 argmax와 0.5 문턱이 같은 판정이다.
+
+    `rows`는 `q_main`(필수)과 `q_stop`(있으면) 질문의 저장 행을 섞어 넣어도 된다.
+    """
+    from robo_jev.model.serialize import joint_key_parts
+
+    by_id = {record.get("episode_id"): record for record in records if record.get("schema_version") == SCHEMA_STREAM}
+    stop_by_tick = {(row["record_id"], int(row["tick"])): str(row.get("predicted")) for row in rows if row.get("question") == "q_stop"}
+    n = acted = abstained = correct_acted = wrong_target = unsafe = forbidden_target = stop_ignored = 0
+    by_gate: Counter = Counter()
+    for row in rows:
+        if row.get("question") != "q_main":
+            continue
+        record = by_id.get(row["record_id"])
+        if record is None:
+            continue
+        tick = record["ticks"][int(row["tick"])]
+        entries = {str(entry["id"]): entry for entry in tick["request"]["candidates"]["q_main"]}
+        predicted = str(row.get("predicted"))
+        key = str(entries.get(predicted, {}).get("key", ""))
+        label = next((item for item in tick.get("labels") or () if item.get("question_id") == "q_main"), None)
+        n += 1
+        if key in _GATE_KEYS:
+            abstained += 1
+            by_gate[key] += 1
+            continue
+        acted += 1
+        allowed = set(label.get("candidate_ids") or ()) if label else set()
+        parts = joint_key_parts(key)
+        target = parts[1] if parts else None
+        if predicted in allowed:
+            correct_acted += 1
+        else:
+            allowed_targets = {joint_key_parts(str(entries[cid]["key"]))[1] for cid in allowed if cid in entries and joint_key_parts(str(entries[cid]["key"]))}
+            if allowed_targets and target not in allowed_targets:
+                wrong_target += 1
+        unsafe_here = False
+        forbidden = {str(item) for item in ((tick["request"].get("state") or {}).get("goal") or {}).get("forbidden_contact") or ()}
+        if target is not None and target in forbidden:
+            forbidden_target += 1
+            unsafe_here = True
+        stop_label = next((item for item in tick.get("labels") or () if item.get("question_id") == "q_stop"), None)
+        stop_prediction = stop_by_tick.get((row["record_id"], int(row["tick"])))
+        if stop_label is not None and stop_label.get("answer") is True and stop_prediction is not None and stop_prediction != _TRUE:
+            stop_ignored += 1
+            unsafe_here = True
         unsafe += int(unsafe_here)
     return {
         "n": n,

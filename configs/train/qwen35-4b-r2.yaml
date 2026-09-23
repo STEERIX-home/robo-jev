@@ -1,0 +1,15 @@
+# Task R2 B3 — 4B 형제 (T0 200 step; 학습의 주 트랙은 2B다, HANDOFF 결정 3).
+#
+#   uv run python scripts/adapt_readout.py --config configs/train/qwen35-4b-r2.yaml --mode t0 --steps 200 \
+#       --eval-config configs/eval/r1-decision-cell.yaml --out artifacts/reports/r2-4b-t0.json
+#
+# R1에서 4B는 **무학습 눈금만** 있었다(q_main 0.706 대 2B 0.355) — 무학습 경로에는 대조군 열이 없으므로 그 우위가
+# 자기 대조군을 넘는지는 재지 않은 값이다. 여기서 같은 열로 T0를 돌려 그 물음에 답한다.
+extends: qwen35-4b-r1.yaml
+run_name: r2-4b
+dataset_manifests:
+  - path: artifacts/datasets/r1-robot/r1-rollout-labels/manifest.json
+    domain: robot
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r1/single/manifest.json
+    domain: non_robot

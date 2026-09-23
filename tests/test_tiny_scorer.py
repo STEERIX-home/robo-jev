@@ -12,7 +12,7 @@ from robo_jev.baselines.tiny_scorer import (
     evaluate_split, load_checkpoint, load_records, predict, train_tiny_scorer,
 )
 from robo_jev.contracts import QUESTION_SET_V0
-from robo_jev.evaluate import calibration_error, selective_metrics
+from robo_jev.evaluate import calibration_error, selective_metrics, selective_metrics_from_stored
 from robo_jev.model.serialize import full_tick_sections, serialize_request
 from robo_jev.model.tokenizer import WhitespaceTokenizer
 
@@ -223,6 +223,23 @@ def test_selective_metrics_read_gates_as_abstention_and_forbidden_targets_as_uns
     result = selective_metrics([prediction(allowed, 1, stop_true=0.2)], [stopped])
     assert result["stop_ignored"] == 1 and result["unsafe_action_rate"] == 1.0
     assert selective_metrics([{**prediction(allowed, 1), "kind": "single"}], [record])["n"] == 0
+
+    # Task R2 C2 — 같은 수를 **저장된 틱별 예측**에서. 대조군·기계적 기준군 열은 확률을 남기지 않으므로,
+    # 표를 같은 자로 읽으려면 id만으로 되는 이 길이 있어야 한다.
+    def stored(choice: str, tick: int, stop: str = "true") -> list[dict]:
+        return [{"record_id": record["episode_id"], "tick": tick, "question": "q_main", "predicted": choice},
+                {"record_id": record["episode_id"], "tick": tick, "question": "q_stop", "predicted": stop}]
+
+    rows = [*stored(gate, 0), *stored(allowed, 1), *stored(bad, 2)]
+    same = selective_metrics_from_stored(rows, [record])
+    both = selective_metrics([prediction(gate, 0), prediction(allowed, 1), prediction(bad, 2)], [record])
+    for key in ("n", "coverage", "abstention", "abstention_by_gate", "selective_accuracy",
+                "wrong_target_rate", "unsafe_action_rate", "forbidden_target", "stop_ignored"):
+        assert same[key] == both[key], key
+    # `q_stop`의 후보는 true/false 둘뿐이라 argmax와 0.5 문턱이 같은 판정이다
+    ignored = selective_metrics_from_stored(stored(allowed, 1, stop="false"), [stopped])
+    assert ignored["stop_ignored"] == 1 and ignored["unsafe_action_rate"] == 1.0
+    assert selective_metrics_from_stored([], [record])["n"] == 0
 
 
 def test_calibration_error_is_zero_for_confident_correct_answers_and_grows_with_overconfidence():
