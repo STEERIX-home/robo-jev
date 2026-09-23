@@ -171,6 +171,73 @@ def test_rng_state_round_trip_reproduces_the_next_draws(tmp_path):
     assert np.array_equal(expected[2], got[2])
 
 
+def test_rng_state_carries_the_cuda_generator_only_when_this_process_has_one(monkeypatch):
+    """CUDA를 **켠 적이 있는** 프로세스에서만 `cuda` 키가 생긴다 (Task R3a A1).
+
+    `torch.cuda.get_rng_state_all()`은 CUDA를 초기화한다 — 그래서 켜지 않은 프로세스(CPU 학습·이 시험
+    대부분)에서는 부르지 않는다. 켠 적이 없으면 뽑은 것도 없으므로 저장할 상태가 아예 없다.
+    """
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    assert "cuda" not in collect_rng_state()
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
+    assert "cuda" not in collect_rng_state()
+
+    drawn = [torch.arange(8, dtype=torch.uint8), torch.arange(8, 16, dtype=torch.uint8)]
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.cuda, "get_rng_state_all", lambda: drawn)
+    got = collect_rng_state()["cuda"]
+    assert [t.tolist() for t in got] == [t.tolist() for t in drawn]
+    assert all(t.dtype == torch.uint8 for t in got)
+    assert got[0] is not drawn[0]  # 복사본이다 — 뒤이은 뽑기가 저장된 상태를 바꾸지 않는다
+
+
+def test_restore_puts_the_cuda_generator_back_and_names_a_box_that_cannot_take_it(monkeypatch):
+    """복원은 저장된 장치 수가 맞을 때만 한다 — 안 맞으면 조용히 넘기지 않고 이름으로 거절한다 (Task R3a A1)."""
+    state = {**collect_rng_state(), "cuda": [torch.arange(8, dtype=torch.uint8)]}
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    with pytest.raises(ValueError, match="rng.cuda"):
+        restore_rng_state(state)
+
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
+    with pytest.raises(ValueError, match="장치 수"):
+        restore_rng_state(state)
+
+    put: list = []
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+    monkeypatch.setattr(torch.cuda, "set_rng_state_all", put.extend)
+    restore_rng_state(state)
+    assert [t.tolist() for t in put] == [list(range(8))]
+    assert all(t.dtype == torch.uint8 for t in put)
+
+
+def test_restore_still_reads_a_checkpoint_written_before_the_cuda_generator_was_saved():
+    """R2까지의 checkpoint에는 `cuda` 키가 없다 — 그것들을 계속 이어갈 수 있어야 한다 (Task R3a A1·C1)."""
+    old = {key: value for key, value in collect_rng_state().items() if key != "cuda"}
+    assert "cuda" not in old
+    restore_rng_state(old)  # 거절하지 않는다
+
+
+def test_cuda_rng_round_trip_reproduces_the_next_draws_on_this_box():
+    """CUDA가 있으면 **실제 generator로** 왕복을 본다; 없으면 CPU 대체 경로의 구조를 본다 (Task R3a A1).
+
+    건너뛰지 않는다 — 상자가 무엇이든 이 시험은 무언가를 확인한다.
+    """
+    if not torch.cuda.is_available():
+        assert "cuda" not in collect_rng_state()
+        return
+    torch.cuda.manual_seed_all(11)
+    snapshot = collect_rng_state()
+    assert "cuda" in snapshot
+    expected = torch.rand(4, device="cuda").cpu()
+    torch.rand(64, device="cuda")  # generator를 앞으로 민다
+    restore_rng_state(snapshot)
+    assert torch.equal(expected, torch.rand(4, device="cuda").cpu())
+
+
 # --------------------------------------------------------------------------
 # 스트림 상태 (진행 중이던 에피소드의 구간 위치·상태)
 # --------------------------------------------------------------------------

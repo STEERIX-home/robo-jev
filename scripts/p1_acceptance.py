@@ -94,13 +94,37 @@ REDERIVED_CRITERIA_SETS: tuple[tuple[str, ...], ...] = (("loss", "param"), ("par
 
 #: 그 범위에서 **재시작 없이** 잰 같은 step 수의 쌍들의 최악 |Δloss| — 기록된 loss 옆에 함께 찍어
 #: "이 차이가 잡음 안인가"를 읽게 한다 (R2 A1e, `artifacts/reports/r2-diagnostic.json` + `r2-acceptance.json`).
+#:
+#: **R3a A2에서 넷으로 늘었다.** R2 fix round 1의 재검사가 이 경로의 **넷째** 6-step 무재시작 run을 남겼고
+#: (`artifacts/reports/r2-acceptance-recheck.json`의 `continuous`), A1d의 `continuous`와 짝지으면 최악 |Δ|
+#: **0.446030**(30.05 %)로 앞의 셋보다 크다. R2는 그 쌍을 "기록하되 등록하지 않는다"로 두었는데(그 라운드의
+#: 규칙 변경 직후였다), 진단 퍼짐은 **판정을 지지 않으므로** 다음 라운드가 기록된 값을 그대로 등록한다.
+#:
+#: **등록하는 것은 기록에 이름이 있는 네 쌍뿐이다.** 같은 네 run에서 나오는 나머지 두 짝(`diag a` 대 fix1
+#: **0.524645**, `diag b` 대 fix1 **0.312429**)은 여기 넣지 않는다 — 진단은 "이 차이가 잡음 안인가"를 묻고,
+#: 퍼짐을 넓히는 것은 그 답을 **너그럽게** 만드는 방향이다. 좁게 두는 쪽이 보수적이고, 보고서가 여섯 짝을 모두
+#: 적는다 (Task R3a A2).
 NO_RESTART_LOSS_SPREAD: dict[str, dict[str, Any]] = {
     "t1": {
         "steps": 6,
-        "unit": "three separate processes, same config and seed, **no restart**; every pairing",
-        "source": "artifacts/reports/r2-diagnostic.json + the resume check's own `continuous` run",
-        "worst_loss_abs": [0.078615, 0.330375, 0.408990],
-        "worst_loss_rel": [0.049404, 0.238616, 0.244923],
+        "unit": "four separate processes, same config and seed, **no restart**; the pairings the record names",
+        "source": (
+            "artifacts/reports/r2-diagnostic.json (`a`, `b`) + artifacts/reports/r2-acceptance.json "
+            "(the resume check's own `continuous`) + artifacts/reports/r2-acceptance-recheck.json (`continuous`)"
+        ),
+        "pairings": [
+            "r2-acceptance `continuous` vs r2-diagnostic `a`",
+            "r2-acceptance `continuous` vs r2-diagnostic `b`",
+            "r2-diagnostic `a` vs r2-diagnostic `b`",
+            "r2-acceptance `continuous` vs r2-acceptance-recheck `continuous` (R2 fix round 1)",
+        ],
+        "worst_loss_abs": [0.078615, 0.330375, 0.408990, 0.446030],
+        "worst_loss_rel": [0.049404, 0.238616, 0.244923, 0.300474],
+        "not_registered": {
+            "why": "the record names four pairings; widening a diagnostic spread only makes it more permissive",
+            "r2-diagnostic `a` vs r2-acceptance-recheck `continuous`": 0.524645,
+            "r2-diagnostic `b` vs r2-acceptance-recheck `continuous`": 0.312429,
+        },
     },
 }
 
@@ -120,10 +144,22 @@ TOLERANCE_SAFETY_FACTOR = 2.0
 MINIMUM_BASELINE_PAIRS = 3
 RESUME_TOLERANCE_RULE = (
     "run the same config twice with no restart (two separate processes, same seed) and measure the run-to-run "
-    "spread; do this at least MINIMUM_BASELINE_PAIRS times on that scope's path; then, for each criterion, take "
+    "spread; do this at least MINIMUM_BASELINE_PAIRS times on that scope's path, and run each baseline pair "
+    "with the same max_steps as the comparison it will license; then, for each criterion, take "
     "the worst value over every measured pair, multiply by TOLERANCE_SAFETY_FACTOR, round up to one significant "
     "figure, and never go below the t0 tolerance. A pair that could not measure a criterion does not contribute "
     "to it. Fixed in this file before the pair that completes the set was measured."
+)
+#: 위 규칙의 **`max_steps`를 맞춘다**는 조항이 언제·왜 들어왔는가 (R2 A1e의 남은 반쪽, Task R3a A2에서 닫는다).
+#: `max_steps`가 warmup과 cosine 일정을 정하므로 5 step으로 잰 쌍과 6 step으로 판정하는 비교는 **다른 run**이다 —
+#: 실제로 이 경로의 무재시작 최악 |Δloss|는 5 step에서 0.0236~0.0766, 6 step에서 0.0786~0.4460으로 한 자릿수
+#: 가까이 벌어진다. 그래서 등록된 `t1` loss 오차(0.2 / 0.08)는 **이 조항 이전에**, 3·5·5 step 쌍에서 나온 값이고
+#: 6 step 비교를 판정할 자격이 없다 — 그것이 R2 A1g가 `t1`의 판정에서 loss를 뺀 이유와 같은 사실이다. 값은
+#: 그대로 두고(느슨해지지도 조여지지도 않았다) 역할만 진단이다. 판정은 정수 기준 + parameter 기준이 진다.
+RESUME_TOLERANCE_SAME_STEPS_NOTE = (
+    "the registered t1 loss tolerance (0.2 / 0.08) was derived from 3/5/5-step pairs, i.e. before this clause; "
+    "it is reported, not judged (RESUME_VERDICT_CRITERIA['t1'] = ('param',)), and re-deriving it would need "
+    "baseline pairs measured at the comparison's own max_steps, before that comparison is run."
 )
 
 #: 이 범위의 경로에서 **이미 잰** 재시작 없는 쌍들 — 값은 저장된 보고서에서 읽었고, 어디서 왔는지가 함께 적혀
@@ -490,6 +526,8 @@ def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: 
             "no_restart_worst": (max(NO_RESTART_LOSS_SPREAD[mode]["worst_loss_abs"]) if mode in NO_RESTART_LOSS_SPREAD else None),
             "inside_no_restart_spread": (worst_loss <= max(NO_RESTART_LOSS_SPREAD[mode]["worst_loss_abs"]) if mode in NO_RESTART_LOSS_SPREAD else None),
             "same_steps": (NO_RESTART_LOSS_SPREAD[mode]["steps"] == int(steps) if mode in NO_RESTART_LOSS_SPREAD else None),
+            # 등록된 오차가 **이 비교와 같은 `max_steps`에서** 나온 값인지 — 아니면 그 사실이 산출물에 적힌다 (R3a A2)
+            "tolerance_same_max_steps_note": (None if "loss" in carried else RESUME_TOLERANCE_SAME_STEPS_NOTE),
         },
         "would_pass_under": {name: (exact and _within(value, criteria=RESUME_VERDICT_CRITERIA.get(name, ("loss", "param")))) for name, value in sorted(RESUME_TOLERANCES.items())},
         "losses": loss_rows, "worst_loss_abs": worst_loss, "worst_loss_rel": worst_loss_rel,
