@@ -73,10 +73,10 @@ P2가 산술로 닫았다) — 곧 이것은 **전체를 학습한 2B 대 readou
 **Task R3b(2026-09-23)가 클라우드 실행기를 만들었다 — 그리고 한 푼도 쓰지 않았다.** R3a가 seed·epoch를 반복하는 동안
 CPU에서 `scripts/launch_run.py {prepare,launch,status,fetch,cancel,resume}` · `src/robo_jev/launch/` ·
 `infra/run-manifest.schema.json`을 만들고 **localhost 왕복**으로 인수했다(SSH 백엔드, `configs/train/tiny_cpu.yaml`
-5 step 141.96 s, 다섯 산출물 sha256 전부 일치). 고의 실패 넷도 실제로 냈다: 벽시계 상한 · USD 상한 · `kill -9` ·
+5 step **145.688 s**(러너 자신의 시계로 잰 경과 — 학습기의 `metrics.json`은 144.85 s다), 다섯 산출물 sha256 전부 일치). 고의 실패 넷도 실제로 냈다: 벽시계 상한 · USD 상한 · `kill -9` ·
 확인되지 않은 `cancel`(→ `unknown`). 읽는 법 셋. (1) **상한을 재는 것은 실행기가 아니라 원격 러너다** — 벽시계·GPU
 시간·USD 셋이 하나의 마감으로 환산되고(`max_usd / hourly_usd` 등) 가장 이른 것이 구속하며, 넘으면 원격이 스스로
-checkpoint를 쓰고 `failed(reason=budget)`으로 끝난다. 노트북을 닫아도 지켜진다. (2) **`cancel`은 확인될 때까지
+checkpoint를 쓰고 `failed(reason=budget)`으로 끝난다. 노트북을 닫아도 지켜진다. 그리고 **아무 상한도 구속하지 않는 run은 `prepare`가 거절한다**(`--no-cap`으로 이름을 부르면 그 사실이 명세에 남는다); **재개의 남은 예산도 부모가 실제로 쓴 시간**(가져온 `state.json`)에서 빼며, 그것이 관측된 적 없으면 `status`부터 하라고 거절한다. (2) **`cancel`은 확인될 때까지
 기다린다** — 확인하지 못하면 `cancelled`가 아니라 **`unknown`**이고 종료 코드 3으로 사람을 부른다(돈이 계속 나갈 수
 있다). (3) **데이터는 묶음에 담기지 않는다** — 경로와 sha256만 가고 원격이 시작 전에 대조하며, 다르면
 `failed(reason=inputs)`로 학습을 시작조차 하지 않는다.
