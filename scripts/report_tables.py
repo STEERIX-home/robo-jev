@@ -13,6 +13,7 @@ JSON에서 읽는다.
 
     uv run python scripts/report_tables.py strata   artifacts/reports/r2-decision-cell-strata.json "2B T1 fp32 master (233 = 1 epoch)"
     uv run python scripts/report_tables.py loo      artifacts/reports/r2-decision-cell-strata.json "2B T1 fp32 master (233 = 1 epoch)"
+    uv run python scripts/report_tables.py seeds    artifacts/reports/r3a-decision-cell-strata.json artifacts/reports/r3a-dev-cell-strata.json
     uv run python scripts/report_tables.py events   artifacts/reports/r2-reeval-2b-t1-fp32-233.json robot/ood_dev
     uv run python scripts/report_tables.py unsafe   artifacts/reports/r2-reeval-2b-t1-fp32-233.json robot/ood_dev
     uv run python scripts/report_tables.py contrast artifacts/reports/r2-contrast-2b-t1-233.json
@@ -123,6 +124,46 @@ def loo_table(data: dict[str, Any], run: str) -> str:
     return "\n".join(lines)
 
 
+def seed_table(cell: dict[str, Any], dev: dict[str, Any] | None = None) -> str:
+    """run마다 **자기 구간을 한 줄에** — seed 표(Task R3a D1)와 epoch 표(D2)가 같은 모양이다.
+
+    **세 seed의 값으로 구간을 만들지 않는다.** 이 표는 seed마다 자기 편 단위 쌍 부트스트랩 구간을 나란히
+    놓을 뿐이고, "0을 제외한다"는 줄마다 따로 읽는다 — 한 줄이라도 0을 포함하면 그 줄의 값과 함께
+    "아직 seed 의존적"이라고 적는다. 마지막 두 칸은 **판정 칸이 아닌** 둘째 칸(`dev`)의 같은 여유다.
+    """
+    lines = ["| run | primary n | model | **instruction-shuffle margin (paired 95 %)** | 0? | `grasp` margin | 0? | state-shuffle margin | 0? | LOO worst (instruction) | `dev` cell margin | 0? |",
+             "| --- | ---: | ---: | ---: | :---: | ---: | :---: | ---: | :---: | --- | ---: | :---: |"]
+    for name, block in cell.get("runs", {}).items():
+        if not block.get("available"):
+            lines.append(f"| {name} | — | — | **missing** | — | — | — | — | — | — | — | — |")
+            continue
+        primary = block["non_commitment"]
+        grasp = (block.get("primary_stratum_by_key_family") or {}).get("grasp") or {}
+        instruction, instruction_zero = ci(primary, "instruction_shuffle")
+        grasp_text, grasp_zero = ci(grasp, "instruction_shuffle")
+        state, state_zero = ci(primary, "state_shuffle")
+        loo = ((block.get("primary_stratum_leave_one_episode_out_by_control") or {}).get("instruction_shuffle") or {})
+        worst = loo.get("worst_drop") or {}
+        interval = worst.get("margin_ci") or []
+        loo_text = "—" if not worst else (
+            f"`{worst['episode_id']}` {worst['margin']:+.4f}"
+            + (f" [{interval[0]:+.4f}, {interval[1]:+.4f}]" if interval else "")
+            + ("" if not worst.get("margin_includes_zero") else " **(contains 0)**")
+        )
+        if loo and not loo.get("every_drop_excludes_zero"):
+            loo_text += " — **not every drop excludes zero**"
+        second = ((dev or {}).get("runs", {}).get(name) or {})
+        if second.get("available"):
+            dev_text, dev_zero = ci(second["non_commitment"], "instruction_shuffle")
+        else:
+            dev_text, dev_zero = "—", "—"
+        lines.append("| " + " | ".join([
+            name, str(primary["n"]), f(primary.get("model")), f"**{instruction}**", instruction_zero,
+            grasp_text, grasp_zero, state, state_zero, loo_text, dev_text, dev_zero,
+        ]) + " |")
+    return "\n".join(lines)
+
+
 def events_table(data: dict[str, Any], split: str) -> str:
     """사건 지표 표 — 반응 지연·안정성·`q_stop`. `q_stop`은 중앙 지연 **옆에 검열**을 달고 나온다."""
     metrics = data["evaluation"]["splits"][split]["event_metrics"]
@@ -197,7 +238,7 @@ def _load(path: Any) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] not in ("strata", "loo", "events", "unsafe", "contrast"):
+    if not argv or argv[0] not in ("strata", "loo", "seeds", "events", "unsafe", "contrast"):
         print(__doc__, file=sys.stderr)
         return 2
     what, rest = argv[0], argv[1:]
@@ -205,6 +246,8 @@ def main(argv: list[str] | None = None) -> int:
         print(strata_table(_load(rest[0]), rest[1]))
     elif what == "loo":
         print(loo_table(_load(rest[0]), rest[1]))
+    elif what == "seeds":
+        print(seed_table(_load(rest[0]), _load(rest[1]) if len(rest) > 1 else None))
     elif what == "events":
         print(events_table(_load(rest[0]), rest[1]))
     elif what == "unsafe":
