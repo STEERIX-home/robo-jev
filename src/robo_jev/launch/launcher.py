@@ -17,7 +17,14 @@
 알린다. 돈이 계속 나가고 있을 수 있기 때문이다.
 
 **resume의 규칙** (R2의 재개 게이트와 같은 자리): 이어 갈 checkpoint는 이 명세의 `artifacts`에 **등록되고
-sha256이 대조된** 것이어야 한다. 아무 파일에서나 잇지 않는다.
+sha256이 대조된** 것이어야 한다. 아무 파일에서나 잇지 않는다. 자식의 상한은 부모가 **실제로 쓴 만큼**을 뺀
+나머지이고, 그 '쓴 만큼'은 관측된 값에서만 온다(:func:`observed_spend_seconds`) — 관측이 없으면 0으로 치지 않고
+거절한다(:class:`SpendNotObserved`).
+
+**상한의 규칙** (돈 울타리): `prepare`는 **구속하는 상한이 하나도 없는 run을 거부한다**
+(:class:`UncappedRun`). 상한 없이 돌리는 것은 `--no-cap`으로 **이름을 불러** 요청했을 때만 되고, 그 사실이
+명세의 `notes`와 `prepared` 줄에 남는다. `max_usd`를 주면서 단가가 0인 모순도 같은 자리에서 거절한다 —
+그 짝은 '비용 상한을 조용히 버린다'는 뜻이기 때문이다.
 """
 
 from __future__ import annotations
@@ -52,21 +59,39 @@ from robo_jev.launch.providers.base import Backend, Handle
 
 __all__ = [
     "CancelNotConfirmed",
+    "SpendNotObserved",
+    "UncappedRun",
     "artifact_plan",
     "bundle_dir",
+    "check_caps",
     "portable_path",
     "cancel",
     "fetch",
     "launch",
+    "observed_spend_seconds",
     "prepare",
     "remaining_budget",
     "resume",
     "status",
 ]
 
+#: 상한 없이 도는 run의 명세에 남는 줄. `--no-cap`으로 이름을 불렀을 때만 쓰인다.
+NO_CAP_NOTE = (
+    "**상한 없이 승인되었다 (`--no-cap`)** — 세 상한 중 구속하는 것이 하나도 없다: 이 run은 `max_steps` 말고는 "
+    "스스로 멈출 것이 없다. 유료 상자에서는 사람이 콘솔을 지켜야 한다"
+)
+
 
 class CancelNotConfirmed(RuntimeError):
     """멈춤을 확인하지 못했다 — 상태는 `unknown`이고 사람이 봐야 한다."""
+
+
+class UncappedRun(ValueError):
+    """구속하는 상한이 없다(또는 상한과 단가가 모순이다) — 이대로는 명세를 만들지 않는다."""
+
+
+class SpendNotObserved(ValueError):
+    """부모 run이 얼마나 썼는지 한 번도 관측되지 않았다 — 0으로 치면 자식이 상한을 통째로 다시 받는다."""
 
 
 def portable_path(path: str | Path) -> str:
@@ -117,6 +142,35 @@ def artifact_plan(run_id: str) -> list[dict[str, Any]]:
     ]
 
 
+def check_caps(budget: Budget, *, run_id: str, allow_no_cap: bool = False) -> tuple[float | None, str | None]:
+    """상한이 이 run을 실제로 멈출 수 있는지 본다. 못 멈추면 :class:`UncappedRun`이다.
+
+    돈이 새는 길은 둘이고 둘 다 **조용하다**: (1) 상한을 하나도 주지 않으면 마감이 `None`이라 원격 러너의
+    `should_stop`이 영영 `"budget"`을 돌려주지 않는다 — `max_steps` 말고는 그 run을 멈출 것이 없다.
+    (2) `--max-usd`를 주면서 단가가 0이면 그 상한은 **버려진다**(0으로 나누지 않으려고 구속하지 않게 두기
+    때문이다). 사람이 돈 상한을 적었는데 아무것도 구속하지 않는 것은 모순이므로 여기서 거절한다.
+
+    상한 없이 도는 것 자체는 막지 않는다 — 다만 `allow_no_cap`(CLI의 `--no-cap`)으로 **이름을 불러야** 한다.
+    돌려주는 것은 (마감 시간, 구속한 상한의 이름)이다.
+    """
+    deadline, binding = budget_deadline_hours(budget)
+    if budget.max_usd is not None and float(budget.hourly_usd) <= 0:
+        raise UncappedRun(
+            f"{run_id}: --max-usd {budget.max_usd}를 줬는데 시간 단가가 {budget.hourly_usd}다 — 0 단가로는 비용 "
+            "상한이 아무것도 구속하지 않는다(0으로 나눌 수 없어 버려진다). 콘솔의 단가를 --hourly-usd에 적거나, "
+            "값이 없으면 --max-usd 대신 --max-wall-hours로 상한을 건다"
+        )
+    if deadline is None and not allow_no_cap:
+        raise UncappedRun(
+            f"{run_id}: 구속하는 상한이 하나도 없다 — "
+            f"max_wall_hours={budget.max_wall_hours}, max_gpu_hours={budget.max_gpu_hours}(gpus={budget.gpus}), "
+            f"max_usd={budget.max_usd}(hourly_usd={budget.hourly_usd}). 이대로 띄우면 max_steps 말고는 이 run을 "
+            "멈출 것이 없고, 유료 상자에서는 그것이 돈이 계속 나간다는 뜻이다. --max-wall-hours/--max-gpu-hours/"
+            "--max-usd 중 하나를 구속하게 주거나, 정말 상한 없이 돌릴 작정이면 --no-cap으로 그렇게 말한다"
+        )
+    return deadline, binding
+
+
 def prepare(
     *,
     config: dict[str, Any],
@@ -132,16 +186,25 @@ def prepare(
     notes: list[str] | None = None,
     resume_from: str | None = None,
     parent_run_id: str | None = None,
+    allow_no_cap: bool = False,
 ) -> dict[str, Any]:
     """명세를 만들고 묶음을 정리한다. GPU도 원격도 건드리지 않는다 — 여기까지는 전부 로컬이다.
 
     묶음(`<manifest 디렉터리>/bundle/`)에 드는 것: 푼 학습 설정(`config.yaml`), 이 명세(`manifest.json`),
     데이터 manifest **파일**의 사본(`datasets/`), 실제 tokenizer 파일(`tokenizer/`). **데이터 레코드는 담지
     않는다** — 명세에 경로와 sha256만 적고 원격 러너가 시작 전에 대조한다.
+
+    상한은 **여기서** 검사한다(:func:`check_caps`) — 아무것도 구속하지 않는 명세는 만들어지지 않는다. 파일을
+    건드리기 전, 무거운 import보다도 먼저 본다.
     """
+    deadline, _binding = check_caps(budget, run_id=run_id, allow_no_cap=allow_no_cap)
+
     from robo_jev.model.contract_digest import contract_digest
     from robo_jev.train import resolve_config, tokenizer_block
 
+    notes = list(notes or [])
+    if deadline is None:
+        notes.append(NO_CAP_NOTE)
     config = copy.deepcopy(config)
     config["run_id"] = run_id
     if resume_from is not None:
@@ -203,10 +266,11 @@ def prepare(
         },
         artifacts=artifact_plan(run_id),
         backend={**backend.describe(), "unit": run_id, "launcher": None, "pid": None, "provider": "existing-box", "instance_id": None},
-        notes=list(notes or []),
+        notes=notes,
         parent_run_id=parent_run_id,
     )
-    note_state(manifest, "prepared", note=f"{Path(config_path).name} · {len(datasets)} dataset manifest · 마감 {budget_deadline_hours(budget)[0]} h")
+    cap_note = f"마감 {deadline} h" if deadline is not None else "**상한 없음 (--no-cap)** — max_steps 말고는 멈출 것이 없다"
+    note_state(manifest, "prepared", note=f"{Path(config_path).name} · {len(datasets)} dataset manifest · {cap_note}")
 
     bundle = bundle_dir(manifest_path)
     if bundle.exists():
@@ -478,10 +542,52 @@ def cancel(
 # --------------------------------------------------------------------------
 
 
+def observed_spend_seconds(manifest: dict[str, Any]) -> tuple[float, str]:
+    """부모 run이 **실제로** 쓴 경과 초와 그것을 어디서 읽었는지.
+
+    권위 있는 값은 가져온 `state.json`이다 — 원격 러너가 자기 시계로 마지막 step까지 쓴 것이고 `fetch`가
+    sha256으로 대조한 파일이다. `progress`는 마지막 `status` 때의 값이라 그 뒤로 더 돈 시간이 빠져 있고,
+    `fetch`는 `progress`를 쓰지 않으므로 **launch → fetch만 한 run은 `progress`가 아예 비어 있다**
+    (그때 0으로 치면 자식이 부모의 상한을 통째로 다시 받는다 — 재개 사슬이 승인된 만큼의 N배를 쓰는 길이다).
+
+    둘 다 있으면 **큰 쪽**을 쓴다: 적게 세는 쪽이 돈이 새는 방향이기 때문이다. 관측이 하나도 없으면
+    :class:`SpendNotObserved` — 0은 '안 썼다'가 아니라 '모른다'이다.
+    """
+    seen: list[tuple[float, str]] = []
+
+    for entry in manifest.get("artifacts") or []:
+        if entry.get("kind") != "state" or not entry.get("local"):
+            continue
+        if entry.get("sha256_match") is False:  # 대조에 실패한 파일은 증거가 아니다
+            continue
+        path = Path(entry["local"])
+        if not path.is_file():
+            continue
+        try:
+            elapsed = json.loads(path.read_text(encoding="utf-8")).get("elapsed_seconds")
+        except (OSError, json.JSONDecodeError, AttributeError):  # pragma: no cover - 깨진 파일
+            continue
+        if isinstance(elapsed, (int, float)) and not isinstance(elapsed, bool):
+            seen.append((float(elapsed), f"가져온 {entry['remote']}"))
+
+    polled = (manifest.get("progress") or {}).get("elapsed_seconds")
+    if isinstance(polled, (int, float)) and not isinstance(polled, bool):
+        seen.append((float(polled), "progress (마지막 status)"))
+
+    if not seen:
+        raise SpendNotObserved(
+            f"{manifest.get('run_id')}: 이 run이 얼마나 썼는지 한 번도 관측되지 않았다 "
+            "(`progress`도 비었고 가져온 state.json도 없다) — 0으로 치면 자식이 부모의 상한을 **통째로 다시** "
+            "받는다. 먼저 `status`(또는 `fetch`)로 부모가 쓴 시간을 확인한 뒤 재개한다"
+        )
+    return max(seen, key=lambda pair: pair[0])
+
+
 def remaining_budget(manifest: dict[str, Any]) -> Budget:
     """부모 run이 쓴 만큼을 뺀 나머지 상한 — 자식 run이 원래 상한을 두 번 쓰지 않게."""
     budget = Budget.from_manifest(manifest)
-    spent = budget_spend(budget, float(manifest.get("progress", {}).get("elapsed_seconds") or 0.0))
+    elapsed, _source = observed_spend_seconds(manifest)
+    spent = budget_spend(budget, elapsed)
 
     def _left(cap: float | None, used: float) -> float | None:
         if cap is None:
@@ -537,7 +643,13 @@ def resume(
 
     상한의 기본값은 부모가 쓴 만큼을 뺀 나머지다(:func:`remaining_budget`) — 재개가 예산을 조용히 새로
     시작하지 않는다. 사람이 예산을 **다시 승인**했으면 `budget`을 주고, 그 사실이 명세의 `notes`에 남는다.
+
+    부모의 지출은 관측된 것에서만 읽는다(:func:`observed_spend_seconds`) — 한 번도 관측되지 않았으면
+    checkpoint를 올리기 **전에** 거절한다(:class:`SpendNotObserved`). 그래야 자식이 부모의 상한을 통째로
+    다시 받는 일이, 다시 승인했을 때만 일어난다.
     """
+    # 부모가 얼마나 썼는지부터 본다 — 원격에 아무것도 올리기 전에 거절할 것은 거절한다.
+    spent_seconds, spent_source = observed_spend_seconds(parent)
     entry = registered_checkpoint(parent, checkpoint)
     # 자식은 **자기** 원격 디렉터리를 쓴다 — 부모의 state.json·로그·산출물을 덮어쓰지 않는다.
     child_backend = backend.with_remote_dir(str(Path(backend.remote_dir).parent / run_id))
@@ -559,9 +671,16 @@ def resume(
         manifest_path=manifest_path,
         overrides=(parent.get("train_config") or {}).get("overrides") or {},
         price_source=(parent.get("budget") or {}).get("price_source"),
-        notes=[*(notes or []), f"{parent['run_id']}의 checkpoint({entry['name']}, sha256 {entry['sha256'][:12]}…)에서 이어간다", *extra],
+        notes=[
+            *(notes or []),
+            f"{parent['run_id']}의 checkpoint({entry['name']}, sha256 {entry['sha256'][:12]}…)에서 이어간다",
+            f"부모가 쓴 시간 {round(spent_seconds, 3)} s를 {spent_source}에서 읽어 상한에서 뺐다",
+            *extra,
+        ],
         resume_from=child_backend.path(remote_relpath),
         parent_run_id=parent["run_id"],
+        # 부모가 이미 상한 없이 승인된 run이었으면 자식도 그렇다 — 그 밖에는 자식도 구속하는 상한이 있어야 한다.
+        allow_no_cap=budget_deadline_hours(Budget.from_manifest(parent))[0] is None,
     )
     require_valid(manifest)
     return manifest

@@ -36,6 +36,8 @@ if str(REPO / "src") not in sys.path:  # `uv run python scripts/…`로도 돌�
 
 from robo_jev.launch.launcher import (  # noqa: E402
     CancelNotConfirmed,
+    SpendNotObserved,
+    UncappedRun,
     cancel,
     fetch,
     launch,
@@ -193,10 +195,14 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--remote-repo", dest="remote_repo", default=None, help="원격 저장소 체크아웃")
     prep.add_argument("--remote-python", dest="remote_python", default=None, help="원격 파이썬 (미리 준비된 venv, 또는 'uv run python')")
     prep.add_argument("--gpus", type=int, default=0)
-    prep.add_argument("--hourly-usd", dest="hourly_usd", type=float, required=True, help="노드 시간 단가 (USD/h). 0이면 비용 상한은 구속하지 않는다")
+    prep.add_argument("--hourly-usd", dest="hourly_usd", type=float, required=True, help="노드 시간 단가 (USD/h). 0이면 비용 상한을 걸 수 없다 (--max-usd와 함께 주면 거절한다)")
     prep.add_argument("--max-wall-hours", dest="max_wall_hours", type=float, default=None)
     prep.add_argument("--max-gpu-hours", dest="max_gpu_hours", type=float, default=None)
     prep.add_argument("--max-usd", dest="max_usd", type=float, default=None)
+    prep.add_argument(
+        "--no-cap", dest="no_cap", action="store_true",
+        help="구속하는 상한 없이 돌리겠다고 **이름 붙여** 말한다 (기본은 거절이다). 그 사실이 명세의 notes와 prepared 줄에 남는다",
+    )  # fmt: skip
     prep.add_argument("--price-source", dest="price_source", default=None, help="단가의 출처 (docs/05 §5 표 / 콘솔)")
     prep.add_argument("--seconds-per-step", dest="seconds_per_step", type=float, default=None, help="예상 비용 계산에 쓸 step당 초")
     prep.add_argument("--assumption", default=None, help="그 예상이 어떤 가정 위의 값인지")
@@ -255,11 +261,16 @@ def main(argv: list[str] | None = None) -> int:
         backend = _backend_from_args(args)
         budget = Budget(hourly_usd=args.hourly_usd, gpus=args.gpus, max_wall_hours=args.max_wall_hours,
                         max_gpu_hours=args.max_gpu_hours, max_usd=args.max_usd)  # fmt: skip
-        manifest = prepare(
-            config=config, config_path=args.config, run_id=args.run_id, backend=backend, budget=budget,
-            manifest_path=args.manifest, overrides=overrides, price_source=args.price_source,
-            seconds_per_step=args.seconds_per_step, assumption=args.assumption, notes=args.note,
-        )  # fmt: skip
+        try:
+            manifest = prepare(
+                config=config, config_path=args.config, run_id=args.run_id, backend=backend, budget=budget,
+                manifest_path=args.manifest, overrides=overrides, price_source=args.price_source,
+                seconds_per_step=args.seconds_per_step, assumption=args.assumption, notes=args.note,
+                allow_no_cap=args.no_cap,
+            )  # fmt: skip
+        except UncappedRun as exc:
+            # 돈 울타리에 걸렸다 — 명세를 만들지 않고 이유를 말하며 0이 아닌 코드로 끝난다.
+            raise SystemExit(f"[launch_run] 상한 거절: {exc}") from None
         _print(manifest)
         return 0
 
@@ -314,8 +325,14 @@ def main(argv: list[str] | None = None) -> int:
                 gpus=parent_budget["gpus"] if args.gpus is None else args.gpus,
                 max_wall_hours=args.max_wall_hours, max_gpu_hours=args.max_gpu_hours, max_usd=args.max_usd,
             )  # fmt: skip
-        child = resume(manifest, backend, checkpoint=args.checkpoint, run_id=args.run_id, manifest_path=args.out,
-                       config=config, config_path=config_path, notes=args.note, budget=reauthorised)  # fmt: skip
+        try:
+            child = resume(manifest, backend, checkpoint=args.checkpoint, run_id=args.run_id, manifest_path=args.out,
+                           config=config, config_path=config_path, notes=args.note, budget=reauthorised)  # fmt: skip
+        except SpendNotObserved as exc:
+            # 부모가 얼마나 썼는지 모르면 남은 예산도 모른다 — 관측을 먼저 하라고 말하고 끝난다.
+            raise SystemExit(f"[launch_run] 재개 거절: {exc}") from None
+        except UncappedRun as exc:
+            raise SystemExit(f"[launch_run] 상한 거절: {exc}") from None
         if args.launch:
             child = launch(child, backend_from_manifest(child), manifest_path=args.out)
         _print(child)

@@ -26,12 +26,15 @@ from helpers import REPO
 from robo_jev.launch import launcher as launcher_module
 from robo_jev.launch.launcher import (
     CancelNotConfirmed,
+    SpendNotObserved,
+    UncappedRun,
     artifact_plan,
     bundle_dir,
     portable_path,
     cancel,
     fetch,
     launch,
+    observed_spend_seconds,
     prepare,
     registered_checkpoint,
     remaining_budget,
@@ -76,7 +79,8 @@ def local_backend(tmp_path: Path, run_id: str) -> LocalBackend:
     return LocalBackend(remote_dir=str(tmp_path / "remote" / run_id), remote_repo=str(REPO), remote_python=sys.executable, gpus=0)
 
 
-def prepared(tmp_path: Path, run_id: str = "r3b-unit", *, budget: Budget | None = None, backend: Backend | None = None, **overrides) -> tuple[dict, Backend, Path]:
+def prepared(tmp_path: Path, run_id: str = "r3b-unit", *, budget: Budget | None = None, backend: Backend | None = None,
+             allow_no_cap: bool = False, **overrides) -> tuple[dict, Backend, Path]:  # fmt: skip
     backend = backend or local_backend(tmp_path, run_id)
     manifest_path = tmp_path / f"{run_id}.json"
     manifest = prepare(
@@ -86,6 +90,7 @@ def prepared(tmp_path: Path, run_id: str = "r3b-unit", *, budget: Budget | None 
         backend=backend,
         budget=budget or Budget(hourly_usd=0.0, gpus=0, max_wall_hours=1.0),
         manifest_path=manifest_path,
+        allow_no_cap=allow_no_cap,
     )
     return manifest, backend, manifest_path
 
@@ -225,6 +230,53 @@ def test_remaining_budget_subtracts_what_the_parent_already_spent():
     assert (left.max_wall_hours, left.max_gpu_hours, left.max_usd) == (3.0, 6.0, 6.0)
     manifest["progress"] = {"elapsed_seconds": 40000.0}  # 다 썼어도 음수가 되지 않는다
     assert remaining_budget(manifest).max_wall_hours > 0
+
+
+# --------------------------------------------------------------------------
+# 돈 울타리 — 아무것도 구속하지 않는 명세는 만들어지지 않는다 (리뷰 1의 I3)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "budget, needle",
+    [
+        # 상한을 아예 주지 않았다 — 원격의 마감이 None이라 `should_stop`이 영영 budget을 돌려주지 않는다.
+        (Budget(hourly_usd=2.5, gpus=1), "구속하는 상한이 하나도 없다"),
+        # 상한은 줬는데 나눌 divisor가 0이라 **버려진다** (GPU 0에 GPU-시간 상한).
+        (Budget(hourly_usd=0.0, gpus=0, max_gpu_hours=5.0), "구속하는 상한이 하나도 없다"),
+        # 돈 상한을 적었는데 단가가 0이다 — 사람이 적은 상한이 조용히 사라지는 짝이다.
+        (Budget(hourly_usd=0.0, gpus=1, max_usd=5.0), "0 단가로는 비용 상한이"),
+    ],
+)
+def test_prepare_refuses_a_run_that_no_cap_can_stop(tmp_path, budget, needle):
+    """`prepare`가 만드는 것은 "돈을 쓰기 전에 못 박아 두는 것"이다 — 못 박히지 않은 명세는 만들지 않는다."""
+    with pytest.raises(UncappedRun, match=needle):
+        prepared(tmp_path, "r3b-uncapped", budget=budget)
+    assert list(tmp_path.iterdir()) == [], "거절했으면 명세도 묶음도 남기지 않는다"
+
+
+def test_the_cli_refuses_an_uncapped_prepare_and_says_why(tmp_path):
+    """두 실수 모두 CLI에서 0이 아닌 종료 코드로 끝난다 — 상한을 잊는 것과 `--max-usd`에 단가 0을 짝짓는 것."""
+    base = [sys.executable, str(REPO / "scripts" / "launch_run.py"), "prepare", "--config", str(TINY_CONFIG),
+            "--run-id", "r3b-cli-uncapped", "--manifest", str(tmp_path / "run.json"), "--backend", "local"]  # fmt: skip
+    for extra, needle in (
+        (["--hourly-usd", "0"], "구속하는 상한이 하나도 없다"),
+        (["--hourly-usd", "0", "--max-usd", "5"], "0 단가로는"),
+    ):
+        result = subprocess.run([*base, *extra], capture_output=True, text=True, check=False)
+        assert result.returncode != 0, result.stdout
+        assert needle in result.stderr + result.stdout
+        assert not (tmp_path / "run.json").exists()
+
+
+def test_an_uncapped_run_is_possible_but_only_by_name_and_it_is_written_down(tmp_path):
+    """`--no-cap`은 상한 없이 돌 **권한**이 아니라 그렇게 하겠다는 **기록**이다 — 명세와 장부 양쪽에 남는다."""
+    manifest, _, manifest_path = prepared(tmp_path, "r3b-nocap", budget=Budget(hourly_usd=0.0, gpus=0), allow_no_cap=True)
+    assert validate(manifest) == []
+    assert budget_deadline_hours(Budget.from_manifest(manifest)) == (None, None)
+    assert any("--no-cap" in note for note in manifest["notes"]), manifest["notes"]
+    assert "상한 없음" in manifest["history"][-1]["note"]
+    assert "--no-cap" in load_manifest(manifest_path)["history"][-1]["note"]
 
 
 # --------------------------------------------------------------------------
@@ -561,6 +613,54 @@ def test_resume_refuses_a_registered_checkpoint_whose_bytes_moved(tmp_path):
     manifest["artifacts"][0]["sha256_match"] = False
     with pytest.raises(ValueError, match="대조되지 않았다"):
         registered_checkpoint(manifest, local)
+
+
+def test_the_parents_spend_is_read_from_the_runs_own_state_file_not_from_the_last_poll(tmp_path):
+    """`fetch`는 `progress`를 쓰지 않는다 — `launch → fetch`만 한 run은 `progress`가 **비어 있다**.
+
+    그때 지출을 0으로 치면 자식이 부모의 상한을 통째로 다시 받는다(리뷰 1의 I4: 0.25 h를 그대로 물려받았다).
+    권위 있는 값은 원격 러너가 쓰고 `fetch`가 sha256으로 대조한 `state.json`이다.
+    """
+    state = tmp_path / "fetched" / "state.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text(json.dumps({"state": "failed", "exit_reason": "budget", "elapsed_seconds": 27.866}), encoding="utf-8")
+    manifest = new_manifest(run_id="r3b-observed")
+    manifest["budget"] = {"hourly_usd": 2.0, "gpus": 1, "max_wall_hours": 0.25, "max_gpu_hours": None, "max_usd": None}
+    manifest["artifacts"] = [{"name": "state", "kind": "state", "remote": "state.json", "local": str(state),
+                              "sha256": "a" * 64, "sha256_match": True, "bytes": state.stat().st_size}]  # fmt: skip
+
+    elapsed, source = observed_spend_seconds(manifest)
+    assert (elapsed, "state.json" in source) == (27.866, True)
+    # 27.866 s = 0.0077406 h → 0.25 − 0.0077406 = 0.242259 h. 옛 코드는 여기서 0.25(부모의 상한 전부)를 줬다.
+    assert remaining_budget(manifest).max_wall_hours == pytest.approx(0.242259, abs=5e-7)
+
+    # 마지막 `status`가 더 나중이면 그쪽이 더 크다 — 둘 다 있으면 **적게 세지 않는 쪽**을 쓴다.
+    manifest["progress"] = {"elapsed_seconds": 40.0}
+    assert observed_spend_seconds(manifest)[0] == 40.0
+    manifest["progress"] = {"elapsed_seconds": 10.0}
+    assert observed_spend_seconds(manifest)[0] == 27.866
+
+
+def test_resume_refuses_a_parent_whose_spend_was_never_observed(tmp_path):
+    """관측이 하나도 없으면 '안 썼다'가 아니라 '모른다'다 — 0으로 치지 않고 `status`를 먼저 하라고 말한다."""
+    from robo_jev.launch.manifest import sha256_of
+
+    budget = Budget(hourly_usd=2.0, gpus=1, max_wall_hours=0.25)
+    parent, backend, _ = prepared(tmp_path, "r3b-unobserved", budget=budget)
+    checkpoint = tmp_path / "fetched" / "checkpoint.pt"
+    checkpoint.parent.mkdir(parents=True, exist_ok=True)
+    checkpoint.write_bytes(b"weights")
+    parent["artifacts"] = [{"name": "checkpoint", "kind": "checkpoint", "remote": "runs/p/checkpoint.pt",
+                            "local": str(checkpoint), "sha256": sha256_of(checkpoint), "sha256_match": True, "bytes": 7}]  # fmt: skip
+    parent["progress"] = {}  # launch → fetch만 했다: 합법적인 순서이고 progress는 비어 있다
+
+    with pytest.raises(SpendNotObserved, match="한 번도 관측되지 않았다"):
+        remaining_budget(parent)
+    with pytest.raises(SpendNotObserved, match="status"):
+        resume(parent, backend, checkpoint=checkpoint, run_id="r3b-unobserved-r1",
+               manifest_path=tmp_path / "child.json", config=tiny_config(), config_path=TINY_CONFIG)  # fmt: skip
+    assert not (tmp_path / "child.json").exists()
+    assert not Path(backend.remote_dir).with_name("r3b-unobserved-r1").exists(), "거절 전에 원격에 아무것도 올리지 않는다"
 
 
 def test_the_child_run_gets_its_own_remote_dir_and_the_remaining_budget(tmp_path):
