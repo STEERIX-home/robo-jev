@@ -526,3 +526,65 @@ def test_the_t1_verdict_rests_on_the_exact_and_parameter_criteria_and_reports_th
     # 정수 기준도 그대로 — 뽑힌 단위가 다르면 무슨 일이 있어도 떨어진다
     broken = module.compare_resume(continuous, {**split, "units": [["x", 0]]}, steps=6, mode="t1")
     assert broken["passed"] is False and broken["exact_criteria_passed"] is False
+
+
+# --------------------------------------------------------------------------
+# R2 fix round 1 (리뷰 1 I-1) — 판정은 snapshot 없이 **저장된 값만으로** 다시 나와야 한다
+# --------------------------------------------------------------------------
+
+
+def test_the_verdict_rederives_from_the_stored_values_without_a_snapshot(tmp_path):
+    """A1g의 재판정은 이 검사가 남긴 snapshot 둘을 읽어 했는데, 그 파일은 지워졌다 (리뷰 1 I-1).
+
+    판정에 들어가는 값 — 정수 기준 통과 여부, 최악 |Δloss|와 상대값, 최악 parameter 차 둘 — 은 **전부 보고서
+    안에** 있다. 그러므로 "어느 기준 집합이 무엇을 판정했는가"는 GPU도 snapshot도 없이 다시 유도할 수 있어야
+    하고, 그것이 이 재판정이 감사 가능하다는 뜻이다. 재유도는 :func:`compare_resume` 과 **같은 판정부**
+    (:func:`within_tolerance`)를 쓴다 — 둘이 갈라지면 재유도가 증명하는 것이 없다."""
+    import json
+    from pathlib import Path
+
+    module = script()
+    stored = {
+        "check": "resume", "scope": "t1", "steps": 6,
+        "tolerance": dict(module.RESUME_TOLERANCE_T1),
+        "verdict": "pass", "passed": True, "verdict_criteria": ["param"],
+        "exact_criteria_passed": True,
+        "worst_loss_abs": 0.31495535746216774, "worst_loss_rel": 0.22423211227018586,
+        "worst_param_max_abs": 5.959e-4, "worst_param_relative_l2": 3.518e-3,
+        "rejudged": {"before": {"verdict": "fail", "passed": False}},
+    }
+    again = module.rederive_verdict(stored)
+    # 리뷰어가 손으로 한 것과 같은 두 줄: loss가 판정을 지면 떨어지고, parameter가 지면 통과한다
+    assert again["verdicts"]["loss+param"] is False
+    assert again["verdicts"]["param"] is True
+    assert again["verdict_criteria"] == ["param"] and again["passed"] is True
+    assert again["agrees_with_stored"] is True and again["stored"]["verdict"] == "pass"
+    assert again["was"] == {"verdict": "fail", "passed": False}
+    assert "snapshot" not in json.dumps(again["source"]) or "no snapshot" in again["source"]
+
+    # 정수 기준이 깨지면 어느 기준 집합에서도 통과가 아니다 — 오차와 무관한 판정이기 때문이다
+    broken = module.rederive_verdict({**stored, "exact_criteria_passed": False, "verdict": "fail", "passed": False})
+    assert set(broken["verdicts"].values()) == {False} and broken["agrees_with_stored"] is True
+
+    # 저장된 판정과 어긋나면 **그렇다고 말한다** — 조용히 덮어쓰지 않는다
+    lying = module.rederive_verdict({**stored, "verdict": "fail", "passed": False})
+    assert lying["agrees_with_stored"] is False
+
+    # 잰 값이 없으면 재유도하지 않는다
+    with pytest.raises(ValueError, match="worst_param_max_abs"):
+        module.rederive_verdict({key: value for key, value in stored.items() if key != "worst_param_max_abs"})
+
+    # CLI — 보고서 경로 하나로, GPU 없이. 저장된 판정과 맞으면 exit 0
+    report = tmp_path / "acceptance.json"
+    report.write_text(json.dumps({"checks": {"resume_t1": stored}}, ensure_ascii=False), encoding="utf-8")
+    assert module.main(["--rederive", str(report), "--resume-modes", "t1"]) == 0
+    report.write_text(json.dumps({"checks": {"resume_t1": {**stored, "passed": False, "verdict": "fail"}}}, ensure_ascii=False), encoding="utf-8")
+    assert module.main(["--rederive", str(report), "--resume-modes", "t1"]) == 1
+
+    # 저장된 R2의 보고서가 있는 체크아웃에서는 그 값으로도 같은 답이 나와야 한다
+    real = Path(module.REPO) / "artifacts" / "reports" / "r2-acceptance.json"
+    if real.is_file():
+        check = json.loads(real.read_text(encoding="utf-8"))["checks"]["resume_t1"]
+        result = module.rederive_verdict(check)
+        assert result["verdicts"] == {"loss+param": False, "param": True, "loss": False}
+        assert result["agrees_with_stored"] is True and result["was"] == {"verdict": "fail", "passed": False}

@@ -88,6 +88,10 @@ RESUME_TOLERANCES: dict[str, dict[str, float]] = {"t0": RESUME_TOLERANCE, "t1": 
 #: **15분의 1**로 통과했다. T0·LoRA는 그대로 loss도 판정한다 — 그 경로들은 이 상자에서 비트 결정적이다.
 RESUME_VERDICT_CRITERIA: dict[str, tuple[str, ...]] = {"t0": ("loss", "param"), "lora": ("loss", "param"), "t1": ("param",)}
 
+#: 저장된 값만으로 판정을 다시 유도할 때 견주는 기준 집합들 (:func:`rederive_verdict`, R2 fix round 1 / 리뷰 1 I-1).
+#: 셋을 다 적는 것은, 어느 기준이 판정을 졌는지가 **결과를 바꾼 유일한 것**임을 읽는 사람이 직접 보게 하려는 것이다.
+REDERIVED_CRITERIA_SETS: tuple[tuple[str, ...], ...] = (("loss", "param"), ("param",), ("loss",))
+
 #: 그 범위에서 **재시작 없이** 잰 같은 step 수의 쌍들의 최악 |Δloss| — 기록된 loss 옆에 함께 찍어
 #: "이 차이가 잡음 안인가"를 읽게 한다 (R2 A1e, `artifacts/reports/r2-diagnostic.json` + `r2-acceptance.json`).
 NO_RESTART_LOSS_SPREAD: dict[str, dict[str, Any]] = {
@@ -389,6 +393,21 @@ def run_resume_phase(phase: str, *, steps: int, run_dir: Path, config_path: Path
     raise ValueError(f"phase: continuous | first | second (받은 값: {phase!r})")
 
 
+def within_tolerance(measured: dict[str, float], tolerance: dict[str, float], criteria: Sequence[str]) -> bool:
+    """그 **기준 집합만으로** 잰 값이 허용 오차 안인가 — 게이트의 판정부 한 벌.
+
+    :func:`compare_resume` (snapshot에서 재며 판정한다)과 :func:`rederive_verdict` (저장된 값만으로 다시
+    유도한다)이 **같은** 함수를 쓴다. 둘이 갈라지면 재유도가 증명하는 것이 없기 때문이다. loss는 절대·상대 중
+    하나만 들어도 통과이고(`or`), parameter는 둘 다 들어야 한다 — 처음 등록할 때의 규칙 그대로다.
+    """
+    ok = True
+    if "loss" in criteria:
+        ok = ok and (measured["worst_loss_abs"] <= tolerance["loss_abs"] or measured["worst_loss_rel"] <= tolerance["loss_rel"])
+    if "param" in criteria:
+        ok = ok and measured["worst_param_max_abs"] <= tolerance["param_max_abs"] and measured["worst_param_relative_l2"] <= tolerance["param_rel_l2"]
+    return bool(ok)
+
+
 def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: int, mode: str = "t0") -> dict[str, Any]:
     """두 :func:`_snapshot` 을 그 **학습 범위의** 사전 등록 허용 오차로 견준다 — 게이트의 **판정 부분**만 떼어 둔
     것이라 GPU 없이도 시험할 수 있다 (P1 리뷰 1 M3: 이 판정에 시험이 하나도 없었다).
@@ -437,14 +456,12 @@ def compare_resume(continuous: dict[str, Any], split: dict[str, Any], *, steps: 
 
     carried = RESUME_VERDICT_CRITERIA.get(mode, ("loss", "param"))
 
+    measured = {"worst_loss_abs": worst_loss, "worst_loss_rel": worst_loss_rel,
+                "worst_param_max_abs": worst_param, "worst_param_relative_l2": worst_rel}
+
     def _within(tolerance: dict[str, float], *, criteria: tuple[str, ...] = carried) -> bool:
         """그 범위의 **판정을 지는 기준만** 견준다 (:data:`RESUME_VERDICT_CRITERIA`)."""
-        ok = True
-        if "loss" in criteria:
-            ok = ok and (worst_loss <= tolerance["loss_abs"] or worst_loss_rel <= tolerance["loss_rel"])
-        if "param" in criteria:
-            ok = ok and worst_param <= tolerance["param_max_abs"] and worst_rel <= tolerance["param_rel_l2"]
-        return bool(ok)
+        return within_tolerance(measured, tolerance, criteria)
 
     registered = RESUME_TOLERANCES.get(mode)
     passed: bool | None
@@ -660,6 +677,44 @@ def resume_gate(report_path: Path | str, mode: str) -> dict[str, Any]:
             "reason": f"{path}: checks.{key}.passed = true (steps {check.get('steps')})"}  # fmt: skip
 
 
+def rederive_verdict(check: dict[str, Any], *, tolerance: dict[str, float] | None = None,
+                     criteria_sets: Sequence[Sequence[str]] = REDERIVED_CRITERIA_SETS) -> dict[str, Any]:
+    """저장된 `checks.resume_*` 의 **잰 값만으로** 기준 집합마다 판정을 다시 유도한다 — GPU도 snapshot도 없이.
+
+    왜 있는가 (R2 fix round 1, 리뷰 1 I-1). A1g의 재판정은 그 검사가 남긴 snapshot 둘
+    (`artifacts/runs/r2-acceptance/{continuous,split}-t1.pt`)을 읽어 이뤄졌는데, 그 파일은 B1의 50 GB run 앞에서
+    지워졌다. 그러나 **판정에 들어가는 값은 전부 보고서 안에 있다** — 정수 기준의 통과 여부, 최악 |Δloss|와 그
+    상대값, 최악 parameter 차 둘. 그러므로 "loss가 판정을 지면 fail, parameter가 지면 pass"는 저장된 보고서
+    하나로 누구나 다시 유도할 수 있고, 그것이 이 재판정이 **감사 가능하다**는 뜻이다.
+
+    아무 값도 다시 재지 않는다 — 읽고, :func:`within_tolerance` 로 견주고, 저장된 판정과 **맞는지 말한다**.
+    """
+    keys = ("exact_criteria_passed", "worst_loss_abs", "worst_loss_rel", "worst_param_max_abs", "worst_param_relative_l2")
+    absent = [key for key in keys if check.get(key) is None]
+    if absent:
+        raise ValueError(f"저장된 검사에 잰 값이 없다: {absent} — snapshot 없이는 이 판정을 다시 유도할 수 없다")
+    scope = str(check.get("scope") or check.get("mode") or "t0")
+    registered = dict(tolerance or check.get("tolerance") or RESUME_TOLERANCES.get(scope) or {})
+    if not registered:
+        raise ValueError(f"범위 {scope!r}에 허용 오차가 없다 — 다른 범위의 오차로 판정하지 않는다")
+    measured = {key: (bool(check[key]) if key == "exact_criteria_passed" else float(check[key])) for key in keys}
+    exact = measured["exact_criteria_passed"]
+    verdicts = {"+".join(criteria): bool(exact and within_tolerance(measured, registered, criteria)) for criteria in criteria_sets}
+    carried = [str(name) for name in (check.get("verdict_criteria") or RESUME_VERDICT_CRITERIA.get(scope, ("loss", "param")))]
+    passed = verdicts["+".join(carried)]
+    stored = {key: check.get(key) for key in ("verdict", "passed")}
+    return {
+        "source": "the stored check's measured values only — no snapshot, no GPU, nothing re-measured",
+        "scope": scope, "steps": check.get("steps"), "tolerance": registered, "measured": measured,
+        "verdicts": verdicts, "verdict_criteria": carried, "passed": passed,
+        "verdict": "pass" if passed else "fail",
+        "stored": stored,
+        "agrees_with_stored": bool(stored["passed"] is None or bool(stored["passed"]) == passed),
+        # 판정이 한 번 바뀐 검사라면 **무엇이었는지**도 같이 적는다 (A1g의 `rejudged.before`)
+        "was": ((check.get("rejudged") or {}).get("before")),
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--check", default="frozen,trains,resume", help="frozen | trains | resume | baseline, 쉼표로")
@@ -674,11 +729,25 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--gpu-memory-fraction", dest="gpu_memory_fraction", type=float, default=DEFAULT_FRACTION)
     parser.add_argument("--gate", default=None, help="긴 run을 띄우기 전의 관문 — 이 학습 범위(t0 | lora | t1)의 재개 결과만 읽고 종료 코드로 답한다 (GPU를 쓰지 않는다)")
     parser.add_argument("--gate-report", dest="gate_report", default=str(REPO / "artifacts" / "reports" / "p1-acceptance.json"))
+    parser.add_argument("--rederive", default=None, metavar="REPORT",
+                        help="저장된 인수 검사 보고서의 `checks.resume_<mode>`를 **잰 값만으로** 다시 판정한다 (GPU도 snapshot도 없이) — "
+                             "기준 집합마다의 판정을 찍고, 저장된 판정과 어긋나면 exit 1")  # fmt: skip
     args = parser.parse_args(argv)
     if args.gate:
         gate = resume_gate(args.gate_report, args.gate)
         print(json.dumps(gate, ensure_ascii=False))
         return int(gate["exit_code"])
+    if args.rederive:
+        checks = (json.loads(Path(args.rederive).read_text(encoding="utf-8")) or {}).get("checks") or {}
+        agreed = True
+        for mode in (name.strip() for name in args.resume_modes.split(",") if name.strip()):
+            check = checks.get(resume_gate_key(mode))
+            if not isinstance(check, dict):
+                parser.error(f"{args.rederive}: checks.{resume_gate_key(mode)}가 없다 (있는 자리: {sorted(checks)})")
+            result = rederive_verdict(check)
+            print(json.dumps(result, ensure_ascii=False))
+            agreed = agreed and result["agrees_with_stored"]
+        return 0 if agreed else 1
     guard = limit_gpu_memory(args.gpu_memory_fraction)
     print(f"[p1] gpu guard {guard} · memory {memory_report()}", file=sys.stderr, flush=True)
     run_dir = Path(args.run_dir)
