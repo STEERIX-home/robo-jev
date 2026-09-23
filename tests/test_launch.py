@@ -59,7 +59,7 @@ from robo_jev.launch.manifest import (
 )
 from robo_jev.launch.providers.base import Backend, Exec, Handle
 from robo_jev.launch.providers.local import LocalBackend
-from robo_jev.launch.providers.ssh import DEFAULT_SSH_OPTIONS, SshBackend
+from robo_jev.launch.providers.ssh import DEFAULT_SSH_OPTIONS, RSYNC_RESUME_OPTIONS, SshBackend
 from robo_jev.launch.runner import check_inputs, inventory, run_bundle, should_stop
 
 TINY_CONFIG = REPO / "configs" / "train" / "tiny_cpu.yaml"
@@ -757,6 +757,32 @@ def test_rsync_goes_over_the_same_ssh_options_not_a_second_path(tmp_path):
     assert rsync[-1] == "rj@box.example:/w/run/bundle/"
 
 
+def test_a_dropped_transfer_is_resumed_not_restarted_from_zero(tmp_path):
+    """checkpoint 하나가 26 GB다 — 끊긴 전송을 처음부터 다시 받으면 그 시간이 그대로 돈이다 (리뷰 1의 M2)."""
+    transport = FakeTransport()
+    backend = ssh_backend(transport)
+    (tmp_path / "bundle").mkdir()
+    backend.push(tmp_path / "bundle", "bundle")
+    backend.push_file(TINY_CONFIG, "inbox/checkpoint.pt")
+    backend.fetch(["runs/x/checkpoint.pt"], tmp_path / "dest")
+    rsyncs = [call for call in transport.calls if call[0] == "rsync"]
+    assert len(rsyncs) == 3
+    for argv in rsyncs:
+        assert set(RSYNC_RESUME_OPTIONS) <= set(argv), argv
+    # `--partial-dir`은 상대 경로여야 rsync가 스스로 전송 목록에서 뺀다 (`--delete`가 그것을 지우지 않게).
+    assert not any(option.split("=", 1)[1].startswith("/") for option in RSYNC_RESUME_OPTIONS if option.startswith("--partial-dir"))
+    assert any(option.startswith("--timeout=") for option in RSYNC_RESUME_OPTIONS), "죽은 연결을 영원히 붙들지 않는다"
+
+
+@pytest.mark.parametrize("field", ["host", "user"])
+def test_a_host_that_starts_with_a_dash_is_an_ssh_option_not_a_host(field):
+    """대상은 argv의 맨 인자라 `-oProxyCommand=…`는 따옴표가 막아 주지 못한다 (리뷰 1의 M3)."""
+    kwargs = {"host": "box.example", "user": "rj", "remote_dir": "/w/run", "remote_repo": "/w/repo",
+              "remote_python": "python", "transport": FakeTransport()}  # fmt: skip
+    with pytest.raises(ValueError, match="ssh가 \\*\\*옵션\\*\\*으로 읽는다"):
+        SshBackend(**{**kwargs, field: "-oProxyCommand=touch /tmp/PWNED_PROXY"})
+
+
 def test_the_detached_launch_prefers_systemd_and_falls_back_to_nohup():
     ok = FakeTransport()
     backend = ssh_backend(ok)
@@ -792,6 +818,9 @@ def test_paths_inside_the_repo_are_written_relative_so_another_box_can_resolve_t
     config = yaml.safe_load((bundle_dir(manifest_path) / "config.yaml").read_text(encoding="utf-8"))
     assert [entry["path"] for entry in config["dataset_manifests"]] == [entry["path"] for entry in manifest["dataset_manifests"]]
     assert not Path(config["model_config"]).is_absolute()
+    # `artifacts_dir`는 원격이 덮어쓰지만, 이 상자의 절대 경로가 남으면 run의 정체(`resolved_sha256`)가
+    # 상자마다 달라지고 로컬 경로가 묶음에 새어 나간다 (리뷰 1의 M1).
+    assert not Path(config["artifacts_dir"]).is_absolute(), config["artifacts_dir"]
     # 저장소 **밖**의 경로(영속 볼륨 위의 데이터)는 그대로 둔다.
     assert portable_path("/mnt/persist/data/manifest.json") == "/mnt/persist/data/manifest.json"
 

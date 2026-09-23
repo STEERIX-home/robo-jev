@@ -229,8 +229,11 @@ def prepare(
                 "bundled": True,
             }
         )
-    if isinstance(resolved.get("model_config"), str):
-        resolved["model_config"] = portable_path(resolved["model_config"])
+    for key in ("model_config", "artifacts_dir"):
+        # `artifacts_dir`는 원격 러너가 어차피 덮어쓴다(runner.run_bundle) — 그래도 이 상자의 절대 경로가
+        # 묶음에 남으면 run의 정체(`resolved_sha256`)가 **상자마다 달라지고** 로컬 경로가 새어 나간다.
+        if isinstance(resolved.get(key), str):
+            resolved[key] = portable_path(resolved[key])
     resolved_text = yaml.safe_dump(resolved, allow_unicode=True, sort_keys=False)
 
     manifest = new_manifest(

@@ -19,12 +19,36 @@ from pathlib import Path
 
 from robo_jev.launch.providers.base import Backend, Exec, _run_local
 
-__all__ = ["SshBackend"]
+__all__ = ["DEFAULT_SSH_OPTIONS", "RSYNC_RESUME_OPTIONS", "SshBackend"]
 
 Transport = Callable[..., Exec]
 
 #: 비대화식 기본값. 암호를 묻지 않고(BatchMode), 끊긴 연결을 오래 붙들지 않는다.
 DEFAULT_SSH_OPTIONS = ("-o", "BatchMode=yes", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15")
+
+#: 끊긴 전송을 **이어서** 받기 위한 rsync 인자. checkpoint 하나가 26 GB이므로(docs/05 §6) 한 번 끊겼다고
+#: 처음부터 다시 받으면 그 시간이 그대로 돈이다. `--partial-dir`은 반쯤 받은 조각을 옆 디렉터리에 남겨
+#: 다음 호출이 그것을 바탕으로 이어 받게 하고(목적지에는 **완성된 파일만** 나타난다), `--timeout`은 죽은
+#: 연결을 영원히 붙들고 있지 않게 한다. rsync는 상대 경로 `--partial-dir`을 스스로 전송 목록에서 뺀다.
+RSYNC_RESUME_OPTIONS = ("--partial", "--partial-dir=.rsync-partial", "--timeout=600")
+
+
+def _reject_option_shaped(field: str, value: str | None) -> None:
+    """`-`로 시작하는 호스트·사용자를 거절한다 — argv의 맨 앞 글자가 `ssh`에게는 **옵션**이다.
+
+    대상(`user@host`)은 `ssh`에 맨 인자로 붙으므로 `-oProxyCommand=…` 같은 값은 셸을 거치지 않고도
+    ssh 자신의 옵션으로 해석된다(경로는 전부 `shlex.quote` 되지만 이것은 따옴표가 막아 주지 못한다).
+    값은 사람의 플래그나 명세에서 오므로 구멍이라기보다 울타리다 — 그래도 울타리는 여기 있어야 한다.
+    """
+    if value is None:
+        return
+    if not str(value).strip():
+        raise ValueError(f"{field}: 비어 있다 — ssh 대상이 되지 못한다")
+    if str(value).startswith("-"):
+        raise ValueError(
+            f"{field}: `-`로 시작하는 값({value!r})은 ssh가 **옵션**으로 읽는다 (예: -oProxyCommand=…) — "
+            "호스트·사용자 이름으로 받지 않는다"
+        )
 
 
 class SshBackend(Backend):
@@ -45,6 +69,8 @@ class SshBackend(Backend):
         known_hosts: str | None = None,
         transport: Transport | None = None,
     ) -> None:
+        _reject_option_shaped("host", host)
+        _reject_option_shaped("user", user)
         self.host = host
         self.user = user
         self.port = port
@@ -86,13 +112,13 @@ class SshBackend(Backend):
         source = str(Path(local_dir)).rstrip("/") + "/"
         target = self.path(remote_relpath).rstrip("/") + "/"
         self.shell(f"mkdir -p {shlex.quote(target)}").require("원격 디렉터리 준비")
-        argv = ["rsync", "-a", "--delete", "-e", self._rsh(), source, f"{self.target}:{target}"]
+        argv = ["rsync", "-a", "--delete", *RSYNC_RESUME_OPTIONS, "-e", self._rsh(), source, f"{self.target}:{target}"]
         return self._transport(argv, timeout=None).require("rsync push")
 
     def push_file(self, local_file: str | Path, remote_relpath: str) -> Exec:
         target = self.path(remote_relpath)
         self.shell(f"mkdir -p {shlex.quote(str(Path(target).parent))}").require("원격 디렉터리 준비")
-        argv = ["rsync", "-a", "-e", self._rsh(), str(Path(local_file)), f"{self.target}:{target}"]
+        argv = ["rsync", "-a", *RSYNC_RESUME_OPTIONS, "-e", self._rsh(), str(Path(local_file)), f"{self.target}:{target}"]
         return self._transport(argv, timeout=None).require(f"rsync push {remote_relpath}")
 
     def fetch(self, relpaths: list[str], dest: str | Path) -> Exec:
@@ -106,7 +132,7 @@ class SshBackend(Backend):
         for relpath, source in zip(relpaths, sources, strict=True):
             target = root / relpath
             target.parent.mkdir(parents=True, exist_ok=True)
-            argv = ["rsync", "-a", "-e", self._rsh(), source, str(target)]
+            argv = ["rsync", "-a", *RSYNC_RESUME_OPTIONS, "-e", self._rsh(), source, str(target)]
             last = self._transport(argv, timeout=None).require(f"rsync fetch {relpath}")
         assert last is not None
         return last
