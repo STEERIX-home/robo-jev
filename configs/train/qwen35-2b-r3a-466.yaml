@@ -1,0 +1,32 @@
+# Task R3a C1 — seed 17의 R2 체크포인트(step 233 = **1 epoch**)에 **1 epoch을 더** 잇는 설정.
+#
+#   uv run python scripts/adapt_readout.py --config configs/train/qwen35-2b-r3a-466.yaml --mode t1 \
+#       --run-id r3a-t1-fp32-2b-466 --no-eval --out artifacts/reports/r3a-2b-t1-fp32-466.json
+#
+# **이것은 2 epoch run이 아니다 — LR 일정을 다시 잡은 연속 학습이다.** `max_steps`는 예산이 아니라 일정이다:
+# warmup(`warmup_ratio × max_steps`)과 cosine이 그 값에서 나오므로, 233으로 끝난 run을 466으로 이어 가면
+# 남은 233 step의 learning rate가 "한 번에 466 step을 도는 run"의 것과 **다르다**. 구체적으로:
+#
+#   * 처음부터 466 step을 도는 run은 warmup 23 step을 지나 cosine이 466에서 0이 되는 한 곡선을 탄다.
+#   * 이 run은 warmup 12 step·cosine이 233에서 0이 되는 곡선을 **이미 한 번 다 탔고**(그래서 step 233의 lr은
+#     정확히 0이다), 이제 warmup 23·최대 466의 곡선 위 **step 233 자리**(peak의 ≈54 %)에서 다시 내려간다.
+#
+# 그러므로 이 run의 값은 "2 epoch을 한 일정으로 돈 결과"가 아니라 "1 epoch을 마친 모델을 다시 데운 뒤 1 epoch을
+# 더 돈 결과"로 읽어야 한다. 두 번째 곡선의 시작 lr이 0이 아니게 하는 것은 `Trainer._reapply_schedule`이다
+# (`LambdaLR.load_state_dict`는 lr을 다시 계산하지 않아, 그대로 두면 재개 첫 step이 lr 0으로 돈다).
+#
+# **재개가 허용되는 근거.** `max_steps`는 `RESUME_SCHEDULE_KEYS`라서 기본은 거절이고, 아래 `resume_reschedule:
+# true`가 "그러겠다"고 말할 때만 지나간다. 그 사실은 `metrics.json`의 `summary.rescheduled`에도 남는다.
+# 재개 기전 자체는 R2 A1g의 게이트가 보증한 경로다(`--gate t1 --gate-report r2-acceptance-recheck.json` → exit 0:
+# sampler 위치·뽑힌 단위·optimizer step 수·빠진 tensor 없음이 전부 통과, parameter 차는 등록값의 14~37분의 1).
+#
+# **`artifacts_dir`가 다른 이유.** 재개하는 run은 run id를 checkpoint에서 가져오므로(`r2-t1-fp32-2b`) 기본
+# 디렉터리로 두면 R2의 step 233 checkpoint를 **덮어쓴다**. 그래서 이 run의 산출물만 따로 받는다:
+# `artifacts/runs/r3a-t1-466/r2-t1-fp32-2b/`. R2의 run 디렉터리는 건드리지 않는다.
+extends: qwen35-2b-r2.yaml
+run_name: r3a-2b-466
+max_steps: 466                                      # 233 + 1 epoch(로봇 에피소드 233편)
+resume: artifacts/runs/r2-t1-fp32-2b/checkpoint.pt  # seed 17, step 233, status completed
+resume_reschedule: true                             # 일정을 다시 잡는다고 **말한다** (RESUME_SCHEDULE_KEYS)
+checkpoint_every: 50                                # 세션이 죽어도 ≤ 1시간
+artifacts_dir: artifacts/runs/r3a-t1-466            # R2의 run 디렉터리를 덮어쓰지 않게

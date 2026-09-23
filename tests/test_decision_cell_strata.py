@@ -458,3 +458,25 @@ def test_the_leave_one_episode_out_check_runs_for_every_control_column():
     drops = by_control["instruction_shuffle"]["drops"]
     assert drops and all(row["margin"] == 1.0 for row in drops.values())
     assert by_control["instruction_shuffle"]["every_drop_excludes_zero"] is True
+
+
+def test_the_r3a_run_sets_name_this_rounds_reports_and_keep_r2s_row_on_the_same_ruler():
+    """Task R3a — seed 18·19와 466 step 행, 그리고 **R2의 233 step 행**이 한 표에 있어야 한다.
+
+    네 줄을 한 자로 읽으려면 R2의 행이 그 표 안에 있어야 한다 — 같은 평가 집합, 같은 층, 같은 쌍 부트스트랩.
+    둘째 칸(`dev`)의 짝은 같은 run들의 `r2-dev-`/`r3a-dev-` 보고서다.
+    """
+    module = script()
+    assert set(module.RUN_SETS) >= {"r2", "r2dev", "r3a", "r3adev"}
+    assert module.RUN_SETS["r3a"] is module.R3A_RUNS and module.RUN_SETS["r3adev"] is module.R3A_DEV_RUNS
+    assert list(module.R3A_RUNS) == list(module.R3A_DEV_RUNS)
+    assert len(module.R3A_RUNS) == 4
+    # R2의 행은 R2가 쓴 바로 그 보고서다 (다시 평가하지 않는다)
+    assert module.R3A_RUNS["2B T1 fp32 seed 17 (233 = 1 epoch)"] == "r2-reeval-2b-t1-fp32-233.json"
+    assert module.R3A_DEV_RUNS["2B T1 fp32 seed 17 (233 = 1 epoch)"] == "r2-dev-2b-t1-fp32-233.json"
+    # 이 판의 행들은 이 판의 보고서를 가리키고, 칸마다 접두사가 다르다
+    for name, report in module.R3A_RUNS.items():
+        if "seed 17 (233" in name:
+            continue
+        assert report.startswith("r3a-reeval-") and module.R3A_DEV_RUNS[name].startswith("r3a-dev-")
+    assert "466" in module.R3A_RUNS["2B T1 fp32 seed 17 (466 = +1 epoch, rescheduled)"]

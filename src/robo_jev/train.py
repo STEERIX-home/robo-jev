@@ -68,7 +68,7 @@ import random
 import subprocess
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -121,6 +121,7 @@ __all__ = [
     "MasterWeightAdamW",
     "RESUME_FREE_KEYS",
     "RESUME_PATH_KEYS",
+    "RESUME_SCHEDULE_KEYS",
     "Trainer",
     "build_model",
     "build_optimizer",
@@ -178,7 +179,14 @@ DEFAULT_SAMPLER = {
 
 #: 재개할 때 checkpoint의 설정과 달라도 되는 키 — 중단·예산·경로·이름뿐이다(run id는 checkpoint의 것을
 #: 쓴다). 나머지는 run의 정체라 같아야 한다.
-RESUME_FREE_KEYS = ("resume", "stop_after", "max_wall_hours", "checkpoint_every", "checkpoint_keep_steps", "artifacts_dir", "run_id", "run_name")
+RESUME_FREE_KEYS = ("resume", "stop_after", "max_wall_hours", "checkpoint_every", "checkpoint_keep_steps", "artifacts_dir", "run_id", "run_name", "resume_reschedule")
+#: **일정**을 정하는 키 — 기본은 다른 키와 똑같이 거절이고, 설정이 `resume_reschedule: true`로 그러겠다고
+#: 말할 때만 달라도 된다 (Task R3a C1). `max_wall_hours`가 그냥 자유로운 것과 대비된다: 그것은 예산이라 돌던
+#: 계산을 바꾸지 않지만, `max_steps`는 warmup과 cosine을 정하므로 **남은 step의 learning rate가 전부 달라진다**.
+#: 그래서 이 키를 바꿔 이어 간 run은 "같은 run의 연장"이 아니라 **다른 일정 위의 연속 학습**이고, 그 사실이
+#: `metrics.json`의 `summary.rescheduled`와 CLI 요약에 남는다. 조용히 통과시키면 곡선 하나가 두 일정에서
+#: 나왔다는 것을 나중에 읽는 사람이 알 길이 없다.
+RESUME_SCHEDULE_KEYS = ("max_steps",)
 #: 값이 경로·이름인 키 — 문자 그대로가 아니라 **가리키는 내용**(manifest의 identity 블록: 설정 파일 sha256, tokenizer
 #: 파일 sha256·id·revision)으로 대조한다. `dataset_manifests`도 경로는 내용(manifest·파일 sha256)으로, 태그는 그대로.
 RESUME_PATH_KEYS = ("model_config", "tokenizer")
@@ -237,6 +245,8 @@ DEFAULTS: dict[str, Any] = {
     "artifacts_dir": "artifacts/runs",
     "stop_after": None,
     "resume": None,
+    # `resume`이 가리키는 checkpoint와 `max_steps`가 달라도 되는가 (:data:`RESUME_SCHEDULE_KEYS`; R3a C1).
+    "resume_reschedule": False,
     "sampler": dict(DEFAULT_SAMPLER),
     # 실제 backbone(G0b)용 — fixture는 기본값 그대로 둔다.
     "device": "cpu",
@@ -367,6 +377,7 @@ def resolve_config(config: dict) -> dict:
         if "unit" in stop:
             _need(_is_int(stop["unit"]) and stop["unit"] >= 0 and _is_int(stop["chunk"]) and stop["chunk"] >= 0, "stop_after: unit·chunk는 0 이상의 정수여야 한다")
     _need(out["resume"] is None or isinstance(out["resume"], str), "resume: checkpoint 경로(문자열)이거나 null이어야 한다")
+    out["resume_reschedule"] = bool(out["resume_reschedule"])
     keep = out["checkpoint_keep_steps"]
     if keep is None:
         out["checkpoint_keep_steps"] = []
@@ -982,8 +993,11 @@ def resume_config(config: dict) -> dict[str, Any]:
     return out
 
 
-def resume_config_differences(saved: dict[str, Any], current: dict[str, Any], *, master_weights: bool) -> list[str]:
+def resume_config_differences(saved: dict[str, Any], current: dict[str, Any], *, master_weights: bool, allow: Sequence[str] = ()) -> list[str]:
     """재개를 거절할 설정 키들 — :func:`resume_config` 의 두 결과를 견준다.
+
+    `allow`는 **이 재개가 달라도 된다고 말한** 키들이다(:data:`RESUME_SCHEDULE_KEYS`; 기본은 빈 목록이라
+    부르는 쪽이 아무 말도 하지 않으면 지금까지와 똑같이 전부 거절한다).
 
     `master_weights`는 **이 모델에 fp32 master 사본이 생기는가**(= 학습 대상에 fp32가 아닌 파라미터가 있는가,
     :func:`fp32_master_weights`)다. 생기지 않으면(T0·LoRA·fixture) :func:`build_optimizer` 는 어느 쪽이든 평범한
@@ -992,7 +1006,7 @@ def resume_config_differences(saved: dict[str, Any], current: dict[str, Any], *,
     경로(T1)에서는 켜고 끄는 것이 갱신 규칙 자체를 바꾸므로 그대로 거절한다 — 그쪽은 모델이 bf16이면 플래그와
     무관하게 참이라, 켜진 run을 끈 채로 이어가는 반대 방향도 함께 막힌다.
     """
-    keys = [key for key in current if master_weights or key != "fp32_master_weights"]
+    keys = [key for key in current if (master_weights or key != "fp32_master_weights") and key not in tuple(allow)]
     return [key for key in keys if saved.get(key) != current[key]]
 
 
@@ -1148,6 +1162,8 @@ class Trainer:
         self.progress: dict[str, Any] | None = None
         self.history: list[dict[str, Any]] = []
         self.status = "running"
+        #: 재개하면서 **일정을 다시 잡았으면** 무엇이 어떻게 바뀌었는지 (:data:`RESUME_SCHEDULE_KEYS`; 아니면 `None`).
+        self.rescheduled: dict[str, Any] | None = None
         self._plans: dict[int, EpisodePlan] = {}
         #: step마다 ``hook(trainer, metrics)``로 불린다 (:meth:`run`). 학습에는 영향이 없다 — 측정·로그용
         #: (RSS·GPU peak를 step 1과 step 10에서 재는 것이 docs/06 Task 5 선결 조건 1의 확인이다).
@@ -1433,6 +1449,8 @@ class Trainer:
             "in_progress": None if self.progress is None else {
                 "unit_index": self.progress["unit_index"], "chunk_index": self.progress["chunk_index"],
             },  # fmt: skip
+            # 이 곡선이 **한 일정**에서 나왔는지 — 다시 잡았으면 무엇이 어떻게 (R3a C1)
+            "rescheduled": copy.deepcopy(self.rescheduled),
         }
 
     def checkpoint_state(self) -> dict[str, Any]:
@@ -1483,11 +1501,18 @@ class Trainer:
         state = load_checkpoint(path)
         check_contract(state.get("manifest"), self.manifest, where=f"resume: {path}")
         saved, current = resume_config(state["config"]), resume_config(self.config)
-        differences = resume_config_differences(saved, current, master_weights=bool(fp32_master_weights(self.model)))
+        allow = RESUME_SCHEDULE_KEYS if self.config["resume_reschedule"] else ()
+        differences = resume_config_differences(saved, current, master_weights=bool(fp32_master_weights(self.model)), allow=allow)
         if differences:
             raise ValueError(
                 f"resume: checkpoint의 설정과 다르다: {differences} — 중단·예산·경로·이름({list(RESUME_FREE_KEYS)})과 "
                 f"내용으로 대조하는 경로({list(RESUME_PATH_KEYS)}, dataset_manifests[].path) 말고는 같아야 한다"
+                + (
+                    f" (일정 키 {list(RESUME_SCHEDULE_KEYS)}는 `resume_reschedule: true`로 그러겠다고 말하면 달라도 된다 — "
+                    "그것은 같은 run의 연장이 아니라 다른 일정 위의 연속 학습이다)"
+                    if not self.config["resume_reschedule"] and any(key in RESUME_SCHEDULE_KEYS for key in differences)
+                    else ""
+                )
             )
         saved_identity = state["manifest"].get("identity") if isinstance(state["manifest"], dict) else None
         if saved_identity is None:
@@ -1505,6 +1530,9 @@ class Trainer:
         load_trainable_state(self.model, state["model"])
         self.optimizer.load_state_dict(state["optimizer"])
         self.scheduler.load_state_dict(state["scheduler"])
+        self.rescheduled = {key: {"from": saved.get(key), "to": current[key]} for key in allow if saved.get(key) != current[key]} or None
+        if self.rescheduled is not None:
+            self._reapply_schedule()
         restore_rng_state(state["rng"])
         self.sampler.load_state_dict(state["sampler"])
         self.step = int(state["step"])
@@ -1531,6 +1559,20 @@ class Trainer:
                 "carried": None if carried is None else stream_state_from_dict(carried, self.model.backbone),
                 "acc": copy.deepcopy(progress["accumulators"]),
             }
+
+    def _reapply_schedule(self) -> None:
+        """다시 잡은 일정의 **지금 자리** learning rate를 optimizer에 건다 (:data:`RESUME_SCHEDULE_KEYS`).
+
+        `LambdaLR.load_state_dict`는 lr을 다시 계산하지 않는다 — 람다는 상태에 담기지 않으므로 이 프로세스가
+        새 `max_steps`로 만든 람다가 그대로 남고, optimizer에는 `load_state_dict`가 실어 준 **옛 일정의 마지막
+        값**이 남는다. 1 epoch을 끝낸 run이면 그 값은 cosine의 끝, 곧 **0**이다: 그대로 두면 재개한 첫 step이
+        lr 0으로 돌아 아무것도 배우지 않는다. 다음 `scheduler.step()`이 두 값을 모두 다시 쓰므로 여기서 고치는
+        것은 그 한 step이다.
+        """
+        values = [base * fn(self.scheduler.last_epoch) for fn, base in zip(self.scheduler.lr_lambdas, self.scheduler.base_lrs)]
+        for group, lr in zip(self.optimizer.param_groups, values):
+            group["lr"] = lr
+        self.scheduler._last_lr = list(values)
 
     def write_metrics(self) -> Path:
         self.run_dir.mkdir(parents=True, exist_ok=True)
@@ -1583,6 +1625,7 @@ def main(argv: list[str] | None = None) -> int:
         {
             "run_id": result["run_id"], "checkpoint": result["checkpoint"], "step": result["step"],
             "status": result["status"], "loss": result["metrics"]["summary"]["last_loss"],
+            "rescheduled": result["metrics"]["summary"]["rescheduled"],
         },
         ensure_ascii=False,
     ))  # fmt: skip
