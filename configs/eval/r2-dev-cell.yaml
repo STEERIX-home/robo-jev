@@ -28,7 +28,11 @@ columns:
   selective: false
   calibration: false
 
-tiny_scorer_report: artifacts/reports/r1-tiny-scorer.json
+# 표지는 **이 판의 표**에서 읽는다 (R2 fix round 1, 리뷰 1 I-4). 처음 만들 때 R1의 표를 가리켰는데, R1의
+# scorer는 90분 벽에서 0.76 epoch만 돌았고 그 표에서는 `robot/dev`의 `q_main`이 패턴으로 풀리지 **않는다**고
+# 나왔다 — A3가 3 epoch을 다 돌려 뒤집은 바로 그 표지다. 그 핀 때문에 이 칸의 산출물은 R2가 틀렸다고 보인
+# 답을 싣고 있었다. `r1-decision-cell.yaml`·`r1-contrast.yaml`의 같은 핀은 R3의 이월이다.
+tiny_scorer_report: artifacts/reports/r2-tiny-scorer.json
 
 splits:
   - name: robot/dev
