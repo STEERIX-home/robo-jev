@@ -438,3 +438,23 @@ def test_every_control_column_gets_its_paired_interval_in_the_key_family_table()
     )
     assert families["observe"]["instruction_shuffle_margin_ci"] == paired["margin_ci"]
     assert families["observe"]["instruction_shuffle_margin_episode_balanced"] == paired["episode_balanced_margin"]
+
+
+def test_the_leave_one_episode_out_check_runs_for_every_control_column():
+    """Task R2 C1 — 한 줄짜리 답은 **지시 섞기**의 여유이므로 "한 편을 빼도 0을 제외하는가"도 그 열에 물어야 한다.
+
+    옛 키(상태 섞기)는 자리를 지킨다 — 옛 보고서를 다시 만드는 경로가 그 이름을 읽는다."""
+    module = script()
+    ticks = _ticks()
+    model = {(row["episode_id"], row["tick"]): True for row in ticks}
+    control = {(row["episode_id"], row["tick"]): (row["episode_id"] == "ep-B") for row in ticks}
+    instruction = {(row["episode_id"], row["tick"]): False for row in ticks}
+    strata = module.run_strata(_table(ticks, model, control, instruction=instruction), ticks)
+
+    by_control = strata["primary_stratum_leave_one_episode_out_by_control"]
+    assert set(by_control) == {"state_shuffle", "instruction_shuffle"}
+    assert by_control["state_shuffle"] == strata["primary_stratum_leave_one_episode_out"]
+    # 모든 틱에서 대조군이 틀리는 지시 섞기 열은 어느 편을 빼도 여유가 1.0이다
+    drops = by_control["instruction_shuffle"]["drops"]
+    assert drops and all(row["margin"] == 1.0 for row in drops.values())
+    assert by_control["instruction_shuffle"]["every_drop_excludes_zero"] is True

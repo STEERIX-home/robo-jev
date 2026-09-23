@@ -340,6 +340,13 @@ def run_strata(table: dict[str, Any], ticks: list[dict[str, Any]], **options: An
     out["primary_stratum_by_key_family"] = by_key_family(columns, primary, **options)
     if columns.get("state_shuffle"):
         out["primary_stratum_leave_one_episode_out"] = leave_one_episode_out(columns["model"], columns["state_shuffle"], primary, **options)
+    # **대조군 열마다** 같은 확인 (R2 C1): 한 줄짜리 답은 **지시 섞기**의 여유이므로 "한 편을 빼도 0을 제외하는가"를
+    # 그 열에도 물어야 한다. 옛 키(`primary_stratum_leave_one_episode_out` = 상태 섞기)는 그대로 둔다.
+    out["primary_stratum_leave_one_episode_out_by_control"] = {
+        column: leave_one_episode_out(columns["model"], columns[column], primary, **options)
+        for column in CONTROL_COLUMNS
+        if columns.get("model") and columns.get(column)
+    }
     return out
 
 
