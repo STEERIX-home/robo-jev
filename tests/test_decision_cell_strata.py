@@ -479,4 +479,4 @@ def test_the_r3a_run_sets_name_this_rounds_reports_and_keep_r2s_row_on_the_same_
         if "seed 17 (233" in name:
             continue
         assert report.startswith("r3a-reeval-") and module.R3A_DEV_RUNS[name].startswith("r3a-dev-")
-    assert "466" in module.R3A_RUNS["2B T1 fp32 seed 17 (466 = +1 epoch, rescheduled)"]
+    assert "466" in module.R3A_RUNS["2B T1 fp32 seed 17 (466 = 2 epochs, fresh run)"]
