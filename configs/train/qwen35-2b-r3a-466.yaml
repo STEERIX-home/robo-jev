@@ -1,5 +1,13 @@
 # Task R3a C1 — seed 17의 R2 체크포인트(step 233 = **1 epoch**)에 **1 epoch을 더** 잇는 설정.
 #
+# **읽기 전에: R3a가 실제로 돌린 run은 이 파일이 적은 재개가 아니다.** `scripts/adapt_readout.py`의
+# `run_training`이 `Trainer(config)`를 `resume=` 없이 부르고 있어서 아래 `resume`·`resume_reschedule` 두 키가
+# **조용히 무시됐고**, 그래서 R3a의 466 step run은 **seed 17로 처음부터 466 step = 2 epoch**을 돈 새 run이다
+# (run 디렉터리 `artifacts/runs/r3a-t1-466/r3a-t1-fp32-2b-466/`가 그 증거다 — 재개였다면 run id를 checkpoint에서
+# 가져와 `r2-t1-fp32-2b`였을 것이다). 그 결함은 고쳤고 시험이 붙었지만(`test_run_training_hands_the_resume_
+# checkpoint_to_the_trainer`), **이 파일이 적은 재개로 돌린 GPU run은 아직 없다.** 보고서 C1이 그렇게 적는다.
+# 돌아간 것은 이 파일의 `max_steps: 466`·`checkpoint_every`·`artifacts_dir`이다.
+#
 #   uv run python scripts/adapt_readout.py --config configs/train/qwen35-2b-r3a-466.yaml --mode t1 \
 #       --run-id r3a-t1-fp32-2b-466 --no-eval --out artifacts/reports/r3a-2b-t1-fp32-466.json
 #

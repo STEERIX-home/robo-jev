@@ -153,3 +153,53 @@ def test_the_zero_shot_defaults_reproduce_the_runs_that_were_recorded():
     parameters = inspect.signature(module.run_zero_shot).parameters
     assert parameters["tick_stride"].default == module.ZERO_SHOT_TICK_STRIDE
     assert parameters["shuffle_seed"].default is None  # None = 평가 집합의 shuffle_seed를 쓴다
+
+
+def test_run_training_hands_the_resume_checkpoint_to_the_trainer(monkeypatch, tmp_path):
+    """**아무 일도 하지 않는 설정 키는 없어야 한다** (Task R3a C1의 값비싼 교훈).
+
+    `resolve_config`는 `resume`을 받아들이므로 설정이나 `--set resume=…`은 아무 불평 없이 통과했는데,
+    `run_training`이 `Trainer(config)`를 `resume=` 없이 불러 그 키를 **조용히 버리고** 있었다. 그래서 "이어서
+    233 step"이라고 적힌 run이 실제로는 처음부터 466 step을 돌았고, 4.3 GPU-h가 그 차이를 메우는 데 갔다.
+    """
+    import robo_jev.train as train_module
+
+    module = script()
+    seen: dict = {}
+
+    class FakeTrainer:
+        def __init__(self, config, *, resume=None):
+            seen["config"], seen["resume"] = config, resume
+            self.config, self.tokenizer, self.model = config, object(), None
+            self.step_hook = None
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def run(self):
+            return {"run_id": "r", "checkpoint": str(tmp_path / "c.pt"), "status": "completed",
+                    "metrics": {"steps": [{"step": 1, "loss": 1.0, "loss_by_domain": {}, "loss_by_type": {},
+                                           "grad_norm": 0.0, "lr": {}, "tokens": {"total": 4}, "seconds": 1.0}]}}
+
+        manifest = {"model": {}, "contract_sha256": "x", "serializer_version": "v", "tokenizer": {}}
+        items: list = []
+
+    monkeypatch.setattr(train_module, "Trainer", FakeTrainer)
+    monkeypatch.setattr(module, "_memory", lambda: {"peak_allocated_bytes": 0, "peak_reserved_bytes": 0,
+                                                    "num_alloc_retries": 0, "num_ooms": 0})
+    import torch
+
+    monkeypatch.setattr(torch.cuda, "reset_peak_memory_stats", lambda *a, **k: None)
+    monkeypatch.setattr(torch.cuda, "reset_accumulated_memory_stats", lambda *a, **k: None)
+    config = {"model_id": "m", "max_steps": 466, "resume": str(tmp_path / "from.pt"),
+              "dataset_manifests": [{"path": str(tmp_path / "m.json"), "domain": "robot"}]}
+
+    module.run_training(dict(config), mode="t0", eval_after=False, log_stream=None)
+    assert seen["resume"] == config["resume"]          # 넘어간다
+
+    seen.clear()
+    module.run_training({k: v for k, v in config.items() if k != "resume"}, mode="t0", eval_after=False, log_stream=None)
+    assert seen["resume"] is None                       # 없으면 None — 새 run이다

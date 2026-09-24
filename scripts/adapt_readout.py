@@ -163,8 +163,13 @@ def run_training(
     mode: str,
     eval_after: bool = True,
     eval_config: str | Path = DEFAULT_EVAL_CONFIG,
+    log_stream: Any = sys.stderr,
 ) -> dict[str, Any]:
-    """T0 / LoRA / T1 학습 + 평가. 돌려주는 것: 곡선, 메모리(RSS 포함), step 시간, checkpoint, 평가 표."""
+    """T0 / LoRA / T1 학습 + 평가. 돌려주는 것: 곡선, 메모리(RSS 포함), step 시간, checkpoint, 평가 표.
+
+    ``config["resume"]``가 있으면 그 checkpoint에서 **이어간다**(run id·일정은 `robo_jev.train.Trainer`의 규칙을
+    따른다 — `max_steps`를 바꾸려면 `resume_reschedule: true`가 있어야 한다).
+    """
     import torch
 
     from robo_jev.train import Trainer
@@ -176,7 +181,13 @@ def run_training(
         require_free(TRAIN_MIN_FREE_BYTES, what=f"{mode} {config['model_id']}")
     started = time.perf_counter()
     rss_before_load = _rss_gib()
-    with Trainer(config) as trainer:
+    # **`resume`을 Trainer에 넘긴다** — Task R3a C1에서 넘기지 않고 있던 것을 고쳤다. `resolve_config`는 이 키를
+    # 받아들이므로 설정·`--set resume=…`은 아무 불평 없이 통과했고, 그러고는 **조용히 무시돼** 새 run이 돌았다
+    # (R3a C1의 첫 466 step run 4.3 GPU-h가 그렇게 나갔다). 아무 일도 하지 않는 설정 키는 없어야 한다.
+    resume = config.get("resume")
+    if resume:
+        print(f"[p1] resume from {resume}", file=log_stream, flush=True)
+    with Trainer(config, resume=resume) as trainer:
         load_seconds = round(time.perf_counter() - started, 1)
         rss_after_load = _rss_gib()
         per_step: list[dict[str, Any]] = []
