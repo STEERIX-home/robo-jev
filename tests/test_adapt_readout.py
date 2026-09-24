@@ -203,3 +203,22 @@ def test_run_training_hands_the_resume_checkpoint_to_the_trainer(monkeypatch, tm
     seen.clear()
     module.run_training({k: v for k, v in config.items() if k != "resume"}, mode="t0", eval_after=False, log_stream=None)
     assert seen["resume"] is None                       # 없으면 None — 새 run이다
+
+
+def test_the_r5_training_config_is_seed_18s_recipe_with_three_manifests_and_the_dagger_material_tag():
+    """Task R5 C1: `qwen35-2b-r5.yaml`은 R2 조리법(= R3a seed 18)을 잇고 데이터 목록만 셋이다 — v2 라벨 부모판(robot), DAgger-0
+    (robot, `material: error_family` — docs/04 §7의 새 오류 계열 축), 비로봇. 계산량(`max_steps 233`)·checkpoint 정책은 seed 18과 같다."""
+    from pathlib import Path
+
+    load_train_config = script().load_train_config
+    config = load_train_config(REPO / "configs/train/qwen35-2b-r5.yaml", mode="t1", seed=18)
+    manifests = config["dataset_manifests"]
+    assert [entry["domain"] for entry in manifests] == ["robot", "robot", "non_robot"]
+    assert [Path(entry["path"]).parent.name for entry in manifests] == ["r1-rollout-labels-g2", "dagger-0", "single"]
+    assert [entry.get("material") for entry in manifests] == [None, "error_family", None]
+    assert config["max_steps"] == 233 and config["checkpoint_every"] == 50 and config["checkpoint_keep_steps"] == [40]
+    assert config["seed"] == 18 and config["sampler"]["permute_candidates_seed"] == 18
+    reference = load_train_config(REPO / "configs/train/qwen35-2b-r2.yaml", mode="t1", seed=18)
+    same = ("stream_chunk_seconds", "backbone_lr", "readout_lr", "fp32_master_weights", "trainable", "gradient_accumulation", "robot_loss_share", "weight_decay", "warmup_ratio")
+    assert {key: config[key] for key in same} == {key: reference[key] for key in same}
+    assert config["sampler"]["tick_weights"] == reference["sampler"]["tick_weights"] and config["splits"] == ["train"]

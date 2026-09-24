@@ -1,0 +1,50 @@
+# Task R5 C2(c) — **둘째 칸(`dev` 42편) 그대로 + `q_gripper`의 틱별 예측**. `r2-dev-cell.yaml`의 사본이고 다른 것은
+# `store_predictions`에 `q_gripper`를 더한 것뿐이다(해시 `9b484441b23b…` 그대로 — R3a의 둘째 칸과 같은 자). 선택에 쓰지 않는다.
+
+version: eval-r2-dev-cell-v0.1   # R5도 같은 버전 문자열 — 해시가 같아야 한다
+window_ticks: 30
+shuffle_seed: 1
+tokens_per_batch: 8192
+fused: true
+
+columns:
+  permuted: false
+  state_shuffle: true
+  instruction_shuffle: true
+  commitment_shuffle: true
+  rule_judge: true
+  mechanical_baseline: true
+  event_metrics: true
+  selective: false
+  calibration: false
+
+# 표지는 **이 판의 표**에서 읽는다 (R2 fix round 1, 리뷰 1 I-4). 처음 만들 때 R1의 표를 가리켰는데, R1의
+# scorer는 90분 벽에서 0.76 epoch만 돌았고 그 표에서는 `robot/dev`의 `q_main`이 패턴으로 풀리지 **않는다**고
+# 나왔다 — A3가 3 epoch을 다 돌려 뒤집은 바로 그 표지다. 그 핀 때문에 이 칸의 산출물은 R2가 틀렸다고 보인
+# 답을 싣고 있었다. `r1-decision-cell.yaml`·`r1-contrast.yaml`의 같은 핀은 R3의 이월이다.
+tiny_scorer_report: artifacts/reports/r2-tiny-scorer.json
+
+splits:
+  - name: robot/dev
+    manifest: artifacts/datasets/r1-robot/r1/manifest.json
+    domain: robot
+    split: dev
+    files: ["episodes/*/streams.jsonl"]
+    selection: false
+    note: "`dev` 42편 전부, 통째로 (`r1-robot-v0.2`). **선택에 쓰지 않는 둘째 칸**이다 — 봉인 계열이 아니므로 여기의 여유는 일반화 주장이 아니다. 판정 칸(`ood_dev` 26편 235틱)의 주 층이 좁아 구간이 넓으므로, 같은 열을 더 큰 모집단에서 한 번 더 읽는 자리다"
+    records: [ep-E0-400101, ep-E0-400125, ep-E0-400129, ep-E0-400130, ep-E0-400132,
+              ep-E0-400137, ep-E0-400141, ep-E0-400147, ep-E0-400149, ep-E0-400161,
+              ep-E0-400162, ep-E0-400171, ep-E0-400173,
+              ep-E1-410101, ep-E1-410111, ep-E1-410117, ep-E1-410124, ep-E1-410133,
+              ep-E1-410146, ep-E1-410148, ep-E1-410154, ep-E1-410156, ep-E1-410180,
+              ep-E1-410184, ep-E1-410198, ep-E1-410217, ep-E1-410218, ep-E1-410219,
+              ep-E1-410225, ep-E1-410235, ep-E1-410255,
+              ep-E2-420105, ep-E2-420113, ep-E2-420115, ep-E2-420144, ep-E2-420158,
+              ep-E2-420168, ep-E2-420170, ep-E2-420186, ep-E2-420197, ep-E2-420232,
+              ep-E2-420235]
+    store_predictions: [q_main, q_stop, q_gripper]   # R5 C2(c): 둘째 칸에도 그리퍼 층
+
+note: >
+  Task R2 B2의 둘째 칸. 판정 칸과 같은 열·같은 쌍 부트스트랩이고, 다른 것은 모집단과 `selection: false`뿐이다.
+  두 칸의 구간을 **나란히** 적는다 — 어느 하나를 고르는 것이 아니라, 좁은 판정 칸의 읽기가 더 큰 칸에서도
+  같은 방향인지를 본다.

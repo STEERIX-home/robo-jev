@@ -6,6 +6,7 @@
 """
 
 import functools
+from collections import Counter
 import importlib.util
 import json
 import sys
@@ -480,3 +481,74 @@ def test_the_r3a_run_sets_name_this_rounds_reports_and_keep_r2s_row_on_the_same_
             continue
         assert report.startswith("r3a-reeval-") and module.R3A_DEV_RUNS[name].startswith("r3a-dev-")
     assert "466" in module.R3A_RUNS["2B T1 fp32 seed 17 (466 = 2 epochs, fresh run)"]
+
+
+# --------------------------------------------------------------------------
+# `q_gripper`의 층 (Task R5 B1)
+# --------------------------------------------------------------------------
+
+
+def _gripper_dataset(base, episodes: dict) -> None:
+    """편마다 `(라벨 ids, 실행 그리퍼)` 목록으로 최소 스트림 레코드를 쓴다 — `gripper_dataset_ticks`가 읽는 꼴."""
+    for episode_id, ticks in episodes.items():
+        record = {"episode_id": episode_id, "ticks": []}
+        for index, (ids, executed) in enumerate(ticks):
+            record["ticks"].append({"t": 5 * index, "request": {"state": {"exec": {"gripper": executed, "phase": "grasp"}}, "candidates": {}},
+                                    "labels": ([{"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ids, "rule": "phase-profile-v0/x"}] if ids else [])})
+        path = base / "episodes" / episode_id / "streams.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+
+def test_the_gripper_strata_score_the_same_predictions_against_any_label_set(tmp_path):
+    """모델 입력은 라벨판과 무관하므로 한 run의 `q_gripper` 예측을 부모 라벨(전환 틱이 두 값)과 v2 라벨(전환 틱이 한 값 `closed`)로 각각
+    채점한다 — v2에서 initiate 층이 생기고 그 층의 정확도 = `closed` 예측률이다; 대조군 열은 층마다 같은 쌍 구간을 받는다."""
+    module = script()
+    parent = tmp_path / "parent"
+    v2 = tmp_path / "v2"
+    # 편 a: 틱 2에서 닫기 전환(실행은 틱 3부터 closed). 부모 라벨은 틱 1·2가 두 값(옛 규칙), v2는 틱 2가 한 값 closed.
+    _gripper_dataset(parent, {"a": [(["open"], "open"), (["open", "closed"], "open"), (["open", "closed"], "open"), (["closed"], "closed"), (["closed"], "closed")],
+                              "b": [(["open"], "open"), (["open", "closed"], "open"), (["open", "closed"], "open"), (["closed"], "closed")]})
+    _gripper_dataset(v2, {"a": [(["open"], "open"), (["open"], "open"), (["closed"], "open"), (["closed"], "closed"), (["closed"], "closed")],
+                          "b": [(["open"], "open"), (["open"], "open"), (["closed"], "open"), (["closed"], "closed")]})
+    for base in (parent, v2):
+        (base / "manifest.json").write_text("{}", encoding="utf-8")
+    parent_ticks = module.gripper_dataset_ticks(parent, ["a", "b"])
+    v2_ticks = module.gripper_dataset_ticks(v2, ["a", "b"])
+    assert Counter(row["class"] for row in parent_ticks) == {"open": 2, "window": 4, "settled": 3}
+    assert Counter(row["class"] for row in v2_ticks) == {"open": 4, "initiate": 2, "settled": 3}
+    # 모델: 실행 상태를 베낀다(전환 틱에서 open) — 대조군은 언제나 open.
+    def rows(predicted_by):
+        return [{"record_id": e, "tick": t, "question": "q_gripper", "predicted": predicted_by(e, t), "correct": None} for e, t in [("a", 0), ("a", 1), ("a", 2), ("a", 3), ("a", 4), ("b", 0), ("b", 1), ("b", 2), ("b", 3)]]
+    executed = {(r["episode_id"], r["tick"]): r["executed"] for r in v2_ticks}
+    model = rows(lambda e, t: "closed" if executed[(e, t)] == "closed" else "open")
+    control = rows(lambda e, t: "open")
+    table = {"model": {"q_gripper": {"per_record": model}}, "context_shuffle": {"q_gripper": {"per_record": control}}, "instruction_shuffle": {"q_gripper": {"per_record": control}}}
+    on_parent = module.gripper_strata(table, parent_ticks, resamples=200)
+    on_v2 = module.gripper_strata(table, v2_ticks, resamples=200)
+    assert on_parent["population"] == {"initiate": 0, "window": 4, "settled": 3, "open": 2, "window_closed": 0, "whole": 9}
+    assert on_v2["population"] == {"initiate": 2, "window": 0, "settled": 3, "open": 4, "window_closed": 0, "whole": 9}
+    # 부모 라벨: 정확도는 채점 가능한 틱(한 값)에서 1.0 — 전환 틱은 두 값이라 채점되지 않는다(정확도 None, closed 예측률 0)
+    assert on_parent["strata"]["window"]["accuracy"]["model"] is None and on_parent["strata"]["window"]["closed_rate"]["model"] == 0.0
+    assert on_parent["strata"]["whole"]["accuracy"]["model"] == 1.0 and on_parent["strata"]["whole"]["accuracy"]["graded"] == 5
+    # v2 라벨: initiate 층에서 실행 상태를 베끼는 모델은 0.0이고 대조군과의 여유는 0 [0, 0] (둘 다 open) — 이제 칸이 그 판단을 본다
+    initiate = on_v2["strata"]["initiate"]
+    assert initiate["n"] == 2 and initiate["episodes"] == 2
+    assert initiate["accuracy"]["model"] == 0.0 and initiate["closed_rate"]["model"] == 0.0
+    assert initiate["accuracy"]["state_shuffle"] == 0.0 and initiate["accuracy"]["state_shuffle_margin"] == 0.0 and initiate["accuracy"]["state_shuffle_margin_includes_zero"] is True
+    assert initiate["accuracy"]["instruction_shuffle_margin_ci"] == [0.0, 0.0]
+    settled = on_v2["strata"]["settled"]
+    assert settled["accuracy"]["model"] == 1.0 and settled["accuracy"]["state_shuffle"] == 0.0 and settled["accuracy"]["state_shuffle_margin"] == 1.0 and settled["accuracy"]["state_shuffle_margin_includes_zero"] is False
+    assert on_v2["strata"]["whole"]["accuracy"]["model"] == 7 / 9 and on_v2["strata"]["whole"]["accuracy"]["graded"] == 9
+    assert on_v2["strata"]["open"]["closed_rate"]["model"] == 0.0 and on_v2["strata"]["open"]["accuracy"]["model"] == 1.0
+    empty = module.gripper_strata({"model": {"q_gripper": {}}}, v2_ticks)
+    assert empty["available"] is False and "store_predictions" in empty["reason"]
+
+
+def test_the_r5_run_sets_name_both_cells_and_carry_the_gripper_label_sets_through_build(tmp_path):
+    module = script()
+    assert set(module.RUN_SETS["r5"]) == {"2B T1 fp32 seed 18 (233 = 1 epoch, R3a)", "2B T1 fp32 seed 18 + labels v2 + DAgger-0 (233, R5)"}
+    assert module.RUN_SETS["r5"]["2B T1 fp32 seed 18 (233 = 1 epoch, R3a)"] == "r5-reeval-2b-t1-fp32-s18.json"
+    assert module.RUN_SETS["r5dev"]["2B T1 fp32 seed 18 + labels v2 + DAgger-0 (233, R5)"] == "r5-dev-2b-t1-fp32-r5.json"
+    assert module.RUN_SETS["r5dev"]["2B T1 fp32 seed 18 (233 = 1 epoch, R3a)"] == "r3a-dev-2b-t1-fp32-s18.json"  # 둘째 칸의 seed 18은 R3a의 보고서 그대로
+    assert module.GRIPPER_STRATA == ("initiate", "window", "settled", "open", "window_closed", "whole")

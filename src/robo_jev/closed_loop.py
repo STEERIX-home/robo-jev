@@ -346,9 +346,12 @@ def _quantiles(values: list[float]) -> dict[str, Any]:
 
 def run_condition(
     bundle: dict[str, Any], schedule: list[tuple[str, int]], *, config: dict[str, Any], out: str | Path, condition: str, label: str,
-    log: Any = None, max_ticks: int | None = None,
+    log: Any = None, max_ticks: int | None = None, id_tag: str = "r4",
 ) -> dict[str, Any]:
-    """정책 하나를 seed 목록 전부에 돌려 에피소드를 쓰고(레코드 + manifest + 틱 지연 sidecar) 편별 요약을 돌려준다."""
+    """정책 하나를 seed 목록 전부에 돌려 에피소드를 쓰고(레코드 + manifest + 틱 지연 sidecar) 편별 요약을 돌려준다.
+
+    에피소드 id에는 `-<id_tag>-<label>`이 붙는다 (R4의 기록은 `-r4-…`; R5의 run은 `--id-tag r5`) — 같은 seed를 다른 라운드가 돌아도
+    파일·manifest의 열쇠가 겹치지 않는다."""
     from robo_jev.sim.environment import Environment
 
     generator = config["generator"]
@@ -356,7 +359,7 @@ def run_condition(
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     policy, expert = bundle["policy"], bundle["expert"]
-    suffix = f"-r4-{label}"
+    suffix = f"-{id_tag}-{label}"
     envs: dict[str, TimedEnvironment] = {}
     episodes: list[dict[str, Any]] = []
     timing_path = out / "timing.jsonl"
@@ -406,7 +409,7 @@ def run_condition(
                 env.close()
     wall = time.perf_counter() - started
     manifest = build_manifest(out, generator, batch_wall_s=wall)
-    manifest["closed_loop"] = {"version": CLOSED_LOOP_VERSION, "policy": bundle["describe"], "condition": condition, "label": label, "episodes": len(episodes)}
+    manifest["closed_loop"] = {"version": CLOSED_LOOP_VERSION, "policy": bundle["describe"], "condition": condition, "label": label, "id_tag": id_tag, "episodes": len(episodes)}
     (out / "manifest.json").write_bytes((json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
     latency = {
         "obs_to_command_ms": _quantiles(obs_to_command), "obs_to_command_net_of_reference_ms": _quantiles(obs_to_command_net),
@@ -773,8 +776,9 @@ def offline_gripper_transitions(report: dict[str, Any], records: list[dict[str, 
     * `initiate` — 라벨이 한 값 `closed`인데 **실행된** 그리퍼(`state.exec.gripper`)는 아직 `open`인 틱: "지금 닫아라"를 모델이
       스스로 내야 하는 틱(파지마다 몇 틱). 루프에서 팔이 멈춘 자리다.
     * `settled` — 라벨 `closed`이고 실행된 그리퍼도 이미 `closed`인 틱: 실행 상태를 베끼면 맞는 틱.
-    * `window` — 라벨이 **두 값**(전환 허용 구간 ±`gripper_transition_tolerance_ticks`)이고 실행된 그리퍼는 아직 `open`인 틱:
-      전문가가 실제로 닫기를 시작한 틱은 여기 든다(라벨은 두 값이라 정확도는 없고 `predicted_closed`만 뜻이 있다).
+    * `window` — 라벨이 **두 값**이고 실행된 그리퍼는 아직 `open`인 틱: 옛 규칙 v1(±`gripper_transition_tolerance_ticks`)에서는
+      전문가가 실제로 닫기를 시작한 틱이 여기 들었고, 규칙 v2(Task R5)에서는 open→closed 전환 **앞** `gripper_early_ticks`틱만 여기 든다
+      (라벨은 두 값이라 정확도는 없고 `predicted_closed`만 뜻이 있다). 종류의 정의는 `robo_jev.data.gripper_labels.gripper_tick_class`와 같다.
     * `open` — 라벨이 한 값 `open`인 틱.
     `initiate`가 거의 비고 `window`에서 `predicted_closed`가 0에 가까우면, 녹화된 데이터는 "지금 닫아라"를 한 값 라벨로 거의 묻지
     않았고 모델은 그 틱에서 닫지 않는다 — 폐루프에서 그리퍼가 한 번도 닫히지 않는 까닭이다.
@@ -854,7 +858,17 @@ def closed_loop_report(run_paths: list[Path], *, offline: list[Path] | None = No
     runs: dict[str, dict[str, Any]] = {}
     for path in run_paths:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
-        runs[str(payload["label"])] = {"path": str(path), "policy": payload["policy"], "conditions": payload["conditions"], "gpu": payload.get("gpu")}
+        label = str(payload["label"])
+        if label in runs:
+            # 같은 정책(이름표)을 다른 라운드가 다른 조건에서 돌린 run 파일들을 **합친다** (Task R5 D2: R4의 dev·ood_dev + R5의 dev_new) —
+            # 조건이 겹치면 어느 쪽이 그 조건의 값인지 알 수 없으므로 거절한다.
+            overlap = sorted(set(runs[label]["conditions"]) & set(payload["conditions"]))
+            if overlap:
+                raise ValueError(f"{path}: 이름표 {label!r}의 조건 {overlap}이 {runs[label]['path']}와 겹친다 — 같은 조건은 한 run 파일이어야 한다")
+            runs[label]["conditions"].update(payload["conditions"])
+            runs[label]["paths"] = [*runs[label].get("paths", [runs[label]["path"]]), str(path)]
+            continue
+        runs[label] = {"path": str(path), "policy": payload["policy"], "conditions": dict(payload["conditions"]), "gpu": payload.get("gpu")}
     conditions = sorted({name for run in runs.values() for name in run["conditions"]})
     tables: dict[str, dict[str, Any]] = {}
     rows_by: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -880,7 +894,7 @@ def closed_loop_report(run_paths: list[Path], *, offline: list[Path] | None = No
                         sub_b = [row for row in rows_by[(b, condition)] if row["layer"] == layer]
                         if sub_a and sub_b:
                             pairs[condition][f"{a} - {b} @ {layer}"] = paired_success(sub_a, sub_b)
-    return {"version": CLOSED_LOOP_VERSION, "runs": {label: {"path": run["path"], "policy": run["policy"], "gpu": run["gpu"]} for label, run in runs.items()},
+    return {"version": CLOSED_LOOP_VERSION, "runs": {label: {"path": run["path"], "paths": run.get("paths", [run["path"]]), "policy": run["policy"], "gpu": run["gpu"]} for label, run in runs.items()},
             "conditions": conditions, "tables": tables, "paired": pairs, "offline": _offline_columns(offline or []), "layers": list(LAYERS)}
 
 

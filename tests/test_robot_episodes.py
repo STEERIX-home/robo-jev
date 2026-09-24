@@ -436,20 +436,27 @@ def test_smoke_labels_never_reach_the_input_area(smoke):
         assert "labels" not in json.dumps(served, ensure_ascii=False)
 
 
-def test_smoke_gripper_labels_allow_both_states_around_a_transition(smoke):
+def test_smoke_gripper_labels_keep_the_transition_tick_single_valued_and_widen_only_before_it(smoke):
+    """규칙 v2 (Task R5 A1): 전환 틱(전문가가 처음 "닫아라"/"열어라"를 낸 틱)은 한 값이고, 두 값 라벨은 전환 **앞** k틱뿐이다
+    (k = 설정 `labels.gripper_early_ticks`; 0이면 두 값 라벨이 하나도 없다). 옛 규칙(±1)은 전환 틱 자체를 두 값으로 만들었다."""
+    from robo_jev.data.gripper_labels import desired_from_evidence, early_tolerance_indices, gripper_transitions
+    from robo_jev.data.robot_episodes import gripper_label_rule
+
     record = smoke["records"][("E0", 17)]
-    desired = []
+    desired = desired_from_evidence(record)
+    transitions = gripper_transitions(desired)
+    assert transitions, "E0 에피소드에는 닫기·열기 전환이 있어야 한다"
+    ids = []
     for tick in record["ticks"]:
         label = next((item for item in tick["labels"] if item["question_id"] == "q_gripper"), None)
-        desired.append(label["candidate_ids"] if label else None)
-    transitions = [
-        index for index in range(1, len(desired))
-        if desired[index] and desired[index - 1] and desired[index] != desired[index - 1]
-    ]
-    assert transitions, "E0 에피소드에는 닫기·열기 전환이 있어야 한다"
-    tolerant = [index for index, value in enumerate(desired) if value == ["open", "closed"]]
-    assert tolerant
-    assert any(abs(index - at) <= CONFIG["episode"].get("tail_ticks_after_done", 10) for index in tolerant for at in transitions)
+        ids.append(label["candidate_ids"] if label else None)
+    for at in transitions:
+        assert ids[at] == [desired[at]]
+    rule, early = gripper_label_rule(smoke["expert"].label_config)
+    assert rule == "v2"
+    two_valued = [index for index, value in enumerate(ids) if value == ["open", "closed"]]
+    assert two_valued == sorted(early_tolerance_indices(desired, early))
+    assert record["provenance"]["gripper_label_rule"] == {"rule": "v2", "early_ticks": early}
 
 
 def test_smoke_usage_and_evidence_stay_out_of_the_input(smoke):

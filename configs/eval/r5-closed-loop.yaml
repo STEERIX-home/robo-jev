@@ -1,0 +1,15 @@
+# Task R5 D1 — 폐루프 **새 dev 장면** 100 seed (브리프 D1 (i)). R4의 `r4-closed-loop.yaml`과 같은 생성 설정·프로파일 혼합
+# (E0/E1/E2 = 20/40/40)·split 규칙이고 seed 구간만 **950100~**이다 — R4의 900100~(프로파일마다 10,000씩, 최대 4,000 seed 스캔)과
+# 겹치지 않고, R4 dev 100 seed는 R5의 DAgger 재료(학습에 쓴 장면)라 "본 장면"으로 따로 낸다. 조건 이름을 `dev_new`로 두는 까닭:
+# `closed_loop.py report`가 조건 이름으로 표를 묶으므로 R4의 `dev`(본 장면)와 한 보고서에 나란히 들어가야 한다.
+# ood_dev 26 seed는 R4의 것을 그대로 쓴다(`artifacts/reports/r4-seeds.json`; 학습에 쓰지 않았다). `ood_test`는 봉인이다.
+version: r5-closed-loop-v0.1
+generator_config: configs/data/r1_robot.yaml
+seeds:
+  base: 950100
+scan:
+  per_profile_max: 4000
+conditions:
+  dev_new:
+    split: dev
+    count: 100

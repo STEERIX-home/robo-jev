@@ -107,8 +107,24 @@ R3A_DEV_RUNS = {
     name: report.replace("r2-reeval-", "r2-dev-").replace("r3a-reeval-", "r3a-dev-")
     for name, report in R3A_RUNS.items()
 }
+#: Task R5의 run들 — R3a seed 18(같은 checkpoint, `q_gripper` 예측을 더해 다시 잰 것)과 라벨 v2 + DAgger-0로 같은 조리법을 돌린 run.
+#: 두 줄은 같은 평가 집합 해시(`6a3b69131243…`) 위에 있다 — `configs/eval/r5-decision-cell.yaml`은 `store_predictions`만 다르다.
+R5_RUNS = {
+    "2B T1 fp32 seed 18 (233 = 1 epoch, R3a)": "r5-reeval-2b-t1-fp32-s18.json",
+    "2B T1 fp32 seed 18 + labels v2 + DAgger-0 (233, R5)": "r5-reeval-2b-t1-fp32-r5.json",
+}
+#: 둘째 칸(`dev` 42편): seed 18 줄은 **R3a의 둘째 칸 보고서**를 그대로 읽는다 (`q_main`·`q_stop` 예측이 있다; `q_gripper` 예측은 R5의 run에만
+#: 있어 seed 18의 그리퍼 층은 그 칸에서 "not available"이다 — 그 줄을 위해 GPU를 한 번 더 쓰지 않았다).
+R5_DEV_RUNS = {
+    "2B T1 fp32 seed 18 (233 = 1 epoch, R3a)": "r3a-dev-2b-t1-fp32-s18.json",
+    "2B T1 fp32 seed 18 + labels v2 + DAgger-0 (233, R5)": "r5-dev-2b-t1-fp32-r5.json",
+}
 RUN_SETS = {"p2": STRATA_RUNS, "p3": P3_RUNS, "r1": R1_RUNS, "r2": R2_RUNS, "r2dev": R2_DEV_RUNS,
-            "r3a": R3A_RUNS, "r3adev": R3A_DEV_RUNS}
+            "r3a": R3A_RUNS, "r3adev": R3A_DEV_RUNS, "r5": R5_RUNS, "r5dev": R5_DEV_RUNS}
+
+#: `q_gripper`의 층 (Task R5 B1) — R4 C0 표의 분류 그대로 (`robo_jev.data.gripper_labels.GRIPPER_LABEL_CLASSES`) + 전체.
+GRIPPER_QUESTION = "q_gripper"
+GRIPPER_STRATA = ("initiate", "window", "settled", "open", "window_closed", "whole")
 
 
 # --------------------------------------------------------------------------
@@ -432,6 +448,91 @@ def by_key_family(columns: dict[str, list[dict[str, Any]] | None], rows: list[di
 
 
 #: 어느 층이 **주 지표**인가 — P3 B1이 제도화한 답. 이 이름이 보고서에 그대로 들어간다.
+# --------------------------------------------------------------------------
+# `q_gripper`의 층 (Task R5 B1) — "지금 닫아라"를 칸이 볼 수 있게
+# --------------------------------------------------------------------------
+
+
+def gripper_dataset_ticks(base: Any, episodes: list[str]) -> list[dict[str, Any]]:
+    """데이터셋의 편들에서 `q_gripper` 라벨이 있는 틱마다 ``{episode_id, tick, label, executed, phase, class, rule}``.
+
+    `class`는 라벨과 **실행된** 그리퍼로 가른 R4 C0 표의 종류(:func:`robo_jev.data.gripper_labels.gripper_tick_class`): `initiate`
+    (한 값 `closed`·실행 open — 모델이 스스로 "닫아라"를 내야 하는 틱), `window`(두 값·실행 open), `settled`(한 값 `closed`·실행
+    closed — 실행 상태를 베끼면 맞는 틱), `open`, `window_closed`. 같은 편 id를 가진 **다른 라벨판**(부모 r1 / v2 `…-g2`)을 `base`로
+    주면 같은 예측을 다른 라벨로 채점할 수 있다 — 모델 입력은 두 판이 같다(바뀐 것은 라벨뿐이다).
+    """
+    from robo_jev.data.gripper_labels import gripper_tick_class
+
+    base = Path(base)
+    out: list[dict[str, Any]] = []
+    for episode_id in episodes:
+        record = json.loads((base / "episodes" / episode_id / "streams.jsonl").read_text(encoding="utf-8").strip())
+        for index, tick in enumerate(record["ticks"]):
+            label = next((row for row in tick.get("labels", []) if row.get("question_id") == GRIPPER_QUESTION), None)
+            if label is None:
+                continue
+            execution = ((tick["request"].get("state") or {}).get("exec") or {})
+            out.append({
+                "episode_id": episode_id, "tick": index, "label": [str(cid) for cid in (label.get("candidate_ids") or [])],
+                "executed": execution.get("gripper"), "phase": execution.get("phase"), "class": gripper_tick_class(tick), "rule": label.get("rule"),
+            })  # fmt: skip
+    return out
+
+
+def _gripper_per_episode(rows: list[dict[str, Any]], keep: set[tuple[str, int]], labels: dict[tuple[str, int], list[str]], *, metric: str) -> list[dict[str, Any]]:
+    """틱별 예측을 층으로 좁혀 편 단위 집계로 (:func:`stratum_per_episode`의 꼴). `metric`이 `accuracy`면 **주어진 라벨판**으로 다시
+    채점한 정확도(두 값 라벨은 채점하지 않는다), `closed_rate`면 `closed`를 낸 비율이다 — initiate 층에서는 둘이 같고, window 층에서는
+    후자만 뜻이 있다."""
+    counts: dict[str, list[int]] = {}
+    for row in rows:
+        key = (str(row["record_id"]), int(row["tick"]))
+        if key not in keep:
+            continue
+        entry = counts.setdefault(str(row["record_id"]), [0, 0, 0])
+        entry[0] += 1
+        ids = labels[key]
+        if metric == "closed_rate":
+            entry[1] += 1
+            entry[2] += int(str(row["predicted"]) == "closed")
+        elif len(ids) == 1:
+            entry[1] += 1
+            entry[2] += int(str(row["predicted"]) in ids)
+    return [{"episode_id": name, "n": value[0], "graded": value[1], "correct": value[2]} for name, value in sorted(counts.items())]
+
+
+def gripper_strata(table: dict[str, Any], ticks: list[dict[str, Any]], **options: Any) -> dict[str, Any]:
+    """한 run의 `q_gripper` 틱별 예측 → 층마다 (정확도, `closed` 예측률) × (모델·대조군·기준선)과 대조군 대비 **쌍** 구간."""
+    columns = {
+        name: ((table.get(source) or {}).get(GRIPPER_QUESTION) or {}).get("per_record")
+        for name, source in COLUMNS.items()
+    }
+    if not columns["model"]:
+        return {"available": False, "reason": f"the report has no per_record for {GRIPPER_QUESTION} (the split did not ask for store_predictions)"}
+    labels = {(row["episode_id"], row["tick"]): list(row["label"]) for row in ticks}
+    strata: dict[str, set[tuple[str, int]]] = {name: {(row["episode_id"], row["tick"]) for row in ticks if row["class"] == name} for name in GRIPPER_STRATA if name != "whole"}
+    strata["whole"] = set(labels)
+    out: dict[str, Any] = {"available": True, "population": {name: len(keep) for name, keep in strata.items()}, "strata": {}}
+    for name, keep in strata.items():
+        block: dict[str, Any] = {"n": len(keep), "episodes": len({episode for episode, _ in keep})}
+        for metric in ("accuracy", "closed_rate"):
+            per_episode = {column: _gripper_per_episode(rows, keep, labels, metric=metric) for column, rows in columns.items() if rows}
+            entry = episode_bootstrap(per_episode.get("model"), **options) or {}
+            metric_block: dict[str, Any] = {"model": entry.get("accuracy"), "model_ci": entry.get("accuracy_ci"), "graded": entry.get("graded")}
+            for column in [name for name in COLUMNS if name != "model"]:
+                rows = per_episode.get(column)
+                if not rows:
+                    continue
+                paired = episode_bootstrap(per_episode["model"], rows, **options) or {}
+                metric_block[column] = paired.get("control_accuracy")
+                if column in CONTROL_COLUMNS:
+                    metric_block[f"{column}_margin"] = paired.get("margin")
+                    metric_block[f"{column}_margin_ci"] = paired.get("margin_ci")
+                    metric_block[f"{column}_margin_includes_zero"] = paired.get("margin_includes_zero")
+            block[metric] = metric_block
+        out["strata"][name] = block
+    return out
+
+
 PRIMARY_STRATUM = "non_commitment"
 PRIMARY_STRATUM_NOTE = (
     "The primary metric is the non_commitment stratum: the ticks whose expert label is NOT the tick's own "
@@ -487,9 +588,13 @@ def reading_text(population: dict[str, Any], mechanism: dict[str, Any], donor: d
 
 def build(*, suite_path: Any = DEFAULT_SUITE, reports: Any = REPORTS, runs: dict[str, str] | None = None,
           split: str = SPLIT, task: str = "p2-decision-cell-strata", reading: str | None = None,
-          records: list[str] | None = None) -> dict[str, Any]:
+          records: list[str] | None = None, gripper_manifests: dict[str, Any] | None = None) -> dict[str, Any]:
+    """`gripper_manifests`(라벨판 이름 → 데이터셋 manifest)를 주면 같은 run들의 `q_gripper` 예측을 **그 라벨판마다** 층으로 채점해
+    `gripper` 블록에 싣는다 (Task R5 B1: 부모 라벨 대 v2 라벨을 나란히)."""
     reports = Path(reports)
     ticks = cell_ticks(suite_path, split=split)
+    chosen_records = records if records is not None else cell_records(suite_path, split=split)
+    gripper_ticks = {name: gripper_dataset_ticks(Path(path).parent, chosen_records) for name, path in (gripper_manifests or {}).items()}
     population = population_composition(ticks)
     found = mechanism(ticks)
     donor = donor_rotation(ticks, records if records is not None else cell_records(suite_path, split=split))
@@ -505,6 +610,10 @@ def build(*, suite_path: Any = DEFAULT_SUITE, reports: Any = REPORTS, runs: dict
         "mechanism": found,
         "runs": {},
         "missing": {},
+        "gripper": {
+            name: {"manifest": str(path), "population": dict(Counter(row["class"] for row in gripper_ticks[name])), "ticks": len(gripper_ticks[name]), "runs": {}}
+            for name, path in (gripper_manifests or {}).items()
+        },
     }
     for label, name in (runs or STRATA_RUNS).items():
         path = reports / name
@@ -521,6 +630,8 @@ def build(*, suite_path: Any = DEFAULT_SUITE, reports: Any = REPORTS, runs: dict
             out["missing"][label] = {"report": name, "reason": entry.get("reason")}
             continue
         out["runs"][label] = {"report": name, "eval_set_sha256": ((payload.get("evaluation") or {}).get("eval_set") or {}).get("sha256"), **entry}
+        for label_set, rows in gripper_ticks.items():
+            out["gripper"][label_set]["runs"][label] = gripper_strata(table, rows)
     return out
 
 
@@ -605,6 +716,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="모집단 보기에 견줄 평가 집합들 — `이름=경로`를 쉼표로")
     parser.add_argument("--rescope", nargs="+", default=None, metavar="REPORT",
                         help="이미 저장된 재평가 보고서들의 commitment 섞기 열에 범위를 적는다 (:func:`rescope`; GPU 없음)")
+    parser.add_argument("--gripper-manifest", dest="gripper_manifests", action="append", default=[], metavar="NAME=MANIFEST",
+                        help="`q_gripper` 층을 이 라벨판으로도 채점한다 (반복; 예: parent=…/r1/manifest.json v2=…/r1-rollout-labels-g2/manifest.json)")
     parser.add_argument("--reading", default=None,
                         help="읽기 문장을 직접 준다 — 기본은 이 파일의 `population`·`donor_rotation`·`mechanism`에서 **생성**한다")
     parser.add_argument("--out", default=str(REPORTS / "p2-decision-cell-strata.json"))
@@ -618,9 +731,10 @@ def main(argv: list[str] | None = None) -> int:
         payload = build_population([name.strip() for name in args.population_splits.split(",")], manifest=args.manifest, suites=suites)
         summary = ", ".join(f"{name} {block['whole_split']['episodes']}편 {block['whole_split']['ticks']}틱" for name, block in payload["splits"].items())
     else:
+        gripper = {pair.split("=", 1)[0]: pair.split("=", 1)[1] for pair in args.gripper_manifests}
         payload = build(suite_path=args.suite, reports=args.reports, runs=RUN_SETS[args.runs], split=args.split,
-                        task=f"{args.runs}-decision-cell-strata", reading=args.reading)
-        summary = f"{len(payload['runs'])} runs, {len(payload['missing'])} missing"
+                        task=f"{args.runs}-decision-cell-strata", reading=args.reading, gripper_manifests=gripper or None)
+        summary = f"{len(payload['runs'])} runs, {len(payload['missing'])} missing" + (f", gripper label sets {sorted(gripper)}" if gripper else "")
     target = Path(args.out)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(json.dumps(payload, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
