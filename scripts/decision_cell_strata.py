@@ -113,7 +113,12 @@ R5_RUNS = {
     "2B T1 fp32 seed 18 (233 = 1 epoch, R3a)": "r5-reeval-2b-t1-fp32-s18.json",
     "2B T1 fp32 seed 18 + labels v2 + DAgger-0 (233, R5)": "r5-reeval-2b-t1-fp32-r5.json",
 }
-R5_DEV_RUNS = {name: report.replace("r5-reeval-", "r5-dev-") for name, report in R5_RUNS.items()}
+#: 둘째 칸(`dev` 42편): seed 18 줄은 **R3a의 둘째 칸 보고서**를 그대로 읽는다 (`q_main`·`q_stop` 예측이 있다; `q_gripper` 예측은 R5의 run에만
+#: 있어 seed 18의 그리퍼 층은 그 칸에서 "not available"이다 — 그 줄을 위해 GPU를 한 번 더 쓰지 않았다).
+R5_DEV_RUNS = {
+    "2B T1 fp32 seed 18 (233 = 1 epoch, R3a)": "r3a-dev-2b-t1-fp32-s18.json",
+    "2B T1 fp32 seed 18 + labels v2 + DAgger-0 (233, R5)": "r5-dev-2b-t1-fp32-r5.json",
+}
 RUN_SETS = {"p2": STRATA_RUNS, "p3": P3_RUNS, "r1": R1_RUNS, "r2": R2_RUNS, "r2dev": R2_DEV_RUNS,
             "r3a": R3A_RUNS, "r3adev": R3A_DEV_RUNS, "r5": R5_RUNS, "r5dev": R5_DEV_RUNS}
 

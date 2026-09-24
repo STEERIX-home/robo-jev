@@ -550,4 +550,5 @@ def test_the_r5_run_sets_name_both_cells_and_carry_the_gripper_label_sets_throug
     assert set(module.RUN_SETS["r5"]) == {"2B T1 fp32 seed 18 (233 = 1 epoch, R3a)", "2B T1 fp32 seed 18 + labels v2 + DAgger-0 (233, R5)"}
     assert module.RUN_SETS["r5"]["2B T1 fp32 seed 18 (233 = 1 epoch, R3a)"] == "r5-reeval-2b-t1-fp32-s18.json"
     assert module.RUN_SETS["r5dev"]["2B T1 fp32 seed 18 + labels v2 + DAgger-0 (233, R5)"] == "r5-dev-2b-t1-fp32-r5.json"
+    assert module.RUN_SETS["r5dev"]["2B T1 fp32 seed 18 (233 = 1 epoch, R3a)"] == "r3a-dev-2b-t1-fp32-s18.json"  # 둘째 칸의 seed 18은 R3a의 보고서 그대로
     assert module.GRIPPER_STRATA == ("initiate", "window", "settled", "open", "window_closed", "whole")
