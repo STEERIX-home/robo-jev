@@ -480,8 +480,9 @@ def _tolerate_gripper_transitions_v2(record: dict[str, Any], early_ticks: int, d
     """그리퍼 라벨 규칙 v2 (Task R5 A1, docs/08 §7 `q_gripper`): **전환 틱은 한 값으로 남는다.**
 
     전환 틱 t*(원하는 상태가 직전 라벨 틱과 달라지는 첫 틱, open→closed·closed→open 둘 다)는 전문가가 실제로 내린
-    판단이라 언제나 한 값이다. 허용은 **파지 전환(open→closed)** 앞 틱(t*−k … t*−1)의 허용 집합만 넓힌다 — 이른 `closed`를
-    허용한다(실행기가 readiness로 보류한다, A2 실측) — 그리고 다른 전환 틱·라벨 없는 틱·다른 상태를 만나면 멈춘다
+    판단이라 언제나 한 값이다. 허용은 **open→closed 전환**(파지 `at_grasp_point`가 대부분이고 밀기 접근·`place_blocked`·lift 재닫기도
+    든다) 앞 틱(t*−k … t*−1)의 허용 집합만 넓힌다 — 이른 `closed`를 허용한다(실행기가 readiness로 보류한다, A2 실측) — 그리고
+    다른 전환 틱·라벨 없는 틱·다른 상태를 만나면 멈춘다(commitment 변경에서는 멈추지 않는다 — `gripper_labels` 모듈 설명)
     (:func:`robo_jev.data.gripper_labels.early_tolerance_indices`). 놓기 전환(closed→open) 앞은 넓히지 **않는다**: 이른
     `open`은 운반 국면에서 그대로 실행돼 물체를 떨어뜨린다(`directions`의 기본값 `("closed",)`가 그 실측이다).
     전환 틱과 그 뒤의 정착 틱은 어떤 k에서도 두 값이 되지 않는다. 옛 규칙(:func:`_tolerate_gripper_transitions`)은

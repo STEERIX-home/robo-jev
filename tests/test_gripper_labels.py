@@ -105,7 +105,7 @@ def _gripper_ids(record: dict) -> list:
 def test_the_record_level_v2_rule_marks_the_widened_ticks_and_refuses_an_already_widened_record():
     record = _labelled_record(["open", "open", "closed", "closed", "open"])
     changed = _tolerate_gripper_transitions_v2(record, 1)
-    assert changed == [1]  # 파지 전환(2) 앞만; 놓기 전환(4) 앞의 3은 그대로 한 값 `closed`
+    assert changed == [1]  # open→closed 전환(2) 앞만; closed→open 전환(4) 앞의 3은 그대로 한 값 `closed`
     assert _gripper_ids(record) == [["open"], ["open", "closed"], ["closed"], ["closed"], ["open"]]
     widened = next(item for item in record["ticks"][1]["labels"] if item["question_id"] == "q_gripper")
     assert widened["rule"].endswith("+early-tolerance") and widened["tolerance"] == {"version": GRIPPER_LABELS_VERSION, "early_ticks": 1, "directions": ["closed"]}
@@ -241,12 +241,33 @@ def test_the_derived_dataset_changes_only_the_gripper_labels_and_keeps_the_linea
             else:
                 assert new_label["candidate_ids"] == [desired[index]]
         validate_record(child)
-    assert manifest["lineage"]["labels_version"] == f"labels-expert+{GRIPPER_LABELS_VERSION}" or manifest["lineage"]["gripper_labels"]["early_ticks"] == 1
+    assert manifest["lineage"]["labels_version"] == f"expert+{GRIPPER_LABELS_VERSION}"  # 부모 레코드에 labels 버전이 없으면 `expert`
+    assert manifest["lineage"]["gripper_labels"] == {"version": GRIPPER_LABELS_VERSION, "rule": "v2", "early_ticks": 1}
+    for parent in parent_batch["records"]:
+        child = children[parent["episode_id"]]
+        assert {k: v for k, v in child["versions"].items() if k != "labels"} == {k: v for k, v in parent["versions"].items() if k != "labels"}  # 라벨 버전 말고는 그대로
+    assert manifest["generator"] == GENERATOR_VERSION and children[parent_batch["records"][0]["episode_id"]]["versions"]["generator"] == GENERATOR_VERSION
     assert manifest["gripper_labels"]["parent"]["classes"]["initiate"] <= manifest["gripper_labels"]["derived"]["classes"]["initiate"]
     assert manifest["gripper_labels"]["derived"]["classes"]["initiate"] >= manifest["gripper_labels"]["derived"]["executed_closes"]
     assert manifest["episodes"] == 2 and (out / "manifest.json").is_file()
+    assert manifest["gripper_labels"]["derived"]["sealed"] == {} and set(manifest["gripper_labels"]["derived"]["by_split"]) == {r["split"] for r in parent_batch["records"]}
     report = validate_dataset([record for _, record in read_episodes(out)])
     assert report["invalid_records"] == 0 and not report.get("errors")
+    # 봉인 분할(`ood_test`)의 레코드가 부모에 있으면 그 라벨 종류 수는 적지 않는다 — 편 수만 (리뷰 1 M9)
+    sealed_parent = tmp_path / "parent-with-sealed"
+    for record in parent_batch["records"]:
+        write_episode(record, sealed_parent)
+    sealed = copy.deepcopy(parent_batch["records"][0])
+    sealed["episode_id"] = sealed["episode_id"] + "-sealed"
+    sealed["split"] = "ood_test"
+    write_episode(sealed, sealed_parent)
+    build_manifest(sealed_parent, CONFIG, batch_wall_s=1.0)
+    manifest = derive_gripper_v2_dataset(sealed_parent, tmp_path / "g2-sealed", early_ticks=1)
+    for side in ("parent", "derived"):
+        block = manifest["gripper_labels"][side]
+        assert "ood_test" not in block["by_split"] and block["sealed"] == {"ood_test": {"episodes": 1}}
+        assert block["episodes"] == 2  # 전체 수도 봉인 분할을 뺀 것이다
+    assert manifest["splits"].get("ood_test") == 1  # 분할 크기는 manifest에 그대로 있다 (데이터로 복사된다)
 
 
 # --------------------------------------------------------------------------
@@ -301,19 +322,34 @@ def test_the_dagger_dataset_relabels_model_driven_records_and_marks_them_as_trai
 
 
 def test_the_dagger_dataset_refuses_sealed_or_ood_dev_sources(loop_batch, tmp_path):
-    sealed = tmp_path / "ood_dev"
-    sealed.mkdir()
+    """세 가지 검사를 각각 건드린다 (리뷰 1 M10): 경로에 봉인 이름이 든 것, 경로는 깨끗하지만 manifest의 `closed_loop.condition`이 ood_dev인 것,
+    경로·조건은 깨끗하지만 레코드의 `split`이 ood_dev인 것 — 셋 다 거절이고, 거절 전에 아무것도 쓰지 않는다."""
+    # (1) 경로만으로 — 디렉터리는 존재하지 않아도 된다 (읽기 전에 거절한다)
+    with pytest.raises(ValueError, match="ood_test"):
+        build_dagger_dataset([tmp_path / "ood_test"], tmp_path / "rejected-path", early_ticks=1, config=CONFIG)
+    assert not (tmp_path / "rejected-path").exists()
+    # (2) 조건만으로 — 경로 이름은 깨끗하다
+    by_condition = tmp_path / "loop-cond" / "run"
+    for _, record in read_episodes(loop_batch):
+        write_episode(record, by_condition)
+    manifest = build_manifest(by_condition, CONFIG, batch_wall_s=1.0)
+    manifest["closed_loop"] = {"condition": "ood_dev", "policy": {"name": "RuleJudge"}}
+    (by_condition / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="ood_dev"):
+        build_dagger_dataset([by_condition], tmp_path / "rejected-cond", early_ticks=1, config=CONFIG)
+    assert not (tmp_path / "rejected-cond").exists()
+    # (3) 레코드의 split만으로 — 경로도 조건도 깨끗하다
+    by_split = tmp_path / "loop-split" / "run"
     for _, record in read_episodes(loop_batch):
         record = copy.deepcopy(record)
         record["split"] = "ood_dev"
-        write_episode(record, sealed)
-    manifest = build_manifest(sealed, CONFIG, batch_wall_s=1.0)
-    manifest["closed_loop"] = {"condition": "ood_dev", "policy": {"name": "RuleJudge"}}
-    (sealed / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False) + "\n", encoding="utf-8")
+        write_episode(record, by_split)
+    manifest = build_manifest(by_split, CONFIG, batch_wall_s=1.0)
+    manifest["closed_loop"] = {"condition": "dev", "policy": {"name": "RuleJudge"}}
+    (by_split / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False) + "\n", encoding="utf-8")
     with pytest.raises(ValueError, match="ood_dev"):
-        build_dagger_dataset([sealed], tmp_path / "rejected", early_ticks=1, config=CONFIG)
-    with pytest.raises(ValueError, match="ood_test"):
-        build_dagger_dataset([tmp_path / "ood_test"], tmp_path / "rejected2", early_ticks=1, config=CONFIG)
+        build_dagger_dataset([by_split], tmp_path / "rejected-split", early_ticks=1, config=CONFIG)
+    assert not (tmp_path / "rejected-split").exists()
 
 
 # --------------------------------------------------------------------------

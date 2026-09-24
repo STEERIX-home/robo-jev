@@ -37,7 +37,11 @@ GPU (0.27 h); the resumed run made no periodic save (see §3 and `.superpowers/s
 | closed-loop scenes reused from R4 | ood_dev 26 (never trained on) and dev 100 (the DAgger scenes — "seen") | `artifacts/reports/r4-seeds.json`, `artifacts/datasets/r5-closed-loop/r5/{ood_dev,dev}/` | `cl0.1` |
 
 QA: `artifacts/reports/r1-robot-r1-rollout-labels-g2-qa.json` and `r5-dagger-dagger-0-qa.json` — 0 contract violations,
-0 QA violations, 0 leaks. The early-answer experiment behind k = 2 is `artifacts/reports/r5-a2-early-gripper.json`
+0 QA violations, 0 leaks. Two manifest notes: the top-level `generator` of both derived manifests is the writer's version
+(`gen-robot-v0.3`) while the records say `gen-robot-v0.2` (no episode was regenerated); and the g2 manifest carries
+per-class label counts for the sealed `ood_test` split in `gripper_labels.by_split` (aggregate only; the writer now skips
+sealed splits, but this file is not rewritten because the checkpoint's identity block holds its sha256). dagger-0's
+low-confidence labels: 345 of 142,078 (0.24 %; all `q_main`, hold∉A, weight 0.25). The early-answer experiment behind k = 2 is `artifacts/reports/r5-a2-early-gripper.json`
 (100 dev seeds, five policies, seed-paired).
 
 ## 3. Resume verification
@@ -66,8 +70,9 @@ never idle for a second GPU job). The step-40 file was deleted after the resumed
 | mechanical baseline (floor) | 0.077 | — | 0.000 | 0.931 | — | — | — | — | — | — | — |
 
 Reading (R5 C2). The instruction-shuffle margin on the primary stratum widens rather than regresses (+0.247 →
-+0.298; all 26 leave-one-episode-out refits exclude zero for all three controls; the non-selecting `dev` cell,
-hash `9b484441b23b`, reads +0.268 [+0.212, +0.324] against +0.261). The `q_gripper` initiate stratum — which the
++0.298; all 26 leave-one-episode-out refits exclude zero for all three controls; the non-selecting `dev` cell, hash `9b484441b23b`, reads +0.268 [+0.212, +0.324] against +0.261 — with the caveat that 18 of that cell's 21
+scene families, 38 of its 42 episodes, are the R4-dev families whose model-driven episodes became DAgger material, so
+only the `ood_dev` cell is a family holdout for this checkpoint). The `q_gripper` initiate stratum — which the
 parent labels did not contain at all (0 ticks) and rule v2 gives 43 ticks in every one of the 26 episodes — goes
 from 0 of 43 `closed` answers to 29 of 43; but the shuffled controls answer `closed` as often, so the answer is
 read from execution state (phase, hold count, the arm's stillness), not from the object's geometry the shuffles
@@ -78,8 +83,13 @@ replace; the controller's readiness is what makes that safe in the loop (R5 A2).
 ## 5. Closed-loop success (R5 D — the second time the model moves the robot)
 
 Setup as in run report 1 §5 (the same `ModelPolicy` serving path, `h0.9` / `c0.6` / `ts0.6`, expert reference
-labels), on three scene sets: **100 new dev seeds** (950100+, harder than R4's — the expert completes 87),
-**R4's 26 ood_dev seeds** (never trained on) and **R4's 100 dev seeds** (the DAgger scenes; "seen").
+labels), on three scene sets: **100 new dev seeds** (950100+, harder than R4's — the expert completes 87; **unseen
+seeds, but 24 of their 29 families = 94 of 100 seeds are the R4-dev families that became DAgger cycle 0**, so this set is
+not a family holdout), **R4's 26 ood_dev seeds** (never trained on — seeds or families; after R5 this is the only
+family holdout) and **R4's 100 dev seeds** (the DAgger scenes; "seen"). Label-rule note: the expert / rule / seed-18
+rows of the ood_dev and seen sets are R4's records labelled under rule v1, the R5 rows under v2, so aux-agreement,
+streak and failure-class columns are stricter for R5 there; done, strict and transition counts do not depend on the
+labels, and the new-seed set is like-for-like (all runs labelled under v2).
 
 | policy | new dev 100: `done` [95 %] / `done ∧ inside` (false done) | ood_dev 26: `done` / strict (false) | seen dev 100: `done` / strict (false) | gripper transitions executed / reference (new / ood / seen) |
 | --- | ---: | ---: | ---: | ---: |
@@ -92,7 +102,8 @@ labels), on three scene sets: **100 new dev seeds** (950100+, harder than R4's �
 Paired by seed: **R5 − seed 18 = +0.710 [+0.620, +0.800]** (strict +0.640 [+0.550, +0.730]) on the new scenes,
 **+0.885 [+0.731, +1.000]** (strict +0.692 [+0.500, +0.846]) on ood_dev, +0.840 [+0.770, +0.910] (strict +0.710) on
 the seen scenes. **Rule judge − R5 = +0.100 [+0.010, +0.190]** (strict +0.170 [+0.100, +0.250]) on the new scenes —
-the goal-reading rule baseline is still ahead where generalisation is measured; on ood_dev −0.192 [−0.423, 0.000]
+the goal-reading rule baseline is still ahead on unseen seeds of trained-on families; on ood_dev, the family holdout,
+−0.192 [−0.423, 0.000]
 (strict 0.000 [−0.192, +0.192], a tie); on the seen scenes −0.040 [−0.140, +0.060] (strict +0.090 [+0.010, +0.170]).
 Expert − R5 +0.160 [+0.090, +0.240] / +0.115 [0.000, +0.269] / +0.130 [+0.060, +0.200]. Layers: rule = expert on
 E0 everywhere; R5 completes 19/22 E0 and 52/78 E1+E2 on the new scenes.
@@ -104,8 +115,10 @@ fails 12 of these scenes geometrically). **False dones are the new largest gap**
 new scenes, 5 of 23 on ood_dev and 13 of 84 on the seen scenes end with the target outside its zone — the model's
 `q_done` fires where the reference label is False (the expert and the rule judge never do). `q_stop`: 18 of 26
 onsets caught on the new scenes, false alarms 1.8 % (147 stop ticks from `q_stop` against 20 reflexes); unsafe
-0.55 % (seed 18 0.37 %); rejections 0. Latency in the loop (docs/03 §7-6): p50 / p95 / p99 42.8 / 55.7 / 80.9 ms,
-0 of 20,757 ticks over 100 ms across the three sets. Sources: `artifacts/reports/r5-closed-loop.json`,
+0.55 % (seed 18 0.37 %); rejections 0. Latency in the loop (docs/03 §7-6), non-first ticks as in run report 1: p50 /
+p95 / p99 42.8 / 55.7 / 80.9 ms, **0 of 20,531 over 100 ms**; first ticks (prefix build) p50 ≈ 93 ms, max 283 ms,
+**18 of 226 over 100 ms**; overall 18 of 20,757 = 0.09 % — the gate (p95 ≤ 80 ms, > 100 ms ≤ 5 %) passes on either
+reading. Sources: `artifacts/reports/r5-closed-loop.json`,
 `artifacts/datasets/r5-closed-loop/`, `.superpowers/sdd/task-r5-report.md` D2.
 
 ## 6. Measured cost and the G1 recommendation
@@ -122,10 +135,10 @@ filesystem reached 99 % (240 GB of prior checkpoints under `artifacts/runs`), th
 resumed run could keep no periodic checkpoint.
 
 **Recommendation on G1 (from the numbers only).** Run report 1 said: do not scale until the auxiliary-judgment
-labels and cell are repaired. They are, and the repair moved the loop from 0/126 to 64–71 % strict on unseen
-scenes and 18/26 on the sealed-concept holdout while the instruction-reading margin widened — so a cloud run on
-this recipe is no longer pointless. It is still not the next step. Two numbers argue for one more Spark round
-first: the rule judge beats this single seed on the new scenes (+0.100 [+0.010, +0.190]; strict +0.170), and the
+labels and cell are repaired. They are, and the repair moved the loop from 0/126 to **18/26 strict on the family holdout (ood_dev)** and to 64 strict /
+71 `done` on unseen seeds of mostly trained-on families (dev_new), while the instruction-reading margin widened — so a
+cloud run on this recipe is no longer pointless. It is still not the next step. Two numbers argue for one more Spark round
+first: the rule judge beats this single seed on the new seeds (+0.100 [+0.010, +0.190]; strict +0.170), and the
 largest remaining failure is a false-done rate of 10–15 % of completions plus auxiliary streaks on model-driven
 states — both addressable by a second DAgger cycle on the R5 records (226 model-driven episodes that now contain
 completions, false dones, drops and flaps) and a check of the `q_done` label/gate, for ≈ 5 GPU-h here. Open the

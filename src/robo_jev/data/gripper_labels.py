@@ -23,6 +23,19 @@ digest의 조각이라(`model/contract_digest.py`) 이름을 더하면 R3a 체�
 
 틱 종류(R4 C0 표, :data:`GRIPPER_LABEL_CLASSES`): `initiate`(한 값 `closed`·실행 그리퍼 아직 open — "지금 닫아라"), `window`(두 값·실행
 open), `settled`(한 값 `closed`·실행 closed — 실행 상태를 베끼면 맞는 틱), `open`(한 값 `open`), `window_closed`(두 값·실행 closed).
+
+규칙 v2의 범위(리뷰 1 M1·M2). 넓히는 것은 원하는 상태가 **open→closed로 바뀌는 모든 전환**의 앞 k틱이지 파지만이 아니다 — g2의
+봉인되지 않은 분할에서 넓힌 1,003틱 가운데 956은 `at_grasp_point`(파지) 앞, 17은 `push_with_closed_fingers`(밀기의 접근) 앞, 28은
+`place_blocked`(막힌 놓기의 재닫기) 앞, 2는 `phase:lift` 재닫기 앞이다; `window_closed`로 남는 24틱은 뒤의 두 종류(실행 그리퍼가 아직
+closed인 채 전문가가 열기를 원하던 틱)다. 거슬러 가는 걸음은 다른 전환·라벨 없는 틱·다른 상태에서 멈추지만 **commitment 변경에서는
+멈추지 않는다** — 넓힌 틱 19개(밀기 17·lift 2)는 자기 전환 틱과 `conditioned_on`이 다르다(1.8 %). 둘 다 학습·루프에 해가 없고(이른
+닫기는 실행기가 보류한다) 데이터셋은 이 규칙으로 만들어졌으므로 규칙은 그대로 두고 여기 적는다; 파지 앞으로 좁히는 것은 다음 라운드의 선택지다.
+
+manifest의 `generator` 필드(리뷰 1 M8). `build_manifest`가 쓰는 최상위 `generator`는 **manifest를 쓴 체크아웃의 생성기 버전**(이 라운드
+`gen-robot-v0.3`, 기본 라벨 규칙 v2)이고, 레코드마다의 `versions.generator`는 **그 에피소드를 만든 생성기**(g2·dagger-0 모두 `gen-robot-v0.2`)다
+— 파생 데이터셋은 에피소드를 다시 만들지 않으므로 둘이 다르다. 학습 run의 identity 블록이 manifest 파일의 sha256을 들므로 이미 학습에 쓴
+manifest는 고쳐 쓰지 않는다(`docs/reports/run-report-2.md` §2). 봉인 분할(`ood_test`)의 라벨 종류 수는 `by_split`에 적지 않는다(리뷰 1 M9;
+편 수만 `sealed`에 든다).
 """
 
 from __future__ import annotations
@@ -87,7 +100,8 @@ def gripper_transitions(desired: list[str | None]) -> list[int]:
     return out
 
 
-#: 규칙 v2가 앞 틱을 넓히는 전환의 **방향**(전환 뒤의 상태). 기본은 `closed`(open→closed, 파지)뿐이다 — A2 실측: 이른 `closed`는
+#: 규칙 v2가 앞 틱을 넓히는 전환의 **방향**(전환 뒤의 상태). 기본은 `closed`(open→closed — 파지가 대부분이고 밀기 접근·`place_blocked`·lift 재닫기도
+#: 든다)뿐이다 — A2 실측: 이른 `closed`는
 #: 실행기가 readiness(`close_readiness_distance_mm`)로 보류해 전문가와 같은 틱에 닫히지만, 이른 `open`은 운반 국면에서
 #: readiness가 하중(`open_readiness_force_n`)만 보므로 **그 자리에서 실행돼 물체를 운반 높이에서 떨어뜨린다**(docs/10 I2의 사고).
 DEFAULT_EARLY_DIRECTIONS = ("closed",)
@@ -237,9 +251,16 @@ def count_gripper_classes(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+#: 봉인 분할 — 그 라벨의 종류 수도 적지 않는다 (docs/04 §5: `ood_test`는 읽기·나열·평가 금지; 편 수만 든다).
+SEALED_SPLITS = ("ood_test",)
+
+
 def _counts_by_split(records: list[dict[str, Any]]) -> dict[str, Any]:
-    out = count_gripper_classes(records)
-    out["by_split"] = {split: count_gripper_classes([r for r in records if r.get("split") == split]) for split in sorted({str(r.get("split")) for r in records})}
+    """전체 + 분할별 그리퍼 틱 종류 수. 봉인 분할은 `by_split`에서 빼고 편 수만 `sealed`에 적는다 — 전체(`classes`)는 봉인 분할을 **뺀** 레코드로 센다."""
+    open_records = [r for r in records if str(r.get("split")) not in SEALED_SPLITS]
+    out = count_gripper_classes(open_records)
+    out["by_split"] = {split: count_gripper_classes([r for r in open_records if r.get("split") == split]) for split in sorted({str(r.get("split")) for r in open_records})}
+    out["sealed"] = {split: {"episodes": sum(1 for r in records if str(r.get("split")) == split)} for split in SEALED_SPLITS if any(str(r.get("split")) == split for r in records)}
     return out
 
 

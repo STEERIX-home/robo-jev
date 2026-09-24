@@ -777,7 +777,7 @@ def offline_gripper_transitions(report: dict[str, Any], records: list[dict[str, 
       스스로 내야 하는 틱(파지마다 몇 틱). 루프에서 팔이 멈춘 자리다.
     * `settled` — 라벨 `closed`이고 실행된 그리퍼도 이미 `closed`인 틱: 실행 상태를 베끼면 맞는 틱.
     * `window` — 라벨이 **두 값**이고 실행된 그리퍼는 아직 `open`인 틱: 옛 규칙 v1(±`gripper_transition_tolerance_ticks`)에서는
-      전문가가 실제로 닫기를 시작한 틱이 여기 들었고, 규칙 v2(Task R5)에서는 파지 전환 **앞** `gripper_early_ticks`틱만 여기 든다
+      전문가가 실제로 닫기를 시작한 틱이 여기 들었고, 규칙 v2(Task R5)에서는 open→closed 전환 **앞** `gripper_early_ticks`틱만 여기 든다
       (라벨은 두 값이라 정확도는 없고 `predicted_closed`만 뜻이 있다). 종류의 정의는 `robo_jev.data.gripper_labels.gripper_tick_class`와 같다.
     * `open` — 라벨이 한 값 `open`인 틱.
     `initiate`가 거의 비고 `window`에서 `predicted_closed`가 0에 가까우면, 녹화된 데이터는 "지금 닫아라"를 한 값 라벨로 거의 묻지
