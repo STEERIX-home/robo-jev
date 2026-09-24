@@ -1,0 +1,224 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/robo-jev/infra/run-manifest.schema.json",
+  "title": "robojev run manifest",
+  "description": "한 번의 학습 run을 '명세된·상한 있는·감사 가능한' 것으로 만드는 파일 (docs/06 Task 6, docs/05 §7). 실행기(scripts/launch_run.py)가 prepare에서 만들고 launch/status/fetch/cancel/resume이 갱신한다. 자격 증명은 들어가지 않는다 — 호스트·사용자·경로까지이고 키는 환경 변수·외부 파일 경로로만 가리킨다.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "run_id", "created_at", "updated_at", "code", "train_config",
+    "dataset_manifests", "tokenizer", "contract", "seed", "max_steps", "checkpoint",
+    "budget", "artifacts", "backend", "state", "progress", "finished_at", "exit_reason", "history"
+  ],
+  "properties": {
+    "schema_version": {"const": "run-manifest-v0"},
+    "run_id": {"type": "string", "minLength": 1, "description": "원격 작업 디렉터리와 systemd 유닛의 이름."},
+    "parent_run_id": {"type": ["string", "null"], "description": "이 run이 잇는 부모 run (resume이 채운다)."},
+    "created_at": {"type": "string", "description": "prepare 시각 (UTC ISO-8601)."},
+    "updated_at": {"type": "string", "description": "마지막으로 이 파일을 쓴 시각."},
+
+    "code": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["git_sha", "dirty"],
+      "description": "코드 리비전. `dirty`가 참이면 커밋되지 않은 변경 위에서 돈 run이라 재현이 sha 하나로 되지 않는다.",
+      "properties": {
+        "git_sha": {"type": ["string", "null"]},
+        "dirty": {"type": "boolean"},
+        "branch": {"type": ["string", "null"]},
+        "dirty_files": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+
+    "train_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "resolved_sha256"],
+      "description": "학습 설정 파일과 그 sha256. `resolved_sha256`은 extends·modes·--set을 푼 뒤 원격이 실제로 받는 설정의 해시다.",
+      "properties": {
+        "path": {"type": "string"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "resolved_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "run_name": {"type": ["string", "null"]},
+        "overrides": {"type": "object"}
+      }
+    },
+
+    "dataset_manifests": {
+      "type": "array",
+      "minItems": 1,
+      "description": "데이터는 묶음에 담지 않는다 — 경로와 sha256만 적고 원격이 시작 전에 대조한다.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "sha256"],
+        "properties": {
+          "path": {"type": "string"},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "domain": {"type": ["string", "null"]},
+          "material": {"type": ["string", "null"]},
+          "files": {"type": ["array", "null"], "items": {"type": "string"}},
+          "bundled": {"type": "boolean", "description": "manifest 파일 자체를 묶음에 담았는지 (레코드는 담지 않는다)."}
+        }
+      }
+    },
+
+    "tokenizer": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "sha256"],
+      "properties": {
+        "id": {"type": "string"},
+        "kind": {"type": ["string", "null"]},
+        "sha256": {"type": ["string", "null"]},
+        "revision": {"type": ["string", "null"]},
+        "path": {"type": ["string", "null"]}
+      }
+    },
+
+    "contract": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["sha256"],
+      "description": "배포 계약 digest (robo_jev.model.contract_digest). 옛 checkpoint를 새 계약에 이어 붙이지 않게 하는 자리다.",
+      "properties": {"sha256": {"type": "string"}}
+    },
+
+    "seed": {"type": "integer"},
+    "max_steps": {"type": "integer", "minimum": 1},
+
+    "checkpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["every", "keep_steps"],
+      "description": "checkpoint 정책 (docs/05 §7). `every`는 optimizer step 간격, `keep_steps`는 덮어쓰이지 않는 비교점.",
+      "properties": {
+        "every": {"type": "integer", "minimum": 1},
+        "keep_steps": {"type": "array", "items": {"type": "integer", "minimum": 1}},
+        "resume_from": {"type": ["string", "null"], "description": "이 run이 이어 가는 checkpoint (resume이 채운다)."}
+      }
+    },
+
+    "budget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hourly_usd", "gpus", "max_wall_hours", "max_gpu_hours", "max_usd"],
+      "description": "상한. 시간당 단가는 여기에 적는다 — 원격 러너가 이 셋을 스스로 재고 넘기면 checkpoint를 쓴 뒤 failed(reason=budget)으로 끝낸다. 셋 다 벽시계 마감으로 환산되고 가장 이른 것이 구속한다 (robo_jev.launch.manifest.budget_deadline_hours).",
+      "properties": {
+        "hourly_usd": {"type": "number", "minimum": 0, "description": "노드 시간 단가 (USD/h). 공급자 콘솔의 값을 그대로 옮긴다."},
+        "gpus": {"type": "integer", "minimum": 0, "description": "이 노드의 GPU 수. gpu_hours = 벽시계 시간 × gpus."},
+        "max_wall_hours": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "max_gpu_hours": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "max_usd": {"type": ["number", "null"], "exclusiveMinimum": 0},
+        "price_source": {"type": ["string", "null"], "description": "단가의 출처 (docs/05 §5 표, 또는 예약 직전 콘솔)."},
+        "planned": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "prepare가 적는 예상치. 실측이 아니면 assumption에 그 사실을 적는다.",
+          "properties": {
+            "wall_hours": {"type": ["number", "null"]},
+            "gpu_hours": {"type": ["number", "null"]},
+            "usd": {"type": ["number", "null"]},
+            "seconds_per_step": {"type": ["number", "null"]},
+            "assumption": {"type": ["string", "null"]}
+          }
+        }
+      }
+    },
+
+    "artifacts": {
+      "type": "array",
+      "description": "run이 남기는 것. prepare가 종류를 적고 fetch가 sha256·바이트·가져온 경로를 채운다.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "kind", "remote"],
+        "properties": {
+          "name": {"type": "string"},
+          "kind": {"enum": ["checkpoint", "metrics", "config", "report", "log", "state"]},
+          "remote": {"type": "string", "description": "원격 run 디렉터리 기준 상대 경로."},
+          "glob": {"type": "boolean", "description": "remote가 패턴이면 참 (checkpoint-step*.pt)."},
+          "required_": {"type": "boolean", "description": "이것이 없으면 회수가 실패하는가. 이름 끝의 `_`는 JSON Schema의 `required` 키워드와 눈으로 구분하기 위한 것이다. `completed`로 끝난 run에서만 강제한다 — 강제 종료된 run은 부분적인 것이 정상이다."},
+          "bytes": {"type": ["integer", "null"]},
+          "sha256": {"type": ["string", "null"]},
+          "local": {"type": ["string", "null"]},
+          "fetched_at": {"type": ["string", "null"]},
+          "sha256_match": {"type": ["boolean", "null"], "description": "가져온 파일을 다시 해시해 원격 값과 견준 결과."}
+        }
+      }
+    },
+
+    "backend": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "remote_dir"],
+      "description": "어디서 도는가. 자격 증명은 없다 — 키는 `identity_path`(외부 파일 경로)나 환경 변수 이름으로만 가리킨다.",
+      "properties": {
+        "kind": {"enum": ["ssh", "local"]},
+        "host": {"type": ["string", "null"]},
+        "user": {"type": ["string", "null"]},
+        "port": {"type": ["integer", "null"]},
+        "remote_dir": {"type": "string"},
+        "remote_repo": {"type": ["string", "null"]},
+        "remote_python": {"type": ["string", "null"]},
+        "gpus": {"type": "integer", "minimum": 0},
+        "unit": {"type": ["string", "null"], "description": "분리 실행의 이름 (systemd-run --user --unit)."},
+        "launcher": {"enum": ["systemd-run", "nohup", "local", null]},
+        "pid": {"type": ["integer", "null"]},
+        "identity_path": {"type": ["string", "null"], "description": "개인키 **경로**. 키 내용은 저장하지 않는다."},
+        "known_hosts": {"type": ["string", "null"], "description": "known_hosts 파일 경로."},
+        "ssh_options": {"type": "array", "items": {"type": "string"}},
+        "provider": {"type": ["string", "null"], "description": "인스턴스를 만든 공급자 (이번 판은 'existing-box')."},
+        "instance_id": {"type": ["string", "null"]}
+      }
+    },
+
+    "state": {
+      "enum": ["prepared", "running", "completed", "failed", "cancelled", "unknown"],
+      "description": "`unknown`은 '확인하지 못했다'는 뜻이다 — cancel이 멈춤을 확인하지 못하면 여기로 간다 (docs/06 Task 6: 종료 API 실패는 미종료 상태로 명시)."
+    },
+
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "status가 원격에서 읽어 채운다.",
+      "properties": {
+        "step": {"type": ["integer", "null"]},
+        "max_steps": {"type": ["integer", "null"]},
+        "loss": {"type": ["number", "null"]},
+        "elapsed_seconds": {"type": ["number", "null"]},
+        "gpu_hours": {"type": ["number", "null"]},
+        "estimated_usd": {"type": ["number", "null"]},
+        "seconds_per_step": {"type": ["number", "null"]},
+        "updated_at": {"type": ["string", "null"], "description": "원격 state.json의 시각."},
+        "observed_at": {"type": ["string", "null"], "description": "실행기가 그것을 읽은 시각."},
+        "alive": {"type": ["boolean", "null"], "description": "원격 프로세스가 살아 있는지 (systemctl/kill -0)."}
+      }
+    },
+
+    "finished_at": {"type": ["string", "null"]},
+    "exit_reason": {
+      "type": ["string", "null"],
+      "description": "completed | budget | cancelled | process_vanished | inputs | error | cancel-unconfirmed | cancel-command-failed"
+    },
+    "budget_limit": {"type": ["string", "null"], "description": "budget으로 끝났다면 구속한 상한의 이름 (max_wall_hours | max_gpu_hours | max_usd)."},
+
+    "history": {
+      "type": "array",
+      "description": "상태 전이의 장부. 지우지 않고 덧붙인다.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["at", "state"],
+        "properties": {
+          "at": {"type": "string"},
+          "state": {"type": "string"},
+          "note": {"type": ["string", "null"]},
+          "command": {"type": ["string", "null"]}
+        }
+      }
+    },
+
+    "notes": {"type": "array", "items": {"type": "string"}, "description": "사람이 읽는 주석 — 카드 크기·메모리 같은 전제."}
+  }
+}

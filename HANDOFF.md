@@ -128,6 +128,28 @@ seed 3 = **234회 전부 0을 제외**하고, 둘째 칸도 세 seed 모두 부�
 대해서는 아직 아니다. (b) `q_stop`의 1건 → 6건은 읽기의 증거가 아니다 — 466에서 상태·지시·commitment 섞기 열이
 **전부 10건 중 7건**을 잡아 모델보다 많고, seed 사이 1 / 8 / 0과 나란히 놓으면 그 지표의 잡음 안이다.
 
+**Task R3b(2026-09-23)가 클라우드 실행기를 만들었다 — 그리고 한 푼도 쓰지 않았다.** R3a가 seed·epoch를 반복하는 동안
+CPU에서 `scripts/launch_run.py {prepare,launch,status,fetch,cancel,resume}` · `src/robo_jev/launch/` ·
+`infra/run-manifest.schema.json`을 만들고 **localhost 왕복**으로 인수했다(SSH 백엔드, `configs/train/tiny_cpu.yaml`
+5 step **145.688 s**(러너 자신의 시계로 잰 경과 — 학습기의 `metrics.json`은 144.85 s다), 다섯 산출물 sha256 전부 일치). 고의 실패 넷도 실제로 냈다: 벽시계 상한 · USD 상한 · `kill -9` ·
+확인되지 않은 `cancel`(→ `unknown`). 읽는 법 셋. (1) **상한을 재는 것은 실행기가 아니라 원격 러너다** — 벽시계·GPU
+시간·USD 셋이 하나의 마감으로 환산되고(`max_usd / hourly_usd` 등) 가장 이른 것이 구속하며, 넘으면 원격이 스스로
+checkpoint를 쓰고 `failed(reason=budget)`으로 끝난다. 노트북을 닫아도 지켜진다. 그리고 **아무 상한도 구속하지 않는 run은 `prepare`가 거절한다**(`--no-cap`으로 이름을 부르면 그 사실이 명세에 남는다); **재개의 남은 예산도 부모가 실제로 쓴 시간**(가져온 `state.json`)에서 빼며, 그것이 관측된 적 없으면 `status`부터 하라고 거절한다. (2) **`cancel`은 확인될 때까지
+기다린다** — 확인하지 못하면 `cancelled`가 아니라 **`unknown`**이고 종료 코드 3으로 사람을 부른다(돈이 계속 나갈 수
+있다). (3) **데이터는 묶음에 담기지 않는다** — 경로와 sha256만 가고 원격이 시작 전에 대조하며, 다르면
+`failed(reason=inputs)`로 학습을 시작조차 하지 않는다.
+
+**다음은 사용자 결정이다 — 공급자·계정·첫 유료 run.** 실행기는 "이미 있는 상자에 SSH"까지이고 인스턴스 생성·종료
+(`Provider.create/destroy/describe`)는 **인터페이스만** 두고 이월했다. 그러므로 다음 세 가지는 코드가 아니라 사람이
+정한다: (a) **공급자와 계정** — docs/05 §5의 공개 표(Lambda 1×H100 PCIe $3.29 · Runpod 표시값 $2.89 · H200 $4.59)는
+2026-09-18 확인값이고, 예약 직전 콘솔의 상품·수량·지역·시간 단가를 명세의 `budget.price_source`에 복사한다.
+(b) **첫 유료 run의 승인** — 준비된 명세는 `artifacts/scratch/r3b/r2-t1/run.json`(R2의 fp32 T1 1 epoch를 1×H100
+$2.5/h 가정으로: 예상 4.32 h · **$10.80**, 상한 6 h / 6 GPU-h / $12.5 → 마감 5.0 h, 구속 `max_usd`)이고 `host`·
+`identity_path`는 자리표시다. **H100 대 GB10의 처리량 배수는 아직 재지 않았다** — 4.32 h는 1.0× 가정의 상한이고
+첫 run의 tokens/s로 대체한다. (c) **카드 크기** — 2B의 fp32 T1은 실측 peak 56.05 GiB로 80 GB 카드에 여유 22.6 %로
+들지만, **4B의 fp32 T1은 optimizer 바닥만 94.0 GiB라 80 GB에 들지 않는다**(H200 141 GB / B200 180 GB 한 장, 또는
+FSDP sharding부터). 자격 증명은 저장소에도 명세에도 넣지 않는다 — 개인키는 **경로**로만 가리킨다.
+
 ## 4. git 밖에 있는 것 — 전달 목록
 
 | 항목 | 위치 | 전달/재생성 | 검증 |
