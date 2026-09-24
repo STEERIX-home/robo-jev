@@ -99,7 +99,16 @@ controller reflex; unsafe-action rate 1.60 % (105 forbidden-target ticks, 25 sto
 
 ### 5a. Offline on the same seeds (`artifacts/reports/r4-offline-loop-seeds-s18.json`, `r4-transitions-s18.json`)
 
-*(filled in when the unit `r4-c-offline-s18` lands — see the task report §C.)*
+The expert's own R4 episodes (dev 11,128 ticks, ood_dev 2,715; eval-set hash `53e77e69fb54`) replayed through the
+seed-18 checkpoint: `q_main` 0.994 / 0.996 (rule judge 0.815 / 0.761, mechanical 0.932 / 0.934), **`q_gripper` 0.997
+[0.994, 1.000] / 1.000**, `q_path` 0.988 / 0.990, `q_stop` 0.997 / 0.994, unsafe 0.14 % / 0.27 %. Split by what the
+gripper tick asks: **initiate** (label single `closed`, executed gripper still open) **3 ticks** in dev, 0 in ood_dev —
+the model gets the 3; **window** (two-valued label under the ±1-tick tolerance, executed still open — where the expert
+actually started closing) 271 / 72 ticks — the model predicts `closed` on **1 / 271 and 0 / 72**; settled (executed
+already closed) 3,477 / 952 — 0.992 / 1.000; open 6,595 / 1,495 — 0.9997 / 0.9993. The R1 v0.2 **training** split has
+9 single-valued initiate ticks among 23,192 gripper ticks (7,895 settled-closed, 614 window ticks around 301
+executed closes). The offline 0.996 and the loop's 0 of 125 executed transitions are the same model read on
+different ticks.
 
 ### 5b. Latency in the loop (docs/03 §7-6)
 
