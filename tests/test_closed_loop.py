@@ -149,7 +149,7 @@ def test_the_layers_are_read_from_instruction_changes_and_the_mechanical_policy_
     mechanical = records["mechanical"]["E0"]
     summary = episode_summary(mechanical)
     assert summary["done"] is False and summary["decisions"]["acted"] == 0 and summary["decisions"]["expert_joint"] > 0
-    assert failure_cause(mechanical) == "semantic"  # 참조는 결합 후보를 허용하는데 정책은 끝까지 게이트·hold
+    assert failure_cause(mechanical) == "semantic_main"  # 참조는 결합 후보를 허용하는데 정책은 끝까지 게이트·hold
     assert all(label["source"] == "expert_v0" for tick in mechanical["ticks"] for label in tick["labels"])
     expert = records["expert"]["E0"]
     assert episode_summary(expert)["decisions"]["wrong_action"] == 0  # 자기 참조와 같은 결정
@@ -213,9 +213,13 @@ def test_failure_cause_separates_a_wrong_decision_from_a_failed_execution():
     same = _record([{"adopted": "c1"}] * 5, done=False)
     assert failure_cause(same) == "geometric"
     wrong = _record([{"adopted": "c1"}, {"adopted": "c2"}, {"adopted": "c1"}], done=False)  # 다른 대상을 골랐다
-    assert failure_cause(wrong) == "semantic"
+    assert failure_cause(wrong) == "semantic_main"
     idle = _record([{"adopted": "c3"}] * 4, done=False)  # 참조는 파지를 허용하는데 관측만
-    assert failure_cause(idle) == "semantic"
+    assert failure_cause(idle) == "semantic_main"
+    hover = _record([{"adopted": "c1"}] * 2 + [{"adopted": "c1", "gripper_label": ["closed"], "gripper": "open"}] * 3, done=False)  # 파지점에서 닫지 않았다
+    assert failure_cause(hover) == "semantic_aux"
+    flicker = _record([{"adopted": "c1"}] * 2 + [{"adopted": "c1", "gripper_label": ["closed"], "gripper": "open"}] * 2 + [{"adopted": "c1", "gripper_label": ["closed"], "gripper": "closed"}], done=False)
+    assert failure_cause(flicker) == "geometric"  # 2틱의 흔들림은 세지 않는다
     gate_allowed = _record([{"adopted": "c3", "allowed": ["c3"]}] * 4, done=False)  # 참조도 관측
     assert failure_cause(gate_allowed) == "geometric"
     assert failure_cause(_record([{"adopted": "c1"}], done=True)) is None
@@ -248,7 +252,8 @@ def test_condition_metrics_on_hand_made_records_report_stop_reflex_rejections_an
     for record in records:
         record["ticks"][0]["request"]["state"]["goal"]["version"] = 1
     table = condition_metrics(records)
-    assert table["episodes"] == 3 and table["done"] == 2 and table["failure_causes"] == {"semantic": 1}
+    assert table["episodes"] == 3 and table["done"] == 2 and table["failure_causes"] == {"semantic_main": 1}
+    assert table["aux_agreement"]["q_gripper"]["n"] > 0 and table["aux_agreement"]["q_gripper"]["rate"] == 1.0
     assert table["layers"]["no_instruction_change"]["episodes"] == 2 and table["layers"]["instruction_changes"]["episodes"] == 1
     assert table["stop_vs_reflex"]["stop_ticks_by_q_stop"] == 1 and table["stop_vs_reflex"]["stop_ticks_by_reflex"] == 1 and table["stop_vs_reflex"]["reflex_ticks_where_model_had_said_stop"] == 1
     assert table["stop_timing"]["onsets"] == 1 and table["stop_timing"]["reacted"] == 1 and table["stop_timing"]["false_alarm_rate"] == 0.0

@@ -11,10 +11,12 @@
 * **조건 층** — 에피소드가 무엇을 요구했는가: `no_instruction_change`(E0 — 시작 지시 하나, 하네스의 기하와 후보로 충분하다)
   대 `instruction_changes`(E1·E2 — 지시가 바뀌므로 정책이 문장을 다시 읽어 대상을 바꿔야 한다). "규칙 기준군이 두 층 모두
   포화한다"는 이 층 위에서 읽는다.
-* **실패 원인** — 실패한 편을 :func:`failure_cause` 로 가른다: **semantic** = 정책이 채택한 주 결정이 전문가 참조와 결정적
-  틱에서 달랐다(결합 후보의 대상·기능·목적지가 참조 허용 집합의 어느 결합 후보와도 다른 틱이 하나라도 있거나, 참조가
-  결합 후보를 허용하는데 정책이 끝까지 게이트·hold만 했다); **geometric** = 그런 틱이 없다 — 같은 결정을 하고도 실행이
-  끝나지 않았다(정체·충돌·시간). 참조가 같은 seed에서 실패했는지(`reference_failed`)도 옆에 적는다.
+* **실패 원인** — 실패한 편을 :func:`failure_cause` 로 가른다. **semantic_main** = 정책이 채택한 주 결정이 전문가 참조와
+  결정적 틱에서 달랐다(결합 후보의 대상·기능이 참조 허용 집합의 어느 결합 후보와도 다른 틱이 하나라도 있거나, 참조가 결합
+  후보를 허용하는데 정책이 끝까지 게이트·hold만 했다). **semantic_aux** = 주 결정은 같은데 **부가 판단**(그리퍼·경로·속도·힘)이
+  참조와 `AUX_DISAGREEMENT_STREAK`틱 이상 이어서 달랐다 — 예: 파지점에 닿았는데 `closed`를 말하지 않아 팔이 열린 채 머문다
+  (R4 첫 run이 실제로 그랬다). 둘 다 **모델의 판단**이 참조와 다른 것이고, 부가 판단은 오프라인 칸에서 몫이 작아 가려진다.
+  **geometric** = 그런 틱이 없다 — 같은 판단을 하고도 실행이 끝나지 않았다(정체·충돌·시간). 보고서의 "semantic"은 둘의 합이다.
 
 모든 비교는 seed로 짝지은 편 단위 부트스트랩 구간(:func:`robo_jev.evaluate.episode_bootstrap`)이고, 0을 포함하면 발견이
 아니다.
@@ -89,6 +91,9 @@ LAYERS = ("no_instruction_change", "instruction_changes")
 #: 그리퍼 전환을 짝지을 때 허용하는 최대 틱 차 (전문가 라벨의 전환 허용 ±1틱보다 넉넉히; 10틱 = 1 s).
 GRIPPER_MATCH_HORIZON_TICKS = 10
 _GATE_KEYS = ("observe", "hold", "replan")
+#: 부가 판단의 불일치를 "달랐다"로 세는 최소 연속 틱 (전문가 라벨의 전환 허용 ±1틱을 넘고, 한 틱의 흔들림은 세지 않는다).
+AUX_DISAGREEMENT_STREAK = 3
+_AUX = ("q_gripper", "q_path", "q_speed", "q_force")
 _JOINT = ("grasp", "place", "push")
 
 
@@ -449,36 +454,71 @@ def condition_layer(record: dict[str, Any]) -> str:
 
 
 def _decision_ticks(record: dict[str, Any]) -> dict[str, Any]:
-    """정책의 채택 주 결정 대 전문가 참조 허용 집합 — 결정적 틱의 수 (모듈 설명의 실패 원인 규칙)."""
+    """정책의 채택 판단 대 전문가 참조 — 주 결정의 결정적 틱 수와 부가 판단의 불일치 (모듈 설명의 실패 원인 규칙).
+
+    주 결정: 채택 결합 후보의 (기능, 대상)이 참조 허용 집합의 어느 결합 후보와도 다르면 `wrong_action`, 참조가 결합 후보를
+    허용하는데 게이트·hold를 채택했으면 `idle`. 부가 판단: 라벨이 한 값인 틱에서 정책의 **채택된** 부가 답(`adopted`의 gripper·
+    path 종류·speed·force)이 다르면 불일치이고, 가장 긴 연속 불일치 길이를 질문마다 센다(`aux_streak`)."""
     wrong_action = idle = agreed = acted = expert_joint = 0
+    aux_total: dict[str, int] = {qid: 0 for qid in _AUX}
+    aux_agree: dict[str, int] = {qid: 0 for qid in _AUX}
+    aux_streak: dict[str, int] = {qid: 0 for qid in _AUX}
+    running: dict[str, int] = {qid: 0 for qid in _AUX}
     for tick in record["ticks"]:
-        adopted = (tick.get("adopted") or {}).get("main")
-        label = next((item for item in tick.get("labels") or () if item.get("question_id") == "q_main"), None)
-        if adopted is None or label is None:
-            continue
-        keys = {str(entry["id"]): str(entry.get("key", "")) for entry in tick["request"]["candidates"]["q_main"]}
-        allowed_joint = {_key_parts(keys.get(cid)) for cid in (label.get("candidate_ids") or ())} - {None}
-        adopted_parts = _key_parts(keys.get(adopted))
-        if allowed_joint:
-            expert_joint += 1
-        if adopted_parts is not None:
-            acted += 1
-            if allowed_joint and adopted_parts not in allowed_joint and adopted_parts[:2] not in {parts[:2] for parts in allowed_joint}:
-                wrong_action += 1  # 다른 대상·다른 기능 — 참조와 다른 결정
+        adopted = tick.get("adopted") or {}
+        main = adopted.get("main")
+        labels = {item.get("question_id"): item for item in tick.get("labels") or ()}
+        label = labels.get("q_main")
+        if main is not None and label is not None:
+            keys = {str(entry["id"]): str(entry.get("key", "")) for entry in tick["request"]["candidates"]["q_main"]}
+            allowed_joint = {_key_parts(keys.get(cid)) for cid in (label.get("candidate_ids") or ())} - {None}
+            adopted_parts = _key_parts(keys.get(main))
+            if allowed_joint:
+                expert_joint += 1
+            if adopted_parts is not None:
+                acted += 1
+                if allowed_joint and adopted_parts[:2] not in {parts[:2] for parts in allowed_joint}:
+                    wrong_action += 1  # 다른 대상·다른 기능 — 참조와 다른 결정
+                elif allowed_joint:
+                    agreed += 1
             elif allowed_joint:
-                agreed += 1
-        elif allowed_joint:
-            idle += 1  # 참조는 결합 후보를 허용하는데 정책은 게이트·hold
-    return {"acted": acted, "expert_joint": expert_joint, "wrong_action": wrong_action, "agreed": agreed, "idle": idle}
+                idle += 1  # 참조는 결합 후보를 허용하는데 정책은 게이트·hold
+        paths = {str(entry["id"]): str(entry.get("kind", "")) for entry in tick["request"]["candidates"].get("q_path") or []}
+        chosen = {
+            "q_gripper": adopted.get("gripper"), "q_path": adopted.get("path_kind") or paths.get(str(adopted.get("path"))),
+            "q_speed": None if adopted.get("speed") is None else str(adopted.get("speed")), "q_force": None if adopted.get("force") is None else str(adopted.get("force")),
+        }
+        for qid in _AUX:
+            item = labels.get(qid)
+            if not adopted or item is None or chosen[qid] is None:
+                running[qid] = 0
+                continue
+            wanted = [str(cid) for cid in item.get("candidate_ids", [item.get("answer")])]
+            if qid == "q_path":
+                wanted = [paths.get(cid, cid) for cid in wanted]
+            if len(wanted) != 1:
+                running[qid] = 0  # 전환 허용 구간·경유점 대안 — 판정하지 않는다
+                continue
+            aux_total[qid] += 1
+            if str(chosen[qid]) == wanted[0]:
+                aux_agree[qid] += 1
+                running[qid] = 0
+            else:
+                running[qid] += 1
+                aux_streak[qid] = max(aux_streak[qid], running[qid])
+    return {"acted": acted, "expert_joint": expert_joint, "wrong_action": wrong_action, "agreed": agreed, "idle": idle,
+            "aux_total": aux_total, "aux_agree": aux_agree, "aux_streak": aux_streak}
 
 
 def failure_cause(record: dict[str, Any], decisions: dict[str, Any] | None = None) -> str | None:
-    """실패한 편의 원인 층 (모듈 설명): `semantic` | `geometric`; 완료한 편은 None."""
+    """실패한 편의 원인 층 (모듈 설명): `semantic_main` | `semantic_aux` | `geometric`; 완료한 편은 None."""
     if record["provenance"]["outcome"]["done"]:
         return None
     counts = decisions or _decision_ticks(record)
     if counts["wrong_action"] > 0 or (counts["expert_joint"] > 0 and counts["acted"] == 0):
-        return "semantic"
+        return "semantic_main"
+    if any(streak >= AUX_DISAGREEMENT_STREAK for streak in counts["aux_streak"].values()):
+        return "semantic_aux"
     return "geometric"
 
 
@@ -683,6 +723,10 @@ def condition_metrics(records: list[dict[str, Any]], rows: list[dict[str, Any]] 
         "layers": layers, "by_profile": by_profile,
         "failure_causes": dict(Counter(row["failure_cause"] for row in rows if not row["done"])),
         "decision_ticks": {key: sum(row["decisions"][key] for row in rows) for key in ("acted", "expert_joint", "wrong_action", "agreed", "idle")},
+        "aux_agreement": {qid: {"n": sum(row["decisions"]["aux_total"][qid] for row in rows), "agree": sum(row["decisions"]["aux_agree"][qid] for row in rows),
+                                "rate": (sum(row["decisions"]["aux_agree"][qid] for row in rows) / max(1, sum(row["decisions"]["aux_total"][qid] for row in rows))),
+                                "episodes_with_streak": sum(1 for row in rows if row["decisions"]["aux_streak"][qid] >= AUX_DISAGREEMENT_STREAK)} for qid in _AUX},
+        "aux_failure_questions": dict(Counter(qid for row in rows if row["failure_cause"] == "semantic_aux" for qid in _AUX if row["decisions"]["aux_streak"][qid] >= AUX_DISAGREEMENT_STREAK)),
         "reaction_delay": {"adopted": reaction_delay(per_record["adopted"], records), "model_answer": reaction_delay(per_record["model"], records) if per_record["model"] else None},
         "stability": {"adopted": answer_stability(per_record["adopted"], records), "model_answer": answer_stability(per_record["model"], records) if per_record["model"] else None},
         "stop_timing": stop_timing(per_record["stop"], records) if per_record["stop"] else None,
@@ -783,7 +827,7 @@ def print_report(report: dict[str, Any], file: Any = None) -> None:
     for condition in report["conditions"]:
         table = report["tables"][condition]
         print(f"\n### {condition}\n", file=file)
-        print("| policy | n | success | 95 % CI | no-change layer | changes layer | failures semantic / geometric | completion median ticks | switch rate | round trips | goal-change immediate / censored | q_stop caught / censored / false alarm | unsafe | reject rate | model p95 / >100 ms |", file=file)
+        print("| policy | n | success | 95 % CI | no-change layer | changes layer | failures main / aux / geometric | completion median ticks | switch rate | round trips | goal-change immediate / censored | q_stop caught / censored / false alarm | unsafe | reject rate | model p95 / >100 ms |", file=file)
         print("| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |", file=file)
         for label, block in table.items():
             layers = block["layers"]
@@ -796,7 +840,7 @@ def print_report(report: dict[str, Any], file: Any = None) -> None:
                 f"| {label} | {block['episodes']} | {_f(block['success_rate'])} | {_f(block['success_ci'][0]) if block['success_ci'] else '—'}–{_f(block['success_ci'][1]) if block['success_ci'] else '—'} "
                 f"| {_f((layers.get(LAYERS[0]) or {}).get('success_rate'))} ({(layers.get(LAYERS[0]) or {}).get('done', 0)}/{(layers.get(LAYERS[0]) or {}).get('episodes', 0)}) "
                 f"| {_f((layers.get(LAYERS[1]) or {}).get('success_rate'))} ({(layers.get(LAYERS[1]) or {}).get('done', 0)}/{(layers.get(LAYERS[1]) or {}).get('episodes', 0)}) "
-                f"| {causes.get('semantic', 0)} / {causes.get('geometric', 0)} | {_f(block['completion_ticks']['median'])} | {_f(block['stability']['adopted']['switch_rate'])} | {block['stability']['adopted']['round_trips']} "
+                f"| {causes.get('semantic_main', 0)} / {causes.get('semantic_aux', 0)} / {causes.get('geometric', 0)} | {_f(block['completion_ticks']['median'])} | {_f(block['stability']['adopted']['switch_rate'])} | {block['stability']['adopted']['round_trips']} "
                 f"| {_f(react.get('immediate_rate'))} / {_f(react.get('censored_rate'))} | {stop.get('reacted', '—')} / {stop.get('censored', '—')} / {_f(stop.get('false_alarm_rate'))} "
                 f"| {_f(block['selective']['unsafe_action_rate'], 4)} | {_f(block['controller']['rejection_rate'], 4)} | {_f(model_ms.get('p95'), 1)} / {_f(model_ms.get('over_100ms_rate'), 4)} |",
                 file=file,
