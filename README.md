@@ -45,7 +45,7 @@ L0  physics / motors   (500 Hz)
 | Training (CPU reference) | `train.py`, `sampler.py`, `checkpoint.py` — TBPTT, mixed sampler, atomic checkpoints, identity-checked resume | 20 continuous steps == 10 + process restart + 10, bit-identical |
 | Run launcher | `launch/manifest.py` (run manifest + budget arithmetic), `launch/runner.py` (the remote side, which enforces the caps itself), `launch/launcher.py`, `launch/providers/{base,ssh,local}.py`, `scripts/launch_run.py`, `infra/run-manifest.schema.json` | a localhost round trip over real SSH (`prepare → launch → status → fetch`, five artifacts, every sha256 matched) and four deliberate failures — wall-clock cap, USD cap, `kill -9`, an unconfirmed `cancel` (which leaves `unknown`, not `cancelled`) |
 
-`uv run pytest -q` → **1,274 tests** on a full checkout (`uv sync --group backbone`). A CPU-only checkout without that group reports **1,253**: `tests/test_backbone_qwen.py`'s 22 tests collapse into a single module-level skip, `test_evaluate.py:188` skips too, and one, `test_measure_candidates.py::test_stream_runner_loads_the_checkpoint_before_compiling_so_lora_keys_survive`, fails because it reaches the backbone through `QwenBackbone.tiny` with no guard. 1,230 = 1,209 − 1 module skip + 22.
+`uv run pytest -q` → **1,276 tests** on a full checkout (`uv sync --group backbone`). A CPU-only checkout without that group reports **1,255**: `tests/test_backbone_qwen.py`'s 22 tests collapse into a single module-level skip, `test_evaluate.py:188` skips too, and one, `test_measure_candidates.py::test_stream_runner_loads_the_checkpoint_before_compiling_so_lora_keys_survive`, fails because it reaches the backbone through `QwenBackbone.tiny` with no guard. 1,230 = 1,209 − 1 module skip + 22.
 
 ## Status
 
@@ -77,7 +77,7 @@ src/robo_jev/
 configs/     harness, controller, simulator, expert, events, data, model fixture, training
 infra/       run-manifest.schema.json — what a run must pin before it is allowed to cost money
 scripts/     generate_episodes · rollout_keyframes · dagger_cycle · measure_tokens · fetch_tokenizer · fetch_backbone · measure_candidates · adapt_readout · p1_acceptance · attribution · select_backbone · launch_run
-tests/       1,274 tests (1,253 without the backbone group); fixtures under tests/fixtures
+tests/       1,276 tests (1,255 without the backbone group); fixtures under tests/fixtures
 HANDOFF.md   how to continue on another machine; what lives outside git
 ```
 
@@ -88,7 +88,7 @@ HANDOFF.md   how to continue on another machine; what lives outside git
 ```bash
 uv sync                                   # Python 3.11; MuJoCo + robosuite 1.5, torch (CPU on macOS)
 uv run python scripts/fetch_tokenizer.py  # Qwen tokenizer.json into artifacts/ (pinned by manifest)
-uv run pytest -q                          # 1,274 tests (tokenizer present; 1,253 without `--group backbone`)
+uv run pytest -q                          # 1,276 tests (tokenizer present; 1,255 without `--group backbone`)
 
 uv run python scripts/generate_episodes.py --config configs/data/d1_robot.yaml --count 4 --out artifacts/datasets/d1-robot/smoke
 uv run python scripts/rollout_keyframes.py --limit 20
