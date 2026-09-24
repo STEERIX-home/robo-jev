@@ -330,3 +330,21 @@ def test_disturbances_are_counted_from_the_applied_log_and_object_moved_events()
     assert summary["disturbances_applied"] == 3 and summary["object_moved_events"] == 2 and summary["scheduled"] == {"instruction_changes": 0, "disturbances": 4}
     events = condition_metrics([record], [summary])["events"]
     assert events == {"goal_changes": 0, "disturbances_applied": 3, "disturbances_scheduled": 4, "object_moved_events": 2, "reflex_ticks": 0}
+
+
+def test_the_report_merges_run_files_that_share_a_label_across_conditions_and_refuses_an_overlap(short_runs, tmp_path):
+    """Task R5 D2: R4의 `expert/rule/mechanical/s18`(dev·ood_dev)과 R5의 같은 정책(dev_new)은 run 파일이 다르다 — 같은 이름표의 파일은
+    조건을 합쳐 한 정책으로 읽고, 같은 조건이 두 파일에 있으면 거절한다."""
+    runs = short_runs["runs"]
+    first = tmp_path / "expert-dev.json"
+    second = tmp_path / "expert-dev_new.json"
+    first.write_text(json.dumps({"label": "expert", "policy": {"kind": "expert"}, "conditions": {"dev": runs["expert"]}}, default=str), encoding="utf-8")
+    moved = {**runs["expert"], "condition": "dev_new"}
+    second.write_text(json.dumps({"label": "expert", "policy": {"kind": "expert"}, "conditions": {"dev_new": moved}}, default=str), encoding="utf-8")
+    report = closed_loop_report([first, second])
+    assert report["conditions"] == ["dev", "dev_new"] and set(report["tables"]["dev"]) == {"expert"} and set(report["tables"]["dev_new"]) == {"expert"}
+    assert report["runs"]["expert"]["paths"] == [str(first), str(second)]
+    clash = tmp_path / "expert-dev-again.json"
+    clash.write_text(first.read_text(encoding="utf-8"), encoding="utf-8")
+    with pytest.raises(ValueError, match="겹친다"):
+        closed_loop_report([first, clash])

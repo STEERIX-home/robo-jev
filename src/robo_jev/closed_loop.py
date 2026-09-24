@@ -858,7 +858,17 @@ def closed_loop_report(run_paths: list[Path], *, offline: list[Path] | None = No
     runs: dict[str, dict[str, Any]] = {}
     for path in run_paths:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
-        runs[str(payload["label"])] = {"path": str(path), "policy": payload["policy"], "conditions": payload["conditions"], "gpu": payload.get("gpu")}
+        label = str(payload["label"])
+        if label in runs:
+            # 같은 정책(이름표)을 다른 라운드가 다른 조건에서 돌린 run 파일들을 **합친다** (Task R5 D2: R4의 dev·ood_dev + R5의 dev_new) —
+            # 조건이 겹치면 어느 쪽이 그 조건의 값인지 알 수 없으므로 거절한다.
+            overlap = sorted(set(runs[label]["conditions"]) & set(payload["conditions"]))
+            if overlap:
+                raise ValueError(f"{path}: 이름표 {label!r}의 조건 {overlap}이 {runs[label]['path']}와 겹친다 — 같은 조건은 한 run 파일이어야 한다")
+            runs[label]["conditions"].update(payload["conditions"])
+            runs[label]["paths"] = [*runs[label].get("paths", [runs[label]["path"]]), str(path)]
+            continue
+        runs[label] = {"path": str(path), "policy": payload["policy"], "conditions": dict(payload["conditions"]), "gpu": payload.get("gpu")}
     conditions = sorted({name for run in runs.values() for name in run["conditions"]})
     tables: dict[str, dict[str, Any]] = {}
     rows_by: dict[tuple[str, str], list[dict[str, Any]]] = {}
@@ -884,7 +894,7 @@ def closed_loop_report(run_paths: list[Path], *, offline: list[Path] | None = No
                         sub_b = [row for row in rows_by[(b, condition)] if row["layer"] == layer]
                         if sub_a and sub_b:
                             pairs[condition][f"{a} - {b} @ {layer}"] = paired_success(sub_a, sub_b)
-    return {"version": CLOSED_LOOP_VERSION, "runs": {label: {"path": run["path"], "policy": run["policy"], "gpu": run["gpu"]} for label, run in runs.items()},
+    return {"version": CLOSED_LOOP_VERSION, "runs": {label: {"path": run["path"], "paths": run.get("paths", [run["path"]]), "policy": run["policy"], "gpu": run["gpu"]} for label, run in runs.items()},
             "conditions": conditions, "tables": tables, "paired": pairs, "offline": _offline_columns(offline or []), "layers": list(LAYERS)}
 
 
