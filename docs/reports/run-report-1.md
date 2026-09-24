@@ -68,19 +68,28 @@ harness `h0.9` and controller `c0.6` untouched. Before running, the loop policy 
 evaluation **bit-for-bit** on three recorded dev episodes (3,890 answers, probability difference 0; 389/389 against
 R3a's stored predictions) — `artifacts/reports/r4-a3-s18.json`.
 
-| policy | dev 100 success (seed-level 95 % CI) | ood_dev 26 | paired vs seed-18 model (dev) | paired vs expert (dev) |
-| --- | ---: | ---: | --- | --- |
-| expert (the policy that made the data) | **0.970** [0.930, 1.000] | **1.000** | +0.970 [+0.930, +1.000] | — |
-| rule judge (`rj0.5`, reads the structured goal) | **0.800** [0.720, 0.870] | **0.692** [0.500, 0.846] | **+0.800 [+0.720, +0.870]** | −0.170 [−0.250, −0.100] |
-| mechanical baseline (commitment else observe) | 0.000 | 0.000 | 0.000 [0, 0] | −0.970 |
-| **model, seed 18, 1 epoch** | **0.000** [0, 0] | **0.000** | — | −0.970 [−1.000, −0.930] |
-| model, seed 17, 2 epochs (466) | 0.020 [0.000, 0.050] | 0.000 | +0.020 [+0.000, +0.050] (contains 0) | −0.950 [−0.990, −0.890] |
+| policy | dev 100 success (`done`, seed-level 95 % CI) | dev `done ∧ target_inside_zone` | ood_dev 26 (`done` / strict) | paired vs seed-18 model (dev) | paired vs expert (dev) |
+| --- | ---: | ---: | ---: | --- | --- |
+| expert (the policy that made the data) | **0.970** [0.930, 1.000] | 97 | **1.000** / 26 | +0.970 [+0.930, +1.000] | — |
+| rule judge (`rj0.5`, reads the structured goal) | **0.800** [0.720, 0.870] | 80 | **0.692** [0.500, 0.846] / 18 | **+0.800 [+0.720, +0.870]** | −0.170 [−0.250, −0.100] |
+| mechanical baseline (commitment else observe) | 0.000 | 0 | 0.000 / 0 | 0.000 [0, 0] | −0.970 |
+| **model, seed 18, 1 epoch** | **0.000** [0, 0] | 0 | **0.000** / 0 | — | −0.970 [−1.000, −0.930] |
+| model, seed 17, 2 epochs (466) | 0.020 [0.000, 0.050] | **1** (strict 0.010 [0.000, 0.030]; 1 false done) | 0.000 / 0 | +0.020 [+0.000, +0.050] (contains 0); strict +0.010 [+0.000, +0.030] (contains 0) | −0.950 [−0.990, −0.890] |
+
+Success as reported is `outcome.done`, i.e. **the policy's own `q_done` held for the 0.3 s tail** (the harness done gate,
+`harness/robot.py` `_gate`), so a policy whose `q_done` can fire falsely can be "done" with the target outside its zone;
+`done ∧ target_inside_zone` is the observed completion and the column to read for such a policy. The expert and the
+rule judge have no false dones.
 
 Layers (a property of the scene): in the no-instruction-change layer (E0, 20 + 5 seeds) the rule judge equals the
 expert (20/20, 5/5; paired 0.000 [0, 0]); in the instruction-change layer (E1/E2, 80 + 21) it does not (60/80 vs 77/80,
 −0.213 [−0.312, −0.125]; 13/21 vs 21/21, −0.381 [−0.619, −0.190]). **The rule baseline saturates one layer, not
-both, so docs/06's trigger for a task redesign is not met.** The models complete nothing in either layer; the 466
-run's two completions are episodes whose final instruction target already sat in its zone (zero closed-gripper ticks).
+both, so docs/06's trigger for a task redesign is not met.** The models grasp nothing in either layer. The 466 run's
+two `done` episodes are two different things: `ep-E2-920311` is a scene whose final target already sits in its zone
+and is completed **without a gripper close by the expert, the rule judge and 466 alike**; `ep-E2-920427` is a **false
+done** — the model's `q_done` rose 0.001 → 0.791 → 1.000 on the done-gate ticks while the reference label was False on
+every one of them, `target_inside_zone` is False, and the same-seed expert and rule judge both fail the seed. Hence
+the strict column's 1/100; no conclusion moves (466 − s18 contains zero on both readings).
 
 **Why the model fails, from the records** (`artifacts/reports/r4-closed-loop.json`, seed 18, dev): the adopted main
 action agrees with the expert reference on 6,463 of the 7,041 ticks where the reference allows a joint action
@@ -91,10 +100,16 @@ ood_dev) — so every episode hovers open at the grasp point until the stall gua
 Failure attribution: 90 semantic-auxiliary (81 with a `q_gripper` disagreement streak), 8 semantic-main, 2 geometric.
 The same checkpoint scores `q_gripper` 0.996 offline: in recorded expert episodes the executed gripper state is in the
 input from the tick after the expert closed, and the label agrees with it; the tick where "close now" must be
-*initiated* is a few per grasp and half-covered by the label's ±1-tick tolerance. Replaying the expert's own R4
+*initiated* is a few per grasp, and the label's transition tolerance erases it almost entirely:
+`_tolerate_gripper_transitions` (`src/robo_jev/data/robot_episodes.py:423-445`, `configs/sim/expert_v0.yaml:75`
+`gripper_transition_tolerance_ticks: 1`) makes the transition tick itself two-valued — on the R1 v0.2 train split,
+316 ticks where the expert wanted `closed` while the executed gripper was open become 307 two-valued labels and 9
+survive (97 % erased). Replaying the expert's own R4
 episodes through the checkpoint scores those initiate ticks directly (§5a). Other loop rows: `q_stop` 6 of 8 onsets
 caught (median 0 ticks), false alarms 1.1 % of 7,230 quiet ticks — 82 stop ticks from `q_stop` against 4 from the
-controller reflex; unsafe-action rate 1.60 % (105 forbidden-target ticks, 25 stop-ignored); controller rejections
+controller reflex (on those four the model's `q_stop` was 0.51–0.82 on the reflex tick with the reflex/contact event
+already in its input and 0.005–0.028 the tick before; the harness recorded the cause as `reflex`); unsafe-action rate
+1.60 % = 107 of 6,669 acted ticks, the union of 105 forbidden-target and 25 stop-ignored ticks (23 both); controller rejections
 0.08 % (`unreachable`), transition collisions 0.
 
 ### 5a. Offline on the same seeds (`artifacts/reports/r4-offline-loop-seeds-s18.json`, `r4-transitions-s18.json`)
@@ -115,7 +130,7 @@ different ticks.
 Seed 18, dev, 7,171 non-prefix ticks, CUDA events: model **p50 43.6 / p95 56.8 / p99 82.7 / max 94.7 ms, 0 ticks over
 100 ms**; first tick of an episode (prefix ≈1.4K tokens) p50 94 ms; observation → command p50 47.9 / p95 63.4 / p99
 100.7 ms including the reference computation (harness ≈2 ms). **Passes** (p95 ≤ 80, > 100 ms ≤ 5 %). GPU peak
-allocation 4.45 GiB.
+allocation 4.15 GiB.
 
 ## 6. Measured cost and the G1 recommendation
 
@@ -123,10 +138,10 @@ allocation 4.45 GiB.
 | --- | ---: | --- |
 | R2 (gate, T1 233 steps, evaluations, diagnostics) | 10.07 | `.superpowers/sdd/task-r2-report.md` |
 | R3a (two seeds, one 466 run, evaluations) | 17.84 | `task-r3a-report.md` D5 |
-| **R4** (A3 2.0 min · seed-18 loop 11.7 min · 466 loop 11.2 min · same-seed offline replay ≈13 min) | **≈0.63** | `artifacts/scratch/r4/*.log`, `r4-run-*.json` |
-| total on the DGX Spark GB10 | **≈28.5** | — |
+| **R4** (systemd unit wall clocks, `Started` → `Consumed`: A3 1 m 59 s · seed-18 loop 11 m 42 s · 466 loop 12 m 06 s · same-seed offline replay 13 m 21 s = 39 m 08 s) | **0.65** | `journalctl --user`, `artifacts/scratch/r4/*.log`, `r4-run-*.json` |
+| total on the DGX Spark GB10 | **≈28.6** | — |
 
-CPU: the three CPU policies ran 126 episodes each in 3.7 / 4.2 / 6.2 minutes; a model episode costs ≈5.3 s wall
+CPU: the three CPU policies (rule / expert / mechanical) ran 126 episodes each in 3.7 / 4.3 / 6.2 minutes; a model episode costs ≈5.3 s wall
 (73 ticks × 45 ms model + simulation). Cloud spend: 0 (R3b's launcher is ready; no instance was created).
 
 **Recommendation on G1 (from the numbers only).** Do not scale seeds or data to the cloud on this recipe yet. The
