@@ -1,0 +1,49 @@
+# Task R5 B1 — **판정 칸 그대로 + `q_gripper`의 틱별 예측**. `r1-decision-cell.yaml`의 사본이고 다른 것은 `store_predictions`에
+# `q_gripper`를 더한 것뿐이다 — `store_predictions`는 평가 집합의 정체(해시)에 들어가지 않으므로(`eval_suite_identity`) 이 집합의
+# 해시는 R2·R3a의 `6a3b69131243…`과 **같다**: `q_main`의 층·여유는 R3a seed 18의 값과 같은 자 위에 놓이고, 저장된 `q_gripper`
+# 예측은 `scripts/decision_cell_strata.py --gripper-manifest …`가 부모 라벨(r1)과 v2 라벨(`r1-rollout-labels-g2`) 양쪽으로
+# 채점한다(모델 입력은 두 판이 같다 — 바뀐 것은 라벨뿐이므로 GPU pass는 한 번이다).
+
+version: eval-r1-decision-cell-v0.1   # R5도 같은 버전 문자열 — 해시가 같아야 한다
+window_ticks: 30
+shuffle_seed: 1
+tokens_per_batch: 8192
+fused: true
+
+columns:
+  permuted: false
+  state_shuffle: true        # 표준 대조군 (기증자 고정을 없앤 판)
+  instruction_shuffle: true  # **"지시를 읽는가" 열** (Task R1 C2)
+  commitment_shuffle: true   # P3 B2 — 주 층에서만 읽는다
+  rule_judge: true           # 구조화된 목표를 읽는다 — 상한이다
+  mechanical_baseline: true  # GPU pass 없음 — 이 열을 넘지 못하면 주장이 아니다
+  event_metrics: true        # Task R1 C3 — 반응 지연·안정성·`q_stop` 지연/오경보
+  selective: false
+  calibration: false
+
+tiny_scorer_report: artifacts/reports/r1-tiny-scorer.json
+
+splits:
+  - name: robot/ood_dev
+    manifest: artifacts/datasets/r1-robot/r1/manifest.json
+    domain: robot
+    split: ood_dev
+    files: ["episodes/*/streams.jsonl"]
+    selection: true
+    note: "봉인 계열(zoneF 개념·템플릿 `c`·prefix) **26편 전부**, 통째로 = 3,162틱(`r1-robot-v0.2`). **판정 칸**(q_main)이 여기 있다. 주 층(정답 ≠ 그 틱의 commitment)은 **235틱 = 7.4 %**이고 갈래는 `hold` 102 · `grasp` 97 · `observe` 24 · `place` 7 · `push` 5다. 같은 26편을 옛 코퍼스(`r1-robot-v0.1`, h0.8)에서 재면 3,517틱·주 층 540(15.4 %)이었지만 그 층의 **61.3 %가 한 편**(`ep-E2-420208`, 45초를 정체 순환에 쓴 편)에서 나왔다 — 지금은 가장 큰 편이 주 층의 8.9 %(21틱)다. 층이 작아진 것은 코퍼스가 정직해진 것이지 칸이 나빠진 것이 아니지만, **235틱은 좁다**(이 줄에 있던 224는 잘못 적힌 값이고 어느 산출물에도 대응이 없다 — R2 fix round 1에서 고쳤다): 칸을 넓히는 것은 R3의 일이다 — R2의 브리프는 재료를 v0.2로 고정했다"
+    records: [ep-E0-400103, ep-E0-400115, ep-E0-400118, ep-E0-400140, ep-E0-400153,
+              ep-E0-400155, ep-E0-400177,
+              ep-E1-410104, ep-E1-410145, ep-E1-410160, ep-E1-410175, ep-E1-410194,
+              ep-E1-410196, ep-E1-410203, ep-E1-410215,
+              ep-E2-420109, ep-E2-420118, ep-E2-420129, ep-E2-420155, ep-E2-420167,
+              ep-E2-420177, ep-E2-420182, ep-E2-420195, ep-E2-420208, ep-E2-420239,
+              ep-E2-420256]
+    # 주 지표(P3 B1)는 **정답이 그 틱의 현재 commitment가 아닌 틱**이다. 그 층과 새 사건 지표를 다시 세려면
+    # 틱별 예측이 있어야 한다. `q_stop`도 켠다 — C3-c의 지연·오경보가 그 열을 읽는다.
+    store_predictions: [q_main, q_stop, q_gripper]   # R5 B1: 그리퍼 층(initiate·window·settled·open)을 세려면 틱별 예측이 있어야 한다
+
+note: >
+  이 집합으로 나온 수는 `artifacts/reports/r1-reeval-*.json`에 남는다. `commitment_shuffle`·`mechanical_baseline`·
+  `event_metrics`는 평가 집합의 정체(해시)에 들어가지 않는다 — 무엇을 더 재는지를 바꿀 뿐 무엇을 점수 매기는지를
+  바꾸지 않기 때문이다. 표의 `episode_bootstrap`이 편(에피소드)을 표본 단위로 재표집한 95 % 구간이고, 대조군 칸의
+  `margin_ci`는 **같은 편에서 짝지은** 차이의 구간이다 — 0을 포함하면 그 여유는 판정이 아니다.

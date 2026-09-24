@@ -71,7 +71,13 @@ profiles:
 # 라벨 (docs/08 §7).
 labels:
   source: expert_v0
-  # 그리퍼 전환 틱 ±이 틱은 두 상태를 허용한다.
+  # 그리퍼 라벨 규칙 (Task R5 A1, docs/08 §7 `q_gripper`). v2(기본): 전환 틱(전문가가 처음 "닫아라"/"열어라"를 낸 틱)은 **한 값**으로
+  # 남고, 허용은 전환 **앞** `gripper_early_ticks`틱의 허용 집합만 넓힌다(이른 답 허용 — 실행기는 readiness 미충족이면 `gripper_wait`로
+  # 보류한다). k는 A2 실측이 정한다: 이른 `closed`로 돌린 100 dev seed의 성공률 차 구간이 0을 포함하고 금지 접촉이 없을 때만 그 k.
+  # v1(옛 규칙, R1 v0.2의 라벨): 전환 틱 ±`gripper_transition_tolerance_ticks`가 두 상태 — 전환 틱 자체를 지운다(R4 리뷰 1: train 316 중 307).
+  gripper_label_rule: v2
+  gripper_early_ticks: 2
+  # v1일 때만 읽는다: 그리퍼 전환 틱 ±이 틱은 두 상태를 허용한다.
   gripper_transition_tolerance_ticks: 1
   # 막힌 경로의 대안 경유점 가운데 최선보다 이만큼 안에 드는 것은 허용 집합에 넣는다.
   path_alternative_extra_mm: 60

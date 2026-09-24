@@ -348,11 +348,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         if args.limit:
             schedule = schedule[: int(args.limit)]
         _log(f"run {label} × {condition}: {len(schedule)} episodes")
-        runs[condition] = run_condition(bundle, schedule, config=config, out=out_root / condition, condition=condition, label=label, log=sys.stderr, max_ticks=args.max_ticks)
+        runs[condition] = run_condition(bundle, schedule, config=config, out=out_root / condition, condition=condition, label=label, log=sys.stderr, max_ticks=args.max_ticks, id_tag=args.id_tag)
         _log(f"{label} × {condition}: done {runs[condition]['summary']['done']}/{runs[condition]['summary']['episodes']} · wall {runs[condition]['summary']['wall_seconds']:.1f} s")
     payload = {
         "script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit(), "policy": bundle["describe"], "label": label,
-        "checkpoint": args.checkpoint, "seeds_config": str(args.config), "conditions": runs,
+        "checkpoint": args.checkpoint, "seeds_config": str(args.config), "seeds_file": args.seeds, "id_tag": args.id_tag, "conditions": runs,
     }
     if args.policy == "model":
         payload["gpu"] = {"guard": guard, "memory_at_end": memory_report()}
@@ -421,6 +421,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--checkpoint", default=None)
     run.add_argument("--model", default="Qwen/Qwen3.5-2B")
     run.add_argument("--label", default=None, help="보고서·디렉터리의 이름표 (예: s18, 466)")
+    run.add_argument("--id-tag", dest="id_tag", default="r4", help="에피소드 id 꼬리의 라운드 표지 `-<tag>-<label>` (R4 기록은 r4; R5의 run은 r5)")
     run.add_argument("--condition", default="dev,ood_dev")
     run.add_argument("--config", default=str(DEFAULT_SEEDS_CONFIG))
     run.add_argument("--manifest", default=str(DEFAULT_MANIFEST))

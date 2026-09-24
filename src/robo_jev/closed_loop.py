@@ -346,9 +346,12 @@ def _quantiles(values: list[float]) -> dict[str, Any]:
 
 def run_condition(
     bundle: dict[str, Any], schedule: list[tuple[str, int]], *, config: dict[str, Any], out: str | Path, condition: str, label: str,
-    log: Any = None, max_ticks: int | None = None,
+    log: Any = None, max_ticks: int | None = None, id_tag: str = "r4",
 ) -> dict[str, Any]:
-    """정책 하나를 seed 목록 전부에 돌려 에피소드를 쓰고(레코드 + manifest + 틱 지연 sidecar) 편별 요약을 돌려준다."""
+    """정책 하나를 seed 목록 전부에 돌려 에피소드를 쓰고(레코드 + manifest + 틱 지연 sidecar) 편별 요약을 돌려준다.
+
+    에피소드 id에는 `-<id_tag>-<label>`이 붙는다 (R4의 기록은 `-r4-…`; R5의 run은 `--id-tag r5`) — 같은 seed를 다른 라운드가 돌아도
+    파일·manifest의 열쇠가 겹치지 않는다."""
     from robo_jev.sim.environment import Environment
 
     generator = config["generator"]
@@ -356,7 +359,7 @@ def run_condition(
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     policy, expert = bundle["policy"], bundle["expert"]
-    suffix = f"-r4-{label}"
+    suffix = f"-{id_tag}-{label}"
     envs: dict[str, TimedEnvironment] = {}
     episodes: list[dict[str, Any]] = []
     timing_path = out / "timing.jsonl"
@@ -406,7 +409,7 @@ def run_condition(
                 env.close()
     wall = time.perf_counter() - started
     manifest = build_manifest(out, generator, batch_wall_s=wall)
-    manifest["closed_loop"] = {"version": CLOSED_LOOP_VERSION, "policy": bundle["describe"], "condition": condition, "label": label, "episodes": len(episodes)}
+    manifest["closed_loop"] = {"version": CLOSED_LOOP_VERSION, "policy": bundle["describe"], "condition": condition, "label": label, "id_tag": id_tag, "episodes": len(episodes)}
     (out / "manifest.json").write_bytes((json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
     latency = {
         "obs_to_command_ms": _quantiles(obs_to_command), "obs_to_command_net_of_reference_ms": _quantiles(obs_to_command_net),

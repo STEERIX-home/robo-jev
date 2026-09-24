@@ -59,6 +59,30 @@ BATCH0_MANIFESTS = [
 DOMAIN_TAG = "provenance.robojev_domain"
 #: LoRA·T1 학습 전에 있어야 하는 장치(통합) 메모리 여유 — G0b 사다리의 4B 5초 full 구간 peak 58 GiB + 여유
 TRAIN_MIN_FREE_BYTES = 60 * 2**30
+#: `--eval-checkpoint`(학습 없이 평가만)가 적재 전에 요구하는 **장치** 메모리 여유 (Task R5: GPU 작업은 모두 울타리 + `require_free`를
+#: 지난다). 평가 프로세스의 장치 peak는 **3.51 GiB** = 2B bf16 가중치 그대로다(R3a `r3a-reeval-2b-t1-fp32-s18.json`·`r4-offline-loop-
+#: seeds-s18.json`의 `memory.peak_allocated_bytes`; 재생 활성값은 그 위에 거의 얹히지 않는다) — 그 두 배를 요구한다. `mem_get_info`의
+#: "여유"는 통합 메모리의 MemFree라 되찾을 수 있는 페이지 캐시(데이터셋 I/O 뒤 80 GB)를 빼고 세므로, checkpoint(24.5 GiB)를 CPU에
+#: 통째로 읽는 몫은 호스트의 MemAvailable로 따로 본다(:func:`_require_host_available`). R4의 같은 seed 재생은 33.3 GiB free에서 돌았다.
+EVAL_MIN_FREE_BYTES = 8 * 2**30
+EVAL_MIN_HOST_AVAILABLE_BYTES = 32 * 2**30
+
+
+def _require_host_available(required_bytes: int, *, what: str) -> dict[str, int]:
+    """`/proc/meminfo`의 MemAvailable(되찾을 수 있는 캐시 포함)이 `required_bytes`보다 작으면 분명한 오류를 낸다 — checkpoint를 CPU에
+    통째로 읽는 몫의 검사. 파일이 없는 플랫폼에서는 검사하지 않는다."""
+    path = Path("/proc/meminfo")
+    if not path.is_file():
+        return {"available_bytes": None}
+    fields = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        key, _, rest = line.partition(":")
+        if key in ("MemTotal", "MemFree", "MemAvailable"):
+            fields[key] = int(rest.strip().split()[0]) * 1024
+    available = fields.get("MemAvailable")
+    if available is not None and available < int(required_bytes):
+        raise MemoryError(f"{what}: 호스트 MemAvailable {available / 2**30:.1f} GiB < 필요 {int(required_bytes) / 2**30:.1f} GiB — 적재하지 않는다")
+    return {"available_bytes": available, "free_bytes": fields.get("MemFree"), "total_bytes": fields.get("MemTotal")}
 #: RSS를 적는 step (docs/06 Task 5 선결 조건 1의 확인 — sampler 적재가 D1에서 몇 GiB인가).
 RSS_STEPS = (1, 10)
 
@@ -242,6 +266,9 @@ def evaluate_checkpoint(config: dict[str, Any], *, mode: str, checkpoint: str, e
     run_dir = path.parent
     metrics = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8")) if (run_dir / "metrics.json").is_file() else {}
     torch.cuda.reset_peak_memory_stats()
+    device_free = require_free(EVAL_MIN_FREE_BYTES, what=f"evaluate checkpoint {path.name}")
+    host_available = _require_host_available(EVAL_MIN_HOST_AVAILABLE_BYTES, what=f"evaluate checkpoint {path.name}")
+    print(f"[p1] evaluate checkpoint {path}: device free {(device_free.get('free_bytes') or 0) / 2**30:.1f} GiB · host available {(host_available.get('available_bytes') or 0) / 2**30:.1f} GiB", file=sys.stderr, flush=True)
     started = time.perf_counter()
     resolved = resolve_config({**config, "run_id": run_dir.name})
     judge = build_model(resolved)

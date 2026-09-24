@@ -2228,7 +2228,7 @@ def test_versions_carry_a_digest_of_every_config_that_shapes_the_record(tmp_path
     from robo_jev.perception.pointworld import EXTRACTOR_VERSION
 
     assert versions["sim"] == "s0.3" and EXTRACTOR_VERSION == "pw0.2"
-    assert ROBOT_GENERATOR_VERSION == "gen-robot-v0.2"
+    assert ROBOT_GENERATOR_VERSION == "gen-robot-v0.3"  # Task R5 A1: 그리퍼 라벨 기본 규칙 v2 (전환 틱은 한 값)
     assert TOKEN_SERIALIZER_VERSION == "ts0.6" and STREAM_FORMAT == "v0.4"
     from robo_jev.data.generate import GENERATOR_VERSION as SINGLE_GENERATOR_VERSION
 

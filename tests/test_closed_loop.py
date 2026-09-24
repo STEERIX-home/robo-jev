@@ -116,10 +116,11 @@ def short_runs(tmp_path_factory, config):
     out = tmp_path_factory.mktemp("r4")
     schedule = [("E0", 900100), ("E1", 910100)]
     runs = {}
+    tags = {"expert": "r4", "rule": "r4", "mechanical": "r5"}  # 기본 꼬리는 r4; R5의 run은 `id_tag`로 다른 라운드 표지를 단다
     for kind in ("expert", "rule", "mechanical"):
         bundle = build_policy(kind, generator=config["generator"])
-        runs[kind] = run_condition(bundle, schedule, config=config, out=out / kind, condition="dev", label=kind, max_ticks=24)
-    return {"out": out, "runs": runs, "schedule": schedule}
+        runs[kind] = run_condition(bundle, schedule, config=config, out=out / kind, condition="dev", label=kind, max_ticks=24, **({"id_tag": "r5"} if kind == "mechanical" else {}))
+    return {"out": out, "runs": runs, "schedule": schedule, "tags": tags}
 
 
 def test_a_short_run_writes_records_a_manifest_and_a_timing_sidecar(short_runs):
@@ -131,8 +132,9 @@ def test_a_short_run_writes_records_a_manifest_and_a_timing_sidecar(short_runs):
         rows = [json.loads(line) for line in (short_runs["out"] / kind / "timing.jsonl").read_text(encoding="utf-8").splitlines()]
         assert len(rows) == run["summary"]["ticks"] and all(row["obs_to_command_ms"] is not None and row["obs_to_command_ms"] >= 0 for row in rows)
         assert run["latency"]["obs_to_command_ms"]["n"] == run["summary"]["ticks"]
+        assert manifest["closed_loop"]["id_tag"] == short_runs["tags"][kind]
         for episode in run["episodes"]:
-            assert episode["layer"] in LAYERS and episode["ticks"] <= 24 and episode["episode_id"].endswith(f"-r4-{kind}")
+            assert episode["layer"] in LAYERS and episode["ticks"] <= 24 and episode["episode_id"].endswith(f"-{short_runs['tags'][kind]}-{kind}")
     expert_rows = [json.loads(line) for line in (short_runs["out"] / "expert" / "timing.jsonl").read_text(encoding="utf-8").splitlines()]
     rule_rows = [json.loads(line) for line in (short_runs["out"] / "rule" / "timing.jsonl").read_text(encoding="utf-8").splitlines()]
     assert all(row["reference_ms"] == 0.0 for row in expert_rows)  # 정책이 expert면 참조 답은 따로 계산되지 않는다

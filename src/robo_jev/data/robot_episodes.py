@@ -61,6 +61,8 @@ __all__ = [
     "CONTRAST_PATH",
     "DEFAULT_CONFIG_PATH",
     "GENERATOR_VERSION",
+    "GRIPPER_LABEL_RULES",
+    "gripper_label_rule",
     "MANIFEST_VERSION",
     "build_manifest",
     "write_contrast",
@@ -83,7 +85,11 @@ __all__ = [
     "write_episode",
 ]
 
-GENERATOR_VERSION = "gen-robot-v0.2"
+#: gen-robot-v0.3 (Task R5 A1): 그리퍼 라벨의 기본 규칙이 v2다 — 전환 틱은 한 값으로 남고 허용은 전환 **앞** k틱만 넓힌다
+#: (:func:`_tolerate_gripper_transitions_v2`; 옛 규칙 ±1은 `labels.gripper_label_rule: v1`로 남는다). 생성·하네스·전문가 행동은 v0.2와 같다.
+GENERATOR_VERSION = "gen-robot-v0.3"
+#: 그리퍼 라벨 규칙 이름 (설정 `labels.gripper_label_rule`).
+GRIPPER_LABEL_RULES = ("v1", "v2")
 MANIFEST_VERSION = "manifest-robot-v1"
 DEFAULT_CONFIG_PATH = "configs/data/d1_robot.yaml"
 
@@ -374,7 +380,13 @@ def generate_episode(
                 terminated = "max_ms"
                 break
 
-        _tolerate_gripper_transitions(record, int((expert.label_config or {}).get("gripper_transition_tolerance_ticks", 0)))
+        # 그리퍼 라벨 규칙은 설정이 고른다 (Task R5 A1): v2(기본)는 전환 틱을 한 값으로 남기고 앞 k틱만 두 값으로 넓힌다;
+        # v1은 R1 v0.2가 쓴 옛 규칙(±tolerance 틱 두 값 — 전환 틱 자체를 지운다, R4 리뷰 1)이다.
+        label_rule, label_ticks = gripper_label_rule(expert.label_config)
+        if label_rule == "v1":
+            _tolerate_gripper_transitions(record, label_ticks)
+        else:
+            _tolerate_gripper_transitions_v2(record, label_ticks)
         wall_s = time.perf_counter() - started
         outcome = _outcome(scene, plan, env, done_tick if terminated == "done_tail" else None, ticks, terminated)
         outcome["first_done_tick"] = first_done_tick
@@ -395,6 +407,7 @@ def generate_episode(
             # 정책 클라이언트(`data.dagger.PolicyClient`)는 감싼 정책의 이름을 `name`으로 든다.
             "policy": {"name": str(getattr(policy, "name", type(policy).__name__)), "version": str(getattr(policy, "version", "unknown"))},
             "label_source": expert.label_source,
+            "gripper_label_rule": {"rule": label_rule, "early_ticks": label_ticks} if label_rule == "v2" else {"rule": label_rule, "tolerance_ticks": label_ticks},
             "config_sha256": config_digest(config),
             "sim_config": sim_config,
             "timing": {"wall_s": round(wall_s, 3), "ticks": ticks, "control_steps_per_tick": control_steps},
@@ -421,10 +434,11 @@ def generate_episode(
 
 
 def _tolerate_gripper_transitions(record: dict[str, Any], tolerance_ticks: int) -> None:
-    """그리퍼 전환 틱 ±`tolerance_ticks`는 두 상태를 허용한다 (docs/08 §7 `q_gripper`).
+    """**옛 규칙 v1** (R1 v0.2의 라벨, `labels.gripper_label_rule: v1`): 그리퍼 전환 틱 ±`tolerance_ticks`는 두 상태를 허용한다.
 
     전환은 전문가 라벨의 원하는 상태가 이웃 틱과 다른 곳이다. 라벨은 그 틱의 commitment에
-    조건화된 것이므로 라벨이 있는 틱끼리만 본다.
+    조건화된 것이므로 라벨이 있는 틱끼리만 본다. **전환 틱 자체도 두 값이 된다** — 그것이 R4가 찾은
+    결함이고(train의 "지금 닫아라" 316틱 중 307을 지운다) 기본 규칙은 이제 v2다. 부모 데이터의 규칙으로 남긴다.
     """
     if tolerance_ticks <= 0:
         return
@@ -445,6 +459,58 @@ def _tolerate_gripper_transitions(record: dict[str, Any], tolerance_ticks: int) 
             label = next(item for item in tick["labels"] if item["question_id"] == "q_gripper")
             label["candidate_ids"] = ["open", "closed"]
             label["rule"] = f"{label['rule']}+transition-tolerance"
+
+
+def gripper_label_rule(label_config: dict[str, Any] | None) -> tuple[str, int]:
+    """전문가 설정의 `labels` 블록 → (규칙 이름, 틱 수). v2의 틱 수는 `gripper_early_ticks`(전환 앞 허용 폭 k, 기본 0),
+    v1의 틱 수는 옛 `gripper_transition_tolerance_ticks`다. 기본 규칙은 v2다."""
+    config = label_config or {}
+    rule = str(config.get("gripper_label_rule", "v2"))
+    if rule not in GRIPPER_LABEL_RULES:
+        raise ValueError(f"labels.gripper_label_rule: {list(GRIPPER_LABEL_RULES)} 중 하나여야 한다 (받은 값: {rule!r})")
+    if rule == "v1":
+        return rule, int(config.get("gripper_transition_tolerance_ticks", 0))
+    early = int(config.get("gripper_early_ticks", 0))
+    if early < 0:
+        raise ValueError(f"labels.gripper_early_ticks: 0 이상이어야 한다 (받은 값: {early})")
+    return rule, early
+
+
+def _tolerate_gripper_transitions_v2(record: dict[str, Any], early_ticks: int, directions: tuple[str, ...] | None = None) -> list[int]:
+    """그리퍼 라벨 규칙 v2 (Task R5 A1, docs/08 §7 `q_gripper`): **전환 틱은 한 값으로 남는다.**
+
+    전환 틱 t*(원하는 상태가 직전 라벨 틱과 달라지는 첫 틱, open→closed·closed→open 둘 다)는 전문가가 실제로 내린
+    판단이라 언제나 한 값이다. 허용은 **파지 전환(open→closed)** 앞 틱(t*−k … t*−1)의 허용 집합만 넓힌다 — 이른 `closed`를
+    허용한다(실행기가 readiness로 보류한다, A2 실측) — 그리고 다른 전환 틱·라벨 없는 틱·다른 상태를 만나면 멈춘다
+    (:func:`robo_jev.data.gripper_labels.early_tolerance_indices`). 놓기 전환(closed→open) 앞은 넓히지 **않는다**: 이른
+    `open`은 운반 국면에서 그대로 실행돼 물체를 떨어뜨린다(`directions`의 기본값 `("closed",)`가 그 실측이다).
+    전환 틱과 그 뒤의 정착 틱은 어떤 k에서도 두 값이 되지 않는다. 옛 규칙(:func:`_tolerate_gripper_transitions`)은
+    ±tolerance 창에 두 상태가 들면 전환 틱 자체까지 두 값으로 만들어 R1 v0.2 train의 "지금 닫아라" 316틱 중 307을 지웠다
+    (R4 리뷰 1). 라벨은 그 틱의 commitment에 조건화된 것이므로 라벨이 있는 틱끼리만 본다. 두 값 라벨이 이미 있는 레코드
+    (옛 규칙이 지난 것)는 거절한다 — 먼저 :func:`robo_jev.data.gripper_labels.reset_gripper_labels`로 되돌린다.
+    돌려주는 것은 넓힌 틱 색인 목록이다.
+    """
+    from robo_jev.data.gripper_labels import DEFAULT_EARLY_DIRECTIONS, GRIPPER_LABELS_VERSION, early_tolerance_indices
+
+    directions = tuple(directions) if directions is not None else DEFAULT_EARLY_DIRECTIONS
+    ticks = record["ticks"]
+    desired: list[str | None] = []
+    for index, tick in enumerate(ticks):
+        label = next((item for item in tick.get("labels") or () if item["question_id"] == "q_gripper"), None)
+        if label is None:
+            desired.append(None)
+            continue
+        ids = [str(cid) for cid in label["candidate_ids"]]
+        if len(ids) != 1:
+            raise ValueError(f"{record.get('episode_id')} 틱 {index}: q_gripper 라벨이 이미 두 값이다 — 규칙 v2는 한 값 라벨에서 시작한다 (reset_gripper_labels)")
+        desired.append(ids[0])
+    widened = sorted(early_tolerance_indices(desired, int(early_ticks), directions=directions))
+    for index in widened:
+        label = next(item for item in ticks[index]["labels"] if item["question_id"] == "q_gripper")
+        label["candidate_ids"] = ["open", "closed"]
+        label["rule"] = f"{label['rule']}+early-tolerance"
+        label["tolerance"] = {"version": GRIPPER_LABELS_VERSION, "early_ticks": int(early_ticks), "directions": list(directions)}
+    return widened
 
 
 def _outcome(scene: dict[str, Any], plan: ScenePlan, env: Any, done_tick: int | None, ticks: int, terminated: str) -> dict[str, Any]:
