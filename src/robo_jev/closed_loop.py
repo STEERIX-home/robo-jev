@@ -74,6 +74,7 @@ __all__ = [
     "episode_summary",
     "failure_cause",
     "gripper_event_metrics",
+    "offline_gripper_transitions",
     "load_closed_loop_config",
     "paired_success",
     "per_record_rows",
@@ -714,11 +715,14 @@ def condition_metrics(records: list[dict[str, Any]], rows: list[dict[str, Any]] 
         subset = [row for row in rows if row["profile"] == profile]
         by_profile[profile] = {"episodes": len(subset), "done": sum(1 for row in subset if row["done"]), "success_rate": sum(1 for row in subset if row["done"]) / len(subset)}
     completion = sorted(int(row["done_tick"]) for row in done if row.get("done_tick") is not None)
+    # 한 번도 그리퍼를 닫지 않고 완료한 편 — 마지막 지시의 대상이 이미 영역 안에 있어 done 게이트가 든 편 (파지가 아니다).
+    without_close = [row["episode_id"] for row, record in zip(rows, records) if row["done"] and not any((tick.get("adopted") or {}).get("gripper") == "closed" for tick in record["ticks"])]
     stored_rows = per_record["adopted"] + per_record["stop"]
     return {
         "episodes": len(rows), "done": len(done), "success_rate": (len(done) / len(rows)) if rows else None,
         "success_ci": boot["accuracy_ci"] if boot else None, "bootstrap": {"resamples": boot["resamples"], "seed": boot["seed"]} if boot else None,
         "terminated": dict(Counter(str(row["terminated"]) for row in rows)),
+        "completed_without_close": without_close,
         "completion_ticks": {"median": (completion[len(completion) // 2] if completion else None), "p90": (completion[min(len(completion) - 1, int(0.9 * (len(completion) - 1)))] if completion else None), "mean": (statistics.fmean(completion) if completion else None)},
         "layers": layers, "by_profile": by_profile,
         "failure_causes": dict(Counter(row["failure_cause"] for row in rows if not row["done"])),
@@ -740,6 +744,56 @@ def condition_metrics(records: list[dict[str, Any]], rows: list[dict[str, Any]] 
                  "ticks_per_episode": (sum(row["ticks"] for row in rows) / len(rows)) if rows else None, "wall_per_episode": (sum(row["wall_s"] for row in rows) / len(rows)) if rows else None},
         "horizon_ticks": REACTION_HORIZON_TICKS,
     }
+
+
+#: 오프라인 재생의 `q_gripper` 예측을 세 종류의 틱으로 나눠 채점한다 (Task R4 C — "판단하는가, 실행 상태를 베끼는가").
+GRIPPER_TICK_CLASSES = ("initiate", "settled", "open")
+
+
+def offline_gripper_transitions(report: dict[str, Any], records: list[dict[str, Any]], *, split_name: str) -> dict[str, Any]:
+    """오프라인 재생 산출물(`per_record`가 있는 `q_gripper`)을 전문가의 폐루프 레코드 위에서 **틱 종류별로** 채점한다.
+
+    * `initiate` — 라벨이 한 값 `closed`인데 **실행된** 그리퍼(`state.exec.gripper`)는 아직 `open`인 틱: "지금 닫아라"를 모델이
+      스스로 내야 하는 틱(파지마다 몇 틱). 루프에서 팔이 멈춘 자리다.
+    * `settled` — 라벨 `closed`이고 실행된 그리퍼도 이미 `closed`인 틱: 실행 상태를 베끼면 맞는 틱.
+    * `open` — 라벨이 한 값 `open`인 틱.
+    두 값 라벨(전환 허용 구간)은 채점하지 않는다. 오프라인 정확도가 `settled`에서 높고 `initiate`에서 낮으면 모델은 전환을
+    판단하지 않고 실행 상태를 읽는다 — 폐루프에서 그리퍼가 한 번도 닫히지 않는 까닭이다.
+    """
+    table = report["evaluation"]["splits"][split_name]["model"]
+    rows = (table.get("q_gripper") or {}).get("per_record") or []
+    predicted = {(str(row["record_id"]), int(row["tick"])): str(row["predicted"]) for row in rows if row.get("tick") is not None}
+    counts = {name: {"n": 0, "correct": 0, "predicted_closed": 0} for name in GRIPPER_TICK_CLASSES}
+    episodes_with_initiate = episodes_initiate_all_wrong = 0
+    for record in records:
+        episode = str(record["episode_id"])
+        seen = wrong = 0
+        for index, tick in enumerate(record["ticks"]):
+            label = next((item for item in tick.get("labels") or () if item.get("question_id") == "q_gripper"), None)
+            ids = [str(cid) for cid in (label.get("candidate_ids") or ())] if label else []
+            answer = predicted.get((episode, index))
+            if len(ids) != 1 or answer is None:
+                continue
+            executed = str(((tick["request"].get("state") or {}).get("exec") or {}).get("gripper") or "")
+            if ids[0] == "closed":
+                kind = "initiate" if executed != "closed" else "settled"
+            else:
+                kind = "open"
+            counts[kind]["n"] += 1
+            counts[kind]["predicted_closed"] += int(answer == "closed")
+            correct = answer == ids[0]
+            counts[kind]["correct"] += int(correct)
+            if kind == "initiate":
+                seen += 1
+                wrong += int(not correct)
+        if seen:
+            episodes_with_initiate += 1
+            episodes_initiate_all_wrong += int(wrong == seen)
+    out = {name: {**block, "accuracy": (block["correct"] / block["n"]) if block["n"] else None} for name, block in counts.items()}
+    out["episodes_with_initiate_ticks"] = episodes_with_initiate
+    out["episodes_where_every_initiate_tick_is_wrong"] = episodes_initiate_all_wrong
+    out["whole_question_accuracy"] = (table.get("q_gripper") or {}).get("accuracy")
+    return out
 
 
 # --------------------------------------------------------------------------

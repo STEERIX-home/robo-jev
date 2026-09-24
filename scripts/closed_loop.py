@@ -375,6 +375,24 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_transitions(args: argparse.Namespace) -> int:
+    from robo_jev.closed_loop import offline_gripper_transitions
+    from robo_jev.data.robot_episodes import read_episodes
+
+    report = json.loads(Path(args.report).read_text(encoding="utf-8"))
+    out: dict[str, Any] = {"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit(), "report": str(args.report), "splits": {}}
+    for pair in args.split:
+        name, directory = pair.split("=", 1)
+        records = [record for _, record in read_episodes(Path(directory))]
+        out["splits"][name] = {"records_dir": directory, "episodes": len(records), **offline_gripper_transitions(report, records, split_name=name)}
+        block = out["splits"][name]
+        print(f"{name}: q_gripper whole {block['whole_question_accuracy']:.4f} · initiate {block['initiate']['accuracy']} ({block['initiate']['correct']}/{block['initiate']['n']}) · "
+              f"settled {block['settled']['accuracy']} ({block['settled']['correct']}/{block['settled']['n']}) · open {block['open']['accuracy']} ({block['open']['correct']}/{block['open']['n']}) · "
+              f"episodes with initiate ticks {block['episodes_with_initiate_ticks']}, all wrong {block['episodes_where_every_initiate_tick_is_wrong']}")
+    _write(Path(args.out), out)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -420,6 +438,12 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--offline", nargs="*", default=None, help="같은 checkpoint의 오프라인 판정 칸 산출물 (나란히 적는다)")
     report.add_argument("--out", required=True)
     report.set_defaults(func=cmd_report)
+
+    transitions = sub.add_parser("transitions", help="C: 오프라인 재생의 q_gripper 예측을 전환 틱(initiate)·정착 틱(settled)·open 틱으로 나눠 채점")
+    transitions.add_argument("--report", required=True, help="adapt_readout --eval-checkpoint 산출물 (q_gripper per_record가 있는 것)")
+    transitions.add_argument("--split", nargs="+", required=True, metavar="NAME=DIR", help="평가 집합의 분할 이름 = 그 레코드 디렉터리")
+    transitions.add_argument("--out", required=True)
+    transitions.set_defaults(func=cmd_transitions)
     return parser
 
 

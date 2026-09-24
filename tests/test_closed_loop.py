@@ -278,3 +278,28 @@ def test_timed_proxies_measure_without_changing_behaviour(config):
         assert observation["tick"] == 0
     finally:
         env.close()
+
+
+def test_offline_gripper_transitions_split_initiate_from_settled_ticks():
+    """오프라인 `q_gripper` 예측을 전환 틱(닫아야 하는데 실행 그리퍼는 아직 열림)·정착 틱(이미 닫힘)·open 틱으로 나눠 채점한다."""
+    from robo_jev.closed_loop import offline_gripper_transitions
+
+    ticks = [{"gripper_label": ["open"]}] * 2 + [{"gripper_label": ["closed"], "exec_gripper": "open"}] * 2 + [{"gripper_label": ["closed"], "exec_gripper": "closed"}] * 3 + [{"gripper_label": ["open", "closed"]}]
+    record = _record(ticks, seed=7)
+    for tick, spec in zip(record["ticks"], ticks):
+        tick["request"]["state"]["exec"] = {"gripper": spec.get("exec_gripper", "open")}
+    predicted = ["open", "open", "open", "closed", "closed", "closed", "closed", "closed"]  # 전환 틱 둘 중 하나만 맞힌다
+    rows = [{"record_id": record["episode_id"], "tick": index, "question": "q_gripper", "predicted": value, "correct": None} for index, value in enumerate(predicted)]
+    report = {"evaluation": {"splits": {"x": {"model": {"q_gripper": {"accuracy": 0.9, "per_record": rows}}}}}}
+    out = offline_gripper_transitions(report, [record], split_name="x")
+    assert out["initiate"] == {"n": 2, "correct": 1, "predicted_closed": 1, "accuracy": 0.5}
+    assert out["settled"] == {"n": 3, "correct": 3, "predicted_closed": 3, "accuracy": 1.0}
+    assert out["open"] == {"n": 2, "correct": 2, "predicted_closed": 0, "accuracy": 1.0}
+    assert out["episodes_with_initiate_ticks"] == 1 and out["episodes_where_every_initiate_tick_is_wrong"] == 0 and out["whole_question_accuracy"] == 0.9
+
+
+def test_completed_without_a_single_close_is_listed():
+    done_by_gate = _record([{"adopted": "c1", "gripper": "open"}] * 3, done=True, seed=11)
+    grasped = _record([{"adopted": "c1", "gripper": "open"}, {"adopted": "c1", "gripper": "closed"}, {"adopted": "c1", "gripper": "closed"}], done=True, seed=12)
+    table = condition_metrics([done_by_gate, grasped])
+    assert table["completed_without_close"] == ["ep-E0-11"]
