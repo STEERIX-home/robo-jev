@@ -387,6 +387,7 @@ def cmd_transitions(args: argparse.Namespace) -> int:
         out["splits"][name] = {"records_dir": directory, "episodes": len(records), **offline_gripper_transitions(report, records, split_name=name)}
         block = out["splits"][name]
         print(f"{name}: q_gripper whole {block['whole_question_accuracy']:.4f} · initiate {block['initiate']['accuracy']} ({block['initiate']['correct']}/{block['initiate']['n']}) · "
+              f"window predicted closed {block['window']['predicted_closed']}/{block['window']['n']} · "
               f"settled {block['settled']['accuracy']} ({block['settled']['correct']}/{block['settled']['n']}) · open {block['open']['accuracy']} ({block['open']['correct']}/{block['open']['n']}) · "
               f"episodes with initiate ticks {block['episodes_with_initiate_ticks']}, all wrong {block['episodes_where_every_initiate_tick_is_wrong']}")
     _write(Path(args.out), out)

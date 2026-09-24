@@ -747,7 +747,7 @@ def condition_metrics(records: list[dict[str, Any]], rows: list[dict[str, Any]] 
 
 
 #: 오프라인 재생의 `q_gripper` 예측을 세 종류의 틱으로 나눠 채점한다 (Task R4 C — "판단하는가, 실행 상태를 베끼는가").
-GRIPPER_TICK_CLASSES = ("initiate", "settled", "open")
+GRIPPER_TICK_CLASSES = ("initiate", "window", "settled", "open")
 
 
 def offline_gripper_transitions(report: dict[str, Any], records: list[dict[str, Any]], *, split_name: str) -> dict[str, Any]:
@@ -756,9 +756,11 @@ def offline_gripper_transitions(report: dict[str, Any], records: list[dict[str, 
     * `initiate` — 라벨이 한 값 `closed`인데 **실행된** 그리퍼(`state.exec.gripper`)는 아직 `open`인 틱: "지금 닫아라"를 모델이
       스스로 내야 하는 틱(파지마다 몇 틱). 루프에서 팔이 멈춘 자리다.
     * `settled` — 라벨 `closed`이고 실행된 그리퍼도 이미 `closed`인 틱: 실행 상태를 베끼면 맞는 틱.
+    * `window` — 라벨이 **두 값**(전환 허용 구간 ±`gripper_transition_tolerance_ticks`)이고 실행된 그리퍼는 아직 `open`인 틱:
+      전문가가 실제로 닫기를 시작한 틱은 여기 든다(라벨은 두 값이라 정확도는 없고 `predicted_closed`만 뜻이 있다).
     * `open` — 라벨이 한 값 `open`인 틱.
-    두 값 라벨(전환 허용 구간)은 채점하지 않는다. 오프라인 정확도가 `settled`에서 높고 `initiate`에서 낮으면 모델은 전환을
-    판단하지 않고 실행 상태를 읽는다 — 폐루프에서 그리퍼가 한 번도 닫히지 않는 까닭이다.
+    `initiate`가 거의 비고 `window`에서 `predicted_closed`가 0에 가까우면, 녹화된 데이터는 "지금 닫아라"를 한 값 라벨로 거의 묻지
+    않았고 모델은 그 틱에서 닫지 않는다 — 폐루프에서 그리퍼가 한 번도 닫히지 않는 까닭이다.
     """
     table = report["evaluation"]["splits"][split_name]["model"]
     rows = (table.get("q_gripper") or {}).get("per_record") or []
@@ -772,9 +774,14 @@ def offline_gripper_transitions(report: dict[str, Any], records: list[dict[str, 
             label = next((item for item in tick.get("labels") or () if item.get("question_id") == "q_gripper"), None)
             ids = [str(cid) for cid in (label.get("candidate_ids") or ())] if label else []
             answer = predicted.get((episode, index))
-            if len(ids) != 1 or answer is None:
+            if answer is None or not ids:
                 continue
             executed = str(((tick["request"].get("state") or {}).get("exec") or {}).get("gripper") or "")
+            if len(ids) != 1:
+                if executed != "closed":
+                    counts["window"]["n"] += 1
+                    counts["window"]["predicted_closed"] += int(answer == "closed")
+                continue
             if ids[0] == "closed":
                 kind = "initiate" if executed != "closed" else "settled"
             else:
@@ -789,7 +796,8 @@ def offline_gripper_transitions(report: dict[str, Any], records: list[dict[str, 
         if seen:
             episodes_with_initiate += 1
             episodes_initiate_all_wrong += int(wrong == seen)
-    out = {name: {**block, "accuracy": (block["correct"] / block["n"]) if block["n"] else None} for name, block in counts.items()}
+    out = {name: {**block, "accuracy": (block["correct"] / block["n"]) if (block["n"] and name != "window") else None} for name, block in counts.items()}
+    out["window"]["predicted_closed_rate"] = (counts["window"]["predicted_closed"] / counts["window"]["n"]) if counts["window"]["n"] else None
     out["episodes_with_initiate_ticks"] = episodes_with_initiate
     out["episodes_where_every_initiate_tick_is_wrong"] = episodes_initiate_all_wrong
     out["whole_question_accuracy"] = (table.get("q_gripper") or {}).get("accuracy")
