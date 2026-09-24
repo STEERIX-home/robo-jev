@@ -313,3 +313,64 @@ def test_resume_names_every_differing_identity_key(tmp_path):
     ):
         assert key in message, key
     assert "datasets[0].files.d0.jsonl" not in message and "ts9.9" in message
+
+
+# --------------------------------------------------------------------------
+# 끝난 run에 더 잇기 — `max_steps`를 바꾸는 재개 (Task R3a C1)
+# --------------------------------------------------------------------------
+
+
+def test_resume_refuses_a_different_max_steps_unless_the_run_says_to_reschedule(root, continuous):
+    """1 epoch을 끝낸 run에 1 epoch을 더 잇는다 — **말하고** 이어야 한다 (Task R3a C1).
+
+    `max_steps`는 예산이 아니라 **일정**이다: warmup과 cosine이 그 값에서 나오므로, 바꾸고 이어 가는 것은
+    같은 run의 연장이 아니라 **다른 일정 위의 연속 학습**이다. 그래서 기본은 거절이고, 설정이
+    `resume_reschedule: true`로 그러겠다고 말할 때만 허용하며, 그 사실이 run 기록에 남는다.
+    """
+    ten = {**base_config(root), "run_id": "extend-10", "max_steps": 10}
+    first = run_train(root, "extend-first", ten)
+    assert first["status"] == "completed" and first["step"] == 10
+    at_ten = root / "extend-at10.pt"
+    shutil.copy2(first["checkpoint"], at_ten)
+
+    twenty = {**base_config(root), "max_steps": 20}
+    path = root / "extend-refuse.yaml"
+    path.write_text(yaml.safe_dump(twenty), encoding="utf-8")
+    refused = subprocess.run(
+        [sys.executable, "-m", "robo_jev.train", "--config", str(path), "--resume", str(at_ten)],
+        capture_output=True, text=True, cwd=REPO,
+    )
+    assert refused.returncode != 0 and "max_steps" in refused.stderr and "resume" in refused.stderr
+
+    second = run_train(root, "extend-second", {**twenty, "resume_reschedule": True}, resume=at_ten)
+    assert second["status"] == "completed" and second["step"] == 20 and second["run_id"] == "extend-10"
+    metrics = metrics_of(root, "extend-10")
+    assert [entry["step"] for entry in metrics["steps"]] == list(range(1, 21))
+    # 무엇이 다시 잡혔는지가 run 기록에 있다 — 나중에 이 곡선을 읽는 사람이 한 run으로 오해하지 않게
+    assert metrics["summary"]["rescheduled"] == {"max_steps": {"from": 10, "to": 20}}
+    # 재개하지 않은 run에는 그 자리가 비어 있다
+    assert metrics_of(root, "continuous-20")["summary"]["rescheduled"] is None
+
+
+def test_rescheduling_puts_the_first_resumed_step_on_the_new_schedule_not_the_old_ones_last_value(root):
+    """옛 일정의 마지막 lr은 **0**이다(cosine의 끝) — 그대로 두면 재개 첫 step이 아무것도 배우지 않는다.
+
+    `LambdaLR.load_state_dict`는 lr을 다시 계산하지 않는다(람다는 상태에 담기지 않으므로 새 람다가 그대로
+    남고, optimizer에는 저장된 옛 값이 실린다). 일정을 다시 잡았다면 **지금 자리의 새 값**을 건다.
+    """
+    from robo_jev.train import Trainer, lr_factor
+
+    ten = {**base_config(root), "run_id": "lr-10", "max_steps": 10}
+    first = run_train(root, "lr-first", ten)
+    at_ten = root / "lr-at10.pt"
+    shutil.copy2(first["checkpoint"], at_ten)
+    assert load_checkpoint(at_ten)["optimizer"]["param_groups"][0]["lr"] == pytest.approx(0.0)  # 옛 일정의 끝
+
+    twenty = {**base_config(root), "run_id": "lr-10", "max_steps": 20, "resume_reschedule": True}
+    with Trainer(twenty, resume=at_ten) as trainer:
+        expected = lr_factor(10, max_steps=20, warmup_ratio=0.1)
+        assert expected > 0
+        assert trainer.scheduler.last_epoch == 10
+        for group in trainer.optimizer.param_groups:
+            assert group["lr"] == pytest.approx(group["initial_lr"] * expected)
+        assert trainer.rescheduled == {"max_steps": {"from": 10, "to": 20}}

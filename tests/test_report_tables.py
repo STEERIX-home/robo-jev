@@ -73,3 +73,69 @@ def test_the_repo_root_is_found_from_the_script_not_from_a_hard_coded_worktree()
     """M-10 — 스크래치 판은 worktree 경로가 박혀 있었다. 커밋된 코드는 `git clone` 어디서나 서야 한다."""
     module = script()
     assert module.REPO == REPO and (module.REPO / "scripts" / "report_tables.py").is_file()
+
+
+def test_the_leave_one_out_table_carries_every_control_and_names_a_drop_that_contains_zero():
+    """편 하나 빼기는 **대조군마다** 묻는다 — 층화 표는 상태 섞기 한 줄만 찍는다 (Task R3a B3).
+
+    층화 JSON은 상태 섞기를 `state_shuffle`로 부르고 평가 표는 `context_shuffle`로 부른다. 두 이름을 한
+    이름으로 합치면 한쪽 표에서 그 줄이 **조용히 사라진다** — 그래서 이 표는 자기 이름표를 쓴다.
+    """
+    module = script()
+    assert set(module.CONTROL_LABEL) == {"state_shuffle", "instruction_shuffle", "commitment_shuffle"}
+    data = {"runs": {"run": {"primary_stratum_leave_one_episode_out_by_control": {
+        "state_shuffle": {"episodes": 26, "every_drop_excludes_zero": True,
+                          "worst_drop": {"episode_id": "ep-A", "margin": 0.0588, "margin_ci": [0.0153, 0.0920], "margin_includes_zero": False}},
+        "instruction_shuffle": {"episodes": 26, "every_drop_excludes_zero": False,
+                                "worst_drop": {"episode_id": "ep-B", "margin": 0.0041, "margin_ci": [-0.0120, 0.0203], "margin_includes_zero": True}},
+        "commitment_shuffle": {"episodes": 26, "every_drop_excludes_zero": True, "worst_drop": None},
+    }}}}
+    table = module.loo_table(data, "run")
+    rows = table.splitlines()
+    assert len(rows) == 5  # 머리 둘 + 대조군 셋
+    assert "state shuffle" in rows[2] and "**yes**" in rows[2] and "`ep-A` +0.0588 [+0.0153, +0.0920]" in rows[2]
+    # 0을 포함하는 드롭은 그렇게 적힌다 — 표가 "전부 0 제외"처럼 읽히지 않게
+    assert "**NO**" in rows[3] and "**(contains 0)**" in rows[3] and "`ep-B` +0.0041" in rows[3]
+    assert rows[4].endswith("| — |")
+
+
+def _strata_run(*, margin: float, low: float, high: float, zero: bool, available: bool = True) -> dict:
+    """층화 JSON의 한 run — seed 표가 읽는 자리만."""
+    block = {"instruction_shuffle_margin": margin, "instruction_shuffle_margin_ci": [low, high],
+             "instruction_shuffle_margin_includes_zero": zero,
+             "state_shuffle_margin": 0.05, "state_shuffle_margin_ci": [0.01, 0.09], "state_shuffle_margin_includes_zero": False}
+    return {
+        "available": available,
+        "non_commitment": {"n": 235, "model": 0.762, **block},
+        "primary_stratum_by_key_family": {"grasp": {"n": 97, **block}},
+        "primary_stratum_leave_one_episode_out_by_control": {
+            "instruction_shuffle": {"episodes": 26, "every_drop_excludes_zero": not zero,
+                                    "worst_drop": {"episode_id": "ep-A", "margin": margin / 2, "margin_ci": [low / 2, high / 2],
+                                                   "margin_includes_zero": zero}},
+        },
+    }
+
+
+def test_the_seed_table_reads_each_run_on_its_own_and_never_pools_them():
+    """seed 표는 줄마다 자기 구간이다 — **세 seed로 구간을 만들지 않는다** (Task R3a D1).
+
+    0을 포함하는 줄은 그 줄에서 `YES`로 읽히고, 그 seed의 편 하나 빼기가 전부 0을 제외하지 못했다는 것도
+    같은 줄에 적힌다. 둘째 칸(`dev`)의 값이 없는 run은 빈칸이지 0이 아니다.
+    """
+    module = script()
+    cell = {"runs": {
+        "seed 17": _strata_run(margin=0.1106, low=0.0653, high=0.1577, zero=False),
+        "seed 18": _strata_run(margin=0.0210, low=-0.0080, high=0.0503, zero=True),
+        "seed 19": _strata_run(margin=0.0, low=0.0, high=0.0, zero=False, available=False),
+    }}
+    dev = {"runs": {"seed 17": _strata_run(margin=0.1014, low=0.0562, high=0.1477, zero=False)}}
+    rows = module.seed_table(cell, dev).splitlines()
+    assert len(rows) == 5
+    assert "**+0.111 [+0.065, +0.158]**" in rows[2] and "| no |" in rows[2]
+    assert "+0.101 [+0.056, +0.148]" in rows[2]            # 둘째 칸
+    assert "**+0.021 [-0.008, +0.050]**" in rows[3] and "**YES**" in rows[3]
+    assert "not every drop excludes zero" in rows[3] and "not every drop" not in rows[2]
+    assert rows[3].endswith("| — | — |")                    # 이 seed의 둘째 칸은 아직 없다 — 0이 아니다
+    assert "**missing**" in rows[4]
+    # 표가 어느 줄도 평균하거나 합치지 않는다 — run 수만큼의 줄이 전부다
+    assert module.seed_table(cell).count("\n") == module.seed_table(cell, dev).count("\n")

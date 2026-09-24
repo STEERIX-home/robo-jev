@@ -12,6 +12,8 @@ JSON에서 읽는다.
 10건 중 1건만 반응한 열의 "중앙 2틱"은 검열률 없이는 거짓말이 된다.
 
     uv run python scripts/report_tables.py strata   artifacts/reports/r2-decision-cell-strata.json "2B T1 fp32 master (233 = 1 epoch)"
+    uv run python scripts/report_tables.py loo      artifacts/reports/r2-decision-cell-strata.json "2B T1 fp32 master (233 = 1 epoch)"
+    uv run python scripts/report_tables.py seeds    artifacts/reports/r3a-decision-cell-strata.json artifacts/reports/r3a-dev-cell-strata.json
     uv run python scripts/report_tables.py events   artifacts/reports/r2-reeval-2b-t1-fp32-233.json robot/ood_dev
     uv run python scripts/report_tables.py unsafe   artifacts/reports/r2-reeval-2b-t1-fp32-233.json robot/ood_dev
     uv run python scripts/report_tables.py contrast artifacts/reports/r2-contrast-2b-t1-233.json
@@ -31,6 +33,10 @@ if str(REPO / "src") not in sys.path:
 #: 평가 표의 열 이름 → 표에 찍는 이름. 순서가 표의 줄 순서다.
 COLUMN_LABEL = {"model": "**model**", "context_shuffle": "state shuffle", "instruction_shuffle": "instruction shuffle",
                 "commitment_shuffle": "commitment shuffle", "rule_judge": "**rule judge**", "mechanical_baseline": "**mechanical baseline**"}
+#: 층화 표(`scripts/decision_cell_strata.py`)의 대조군 이름 → 찍는 이름. 그쪽은 상태 섞기를 `state_shuffle`로
+#: 부른다(평가 표는 `context_shuffle`이다) — 두 자를 한 이름으로 합치지 않고 각자의 이름을 그대로 쓴다.
+CONTROL_LABEL = {"state_shuffle": "state shuffle", "instruction_shuffle": "**instruction shuffle**",
+                 "commitment_shuffle": "commitment shuffle"}
 
 
 def _pct(x: Any, digits: int = 2) -> str:
@@ -91,6 +97,70 @@ def strata_table(data: dict[str, Any], run: str) -> str:
         w = loo["worst_drop"]
         lines += ["", f"leave-one-episode-out (state shuffle): every drop excludes zero = {loo.get('every_drop_excludes_zero')}; "
                       f"worst {w['episode_id']} {w['margin']:+.3f} [{w['margin_ci'][0]:+.3f}, {w['margin_ci'][1]:+.3f}]"]
+    return "\n".join(lines)
+
+
+def loo_table(data: dict[str, Any], run: str) -> str:
+    """편 하나 빼기 — **대조군 열마다** (R2 B2a의 표; `strata_table`은 상태 섞기 한 줄만 찍는다).
+
+    "모든 드롭이 0을 제외하는가"는 여유가 한 편에 업혀 있지 않다는 확인이고, 대조군마다 따로 물어야 한다 —
+    지시 섞기의 여유가 어느 편 없이도 서는지는 상태 섞기의 같은 질문과 다른 질문이다.
+    """
+    block = data["runs"][run]["primary_stratum_leave_one_episode_out_by_control"]
+    lines = ["| control | episodes refit | every drop excludes zero? | worst drop |",
+             "| --- | ---: | :---: | --- |"]
+    for column, label in CONTROL_LABEL.items():
+        row = block.get(column)
+        if not row:
+            continue
+        worst = row.get("worst_drop") or {}
+        interval = worst.get("margin_ci") or []
+        text = "—" if not worst else (
+            f"`{worst['episode_id']}` {worst['margin']:+.4f}"
+            + (f" [{interval[0]:+.4f}, {interval[1]:+.4f}]" if interval else "")
+            + ("" if not worst.get("margin_includes_zero") else " **(contains 0)**")
+        )
+        lines.append(f"| {label} | {row.get('episodes')} | {'**yes**' if row.get('every_drop_excludes_zero') else '**NO**'} | {text} |")
+    return "\n".join(lines)
+
+
+def seed_table(cell: dict[str, Any], dev: dict[str, Any] | None = None) -> str:
+    """run마다 **자기 구간을 한 줄에** — seed 표(Task R3a D1)와 epoch 표(D2)가 같은 모양이다.
+
+    **세 seed의 값으로 구간을 만들지 않는다.** 이 표는 seed마다 자기 편 단위 쌍 부트스트랩 구간을 나란히
+    놓을 뿐이고, "0을 제외한다"는 줄마다 따로 읽는다 — 한 줄이라도 0을 포함하면 그 줄의 값과 함께
+    "아직 seed 의존적"이라고 적는다. 마지막 두 칸은 **판정 칸이 아닌** 둘째 칸(`dev`)의 같은 여유다.
+    """
+    lines = ["| run | primary n | model | **instruction-shuffle margin (paired 95 %)** | 0? | `grasp` margin | 0? | state-shuffle margin | 0? | LOO worst (instruction) | `dev` cell margin | 0? |",
+             "| --- | ---: | ---: | ---: | :---: | ---: | :---: | ---: | :---: | --- | ---: | :---: |"]
+    for name, block in cell.get("runs", {}).items():
+        if not block.get("available"):
+            lines.append(f"| {name} | — | — | **missing** | — | — | — | — | — | — | — | — |")
+            continue
+        primary = block["non_commitment"]
+        grasp = (block.get("primary_stratum_by_key_family") or {}).get("grasp") or {}
+        instruction, instruction_zero = ci(primary, "instruction_shuffle")
+        grasp_text, grasp_zero = ci(grasp, "instruction_shuffle")
+        state, state_zero = ci(primary, "state_shuffle")
+        loo = ((block.get("primary_stratum_leave_one_episode_out_by_control") or {}).get("instruction_shuffle") or {})
+        worst = loo.get("worst_drop") or {}
+        interval = worst.get("margin_ci") or []
+        loo_text = "—" if not worst else (
+            f"`{worst['episode_id']}` {worst['margin']:+.4f}"
+            + (f" [{interval[0]:+.4f}, {interval[1]:+.4f}]" if interval else "")
+            + ("" if not worst.get("margin_includes_zero") else " **(contains 0)**")
+        )
+        if loo and not loo.get("every_drop_excludes_zero"):
+            loo_text += " — **not every drop excludes zero**"
+        second = ((dev or {}).get("runs", {}).get(name) or {})
+        if second.get("available"):
+            dev_text, dev_zero = ci(second["non_commitment"], "instruction_shuffle")
+        else:
+            dev_text, dev_zero = "—", "—"
+        lines.append("| " + " | ".join([
+            name, str(primary["n"]), f(primary.get("model")), f"**{instruction}**", instruction_zero,
+            grasp_text, grasp_zero, state, state_zero, loo_text, dev_text, dev_zero,
+        ]) + " |")
     return "\n".join(lines)
 
 
@@ -168,12 +238,16 @@ def _load(path: Any) -> dict[str, Any]:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv or argv[0] not in ("strata", "events", "unsafe", "contrast"):
+    if not argv or argv[0] not in ("strata", "loo", "seeds", "events", "unsafe", "contrast"):
         print(__doc__, file=sys.stderr)
         return 2
     what, rest = argv[0], argv[1:]
     if what == "strata":
         print(strata_table(_load(rest[0]), rest[1]))
+    elif what == "loo":
+        print(loo_table(_load(rest[0]), rest[1]))
+    elif what == "seeds":
+        print(seed_table(_load(rest[0]), _load(rest[1]) if len(rest) > 1 else None))
     elif what == "events":
         print(events_table(_load(rest[0]), rest[1]))
     elif what == "unsafe":

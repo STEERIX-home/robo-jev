@@ -90,7 +90,25 @@ R2_RUNS = {
 }
 #: 같은 run들을 **선택에 쓰지 않는 둘째 칸**(`dev` 42편, `configs/eval/r2-dev-cell.yaml`)에서 읽은 보고서.
 R2_DEV_RUNS = {name: report.replace("r2-reeval-", "r2-dev-") for name, report in R2_RUNS.items()}
-RUN_SETS = {"p2": STRATA_RUNS, "p3": P3_RUNS, "r1": R1_RUNS, "r2": R2_RUNS, "r2dev": R2_DEV_RUNS}
+#: Task R3a의 run들 — **같은 조리법·같은 재료에서 seed만 바꾼 둘**과, seed 17의 **2 epoch** run.
+#: 마지막 줄은 R2의 233 step checkpoint를 **이어간 것이 아니다** — `adapt_readout.py`가 `resume`을 Trainer에
+#: 넘기지 않고 있어서 처음부터 466 step을 돈 새 run이다(그 결함과 증거는 보고서 C1). 그래서 "이은 것"이 아니라
+#: **"한 일정으로 2 epoch"**이고, 233 행과의 비교는 "각자 자기 일정을 끝까지 돈 1 epoch 대 2 epoch"이다.
+#: R2의 233 step 행이 맨 위에 그대로 있어야 네 줄이 한 자로 읽힌다(같은 평가 집합 해시·같은 층·같은 부트스트랩).
+#: **seed마다 자기 구간을 읽는다** — 세 seed의 값으로 구간을 만들지 않는다(Task R3a D1).
+R3A_RUNS = {
+    "2B T1 fp32 seed 17 (233 = 1 epoch)": "r2-reeval-2b-t1-fp32-233.json",
+    "2B T1 fp32 seed 18 (233 = 1 epoch)": "r3a-reeval-2b-t1-fp32-s18.json",
+    "2B T1 fp32 seed 19 (233 = 1 epoch)": "r3a-reeval-2b-t1-fp32-s19.json",
+    "2B T1 fp32 seed 17 (466 = 2 epochs, fresh run)": "r3a-reeval-2b-t1-fp32-466.json",
+}
+#: 같은 네 run을 둘째 칸(`dev` 42편)에서 읽은 보고서.
+R3A_DEV_RUNS = {
+    name: report.replace("r2-reeval-", "r2-dev-").replace("r3a-reeval-", "r3a-dev-")
+    for name, report in R3A_RUNS.items()
+}
+RUN_SETS = {"p2": STRATA_RUNS, "p3": P3_RUNS, "r1": R1_RUNS, "r2": R2_RUNS, "r2dev": R2_DEV_RUNS,
+            "r3a": R3A_RUNS, "r3adev": R3A_DEV_RUNS}
 
 
 # --------------------------------------------------------------------------

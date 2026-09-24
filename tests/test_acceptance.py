@@ -478,6 +478,73 @@ def test_the_pairs_already_measured_on_the_t1_path_are_recorded_with_their_prove
                 assert pair[key] == pytest.approx(spread[key]), (pair["label"], key)
 
 
+def test_the_rule_now_says_the_baseline_pairs_run_at_the_comparisons_own_max_steps():
+    """Task R3a A2 — R2 A1e가 남긴 remedy 1. `max_steps`가 일정을 정하므로 5 step 쌍은 6 step 비교를 못 잰다.
+
+    등록된 `t1` loss 오차는 **바꾸지 않는다** — 그 값(0.2 / 0.08)은 3·5·5 step 쌍에서 나왔고 이 조항 이전의
+    것이라, 지금은 판정이 아니라 기록이다(R2 A1g). 규칙만 앞으로의 등록을 묶는다.
+    """
+    module = script()
+    rule = module.RESUME_TOLERANCE_RULE
+    assert "same max_steps as the comparison it will license" in rule
+    assert "every measured" in rule and "round up to one significant figure" in rule  # 앞의 조항은 그대로다
+    assert module.RESUME_TOLERANCE_T1 == {"loss_abs": 0.2, "loss_rel": 0.08, "param_max_abs": 0.01, "param_rel_l2": 0.05}
+    assert "0.2 / 0.08" in module.RESUME_TOLERANCE_SAME_STEPS_NOTE and "not judged" in module.RESUME_TOLERANCE_SAME_STEPS_NOTE
+
+    # 판정하지 않는 범위에서만 그 사실을 산출물에 적는다 (t0는 loss가 판정을 지므로 붙지 않는다)
+    continuous, split = _snapshot_pair(steps=6)
+    assert module.compare_resume(continuous, split, steps=6, mode="t1")["loss_diagnostic"]["tolerance_same_max_steps_note"]
+    assert module.compare_resume(continuous, split, steps=6, mode="t0")["loss_diagnostic"]["tolerance_same_max_steps_note"] is None
+
+
+def test_the_six_step_no_restart_spread_is_four_pairings_and_each_re_derives_from_its_report():
+    """Task R3a A2 — 진단 퍼짐의 네 값은 저장된 보고서의 loss에서 **다시 나온다**.
+
+    네 run은 전부 6 step·무재시작이다: A1d의 `continuous`(`r2-acceptance.json`), 진단 둘(`r2-diagnostic.json`의
+    `a`·`b`), fix round 1 재검사의 `continuous`(`r2-acceptance-recheck.json`). 기록에 이름이 있는 네 짝만
+    등록한다 — 같은 네 run의 나머지 두 짝(0.524645 · 0.312429)은 `not_registered`에 적어 두고 퍼짐에 넣지
+    않는다. 퍼짐을 넓히면 "이 차이가 잡음 안인가"가 너그러워지는 쪽이기 때문이다.
+    """
+    import json
+    from pathlib import Path
+
+    module = script()
+    spread = module.NO_RESTART_LOSS_SPREAD["t1"]
+    assert len(spread["pairings"]) == len(spread["worst_loss_abs"]) == len(spread["worst_loss_rel"]) == 4
+    assert spread["not_registered"]["r2-diagnostic `a` vs r2-acceptance-recheck `continuous`"] == pytest.approx(0.524645)
+    assert spread["not_registered"]["r2-diagnostic `b` vs r2-acceptance-recheck `continuous`"] == pytest.approx(0.312429)
+    assert max(spread["worst_loss_abs"]) < spread["not_registered"]["r2-diagnostic `a` vs r2-acceptance-recheck `continuous`"]
+
+    def losses(report: str, check: str, phase: str) -> list[float] | None:
+        path = Path(module.REPO) / report
+        if not path.is_file():
+            return None
+        block = json.loads(path.read_text(encoding="utf-8"))["checks"][check]
+        for entry in block["phases"]:
+            if (entry.get("phase") or entry.get("run")) == phase:
+                return json.loads(entry["stdout_tail"][-1])["losses"]
+        raise AssertionError(f"{report}: {phase} 단계가 없다")
+
+    runs = {
+        "a1d": losses("artifacts/reports/r2-acceptance.json", "resume_t1", "continuous"),
+        "diag_a": losses("artifacts/reports/r2-diagnostic.json", "baseline_t1", "a"),
+        "diag_b": losses("artifacts/reports/r2-diagnostic.json", "baseline_t1", "b"),
+        "fix1": losses("artifacts/reports/r2-acceptance-recheck.json", "resume_t1", "continuous"),
+    }
+    if any(value is None for value in runs.values()):
+        return  # 산출물이 없는 체크아웃 — 위의 구조만 시험한다
+    # `compare_resume`과 같은 정의다: rel은 **앞 run**을 분모로 한다
+    pairs = (("a1d", "diag_a"), ("a1d", "diag_b"), ("diag_a", "diag_b"), ("a1d", "fix1"))
+    for index, (left, right) in enumerate(pairs):
+        a, b = runs[left], runs[right]
+        assert len(a) == len(b) == spread["steps"]
+        assert spread["worst_loss_abs"][index] == pytest.approx(max(abs(x - y) for x, y in zip(a, b)), abs=1e-6)
+        assert spread["worst_loss_rel"][index] == pytest.approx(max(abs(x - y) / abs(x) for x, y in zip(a, b)), abs=1e-6)
+    for left, right, value in (("diag_a", "fix1", 0.524645), ("diag_b", "fix1", 0.312429)):
+        a, b = runs[left], runs[right]
+        assert value == pytest.approx(max(abs(x - y) for x, y in zip(a, b)), abs=1e-6)
+
+
 def test_a_relative_config_path_does_not_break_the_report_header():
     """R2 A1 — 첫 run이 여기서 죽었다: `--config configs/…`(상대 경로)가 `relative_to(REPO)`에서 떨어졌다."""
     module = script()
@@ -505,8 +572,8 @@ def test_the_t1_verdict_rests_on_the_exact_and_parameter_criteria_and_reports_th
     # 등록값은 그대로다 — 값을 보고 늘린 것이 아니다
     assert module.RESUME_TOLERANCE_T1 == {"loss_abs": 0.2, "loss_rel": 0.08, "param_max_abs": 0.01, "param_rel_l2": 0.05}
     spread = module.NO_RESTART_LOSS_SPREAD["t1"]
-    assert spread["steps"] == 6 and len(spread["worst_loss_abs"]) == 3
-    assert max(spread["worst_loss_abs"]) == pytest.approx(0.408990, abs=1e-5)
+    assert spread["steps"] == 6 and len(spread["worst_loss_abs"]) == 4   # R3a A2가 넷째(0.4460)를 등록했다
+    assert max(spread["worst_loss_abs"]) == pytest.approx(0.446030, abs=1e-5)
 
     continuous, split = _snapshot_pair(steps=6)
     # loss만 크게 벌어진 쌍: t1은 통과하고(판정이 loss를 보지 않는다) t0는 떨어진다
@@ -515,8 +582,8 @@ def test_the_t1_verdict_rests_on_the_exact_and_parameter_criteria_and_reports_th
     assert t1["passed"] is True and t1["verdict"] == "pass"
     assert t1["loss_criterion_judged"] is False
     assert t1["loss_diagnostic"]["worst_loss_abs"] == pytest.approx(1.0)
-    assert t1["loss_diagnostic"]["inside_no_restart_spread"] is False   # 1.0 > 0.409
-    assert t1["loss_diagnostic"]["no_restart_worst"] == pytest.approx(0.408990, abs=1e-5)
+    assert t1["loss_diagnostic"]["inside_no_restart_spread"] is False   # 1.0 > 0.446
+    assert t1["loss_diagnostic"]["no_restart_worst"] == pytest.approx(0.446030, abs=1e-5)
     assert module.compare_resume(continuous, split, steps=6, mode="t0")["passed"] is False
 
     # parameter 기준은 그대로 판정한다 — 그것이 이제 판정을 진다
