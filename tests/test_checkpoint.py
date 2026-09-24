@@ -229,6 +229,7 @@ def test_cuda_rng_round_trip_reproduces_the_next_draws_on_this_box():
     if not torch.cuda.is_available():
         assert "cuda" not in collect_rng_state()
         return
+    torch.cuda.init()  # manual_seed_all은 게으르다 — 이 시험이 혼자 돌아도 generator가 실제로 있게 한다 (리뷰 1 I3)
     torch.cuda.manual_seed_all(11)
     snapshot = collect_rng_state()
     assert "cuda" in snapshot
