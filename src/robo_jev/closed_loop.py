@@ -536,17 +536,24 @@ def episode_summary(record: dict[str, Any]) -> dict[str, Any]:
     reflex_ticks = [index for index, tick in enumerate(ticks) if any(str(event.get("kind", "")).startswith("reflex") for event in (tick["request"]["state"].get("events") or ()))]
     stop_ticks = [index for index, tick in enumerate(ticks) if (tick.get("adopted") or {}).get("stop")]
     goal_changes = sum(1 for a, b in zip(ticks, ticks[1:]) if _goal_version(b) > _goal_version(a))
-    disturbances = sum(1 for tick in ticks for event in (tick["request"]["state"].get("events") or ()) if str(event.get("kind")) == "disturbance_applied")
-    plan = (record.get("evidence") or {}).get("scene_plan") or {}
+    # 외란은 환경의 `evidence.disturbance_log`(실제로 가한 것)로 센다 — 모델 입력의 사건 목록에는 `disturbance_applied`가 아니라
+    # 정밀도를 넘는 이동만 `object_moved`로 실린다 (리뷰 1 M6).
+    evidence = record.get("evidence") or {}
+    disturbances_applied = len(evidence.get("disturbance_log") or [])
+    object_moved_events = sum(1 for tick in ticks for event in (tick["request"]["state"].get("events") or ()) if str(event.get("kind")) == "object_moved")
+    plan = evidence.get("scene_plan") or {}
     scheduled = {"instruction_changes": max(0, len(plan.get("instructions") or [1]) - 1), "disturbances": len(plan.get("disturbances") or [])}
     return {
         "episode_id": record["episode_id"], "profile": provenance["profile"], "seed": int(provenance["seed"]), "key": f"{provenance['profile']}:{provenance['seed']}",
         "origin_group": record.get("origin_group"), "split": record.get("split"),
         "done": bool(outcome["done"]), "done_tick": outcome.get("done_tick"), "first_done_tick": outcome.get("first_done_tick"),
+        # `done`은 정책 자신의 `q_done`이 꼬리 동안 든 것이다(하네스 done 게이트, `robot.py` `_gate`) — 거짓 done이 가능하므로
+        # 관측된 결과(대상이 목표 영역 안)와 함께 센다 (리뷰 1 I1).
+        "done_inside": bool(outcome["done"]) and bool(outcome.get("target_inside_zone")),
         "ticks": len(ticks), "sim_ms": int(outcome.get("sim_ms", 0)), "terminated": outcome.get("terminated"), "stall": outcome.get("stall"),
         "target_inside_zone": outcome.get("target_inside_zone"), "wall_s": float(provenance["timing"]["wall_s"]),
         "layer": condition_layer(record), "failure_cause": failure_cause(record, decisions), "decisions": decisions,
-        "goal_changes": goal_changes, "disturbances": disturbances, "scheduled": scheduled,
+        "goal_changes": goal_changes, "disturbances_applied": disturbances_applied, "object_moved_events": object_moved_events, "scheduled": scheduled,
         "gates": counts["gates"], "switches": counts["switches"], "main_changes": counts["main_changes"], "conflicts": counts["conflicts"],
         "stops": len(stop_ticks), "reflex_ticks": len(reflex_ticks), "commanded": len(commanded), "rejected": len(rejected), "reject_reasons": dict(reasons),
         "transition_collisions": int(reasons.get("transition_collision", 0)),
@@ -677,18 +684,20 @@ def controller_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _success_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{"episode_id": row["key"], "n": 1, "graded": 1, "correct": int(bool(row["done"]))} for row in rows]
+def _success_rows(rows: list[dict[str, Any]], *, strict: bool = False) -> list[dict[str, Any]]:
+    """편 단위 부트스트랩의 재료 — `strict`면 `done ∧ target_inside_zone`(정책이 선언한 done이 아니라 관측된 완료)."""
+    key = "done_inside" if strict else "done"
+    return [{"episode_id": row["key"], "n": 1, "graded": 1, "correct": int(bool(row[key]))} for row in rows]
 
 
-def paired_success(rows_a: list[dict[str, Any]], rows_b: list[dict[str, Any]]) -> dict[str, Any] | None:
-    """두 정책의 성공률 차이의 seed로 짝지은 편 단위 부트스트랩 구간 (같은 seed 집합에서만)."""
+def paired_success(rows_a: list[dict[str, Any]], rows_b: list[dict[str, Any]], *, strict: bool = False) -> dict[str, Any] | None:
+    """두 정책의 성공률 차이의 seed로 짝지은 편 단위 부트스트랩 구간 (같은 seed 집합에서만). `strict`는 `done ∧ target_inside_zone`."""
     keys = {row["key"] for row in rows_a} & {row["key"] for row in rows_b}
     a = [row for row in rows_a if row["key"] in keys]
     b = [row for row in rows_b if row["key"] in keys]
     if not keys:
         return None
-    out = episode_bootstrap(_success_rows(a), _success_rows(b))
+    out = episode_bootstrap(_success_rows(a, strict=strict), _success_rows(b, strict=strict))
     if out is None:
         return None
     return {"seeds": len(keys), "a": out["accuracy"], "b": out.get("control_accuracy"), "margin": out.get("margin"), "margin_ci": out.get("margin_ci"),
@@ -701,6 +710,8 @@ def condition_metrics(records: list[dict[str, Any]], rows: list[dict[str, Any]] 
     per_record = per_record_rows(records)
     done = [row for row in rows if row["done"]]
     boot = episode_bootstrap(_success_rows(rows))
+    strict_boot = episode_bootstrap(_success_rows(rows, strict=True))
+    false_done = [row["episode_id"] for row in rows if row["done"] and not row["done_inside"]]
     layers: dict[str, Any] = {}
     for layer in LAYERS:
         subset = [row for row in rows if row["layer"] == layer]
@@ -721,6 +732,10 @@ def condition_metrics(records: list[dict[str, Any]], rows: list[dict[str, Any]] 
     return {
         "episodes": len(rows), "done": len(done), "success_rate": (len(done) / len(rows)) if rows else None,
         "success_ci": boot["accuracy_ci"] if boot else None, "bootstrap": {"resamples": boot["resamples"], "seed": boot["seed"]} if boot else None,
+        # 정책이 선언한 done(하네스 게이트 = 그 정책의 `q_done`)이 관측된 완료(대상이 영역 안)와 갈리는 편 — `q_done`이 거짓으로 들 수 있는
+        # 정책에서는 이 열을 읽는다 (리뷰 1 I1).
+        "strict_done": sum(1 for row in rows if row["done_inside"]), "strict_success_rate": (sum(1 for row in rows if row["done_inside"]) / len(rows)) if rows else None,
+        "strict_success_ci": strict_boot["accuracy_ci"] if strict_boot else None, "false_done": false_done,
         "terminated": dict(Counter(str(row["terminated"]) for row in rows)),
         "completed_without_close": without_close,
         "completion_ticks": {"median": (completion[len(completion) // 2] if completion else None), "p90": (completion[min(len(completion) - 1, int(0.9 * (len(completion) - 1)))] if completion else None), "mean": (statistics.fmean(completion) if completion else None)},
@@ -739,7 +754,9 @@ def condition_metrics(records: list[dict[str, Any]], rows: list[dict[str, Any]] 
         "gripper_events": gripper_event_metrics(records),
         "controller": controller_metrics(rows),
         "gates": dict(sum((Counter(row["gates"]) for row in rows), Counter())),
-        "events": {"goal_changes": sum(row["goal_changes"] for row in rows), "disturbances": sum(row["disturbances"] for row in rows), "reflex_ticks": sum(row["reflex_ticks"] for row in rows)},
+        "events": {"goal_changes": sum(row["goal_changes"] for row in rows), "disturbances_applied": sum(row["disturbances_applied"] for row in rows),
+                   "disturbances_scheduled": sum(row["scheduled"]["disturbances"] for row in rows), "object_moved_events": sum(row["object_moved_events"] for row in rows),
+                   "reflex_ticks": sum(row["reflex_ticks"] for row in rows)},
         "cost": {"ticks": sum(row["ticks"] for row in rows), "wall_seconds": sum(row["wall_s"] for row in rows), "sim_seconds": sum(row["sim_ms"] for row in rows) / 1e3,
                  "ticks_per_episode": (sum(row["ticks"] for row in rows) / len(rows)) if rows else None, "wall_per_episode": (sum(row["wall_s"] for row in rows) / len(rows)) if rows else None},
         "horizon_ticks": REACTION_HORIZON_TICKS,
@@ -857,6 +874,7 @@ def closed_loop_report(run_paths: list[Path], *, offline: list[Path] | None = No
             for b in labels[index + 1 :]:
                 if (a, condition) in rows_by and (b, condition) in rows_by:
                     pairs.setdefault(condition, {})[f"{a} - {b}"] = paired_success(rows_by[(a, condition)], rows_by[(b, condition)])
+                    pairs[condition][f"{a} - {b} (done ∧ inside)"] = paired_success(rows_by[(a, condition)], rows_by[(b, condition)], strict=True)
                     for layer in LAYERS:
                         sub_a = [row for row in rows_by[(a, condition)] if row["layer"] == layer]
                         sub_b = [row for row in rows_by[(b, condition)] if row["layer"] == layer]
@@ -889,8 +907,8 @@ def print_report(report: dict[str, Any], file: Any = None) -> None:
     for condition in report["conditions"]:
         table = report["tables"][condition]
         print(f"\n### {condition}\n", file=file)
-        print("| policy | n | success | 95 % CI | no-change layer | changes layer | failures main / aux / geometric | completion median ticks | switch rate | round trips | goal-change immediate / censored | q_stop caught / censored / false alarm | unsafe | reject rate | model p95 / >100 ms |", file=file)
-        print("| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |", file=file)
+        print("| policy | n | success | 95 % CI | done ∧ inside | no-change layer | changes layer | failures main / aux / geometric | completion median ticks | switch rate | round trips | goal-change immediate / censored | q_stop caught / censored / false alarm | unsafe | reject rate | model p95 / >100 ms |", file=file)
+        print("| --- | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |", file=file)
         for label, block in table.items():
             layers = block["layers"]
             causes = block["failure_causes"]
@@ -900,6 +918,7 @@ def print_report(report: dict[str, Any], file: Any = None) -> None:
             model_ms = (latency.get("model_ms") or {}) if latency else {}
             print(
                 f"| {label} | {block['episodes']} | {_f(block['success_rate'])} | {_f(block['success_ci'][0]) if block['success_ci'] else '—'}–{_f(block['success_ci'][1]) if block['success_ci'] else '—'} "
+                f"| {block['strict_done']}{' (false done ' + str(len(block['false_done'])) + ')' if block['false_done'] else ''} "
                 f"| {_f((layers.get(LAYERS[0]) or {}).get('success_rate'))} ({(layers.get(LAYERS[0]) or {}).get('done', 0)}/{(layers.get(LAYERS[0]) or {}).get('episodes', 0)}) "
                 f"| {_f((layers.get(LAYERS[1]) or {}).get('success_rate'))} ({(layers.get(LAYERS[1]) or {}).get('done', 0)}/{(layers.get(LAYERS[1]) or {}).get('episodes', 0)}) "
                 f"| {causes.get('semantic_main', 0)} / {causes.get('semantic_aux', 0)} / {causes.get('geometric', 0)} | {_f(block['completion_ticks']['median'])} | {_f(block['stability']['adopted']['switch_rate'])} | {block['stability']['adopted']['round_trips']} "

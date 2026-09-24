@@ -193,9 +193,9 @@ def test_closed_loop_report_joins_runs_and_prints_tables(short_runs, tmp_path, c
 # --------------------------------------------------------------------------
 
 
-def _record(ticks: list[dict], *, done: bool = True, profile: str = "E0", seed: int = 1) -> dict:
+def _record(ticks: list[dict], *, done: bool = True, profile: str = "E0", seed: int = 1, inside: bool | None = None) -> dict:
     out = {"schema_version": "stream-v0", "episode_id": f"ep-{profile}-{seed}", "ticks": [], "provenance": {"profile": profile, "seed": seed, "timing": {"wall_s": 1.0},
-           "outcome": {"done": done, "done_tick": (len(ticks) - 1) if done else None, "first_done_tick": None, "sim_ms": 100 * len(ticks), "terminated": "done_tail" if done else "max_ms", "target_inside_zone": done}}}
+           "outcome": {"done": done, "done_tick": (len(ticks) - 1) if done else None, "first_done_tick": None, "sim_ms": 100 * len(ticks), "terminated": "done_tail" if done else "max_ms", "target_inside_zone": done if inside is None else inside}}}
     for index, spec in enumerate(ticks):
         candidates = [{"id": "c1", "key": "grasp:o1:top:zoneL"}, {"id": "c2", "key": "grasp:o2:top:zoneL"}, {"id": "c3", "key": "observe"}, {"id": "c4", "key": "hold"}]
         state = {"goal": {"version": spec.get("version", 1), "forbidden_contact": ["o9"]}, "events": spec.get("events", []), "robot": {}, "objects": []}
@@ -272,9 +272,9 @@ def test_timed_proxies_measure_without_changing_behaviour(config):
     try:
         observation = env.reset(900100)
         assert env.profile == "E0" and env.max_ms == 45000 and env.intervals_ms == []
+        before = env._ready_at
         env.step(None)
-        assert env.intervals_ms == []  # 명령 없는 스텝은 관측→명령 구간이 아니다
-        env.step({"seq": 1, "kind": "hold"} if False else None)
+        assert env.intervals_ms == [] and env._ready_at is not None and env._ready_at > before  # 명령 없는 스텝은 관측→명령 구간이 아니고, 관측 시각은 새로 찍힌다
         assert observation["tick"] == 0
     finally:
         env.close()
@@ -288,13 +288,14 @@ def test_offline_gripper_transitions_split_initiate_from_settled_ticks():
     record = _record(ticks, seed=7)
     for tick, spec in zip(record["ticks"], ticks):
         tick["request"]["state"]["exec"] = {"gripper": spec.get("exec_gripper", "open")}
-    predicted = ["open", "open", "open", "closed", "closed", "closed", "closed", "closed"]  # 전환 틱 둘 중 하나만 맞힌다
+    predicted = ["open", "open", "open", "closed", "closed", "closed", "closed", "open"]  # 전환 틱 둘 중 하나만 맞힌다; 마지막(두 값 라벨·실행 open)은 window
     rows = [{"record_id": record["episode_id"], "tick": index, "question": "q_gripper", "predicted": value, "correct": None} for index, value in enumerate(predicted)]
     report = {"evaluation": {"splits": {"x": {"model": {"q_gripper": {"accuracy": 0.9, "per_record": rows}}}}}}
     out = offline_gripper_transitions(report, [record], split_name="x")
     assert out["initiate"] == {"n": 2, "correct": 1, "predicted_closed": 1, "accuracy": 0.5}
     assert out["settled"] == {"n": 3, "correct": 3, "predicted_closed": 3, "accuracy": 1.0}
     assert out["open"] == {"n": 2, "correct": 2, "predicted_closed": 0, "accuracy": 1.0}
+    assert out["window"] == {"n": 1, "correct": 0, "predicted_closed": 0, "accuracy": None, "predicted_closed_rate": 0.0}  # 헤드라인(1/271)이 서는 칸
     assert out["episodes_with_initiate_ticks"] == 1 and out["episodes_where_every_initiate_tick_is_wrong"] == 0 and out["whole_question_accuracy"] == 0.9
 
 
@@ -303,3 +304,27 @@ def test_completed_without_a_single_close_is_listed():
     grasped = _record([{"adopted": "c1", "gripper": "open"}, {"adopted": "c1", "gripper": "closed"}, {"adopted": "c1", "gripper": "closed"}], done=True, seed=12)
     table = condition_metrics([done_by_gate, grasped])
     assert table["completed_without_close"] == ["ep-E0-11"]
+
+
+def test_a_policy_declared_done_with_the_target_outside_its_zone_is_a_false_done_and_the_strict_column_excludes_it():
+    """`done`은 정책 자신의 `q_done`이 꼬리 동안 든 것이라 거짓으로 들 수 있다 — `done ∧ target_inside_zone`이 관측된 완료다 (리뷰 1 I1)."""
+    real = _record([{"adopted": "c1"}] * 3, done=True, seed=21)
+    false_done = _record([{"adopted": "c1"}] * 3, done=True, seed=22, inside=False)
+    failed = _record([{"adopted": "c1"}] * 3, done=False, seed=23)
+    rows = [episode_summary(record) for record in (real, false_done, failed)]
+    assert [row["done_inside"] for row in rows] == [True, False, False]
+    table = condition_metrics([real, false_done, failed], rows)
+    assert table["done"] == 2 and table["strict_done"] == 1 and table["false_done"] == ["ep-E0-22"]
+    assert table["strict_success_rate"] == pytest.approx(1 / 3) and table["strict_success_ci"] is not None
+    other = [episode_summary(_record([{"adopted": "c1"}] * 3, done=True, seed=seed)) for seed in (21, 22, 23)]
+    assert paired_success(rows, other)["margin"] == pytest.approx(2 / 3 - 1.0)
+    assert paired_success(rows, other, strict=True)["margin"] == pytest.approx(1 / 3 - 1.0)
+
+
+def test_disturbances_are_counted_from_the_applied_log_and_object_moved_events():
+    record = _record([{"events": [{"kind": "object_moved", "object": "o1", "displacement_mm": 29}]}, {}, {"events": [{"kind": "object_moved", "object": "o0", "displacement_mm": 67}]}])
+    record["evidence"] = {"disturbance_log": [{"sim_ms": 100, "object": "o1"}, {"sim_ms": 300, "object": "o0"}, {"sim_ms": 800, "object": "o1"}], "scene_plan": {"instructions": [{"version": 1}], "disturbances": [{}, {}, {}, {}]}}
+    summary = episode_summary(record)
+    assert summary["disturbances_applied"] == 3 and summary["object_moved_events"] == 2 and summary["scheduled"] == {"instruction_changes": 0, "disturbances": 4}
+    events = condition_metrics([record], [summary])["events"]
+    assert events == {"goal_changes": 0, "disturbances_applied": 3, "disturbances_scheduled": 4, "object_moved_events": 2, "reflex_ticks": 0}
