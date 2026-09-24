@@ -1,0 +1,38 @@
+# Task R4 C — **같은 seed의 오프라인 값**: 폐루프에서 전문가가 실제로 돈 126편(`artifacts/datasets/r4-closed-loop/expert/{dev,ood_dev}`)을
+# 녹화된 에피소드로 삼아 같은 checkpoint를 재생 평가한다. 폐루프 표(`r4-closed-loop.json`)의 값 옆에 놓는 "오프라인이면 몇 점인가"다 —
+# 같은 장면·같은 전문가 궤적·같은 라벨 위에서 오프라인 정확도(특히 `q_gripper`의 `closed` 틱)와 루프 결과(그리퍼가 한 번도 닫히지
+# 않아 0/126)의 거리를 재는 자리다. 대조군·규칙 기준군 열은 끄고(GPU 한 pass) 틱별 예측만 남긴다. 봉인(`ood_test`)은 없다.
+version: eval-r4-offline-on-loop-seeds-v0.1
+window_ticks: 30
+shuffle_seed: 1
+tokens_per_batch: 8192
+fused: true
+
+columns:
+  permuted: false
+  state_shuffle: false
+  instruction_shuffle: false
+  commitment_shuffle: false
+  rule_judge: true
+  mechanical_baseline: true
+  event_metrics: true
+  selective: true
+  calibration: false
+
+splits:
+  - name: robot/loop-expert-dev
+    manifest: artifacts/datasets/r4-closed-loop/expert/dev/manifest.json
+    domain: robot
+    split: dev
+    files: ["episodes/*/streams.jsonl"]
+    selection: false
+    note: "R4 dev 100 seed, 전문가 정책의 폐루프 레코드 (h0.9·e0.4·ts0.6). 판정 칸이 아니다 — 같은 seed에서 오프라인 값을 폐루프 값 옆에 놓는 자리다"
+    store_predictions: [q_main, q_stop, q_gripper, q_path]
+  - name: robot/loop-expert-ood_dev
+    manifest: artifacts/datasets/r4-closed-loop/expert/ood_dev/manifest.json
+    domain: robot
+    split: ood_dev
+    files: ["episodes/*/streams.jsonl"]
+    selection: false
+    note: "R4 ood_dev 26 seed, 전문가 정책의 폐루프 레코드"
+    store_predictions: [q_main, q_stop, q_gripper, q_path]

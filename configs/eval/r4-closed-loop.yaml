@@ -1,0 +1,22 @@
+# Task R4 — 폐루프 장면 목록 (docs/06 Task 6 "개발용 폐루프 100 seed"; Stage B2).
+#
+# 장면은 R1 v0.2의 생성 설정(`configs/data/r1_robot.yaml`: 같은 장면 설정·하네스 h0.9·전문가 e0.4·split 규칙)에서 **새 seed**로
+# 만든다 — 같은 계열, 다른 배치·외란·지시 시각. seed 구간은 r1(400100~; 프로파일마다 10,000씩 벌린다)·DAgger 사이클
+# (`seeds.dagger_cycle_offset` 100,000; 사이클 0 = 500100~)과 겹치지 않는 900100~이다. split은 생성 전에 장면 계열
+# (`origin_group` + 템플릿·개념 태그)에서 나오므로(docs/04 §5) 새 seed도 같은 규칙으로 dev·ood_dev에 떨어진다 — 선택은
+# 프로파일 순환(E0/E1/E2 = 20/40/40, `profile_weights`)을 새 구간에서 걸으며 조건의 split에 떨어진 seed만 취한다.
+# `ood_test`에 떨어진 seed는 **만들지도 적지도 않는다**(봉인).
+version: r4-closed-loop-v0.1
+generator_config: configs/data/r1_robot.yaml
+seeds:
+  base: 900100
+scan:
+  # 조건 하나를 채우려고 프로파일마다 최대 몇 seed까지 계획을 지어 보는가 (계획만 짓는다 — 물리는 없다).
+  per_profile_max: 4000
+conditions:
+  dev:
+    split: dev
+    count: 100
+  ood_dev:
+    split: ood_dev
+    count: 26
