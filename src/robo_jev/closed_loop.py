@@ -73,9 +73,11 @@ __all__ = [
     "condition_metrics",
     "episode_summary",
     "failure_cause",
+    "family_overlap",
     "gripper_event_metrics",
     "offline_gripper_transitions",
     "load_closed_loop_config",
+    "paired_false_done",
     "paired_success",
     "per_record_rows",
     "print_report",
@@ -146,14 +148,25 @@ def quotas(weights: list[int], count: int) -> list[int]:
 
 def select_seeds(
     generator: dict[str, Any], sim_settings: dict[str, Any], *, split: str, count: int, base: int, per_profile_max: int = 4000,
+    quota: dict[str, int] | None = None,
 ) -> dict[str, Any]:
     """생성기의 seed 일정(프로파일 순환·프로파일별 계수기)을 `base`에서 걸으며 `split`에 떨어지는 장면을 프로파일 몫만큼 고른다.
 
     계획만 짓는다(:func:`build_plan` — 물리 없음). 다른 split에 떨어진 seed는 세기만 하고 **적지 않는다**(봉인 `ood_test` 포함).
+    `quota`(프로파일 → 편 수)를 주면 비중 대신 그 몫이다 — 주지 않은 프로파일은 0이고 합은 `count`와 같아야 한다(Task R6 A3:
+    지시가 바뀌는 E1·E2만 100편씩). seed 번호는 생성기의 일정 그대로다(프로파일 순환에서 빠지는 것이 아니라 건너뛸 뿐이다).
     """
     profiles = [str(name) for name in generator["profiles"]]
     weights = [int(value) for value in (generator.get("profile_weights") or [1] * len(profiles))]
-    quota = dict(zip(profiles, quotas(weights, count)))
+    if quota is None:
+        quota = dict(zip(profiles, quotas(weights, count)))
+    else:
+        unknown = sorted(set(quota) - set(profiles))
+        if unknown:
+            raise ValueError(f"quota: 생성기에 없는 프로파일 {unknown} (있는 것: {profiles})")
+        quota = {name: int(quota.get(name, 0)) for name in profiles}
+        if sum(quota.values()) != int(count):
+            raise ValueError(f"quota의 합 {sum(quota.values())}이 count {count}와 다르다")
     policy = split_policy(generator)
     schedule = seed_schedule({**generator, "seeds": {**generator["seeds"], "base": int(base)}}, per_profile_max * len(profile_cycle(generator)))
     chosen: list[dict[str, Any]] = []
@@ -204,6 +217,42 @@ def select_conditions(config: dict[str, Any], *, manifest: str | Path | None = N
         block["families"] = families
         block["families_in_r1"] = sum(1 for family in families if family in known_families)
         out["conditions"][name] = block
+    return out
+
+
+def _family_of(origin_group: str) -> str:
+    """`robot/<profile>/<family>/goal-<zone>` → `<family>` (목표 영역을 뺀 구조 계열)."""
+    parts = str(origin_group).split("/")
+    return parts[2] if len(parts) >= 3 else str(origin_group)
+
+
+def family_overlap(seeds: dict[str, Any], materials: dict[str, str | Path]) -> dict[str, Any]:
+    """조건마다 장면 계열이 **학습 재료**의 계열과 겹치는 수 (Task R6 D1: "본 적 없는 seed·대부분 학습한 계열").
+
+    `materials`는 이름 → 데이터셋 manifest(`files`의 에피소드 항목이 `origin_group`·`split`을 든다; **train 분할의 편만** 재료다)다. 두 자로 센다 — origin group(구조 계열 +
+    목표 영역, 분할이 정해지는 단위)과 구조 계열(`family`, 목표 영역을 뺀 것). 각각 겹치는 계열 수와 그 계열에 든 seed 수다."""
+    groups_of: dict[str, set[str]] = {}
+    for name, path in materials.items():
+        manifest = json.loads(Path(path).read_text(encoding="utf-8"))
+        # 학습에 들어가는 것은 train 분할뿐이다 (`splits: [train]`) — 부모 코퍼스의 dev·ood_dev 편은 재료가 아니다
+        groups_of[name] = {str(entry["origin_group"]) for key, entry in (manifest.get("files") or {}).items()
+                           if str(key).startswith("episodes/") and isinstance(entry, dict) and entry.get("origin_group")
+                           and str(entry.get("split", "train")) == "train"}
+    out: dict[str, Any] = {}
+    for condition, block in (seeds.get("conditions") or {}).items():
+        chosen = list(block.get("seeds") or [])
+        groups = {str(item["origin_group"]) for item in chosen}
+
+        def overlap(material_groups: set[str]) -> dict[str, int]:
+            families = {_family_of(group) for group in material_groups}
+            shared = groups & material_groups
+            shared_families = {_family_of(group) for group in groups} & families
+            return {"origin_groups": len(shared), "seeds": sum(1 for item in chosen if str(item["origin_group"]) in shared),
+                    "families": len(shared_families), "seeds_by_family": sum(1 for item in chosen if _family_of(str(item["origin_group"])) in shared_families)}
+
+        everything = set().union(*groups_of.values()) if groups_of else set()
+        out[condition] = {"origin_groups": len(groups), "families": len({_family_of(group) for group in groups}), "seeds": len(chosen),
+                          "by_material": {name: overlap(material) for name, material in groups_of.items()}, "any_material": overlap(everything)}
     return out
 
 
@@ -354,6 +403,9 @@ def run_condition(
     파일·manifest의 열쇠가 겹치지 않는다."""
     from robo_jev.sim.environment import Environment
 
+    if getattr(bundle["policy"], "collection_only", False):
+        # done 게이트 수집 정책(Task R6 A3)은 종료를 expert에게 맡기므로 성공률이 뜻을 잃는다 — 평가 run에 들어오면 멈춘다
+        raise ValueError(f"{getattr(bundle['policy'], 'name', 'policy')}: 수집 전용 정책은 평가에 쓰지 않는다 (robo_jev.data.done_gate)")
     generator = config["generator"]
     paths = config_paths(generator)
     out = Path(out)
@@ -707,6 +759,27 @@ def paired_success(rows_a: list[dict[str, Any]], rows_b: list[dict[str, Any]], *
             "margin_includes_zero": out.get("margin_includes_zero")}
 
 
+def paired_false_done(rows_a: list[dict[str, Any]], rows_b: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """두 정책의 **거짓 done 율** 차이의 seed로 짝지은 편 단위 부트스트랩 (Task R6 D2·E1).
+
+    거짓 done = 정책이 선언한 done(하네스 게이트 = 그 정책의 `q_done`)인데 대상이 영역 밖으로 끝난 편(`done ∧ ¬target_inside_zone`)이고,
+    율은 **seed마다의 0/1 지표를 모든 seed에 대해 평균한 것**(거짓 done 편 / 전체 편)이다 — 완료한 편만의 몫(거짓 done / done)은 분모가
+    정책마다 달라 seed로 짝지을 수 없다. `margin` = a − b, 구간이 0을 제외해야 판정이다."""
+    keys = {row["key"] for row in rows_a} & {row["key"] for row in rows_b}
+    if not keys:
+        return None
+
+    def indicator(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [{"episode_id": row["key"], "n": 1, "graded": 1, "correct": int(bool(row["done"]) and not bool(row["done_inside"]))} for row in rows if row["key"] in keys]
+
+    out = episode_bootstrap(indicator(rows_a), indicator(rows_b))
+    if out is None:
+        return None
+    return {"seeds": len(keys), "a": out["accuracy"], "b": out.get("control_accuracy"), "margin": out.get("margin"), "margin_ci": out.get("margin_ci"),
+            "margin_includes_zero": out.get("margin_includes_zero"), "a_count": sum(item["correct"] for item in indicator(rows_a)),
+            "b_count": sum(item["correct"] for item in indicator(rows_b)), "metric": "false-done episodes / all seeds (done ∧ ¬target_inside_zone)"}
+
+
 def condition_metrics(records: list[dict[str, Any]], rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """정책 × 조건 하나의 지표 표 (docs/08 §10 폐루프 항목 전부)."""
     rows = rows if rows is not None else [episode_summary(record) for record in records]
@@ -853,8 +926,14 @@ def _offline_columns(paths: list[Path]) -> dict[str, Any]:
     return out
 
 
-def closed_loop_report(run_paths: list[Path], *, offline: list[Path] | None = None) -> dict[str, Any]:
-    """run 요약 JSON들(`scripts/closed_loop.py run --report`) → 정책 × 조건 지표, 짝지은 성공률 차이, 오프라인 값 나란히."""
+def closed_loop_report(
+    run_paths: list[Path], *, offline: list[Path] | None = None, merge: dict[str, list[str]] | None = None, only: list[str] | None = None,
+) -> dict[str, Any]:
+    """run 요약 JSON들(`scripts/closed_loop.py run --report`) → 정책 × 조건 지표, 짝지은 성공률 차이, 오프라인 값 나란히.
+
+    `merge`(Task R6 D2)는 새 조건 이름 → 합칠 조건들이다(예: ``{"ood_dev100": ["ood_dev", "ood_dev_new"]}`` — R4의 ood_dev 26 seed와 새로
+    뽑은 74 seed). 합칠 조건을 **전부** 가진 정책만 그 표에 들고(없는 정책은 `merge_missing`에 이름이 남는다), 같은 seed가 두 조건에
+    있으면 거절한다. `only`는 보고할 조건 목록이다(주지 않으면 전부)."""
     runs: dict[str, dict[str, Any]] = {}
     for path in run_paths:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -870,17 +949,38 @@ def closed_loop_report(run_paths: list[Path], *, offline: list[Path] | None = No
             continue
         runs[label] = {"path": str(path), "policy": payload["policy"], "conditions": dict(payload["conditions"]), "gpu": payload.get("gpu")}
     conditions = sorted({name for run in runs.values() for name in run["conditions"]})
+    wanted = set(only) if only is not None else set(conditions) | set(merge or {})
     tables: dict[str, dict[str, Any]] = {}
     rows_by: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    records_by: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    needed = set(wanted) | {part for parts in (merge or {}).values() for part in parts}
     for label, run in runs.items():
         for condition in conditions:
             block = run["conditions"].get(condition)
-            if block is None:
+            if block is None or condition not in needed:
                 continue
             records = _read_records(Path(block["episodes_dir"]))
+            records_by[(label, condition)] = records
             rows = [episode_summary(record) for record in records]
             rows_by[(label, condition)] = rows
-            tables.setdefault(condition, {})[label] = {**condition_metrics(records, rows), "latency": block.get("latency"), "run_summary": block.get("summary")}
+            if condition in wanted:
+                tables.setdefault(condition, {})[label] = {**condition_metrics(records, rows), "latency": block.get("latency"), "run_summary": block.get("summary")}
+    merge_missing: dict[str, list[str]] = {}
+    for name, parts in (merge or {}).items():
+        for label in runs:
+            if not all((label, part) in rows_by for part in parts):
+                merge_missing.setdefault(name, []).append(label)
+                continue
+            records = [record for part in parts for record in records_by[(label, part)]]
+            rows = [row for part in parts for row in rows_by[(label, part)]]
+            keys = Counter(row["key"] for row in rows)
+            repeated = sorted(key for key, count in keys.items() if count > 1)
+            if repeated:
+                raise ValueError(f"{label}: 합칠 조건 {parts}에 같은 seed가 있다: {repeated[:3]}")
+            rows_by[(label, name)] = rows
+            if name in wanted:
+                tables.setdefault(name, {})[label] = {**condition_metrics(records, rows), "latency": None, "run_summary": None, "merged_from": list(parts)}
+    conditions = sorted(name for name in set(conditions) | set(merge or {}) if name in wanted and name in tables)
     pairs: dict[str, dict[str, Any]] = {}
     labels = list(runs)
     for condition in conditions:
@@ -889,13 +989,15 @@ def closed_loop_report(run_paths: list[Path], *, offline: list[Path] | None = No
                 if (a, condition) in rows_by and (b, condition) in rows_by:
                     pairs.setdefault(condition, {})[f"{a} - {b}"] = paired_success(rows_by[(a, condition)], rows_by[(b, condition)])
                     pairs[condition][f"{a} - {b} (done ∧ inside)"] = paired_success(rows_by[(a, condition)], rows_by[(b, condition)], strict=True)
+                    pairs[condition][f"{a} - {b} (false done)"] = paired_false_done(rows_by[(a, condition)], rows_by[(b, condition)])
                     for layer in LAYERS:
                         sub_a = [row for row in rows_by[(a, condition)] if row["layer"] == layer]
                         sub_b = [row for row in rows_by[(b, condition)] if row["layer"] == layer]
                         if sub_a and sub_b:
                             pairs[condition][f"{a} - {b} @ {layer}"] = paired_success(sub_a, sub_b)
     return {"version": CLOSED_LOOP_VERSION, "runs": {label: {"path": run["path"], "paths": run.get("paths", [run["path"]]), "policy": run["policy"], "gpu": run["gpu"]} for label, run in runs.items()},
-            "conditions": conditions, "tables": tables, "paired": pairs, "offline": _offline_columns(offline or []), "layers": list(LAYERS)}
+            "conditions": conditions, "tables": tables, "paired": pairs, "offline": _offline_columns(offline or []), "layers": list(LAYERS),
+            "merge": {name: list(parts) for name, parts in (merge or {}).items()}, "merge_missing": merge_missing}
 
 
 def _f(value: Any, digits: int = 3) -> str:

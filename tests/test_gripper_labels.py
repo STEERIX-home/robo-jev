@@ -321,6 +321,31 @@ def test_the_dagger_dataset_relabels_model_driven_records_and_marks_them_as_trai
     assert report["invalid_records"] == 0 and not report.get("errors")
 
 
+def test_the_dagger_dataset_carries_the_done_strata_the_cycle_and_the_collection_name(loop_batch, tmp_path):
+    """Task R6 A2·A3: 사이클 번호·수집 방식(`collection`)이 레코드와 manifest에 들고, `q_done` 층(08 §7)과 모델 raw 답의 거짓 done
+    사건이 manifest에 든다 — 라벨은 `q_gripper` 말고 바뀌지 않으므로 층은 부모와 같다."""
+    from robo_jev.data.done_strata import DONE_STRATA, count_done_strata
+
+    out = tmp_path / "dagger-1"
+    manifest = build_dagger_dataset([loop_batch], out, early_ticks=2, config=CONFIG, cycle=1, collection="model_loop")
+    records = [record for _, record in read_episodes(out)]
+    for record in records:
+        assert record["provenance"]["dagger"]["cycle"] == 1 and record["provenance"]["dagger"]["collection"] == "model_loop"
+    assert manifest["dagger"]["cycle"] == 1 and manifest["dagger"]["collection"] == "model_loop"
+    block = manifest["done_strata"]
+    assert set(block["derived"]["strata"]) == set(DONE_STRATA)
+    assert block["derived"]["labelled_ticks"] == sum(len(record["ticks"]) for record in records)
+    assert block["derived"]["strata"] == count_done_strata(records)["strata"] == block["parent"]["strata"]
+    assert set(block["model_rates_by_stratum"]) == set(DONE_STRATA)
+    assert block["false_done_events"]["episodes_total"] == len(records)
+    assert block["false_done_episodes"] == [record["episode_id"] for record in records
+                                            if record["provenance"]["outcome"]["done"] and not record["provenance"]["outcome"].get("target_inside_zone")]
+    # 수집 방식을 주지 않으면(사이클 0의 호출) 표지가 없다 — 옛 산출물과 같은 꼴
+    plain = build_dagger_dataset([loop_batch], tmp_path / "dagger-0", early_ticks=2, config=CONFIG, cycle=0)
+    assert "collection" not in plain["dagger"]
+    assert all("collection" not in record["provenance"]["dagger"] for _, record in read_episodes(tmp_path / "dagger-0"))
+
+
 def test_the_dagger_dataset_refuses_sealed_or_ood_dev_sources(loop_batch, tmp_path):
     """세 가지 검사를 각각 건드린다 (리뷰 1 M10): 경로에 봉인 이름이 든 것, 경로는 깨끗하지만 manifest의 `closed_loop.condition`이 ood_dev인 것,
     경로·조건은 깨끗하지만 레코드의 `split`이 ood_dev인 것 — 셋 다 거절이고, 거절 전에 아무것도 쓰지 않는다."""

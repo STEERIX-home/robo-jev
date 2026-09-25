@@ -348,3 +348,68 @@ def test_the_report_merges_run_files_that_share_a_label_across_conditions_and_re
     clash.write_text(first.read_text(encoding="utf-8"), encoding="utf-8")
     with pytest.raises(ValueError, match="겹친다"):
         closed_loop_report([first, clash])
+
+
+def test_family_overlap_counts_the_scene_groups_and_seeds_a_condition_shares_with_training_material(tmp_path):
+    """Task R6 D1: "본 적 없는 seed·대부분 학습한 계열" — 조건의 장면 계열(origin group)이 학습 재료의 계열과 얼마나 겹치는가."""
+    from robo_jev.closed_loop import family_overlap
+
+    seeds = {"conditions": {"dev_new2": {"seeds": [
+        {"profile": "E1", "seed": 1, "origin_group": "robot/E1/family-a/goal-zoneL", "family": "family-a"},
+        {"profile": "E1", "seed": 2, "origin_group": "robot/E1/family-a/goal-zoneL", "family": "family-a"},
+        {"profile": "E2", "seed": 3, "origin_group": "robot/E2/family-b/goal-zoneR", "family": "family-b"},
+    ]}}}
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"files": {
+        "episodes/x/streams.jsonl": {"origin_group": "robot/E1/family-a/goal-zoneL"},
+        "episodes/y/streams.jsonl": {"origin_group": "robot/E2/family-b/goal-zoneL"},  # 같은 구조 계열, 다른 목표 영역
+        "episodes/z/streams.jsonl": {"origin_group": "robot/E2/family-b/goal-zoneR", "split": "dev"},  # train이 아닌 편은 재료가 아니다
+        "contrast/records.jsonl": {"records": 3},
+    }}), encoding="utf-8")
+    out = family_overlap(seeds, {"dagger": manifest})
+    block = out["dev_new2"]
+    assert block["origin_groups"] == 2 and block["seeds"] == 3
+    assert block["by_material"]["dagger"] == {"origin_groups": 1, "seeds": 2, "families": 2, "seeds_by_family": 3}
+    assert block["any_material"] == {"origin_groups": 1, "seeds": 2, "families": 2, "seeds_by_family": 3}
+
+
+def test_the_report_merges_two_conditions_into_one_table_and_pairs_false_dones(short_runs, tmp_path):
+    """Task R6 D2: ood_dev 100 = R4의 ood_dev 26 seed + 새 ood_dev 74 seed — 두 조건의 편을 한 표로 합치고(같은 seed가 둘에 있으면 거절),
+    짝지은 비교에 **거짓 done**(`done ∧ ¬target_inside_zone`, seed마다 0/1)의 차를 더한다."""
+    from robo_jev.data.robot_episodes import read_episodes, write_episode
+
+    paths = []
+    for kind in ("expert", "rule"):
+        records = [record for _, record in read_episodes(short_runs["out"] / kind)]
+        parts = {}
+        for name, record in zip(("part_a", "part_b"), records):
+            directory = tmp_path / kind / name
+            write_episode(record, directory)
+            parts[name] = {**short_runs["runs"][kind], "condition": name, "episodes_dir": str(directory)}
+        path = tmp_path / f"run-{kind}.json"
+        path.write_text(json.dumps({"label": kind, "policy": {"kind": kind}, "conditions": parts}, default=str), encoding="utf-8")
+        paths.append(path)
+    report = closed_loop_report(paths, merge={"both": ["part_a", "part_b"]}, only=["both"])
+    assert report["conditions"] == ["both"] and set(report["tables"]["both"]) == {"expert", "rule"}
+    assert report["tables"]["both"]["expert"]["episodes"] == 2 and report["tables"]["both"]["expert"]["merged_from"] == ["part_a", "part_b"]
+    pair = report["paired"]["both"]["expert - rule (false done)"]
+    assert pair["seeds"] == 2 and pair["margin"] == pytest.approx(pair["a"] - pair["b"])
+    # 같은 seed가 두 조건에 있으면 합칠 수 없다
+    clash = tmp_path / "clash.json"
+    run = short_runs["runs"]["expert"]
+    clash.write_text(json.dumps({"label": "expert", "policy": {"kind": "expert"}, "conditions": {"x": run, "y": {**run, "condition": "y"}}}, default=str), encoding="utf-8")
+    with pytest.raises(ValueError, match="seed"):
+        closed_loop_report([clash], merge={"xy": ["x", "y"]})
+
+
+def test_paired_false_done_is_the_difference_of_seed_level_false_done_indicators():
+    from robo_jev.closed_loop import paired_false_done
+
+    def row(key, done, inside):
+        return {"key": key, "done": done, "done_inside": done and inside}
+
+    a = [row("E1:1", True, False), row("E1:2", True, True), row("E1:3", False, False)]
+    b = [row("E1:1", True, True), row("E1:2", True, True), row("E1:3", False, False)]
+    out = paired_false_done(a, b)
+    assert out["seeds"] == 3 and out["a"] == pytest.approx(1 / 3) and out["b"] == 0.0 and out["margin"] == pytest.approx(1 / 3)
+    assert paired_false_done(a, []) is None

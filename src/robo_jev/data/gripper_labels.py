@@ -4,6 +4,11 @@
         --out artifacts/datasets/r1-robot/r1-rollout-labels-g2 --early-ticks K
     uv run python -m robo_jev.data.gripper_labels dagger --source artifacts/datasets/r4-closed-loop/s18/dev \\
         --source artifacts/datasets/r4-closed-loop/466/dev --out artifacts/datasets/r5-dagger/dagger-0 --early-ticks K
+    # Task R6: 사이클 1 — R5의 dev 조건 모델 주행(모델 자신의 done 게이트)과 done 게이트 수집(expert의 `q_done`)
+    uv run python -m robo_jev.data.gripper_labels dagger --source artifacts/datasets/r5-closed-loop/r5/dev_new \\
+        --source artifacts/datasets/r5-closed-loop/r5/dev --out artifacts/datasets/r6-dagger/dagger-1 --early-ticks 2 --cycle 1 --collection model_loop
+    uv run python -m robo_jev.data.gripper_labels dagger --source artifacts/scratch/r6/donegate-raw/train \\
+        --out artifacts/datasets/r6-dagger/dagger-1-donegate --early-ticks 2 --cycle 1 --collection expert_done_gate
 
 왜. R4가 보인 것: 루프 안의 모델은 지시를 읽는데 파지점에서 `closed`를 한 번도 내지 못한다(참조 전환 125건 중 실행 0). 까닭은
 라벨 기제다 — 옛 규칙 `_tolerate_gripper_transitions`(±1틱 두 값)는 전환 틱 t*(전문가가 "닫아라"를 처음 낸 틱) 자체를 두 값으로
@@ -342,9 +347,17 @@ def _refuse_sealed(source: Path, *, condition: Any = None, split: Any = None, ep
 
 def build_dagger_dataset(
     sources: list[Path], out: Path, *, early_ticks: int, config: dict[str, Any], cycle: int = 0, log: Any = None,
+    collection: str | None = None,
 ) -> dict[str, Any]:
-    """R4의 폐루프 기록 디렉터리들(`closed_loop.py run --out …/<condition>`)을 첫 DAgger 데이터셋으로 재라벨해 쓴다."""
+    """폐루프 기록 디렉터리들(`closed_loop.py run --out …/<condition>`)을 DAgger 데이터셋으로 재라벨해 쓴다.
+
+    `collection`(Task R6)은 기록을 모은 방식의 이름이다 — `model_loop`(모델 자신의 done 게이트로 돈 평가 run의 기록, 사이클 1의
+    `dagger-1`)·`expert_done_gate`(하네스에 expert의 `q_done`을 넘긴 수집 정책의 기록, `dagger-1-donegate`). 주면 레코드의
+    `provenance.dagger.collection`과 manifest의 `dagger.collection`에 든다; 주지 않으면(사이클 0) 표지가 없다. manifest에는
+    `q_done` 층(:mod:`robo_jev.data.done_strata`)과 모델 raw 답의 거짓 done 사건도 든다 — 라벨은 `q_gripper`만 바뀌므로 층은
+    부모와 같다(`parent`·`derived` 둘 다 적어 그것을 보인다)."""
     from robo_jev.data.dagger import DAGGER_VERSION, count_policy_behaviour
+    from robo_jev.data.done_strata import done_strata_by_split, false_done_events, model_rates_by_stratum, recovery_after_false_done
     from robo_jev.data.robot_episodes import _tolerate_gripper_transitions_v2, build_manifest, read_episodes, write_episode
 
     started = time.perf_counter()
@@ -391,6 +404,8 @@ def build_dagger_dataset(
                 "gripper_labels": {"version": GRIPPER_LABELS_VERSION, "rule": "v2", "early_ticks": int(early_ticks)},
                 "gripper_label_ticks_reset": reset, "gripper_label_ticks_widened": widened,
             }
+            if collection is not None:
+                provenance["dagger"]["collection"] = str(collection)
             provenance["material"] = "error_family"
             validate_record(child)
             write_episode(child, out)
@@ -417,6 +432,16 @@ def build_dagger_dataset(
         "per_episode": per_episode,
         "split_note": "split은 train이다 — 계약의 SPLITS에 dagger가 없고 contracts.py는 배포 계약 digest의 조각이라 이름을 더할 수 없다; 장면의 원래 조건·split은 provenance.dagger에 있다",
         "material": "error_family",
+    }
+    if collection is not None:
+        manifest["dagger"]["collection"] = str(collection)
+    manifest["done_strata"] = {
+        "parent": done_strata_by_split(parents), "derived": done_strata_by_split(children),
+        "model_rates_by_stratum": model_rates_by_stratum(children),
+        "false_done_events": {key: value for key, value in false_done_events(children).items() if key != "per_episode"},
+        "recovery_after_false_done": {key: value for key, value in recovery_after_false_done(children).items() if key != "per_episode"},
+        "false_done_episodes": [str(record["episode_id"]) for record in children
+                                if record["provenance"]["outcome"].get("done") and not record["provenance"]["outcome"].get("target_inside_zone")],
     }
     manifest["lineage"] = {"sources": manifest["dagger"]["sources"], "gripper_labels": {"version": GRIPPER_LABELS_VERSION, "rule": "v2", "early_ticks": int(early_ticks)}, "labels_version": GRIPPER_LABELS_VERSION}
     manifest["gripper_labels"] = {"parent": _counts_by_split(parents), "derived": _counts_by_split(children)}
@@ -521,13 +546,15 @@ def main(argv: list[str] | None = None) -> int:
     dagger.add_argument("--early-ticks", dest="early_ticks", type=int, required=True)
     dagger.add_argument("--config", type=Path, default=Path("configs/data/r1_robot.yaml"))
     dagger.add_argument("--cycle", type=int, default=0)
+    dagger.add_argument("--collection", default=None, help="기록을 모은 방식 (R6: model_loop · expert_done_gate); 주지 않으면 표지 없음")
     args = parser.parse_args(argv)
     if args.command == "derive":
         manifest = derive_gripper_v2_dataset(args.parent, args.out, early_ticks=args.early_ticks, log=sys.stdout)
     else:
         from robo_jev.data.robot_episodes import load_generator_config
 
-        manifest = build_dagger_dataset(args.source, args.out, early_ticks=args.early_ticks, config=load_generator_config(args.config), cycle=args.cycle, log=sys.stdout)
+        manifest = build_dagger_dataset(args.source, args.out, early_ticks=args.early_ticks, config=load_generator_config(args.config), cycle=args.cycle, log=sys.stdout,
+                                        collection=args.collection)
     print(json.dumps({"episodes": manifest["episodes"], "splits": manifest["splits"], "gripper_labels": {name: manifest["gripper_labels"][name]["classes"] for name in ("parent", "derived")}}, ensure_ascii=False, indent=1))
     return 0
 

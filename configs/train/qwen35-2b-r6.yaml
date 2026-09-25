@@ -1,0 +1,62 @@
+# Task R6 C1 — R5 조리법 그대로 + **데이터 목록을 다섯으로**, 그리고 **혼합 비율 하나만** 바꾼다. `qwen35-2b-r5.yaml`을 잇는다.
+#
+#   uv run python scripts/adapt_readout.py --config configs/train/qwen35-2b-r6.yaml --mode t1 --steps 233 --seed 18 \
+#       --set checkpoint_every=50 --set 'checkpoint_keep_steps=[]' --run-id r6-t1-fp32-2b-s18 --no-eval \
+#       --out artifacts/reports/r6-2b-t1-fp32-s18.json
+#   (저장마다 26.35 GB 여유가 checkpoint.pt 옆에 있어야 한다 — 저장은 atomic(임시 파일 → rename)이라 run의 최고 사용량 ≈ 53 GB.
+#    이 과제는 `/`에 ≥ 65 GB 여유가 있을 때만 학습 유닛을 띄운다.)
+#
+# 조리법(fp32 master·5초 구간·backbone_lr 1e-5·readout_lr 3e-4·tick weights·seed 18·후보 치환·`max_steps 233`)은 R5(= R3a seed 18)와 같다.
+# 데이터:
+#   1. `r1-rollout-labels-g2` — 라벨 v2 부모판(expert 편, train 233편; material 기존 = existing).
+#   2. `r5-dagger/dagger-0` — R4 dev 조건의 모델 주행 200편(R5의 첫 DAgger).
+#   3. `r6-dagger/dagger-1` — R5 체크포인트의 **dev 조건** 모델 주행 200편(R5 dev_new 100 + R4 dev seed 100; 거짓 done 20편이 든다).
+#      R5의 `ood_dev` 26편과 `s18/*`는 넣지 않는다 — ood_dev는 계열 홀드아웃이고, s18 dev_new는 dagger-0과 같은 종류의 옛 정책 상태다.
+#   4. `r6-dagger/dagger-1-donegate` — train 계열의 새 seed(E1·E2 각 100, 600100~)에서 모델의 답 + expert의 `q_done`으로 돈 수집 200편:
+#      거짓 done **뒤의** 상태(모델이 새 대상으로 가는지·멈추는지)에 expert 라벨이 붙는다. 수집 전용 정책의 기록이지 평가가 아니다.
+#   5. `r1/single` — 비로봇 단일 요청, R2·R3a·R5와 같다.
+# 2~4는 docs/04 §7의 **새 오류 계열**이라 `material: error_family`이고 sampler에서 한 묶음이다.
+#
+# **조리법에서 바꾸는 것은 하나: `material_shares` existing 0.5 / error_family 0.5 / new_semantic_family 0.0.** 까닭(브리프 C1 그대로):
+# R5의 재정규화된 22 %라면 cycle 1의 거짓 done 편(≈ 20 + 수집분)은 233 step 동안 두세 번 뽑힌다 — 0.5면 DAgger 단위 ≈ 117개.
+# expert 노출은 0.78 → ≈ 0.5 epoch로 준다; 지시 읽기 회귀는 C2(판정 칸 주 층의 지시 섞기 여유)가 지킨다. tick weights는 바꾸지 않는다.
+# `sampler:` 블록은 **통째로** 적는다 — `extends`는 얕게 합치므로 `material_shares`만 적으면 파일럿의 분야 태그·후보 치환·tick weights가
+# 기본값으로 돌아간다(시험 `test_the_r6_training_config_changes_only_the_data_list_and_the_material_shares_from_r5`가 그것을 막는다).
+# ood_dev·ood_test 계열은 어느 manifest에도 학습 split로 들어 있지 않다(`splits: [train]`; DAgger·수집 재료는 train 계열·dev 조건 기록뿐이다).
+extends: qwen35-2b-r5.yaml
+run_name: r6-2b
+max_steps: 233                 # R5·seed 18과 같은 계산량
+checkpoint_every: 50
+checkpoint_keep_steps: []
+dataset_manifests:
+  - path: artifacts/datasets/r1-robot/r1-rollout-labels-g2/manifest.json
+    domain: robot
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r5-dagger/dagger-0/manifest.json
+    domain: robot
+    material: error_family
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r6-dagger/dagger-1/manifest.json
+    domain: robot
+    material: error_family
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r6-dagger/dagger-1-donegate/manifest.json
+    domain: robot
+    material: error_family
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r1/single/manifest.json
+    domain: non_robot
+sampler:
+  domain_tag: provenance.robojev_domain   # 파일럿과 같다 (pilot 레코드의 `provenance.domain`은 분야 이름이다)
+  material_tag: provenance.material
+  permute_candidates_seed: 17             # `--seed 18`이 18로 덮는다 (R5와 같다)
+  steady_min_held_ticks: 3
+  tick_weights:                           # 바꾸지 않는다
+    steady: 0.25
+    event: 2.0
+    goal_change: 2.0
+    other: 1.0
+  material_shares:                        # **R6의 유일한 조리법 변경** (R5는 기본값 0.7/0.2/0.1 → 재정규화 0.78/0.22)
+    existing: 0.5
+    error_family: 0.5
+    new_semantic_family: 0.0

@@ -222,3 +222,28 @@ def test_the_r5_training_config_is_seed_18s_recipe_with_three_manifests_and_the_
     same = ("stream_chunk_seconds", "backbone_lr", "readout_lr", "fp32_master_weights", "trainable", "gradient_accumulation", "robot_loss_share", "weight_decay", "warmup_ratio")
     assert {key: config[key] for key in same} == {key: reference[key] for key in same}
     assert config["sampler"]["tick_weights"] == reference["sampler"]["tick_weights"] and config["splits"] == ["train"]
+
+
+def test_the_r6_training_config_changes_only_the_data_list_and_the_material_shares_from_r5():
+    """Task R6 C1: `qwen35-2b-r6.yaml`은 R5 조리법을 잇고 **바꾸는 것이 둘뿐이다** — 데이터 목록(g2 · DAgger-0 · DAgger-1 · done 게이트
+    수집 · 비로봇; DAgger 셋은 `material: error_family`)과 혼합 비율 existing 0.5 / error_family 0.5 / new_semantic_family 0.0. 나머지
+    (fp32 master·lr·5초 구간·tick weights·seed 18·`max_steps 233`·후보 치환·분야 태그)는 R5의 해석된 설정과 **키마다** 같다."""
+    from pathlib import Path
+
+    load_train_config = script().load_train_config
+    r6 = load_train_config(REPO / "configs/train/qwen35-2b-r6.yaml", mode="t1", seed=18, run_id="test")
+    r5 = load_train_config(REPO / "configs/train/qwen35-2b-r5.yaml", mode="t1", seed=18, run_id="test")
+    manifests = r6["dataset_manifests"]
+    assert [Path(entry["path"]).parent.name for entry in manifests] == ["r1-rollout-labels-g2", "dagger-0", "dagger-1", "dagger-1-donegate", "single"]
+    assert [entry["domain"] for entry in manifests] == ["robot", "robot", "robot", "robot", "non_robot"]
+    assert [entry.get("material") for entry in manifests] == [None, "error_family", "error_family", "error_family", None]
+    assert r6["checkpoint_every"] == 50 and r6["checkpoint_keep_steps"] == []
+    assert r6["sampler"]["material_shares"] == {"existing": 0.5, "error_family": 0.5, "new_semantic_family": 0.0}
+    resolved6, resolved5 = resolve_config(dict(r6)), resolve_config(dict(r5))
+    differing = sorted(key for key in set(resolved6) | set(resolved5) if resolved6.get(key) != resolved5.get(key))
+    assert differing == ["checkpoint_keep_steps", "dataset_manifests", "run_name", "sampler"]
+    sampler6, sampler5 = resolved6["sampler"], resolved5["sampler"]
+    assert sorted(key for key in sampler6 if sampler6[key] != sampler5[key]) == ["material_shares"]
+    assert sampler5["material_shares"] == {"existing": 0.7, "error_family": 0.2, "new_semantic_family": 0.1}  # R5는 기본값(재정규화하면 0.78 / 0.22)
+    assert resolved6["max_steps"] == 233 and resolved6["seed"] == 18 and sampler6["permute_candidates_seed"] == 18
+    assert resolved6["splits"] == ["train"]  # ood_dev·ood_test 계열은 어느 manifest에도 학습 split로 없다
