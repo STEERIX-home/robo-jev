@@ -172,4 +172,4 @@ FSDP sharding부터). 자격 증명은 저장소에도 명세에도 넣지 않�
 
 ## 5. 작업 규칙
 
-superpowers SDD 루프(브리프 파일 → 구현 에이전트 → 리뷰 패키지 → 리뷰 → 수정 → 재리뷰 → `progress.md` 한 줄). 커밋은 사용자 승인 하에, trailer `Co-Authored-By: <그 작업을 한 Claude 모델> <noreply@anthropic.com>`(2026-09-20까지는 Claude Fable 5.1, 2026-09-21부터 Claude Opus 5 (1M context)). `.superpowers/`·`.venv/`·`artifacts/`·`data/`·`.claude/worktrees/`는 커밋 금지. docs/08이 로봇 스트림 계약의 정본, README의 구현 상태 표가 태스크 상태의 정본. 외부 리뷰는 코드로 검증한 뒤 동의를 받아 반영(07·09·10·11 반영 완료).
+superpowers SDD 루프(브리프 파일 → 구현 에이전트 → 리뷰 패키지 → 리뷰 → 수정 → 재리뷰 → `progress.md` 한 줄). 커밋은 사용자 승인 하에, trailer `Co-Authored-By: <그 커밋을 쓴 세션의 Claude 모델> <noreply@anthropic.com>` — 2026-09-18~20 Claude Fable 5.1, 09-21~22 Claude Opus 5 (1M context)와 Claude Fable 5.1이 섞임, 09-23~25(R2~R5) Claude Fable 5.1, 2026-09-25 R6부터 Claude Opus 5.5 (1M context). 어느 커밋이 어느 모델인지의 정본은 `git log`다. `.superpowers/`·`.venv/`·`artifacts/`·`data/`·`.claude/worktrees/`는 커밋 금지. docs/08이 로봇 스트림 계약의 정본, README의 구현 상태 표가 태스크 상태의 정본. 외부 리뷰는 코드로 검증한 뒤 동의를 받아 반영(07·09·10·11 반영 완료).
