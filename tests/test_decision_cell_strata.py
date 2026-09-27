@@ -641,3 +641,23 @@ def test_the_r6_run_sets_name_both_checkpoints_on_the_r5_rulers_and_the_r6_cells
         strip = lambda suite: {**{k: v for k, v in suite.items() if k != "path"}, "splits": [{k: v for k, v in s.items() if k != "store_predictions"} for s in suite["splits"]]}  # noqa: E731
         assert strip(old) == strip(new)
         assert [s["store_predictions"] for s in new["splits"]] == [[*s["store_predictions"], "q_done"] for s in old["splits"]]
+
+
+def test_compare_runs_pairs_the_primary_stratum_the_done_strata_and_the_gripper_initiate_stratum():
+    """Task R6 C2: 같은 칸의 두 run — 주 층 모델 정확도 차, 대조군 여유의 차, `q_done` 층의 정확도 차, `q_gripper` initiate 층의
+    `closed` 비율 차를 편 단위로 짝지어 낸다."""
+    module = script()
+    ticks = _ticks()
+    primary_a = {(r["episode_id"], r["tick"]): True for r in ticks}
+    primary_b = {(r["episode_id"], r["tick"]): r["is_commitment"] for r in ticks}  # b는 비-commitment 틱을 전부 틀린다
+    control = {(r["episode_id"], r["tick"]): r["is_commitment"] for r in ticks}
+    a_table = _table(ticks, primary_a, control, instruction=control)
+    b_table = _table(ticks, primary_b, control, instruction=control)
+    gripper = [{"episode_id": e, "tick": t, "label": ["closed"], "executed": "open", "phase": "grasp", "class": "initiate", "rule": "x"} for e, t in (("ep-A", 0), ("ep-B", 0))]
+    a_table["model"]["q_gripper"] = {"per_record": [{"record_id": e, "tick": t, "question": "q_gripper", "predicted": "closed", "correct": True} for e, t in (("ep-A", 0), ("ep-B", 0))]}
+    b_table["model"]["q_gripper"] = {"per_record": [{"record_id": e, "tick": t, "question": "q_gripper", "predicted": "open", "correct": False} for e, t in (("ep-A", 0), ("ep-B", 0))]}
+    out = module.compare_runs(a_table, b_table, ticks, None, gripper_ticks=gripper, resamples=200)
+    primary = out["primary_stratum"]
+    assert primary["n"] == 5 and primary["model"]["difference"] == 1.0
+    assert primary["instruction_shuffle_margin"]["difference"] == 1.0 and primary["instruction_shuffle_margin"]["kind"] == "margin difference"
+    assert out["gripper_initiate"]["n"] == 2 and out["gripper_initiate"]["closed_rate"]["difference"] == 1.0

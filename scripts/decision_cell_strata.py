@@ -661,8 +661,10 @@ def paired_difference(
             "includes_zero": bool(interval[0] <= 0.0 <= interval[1]), "episodes": len(groups), "resamples": resamples, "seed": seed, "level": level}
 
 
-def compare_runs(a_table: dict[str, Any], b_table: dict[str, Any], ticks: list[dict[str, Any]], done_ticks: list[dict[str, Any]] | None = None, **options: Any) -> dict[str, Any]:
-    """같은 칸의 두 run(a, b)을 편 단위로 짝지어: `q_main` 주 층의 모델 정확도 차와 대조군 여유의 차, 그리고 `q_done` 층마다 정확도 차."""
+def compare_runs(a_table: dict[str, Any], b_table: dict[str, Any], ticks: list[dict[str, Any]], done_ticks: list[dict[str, Any]] | None = None,
+                 *, gripper_ticks: list[dict[str, Any]] | None = None, **options: Any) -> dict[str, Any]:
+    """같은 칸의 두 run(a, b)을 편 단위로 짝지어: `q_main` 주 층의 모델 정확도 차와 대조군 여유의 차, `q_done` 층마다 정확도 차, 그리고
+    `gripper_ticks`(v2 라벨판의 틱)를 주면 `q_gripper` initiate 층의 `closed` 비율 차."""
     def rows(table: dict[str, Any], column: str, question: str) -> list[dict[str, Any]] | None:
         return ((table.get(COLUMNS[column]) or {}).get(question) or {}).get("per_record")
 
@@ -690,6 +692,13 @@ def compare_runs(a_table: dict[str, Any], b_table: dict[str, Any], ticks: list[d
                     continue
                 out["done_strata"][name] = {"n": len(keep), "accuracy": paired_difference(
                     _done_per_episode(a_done, keep, reference, metric="accuracy"), _done_per_episode(b_done, keep, reference, metric="accuracy"), **options)}
+    if gripper_ticks:
+        a_grip, b_grip = rows(a_table, "model", GRIPPER_QUESTION), rows(b_table, "model", GRIPPER_QUESTION)
+        keep = {(row["episode_id"], row["tick"]) for row in gripper_ticks if row["class"] == "initiate"}
+        if a_grip and b_grip and keep:
+            labels = {(row["episode_id"], row["tick"]): list(row["label"]) for row in gripper_ticks}
+            out["gripper_initiate"] = {"n": len(keep), "closed_rate": paired_difference(
+                _gripper_per_episode(a_grip, keep, labels, metric="closed_rate"), _gripper_per_episode(b_grip, keep, labels, metric="closed_rate"), **options)}
     return out
 
 
@@ -811,7 +820,7 @@ def build(*, suite_path: Any = DEFAULT_SUITE, reports: Any = REPORTS, runs: dict
         out["comparisons"] = {}
         for a, b in comparisons:
             if a in tables and b in tables:
-                out["comparisons"][f"{a} − {b}"] = compare_runs(tables[a], tables[b], ticks, done_ticks)
+                out["comparisons"][f"{a} − {b}"] = compare_runs(tables[a], tables[b], ticks, done_ticks, gripper_ticks=gripper_ticks.get("v2"))
             else:
                 out["comparisons"][f"{a} − {b}"] = {"available": False, "reason": f"missing run(s): {[name for name in (a, b) if name not in tables]}"}
     return out
