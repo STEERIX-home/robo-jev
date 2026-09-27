@@ -384,7 +384,8 @@ def cmd_report(args: argparse.Namespace) -> int:
         paths = [Path(item) for item in args.runs]
     merge = {pair.split("=", 1)[0]: [part for part in pair.split("=", 1)[1].split(",") if part] for pair in (args.merge or [])}
     only = [name for name in args.only.split(",") if name] if args.only else None
-    report = closed_loop_report(paths, offline=[Path(item) for item in (args.offline or [])], merge=merge or None, only=only)
+    seed_pairs = [tuple(pair.split(":", 1)) for pair in (args.seed_pairs or [])]
+    report = closed_loop_report(paths, offline=[Path(item) for item in (args.offline or [])], merge=merge or None, only=only, seed_pairs=seed_pairs or None)
     report.update({"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit()})
     _write(Path(args.out), report)
     from robo_jev.closed_loop import print_report
@@ -465,6 +466,8 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--merge", action="append", default=None, metavar="NAME=COND,COND",
                         help="조건 여럿을 한 표로 합친다 (R6: ood_dev100=ood_dev,ood_dev_new); 같은 seed가 둘에 있으면 거절")
     report.add_argument("--only", default=None, help="보고할 조건 (쉼표로; 합친 이름도 된다)")
+    report.add_argument("--seed-pairs", dest="seed_pairs", nargs="*", default=None, metavar="A:B",
+                        help="이 쌍마다 seed 단위 짝지은 지표(그리퍼 연속·중복·q_stop·안전·오행동·실패 원인)와 엄격 성공·거짓 done의 견고성(다른 부트스트랩 seed 1~200)")
     report.add_argument("--out", required=True)
     report.set_defaults(func=cmd_report)
 

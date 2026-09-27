@@ -27,6 +27,7 @@ from __future__ import annotations
 import copy
 import json
 import math
+import random
 import statistics
 import time
 from collections import Counter
@@ -51,7 +52,9 @@ from robo_jev.data.robot_episodes import (
     write_episode,
 )
 from robo_jev.evaluate import (
+    EPISODE_BOOTSTRAP,
     REACTION_HORIZON_TICKS,
+    _quantile,
     answer_stability,
     episode_bootstrap,
     reaction_delay,
@@ -78,11 +81,14 @@ __all__ = [
     "offline_gripper_transitions",
     "load_closed_loop_config",
     "paired_false_done",
+    "paired_robustness",
+    "paired_seed_ratio",
     "paired_success",
     "per_record_rows",
     "print_report",
     "quotas",
     "run_condition",
+    "seed_metrics",
     "select_conditions",
     "select_seeds",
 ]
@@ -780,6 +786,121 @@ def paired_false_done(rows_a: list[dict[str, Any]], rows_b: list[dict[str, Any]]
             "b_count": sum(item["correct"] for item in indicator(rows_b)), "metric": "false-done episodes / all seeds (done ∧ ¬target_inside_zone)"}
 
 
+#: seed(편) 하나에서 읽는 (분자, 분모) — 두 정책을 **같은 seed**로 짝지어 합친 비율의 차를 낸다 (Task R6 수정 라운드 1, 리뷰 1 I-3).
+#: 이름이 붙은 "퇴행"은 이 짝지은 구간이 0을 제외할 때만 발견이다.
+SEED_METRICS = ("gripper_streak", "gripper_duplicates", "q_stop_caught", "unsafe", "wrong_action", "aux_failure", "main_failure")
+
+
+def seed_metrics(record: dict[str, Any], row: dict[str, Any] | None = None) -> dict[str, tuple[float, float]]:
+    """편 하나의 (분자, 분모): 그리퍼 연속 불일치 편(0/1), 중복 그리퍼 전환 수(편당), `q_stop`이 잡은 정지 사건 / 정지 사건,
+    안전 위반 틱 / 행동한 틱(`selective_metrics_from_stored`와 같은 정의), 오행동 틱 / 행동한 틱(`_decision_ticks`), 실패 원인 aux·main(0/1)."""
+    row = row or episode_summary(record)
+    per = per_record_rows([record])
+    stop = stop_timing(per["stop"], [record]) if per["stop"] else {"reacted": 0, "onsets": 0}
+    selective = selective_metrics_from_stored(per["adopted"] + per["stop"], [record])
+    acted = round(float(selective["coverage"] or 0.0) * selective["n"]) if selective["n"] else 0
+    unsafe = round(float(selective["unsafe_action_rate"] or 0.0) * acted) if acted else 0
+    decisions = row["decisions"]
+    return {
+        "gripper_streak": (1.0 if decisions["aux_streak"]["q_gripper"] >= AUX_DISAGREEMENT_STREAK else 0.0, 1.0),
+        "gripper_duplicates": (float(gripper_event_metrics([record])["duplicate"]), 1.0),
+        "q_stop_caught": (float(stop["reacted"]), float(stop["onsets"])),
+        "unsafe": (float(unsafe), float(acted)),
+        "wrong_action": (float(decisions["wrong_action"]), float(decisions["acted"])),
+        "aux_failure": (1.0 if row["failure_cause"] == "semantic_aux" else 0.0, 1.0),
+        "main_failure": (1.0 if row["failure_cause"] == "semantic_main" else 0.0, 1.0),
+    }
+
+
+def paired_seed_ratio(
+    a: dict[str, tuple[float, float]], b: dict[str, tuple[float, float]], *, resamples: int = EPISODE_BOOTSTRAP["resamples"],
+    seed: int = EPISODE_BOOTSTRAP["seed"], level: float = EPISODE_BOOTSTRAP["level"],
+) -> dict[str, Any] | None:
+    """seed로 짝지은 **합친 비율의 차** Σnum_a/Σden_a − Σnum_b/Σden_b의 부트스트랩 구간 — 같은 seed 목록을 복원추출해 두 정책을 함께 센다
+    (:func:`robo_jev.evaluate.episode_bootstrap`과 같은 재표집 수·seed·수준). 한쪽 분모가 0인 재표집은 건너뛰고 그 수를 적는다."""
+    keys = sorted(set(a) & set(b))
+    if not keys:
+        return None
+
+    def ratio(source: dict[str, tuple[float, float]], names: list[str]) -> float | None:
+        denominator = sum(source[name][1] for name in names)
+        return (sum(source[name][0] for name in names) / denominator) if denominator else None
+
+    point_a, point_b = ratio(a, keys), ratio(b, keys)
+    rng = random.Random(int(seed))
+    draws: list[float] = []
+    skipped = 0
+    for _ in range(int(resamples)):
+        drawn = [keys[rng.randrange(len(keys))] for _ in keys]
+        value_a, value_b = ratio(a, drawn), ratio(b, drawn)
+        if value_a is None or value_b is None:
+            skipped += 1
+            continue
+        draws.append(value_a - value_b)
+    draws.sort()
+    low, high = (1.0 - level) / 2.0, 1.0 - (1.0 - level) / 2.0
+    interval = [_quantile(draws, low), _quantile(draws, high)] if draws else None
+    return {"seeds": len(keys), "a": point_a, "b": point_b,
+            "difference": None if point_a is None or point_b is None else point_a - point_b, "ci": interval,
+            "includes_zero": None if interval is None else bool(interval[0] <= 0.0 <= interval[1]),
+            "a_totals": [sum(a[k][0] for k in keys), sum(a[k][1] for k in keys)], "b_totals": [sum(b[k][0] for k in keys), sum(b[k][1] for k in keys)],
+            "skipped_resamples": skipped, "resamples": int(resamples), "seed": int(seed), "level": level}
+
+
+def _indicator(row: dict[str, Any], metric: str) -> int:
+    if metric == "strict":
+        return int(bool(row["done_inside"]))
+    if metric == "done":
+        return int(bool(row["done"]))
+    if metric == "false_done":
+        return int(bool(row["done"]) and not bool(row["done_inside"]))
+    raise ValueError(f"metric: strict · done · false_done 중 하나여야 한다 (받은 값: {metric!r})")
+
+
+def paired_robustness(
+    rows_a: list[dict[str, Any]], rows_b: list[dict[str, Any]], *, metric: str, alternative_seeds: Any = range(1, 201),
+) -> dict[str, Any]:
+    """seed 단위 0/1 지표(엄격 성공·done·거짓 done)의 짝지은 차가 **얼마나 굳은가** (Task R6 수정 라운드 1, 리뷰 1 I-2): 불일치 seed 수(a만 1, b만 1),
+    정확 McNemar 양측 p(불일치 쌍의 이항 검정), 등록된 부트스트랩(seed 20260921, 2,000회)의 구간, 그리고 **다른 부트스트랩 RNG seed**들에서 구간이
+    0을 포함한 횟수와 하한·상한의 분포. 판정은 등록된 절차가 내린다 — 이 블록은 그 판정 옆에 적는 민감도다."""
+    if metric not in ("strict", "done", "false_done"):
+        raise ValueError(f"metric: strict · done · false_done 중 하나여야 한다 (받은 값: {metric!r})")
+    by_a = {row["key"]: _indicator(row, metric) for row in rows_a}
+    by_b = {row["key"]: _indicator(row, metric) for row in rows_b}
+    keys = sorted(set(by_a) & set(by_b))
+    a_only = sum(1 for key in keys if by_a[key] and not by_b[key])
+    b_only = sum(1 for key in keys if by_b[key] and not by_a[key])
+    discordant = a_only + b_only
+    tail = sum(math.comb(discordant, index) for index in range(min(a_only, b_only) + 1)) / (2 ** discordant) if discordant else 1.0
+    rows_1 = [{"episode_id": key, "n": 1, "graded": 1, "correct": by_a[key]} for key in keys]
+    rows_2 = [{"episode_id": key, "n": 1, "graded": 1, "correct": by_b[key]} for key in keys]
+    registered = episode_bootstrap(rows_1, rows_2) or {}
+    lows: list[float] = []
+    highs: list[float] = []
+    for alternative in alternative_seeds:
+        out = episode_bootstrap(rows_1, rows_2, seed=int(alternative)) or {}
+        if out.get("margin_ci"):
+            lows.append(out["margin_ci"][0])
+            highs.append(out["margin_ci"][1])
+
+    def summary(values: list[float]) -> dict[str, Any]:
+        ordered = sorted(values)
+        return {"min": ordered[0], "median": _quantile(ordered, 0.5), "max": ordered[-1]} if ordered else {}
+
+    return {
+        "metric": metric, "seeds": len(keys), "a": registered.get("accuracy"), "b": registered.get("control_accuracy"),
+        "discordant": {"a_only": a_only, "b_only": b_only}, "mcnemar_exact_p": min(1.0, 2.0 * tail),
+        "registered": {"margin": registered.get("margin"), "margin_ci": registered.get("margin_ci"), "seed": registered.get("seed"), "resamples": registered.get("resamples")},
+        "alternative_seeds": {
+            "seeds": [min(alternative_seeds), max(alternative_seeds)] if len(lows) else None, "count": len(lows),
+            "intervals_containing_zero": sum(1 for low, high in zip(lows, highs) if low <= 0.0 <= high),
+            "lower_bound_at_or_below_zero": sum(1 for low in lows if low <= 0.0), "lower_bound_above_zero": sum(1 for low in lows if low > 0.0),
+            "upper_bound_at_or_above_zero": sum(1 for high in highs if high >= 0.0),
+            "lower_bound": summary(lows), "upper_bound": summary(highs),
+        },
+    }
+
+
 def condition_metrics(records: list[dict[str, Any]], rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     """정책 × 조건 하나의 지표 표 (docs/08 §10 폐루프 항목 전부)."""
     rows = rows if rows is not None else [episode_summary(record) for record in records]
@@ -928,12 +1049,15 @@ def _offline_columns(paths: list[Path]) -> dict[str, Any]:
 
 def closed_loop_report(
     run_paths: list[Path], *, offline: list[Path] | None = None, merge: dict[str, list[str]] | None = None, only: list[str] | None = None,
+    seed_pairs: list[tuple[str, str]] | None = None, alternative_seeds: Any = range(1, 201),
 ) -> dict[str, Any]:
     """run 요약 JSON들(`scripts/closed_loop.py run --report`) → 정책 × 조건 지표, 짝지은 성공률 차이, 오프라인 값 나란히.
 
     `merge`(Task R6 D2)는 새 조건 이름 → 합칠 조건들이다(예: ``{"ood_dev100": ["ood_dev", "ood_dev_new"]}`` — R4의 ood_dev 26 seed와 새로
     뽑은 74 seed). 합칠 조건을 **전부** 가진 정책만 그 표에 들고(없는 정책은 `merge_missing`에 이름이 남는다), 같은 seed가 두 조건에
-    있으면 거절한다. `only`는 보고할 조건 목록이다(주지 않으면 전부)."""
+    있으면 거절한다. `only`는 보고할 조건 목록이다(주지 않으면 전부). `seed_pairs`(이름표 쌍 a, b)면 조건마다 그 쌍의 **seed 단위 짝지은 지표**
+    (:data:`SEED_METRICS`, :func:`paired_seed_ratio`)와 엄격 성공·거짓 done의 **견고성**(:func:`paired_robustness`, 다른 부트스트랩 seed
+    `alternative_seeds`)을 `seed_pairs`에 싣는다 (Task R6 수정 라운드 1)."""
     runs: dict[str, dict[str, Any]] = {}
     for path in run_paths:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -978,6 +1102,7 @@ def closed_loop_report(
             if repeated:
                 raise ValueError(f"{label}: 합칠 조건 {parts}에 같은 seed가 있다: {repeated[:3]}")
             rows_by[(label, name)] = rows
+            records_by[(label, name)] = records
             if name in wanted:
                 tables.setdefault(name, {})[label] = {**condition_metrics(records, rows), "latency": None, "run_summary": None, "merged_from": list(parts)}
     conditions = sorted(name for name in set(conditions) | set(merge or {}) if name in wanted and name in tables)
@@ -995,9 +1120,21 @@ def closed_loop_report(
                         sub_b = [row for row in rows_by[(b, condition)] if row["layer"] == layer]
                         if sub_a and sub_b:
                             pairs[condition][f"{a} - {b} @ {layer}"] = paired_success(sub_a, sub_b)
+    seeded: dict[str, dict[str, Any]] = {}
+    for condition in conditions:
+        for a, b in seed_pairs or ():
+            if (a, condition) not in rows_by or (b, condition) not in rows_by:
+                continue
+            metrics_a = {row["key"]: seed_metrics(record, row) for record, row in zip(records_by[(a, condition)], rows_by[(a, condition)])}
+            metrics_b = {row["key"]: seed_metrics(record, row) for record, row in zip(records_by[(b, condition)], rows_by[(b, condition)])}
+            seeded.setdefault(condition, {})[f"{a} - {b}"] = {
+                "metrics": {name: paired_seed_ratio({k: v[name] for k, v in metrics_a.items()}, {k: v[name] for k, v in metrics_b.items()}) for name in SEED_METRICS},
+                "robustness": {metric: paired_robustness(rows_by[(a, condition)], rows_by[(b, condition)], metric=metric, alternative_seeds=alternative_seeds)
+                               for metric in ("strict", "false_done")},
+            }
     return {"version": CLOSED_LOOP_VERSION, "runs": {label: {"path": run["path"], "paths": run.get("paths", [run["path"]]), "policy": run["policy"], "gpu": run["gpu"]} for label, run in runs.items()},
             "conditions": conditions, "tables": tables, "paired": pairs, "offline": _offline_columns(offline or []), "layers": list(LAYERS),
-            "merge": {name: list(parts) for name, parts in (merge or {}).items()}, "merge_missing": merge_missing}
+            "merge": {name: list(parts) for name, parts in (merge or {}).items()}, "merge_missing": merge_missing, "seed_pairs": seeded}
 
 
 def _f(value: Any, digits: int = 3) -> str:

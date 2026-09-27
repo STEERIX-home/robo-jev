@@ -679,25 +679,35 @@ def compare_runs(a_table: dict[str, Any], b_table: dict[str, Any], ticks: list[d
                 out["primary_stratum"][f"{column}_margin"] = paired_difference(
                     stratum_per_episode(a_model, primary), stratum_per_episode(b_model, primary),
                     a_control=stratum_per_episode(a_control, primary), b_control=stratum_per_episode(b_control, primary), **options)
-    if done_ticks:
+    # 층 블록은 **언제나** 싣는다 — 청하지 않았거나 한쪽 run에 예측이 없으면 빈 dict가 아니라 까닭을 적은 표지다 (리뷰 1 M-4: 둘째 칸의 R5 줄은
+    # `q_done` 예측이 없어 조용히 비어 있었다).
+    if done_ticks is None:
+        out["done_strata"] = {"available": False, "reason": "done strata not requested"}
+    else:
         from robo_jev.data.done_strata import DONE_STRATA
 
         a_done, b_done = rows(a_table, "model", DONE_QUESTION), rows(b_table, "model", DONE_QUESTION)
-        if a_done and b_done:
+        if not (a_done and b_done):
+            out["done_strata"] = {"available": False, "reason": f"{'a' if not a_done else 'b'} has no per_record for {DONE_QUESTION} (the report did not store q_done predictions)"}
+        else:
             reference = {(row["episode_id"], row["tick"]): bool(row["reference"]) for row in done_ticks}
-            out["done_strata"] = {}
+            out["done_strata"] = {"available": True}
             for name in (*DONE_STRATA, "whole"):
                 keep = {(row["episode_id"], row["tick"]) for row in done_ticks if name == "whole" or row["stratum"] == name}
                 if not keep:
                     continue
                 out["done_strata"][name] = {"n": len(keep), "accuracy": paired_difference(
                     _done_per_episode(a_done, keep, reference, metric="accuracy"), _done_per_episode(b_done, keep, reference, metric="accuracy"), **options)}
-    if gripper_ticks:
+    if gripper_ticks is None:
+        out["gripper_initiate"] = {"available": False, "reason": "gripper label set not given"}
+    else:
         a_grip, b_grip = rows(a_table, "model", GRIPPER_QUESTION), rows(b_table, "model", GRIPPER_QUESTION)
         keep = {(row["episode_id"], row["tick"]) for row in gripper_ticks if row["class"] == "initiate"}
-        if a_grip and b_grip and keep:
+        if not (a_grip and b_grip and keep):
+            out["gripper_initiate"] = {"available": False, "reason": "no initiate ticks or no stored q_gripper predictions in one of the runs"}
+        else:
             labels = {(row["episode_id"], row["tick"]): list(row["label"]) for row in gripper_ticks}
-            out["gripper_initiate"] = {"n": len(keep), "closed_rate": paired_difference(
+            out["gripper_initiate"] = {"available": True, "n": len(keep), "closed_rate": paired_difference(
                 _gripper_per_episode(a_grip, keep, labels, metric="closed_rate"), _gripper_per_episode(b_grip, keep, labels, metric="closed_rate"), **options)}
     return out
 

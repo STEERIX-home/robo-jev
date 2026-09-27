@@ -643,6 +643,16 @@ def test_the_r6_run_sets_name_both_checkpoints_on_the_r5_rulers_and_the_r6_cells
         assert [s["store_predictions"] for s in new["splits"]] == [[*s["store_predictions"], "q_done"] for s in old["splits"]]
 
 
+def test_the_r6_decision_cell_identity_is_the_r5_hash():
+    """해시를 **직접** 계산한다 (리뷰 1 M-3): 정체 payload에는 tokenizer가 들지 않으므로 공백 tokenizer로 읽어도 같은 해시다."""
+    from robo_jev.evaluate import eval_suite_identity, load_eval_suite, load_suite_items
+    from robo_jev.model.tokenizer import WhitespaceTokenizer
+
+    suite = load_eval_suite(REPO / "configs/eval/r6-decision-cell.yaml")
+    items = load_suite_items(suite, tokenizer=WhitespaceTokenizer(), root=REPO)
+    assert eval_suite_identity(suite, items)["sha256"].startswith("6a3b69131243")
+
+
 def test_compare_runs_pairs_the_primary_stratum_the_done_strata_and_the_gripper_initiate_stratum():
     """Task R6 C2: 같은 칸의 두 run — 주 층 모델 정확도 차, 대조군 여유의 차, `q_done` 층의 정확도 차, `q_gripper` initiate 층의
     `closed` 비율 차를 편 단위로 짝지어 낸다."""
@@ -656,8 +666,29 @@ def test_compare_runs_pairs_the_primary_stratum_the_done_strata_and_the_gripper_
     gripper = [{"episode_id": e, "tick": t, "label": ["closed"], "executed": "open", "phase": "grasp", "class": "initiate", "rule": "x"} for e, t in (("ep-A", 0), ("ep-B", 0))]
     a_table["model"]["q_gripper"] = {"per_record": [{"record_id": e, "tick": t, "question": "q_gripper", "predicted": "closed", "correct": True} for e, t in (("ep-A", 0), ("ep-B", 0))]}
     b_table["model"]["q_gripper"] = {"per_record": [{"record_id": e, "tick": t, "question": "q_gripper", "predicted": "open", "correct": False} for e, t in (("ep-A", 0), ("ep-B", 0))]}
-    out = module.compare_runs(a_table, b_table, ticks, None, gripper_ticks=gripper, resamples=200)
+    # q_done 층: 편 A의 틱 0~1은 post_release_other(참조 거짓), 편 B의 틱 0은 done_true(참조 참). a는 셋 다 맞히고, b는 post_release_other에서
+    # 'true'(거짓 양성)를 두 번 낸다 — 층의 정확도 차는 +1.0, done_true는 0.0이다.
+    done_ticks = [{"episode_id": "ep-A", "tick": 0, "stratum": "post_release_other", "reference": False},
+                  {"episode_id": "ep-A", "tick": 1, "stratum": "post_release_other", "reference": False},
+                  {"episode_id": "ep-B", "tick": 0, "stratum": "done_true", "reference": True}]
+    def done_rows(answer):
+        return [{"record_id": row["episode_id"], "tick": row["tick"], "question": "q_done", "predicted": answer(row), "correct": None} for row in done_ticks]
+    a_table["model"]["q_done"] = {"per_record": done_rows(lambda row: "true" if row["reference"] else "false")}
+    b_table["model"]["q_done"] = {"per_record": done_rows(lambda row: "true")}
+    out = module.compare_runs(a_table, b_table, ticks, done_ticks, gripper_ticks=gripper, resamples=200)
     primary = out["primary_stratum"]
     assert primary["n"] == 5 and primary["model"]["difference"] == 1.0
     assert primary["instruction_shuffle_margin"]["difference"] == 1.0 and primary["instruction_shuffle_margin"]["kind"] == "margin difference"
+    done = out["done_strata"]
+    assert done["available"] is True
+    assert done["post_release_other"]["n"] == 2 and done["post_release_other"]["accuracy"]["difference"] == 1.0
+    assert done["post_release_other"]["accuracy"]["episodes"] == 1 and done["post_release_other"]["accuracy"]["ci"] == [1.0, 1.0]
+    assert done["done_true"]["accuracy"]["difference"] == 0.0 and done["whole"]["n"] == 3
+    assert "old_goal_satisfied" not in done  # 틱이 없는 층은 싣지 않는다
     assert out["gripper_initiate"]["n"] == 2 and out["gripper_initiate"]["closed_rate"]["difference"] == 1.0
+    # 층을 청하지 않았거나 한쪽 run에 q_done 예측이 없으면 빈 블록이 아니라 **까닭을 적은** 표지다 (리뷰 1 M-4)
+    assert module.compare_runs(a_table, b_table, ticks, None, resamples=50)["done_strata"] == {"available": False, "reason": "done strata not requested"}
+    missing = {**b_table, "model": {key: value for key, value in b_table["model"].items() if key != "q_done"}}
+    refused = module.compare_runs(a_table, missing, ticks, done_ticks, resamples=50)["done_strata"]
+    assert refused["available"] is False and "q_done" in refused["reason"]
+    assert module.compare_runs(a_table, b_table, ticks, done_ticks, resamples=50)["gripper_initiate"]["available"] is False

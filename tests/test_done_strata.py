@@ -184,11 +184,22 @@ def test_model_rates_count_true_answers_by_the_harness_threshold_per_stratum():
     assert rates["other_false"]["model_true"] == 0 and rates["other_false"]["n"] == 3
 
 
-def test_release_window_counts_reproduce_the_three_numbers_the_brief_named():
-    """브리프의 g2 train 403 / 107 / 853 — 놓은 뒤 ≤ 6틱에서 (놓은 물체가 지금 대상이 아님 ∧ 참조 거짓) / (지금 대상 ∧ 참조 거짓) / (지금 대상 ∧ 참조 참)."""
-    record = _false_done_record()
-    counts = release_window_counts([record])
-    assert counts == {"other_not_done": 3, "other_done": 0, "current_not_done": 0, "current_done": 0, "window_ticks": RELEASE_WINDOW_TICKS}
+def test_release_window_counts_split_the_window_by_whose_object_was_released_and_by_the_reference():
+    """창의 규칙 자체를 고정한다 (브리프의 g2 train 403 / 107 / 853은 산출물 `r6-a0-false-done.json`의 수다 — 이 시험은 그 수를 재현하지 않는다):
+    놓은 틱(0)부터 6틱까지를 (놓은 물체가 지금 대상인가) × (참조가 참인가)로 네 칸에 나누고, 창 밖의 틱은 세지 않는다."""
+    o9, o1 = {"o9": OUT}, "o1"
+    specs = [
+        dict(holding="o9", o1=OUT, done=False),  # 0: 아직 o9를 든다 — 창 없음
+        dict(holding=None, o1=OUT, done=False),  # 1: o9를 놓았다 (지금 대상 o1이 아니다) → other_not_done
+        dict(holding=None, o1=IN_L, done=True),  # 2: 창 안에서 o1이 영역 안 — 참조 참 → other_done
+    ] + [dict(holding=None, o1=OUT, done=False) for _ in range(5)] + [  # 3~7: 창 안(1~6) → other_not_done
+        dict(holding=o1, o1=OUT, done=False),  # 8: o9의 창 밖(7), o1을 든다 — 세지 않는다
+        dict(holding=None, o1=OUT, done=False),  # 9: o1(지금 대상)을 영역 밖에 놓았다 → current_not_done
+        dict(holding=None, o1=IN_L, done=True),  # 10: o1이 영역 안 → current_done
+    ]
+    ticks = [_tick(i, version=1, target="o1", zone="zoneL", poses={**o9, "o1": spec["o1"]}, holding=spec["holding"], done=spec["done"]) for i, spec in enumerate(specs)]
+    counts = release_window_counts([_record(ticks)])
+    assert counts == {"other_not_done": 6, "other_done": 1, "current_not_done": 1, "current_done": 1, "window_ticks": RELEASE_WINDOW_TICKS}
 
 
 # --------------------------------------------------------------------------
@@ -196,10 +207,32 @@ def test_release_window_counts_reproduce_the_three_numbers_the_brief_named():
 # --------------------------------------------------------------------------
 
 
+def _three_instruction_record(*, o1, o2, released):
+    """v1: o1 → zoneL, v2: o2 → zoneR, v3: o3 → zoneR(지금). 틱 1에 `released`를 들고 틱 2에 놓는다(o1이면 zoneL 안에 놓는다)."""
+    poses = {"o1": o1, "o2": o2, "o3": OUT, "o9": OUT}
+    ticks = [
+        _tick(0, version=1, target="o1", zone="zoneL", poses=poses),
+        _tick(1, version=2, target="o2", zone="zoneR", poses=poses, holding=released),
+        _tick(2, version=3, target="o3", zone="zoneR", poses=poses),
+    ]
+    return {"ticks": ticks}
+
+
 def test_old_goal_variants_distinguish_the_immediate_previous_any_earlier_and_the_released_objects_instruction():
-    record = _false_done_record()
-    variants = old_goal_variants(record)
-    assert variants == {"immediately_previous": True, "any_earlier": True, "released_objects_instruction": True, "last_released": "o1"}
+    """세 정의가 **갈리는** 장면마다 (A0의 16 / 21 / 20이 이 셋이다): 바로 앞 지시(v2)·어느 이전 지시·마지막으로 놓은 물체의 지시."""
+    # 모두 참: 두 버전, 놓은 o1이 v1의 대상이고 v1의 영역 안
+    assert old_goal_variants(_false_done_record()) == {"immediately_previous": True, "any_earlier": True, "released_objects_instruction": True, "last_released": "o1"}
+    # v1만 성립(o1이 원래 zoneL 안), v2 불성립, 놓은 것은 대상이 아닌 o9 → 어느 이전 지시만 참
+    only_any = old_goal_variants(_three_instruction_record(o1=IN_L, o2=OUT, released="o9"))
+    assert only_any == {"immediately_previous": False, "any_earlier": True, "released_objects_instruction": False, "last_released": "o9"}
+    # v1의 대상 o1을 zoneL에 놓았다, v2 불성립 → 바로 앞 지시는 거짓, 나머지 둘은 참
+    released_old = old_goal_variants(_three_instruction_record(o1=IN_L, o2=OUT, released="o1"))
+    assert released_old == {"immediately_previous": False, "any_earlier": True, "released_objects_instruction": True, "last_released": "o1"}
+    # v2가 성립(o2가 원래 zoneR 안), 놓은 것은 o9 → 바로 앞·어느 이전은 참, 놓은 물체의 지시는 거짓
+    previous_only = old_goal_variants(_three_instruction_record(o1=OUT, o2=IN_R, released="o9"))
+    assert previous_only == {"immediately_previous": True, "any_earlier": True, "released_objects_instruction": False, "last_released": "o9"}
+    # 아무 이전 목표도 성립하지 않는다
+    assert old_goal_variants(_three_instruction_record(o1=OUT, o2=OUT, released="o9"))["any_earlier"] is False
 
 
 def test_false_done_facts_describe_each_false_done_episode_and_leave_true_completions_out():
@@ -288,3 +321,47 @@ def test_the_count_script_never_opens_a_sealed_split_file(tmp_path):
     assert [item["episode_id"] for item in records] == ["ep-E1-000001"] and sealed == {"ood_test": {"episodes": 1}}
     payload = module.build_counts({"x": tmp_path})
     assert payload["datasets"]["x"]["sealed"] == {"ood_test": {"episodes": 1}} and set(payload["datasets"]["x"]["by_split"]) == {"train"}
+    # manifest가 없으면 파일을 열지 않고는 분할을 알 수 없다 — 읽고 버리는 대신 거절한다 (리뷰 1 I-1)
+    bare = tmp_path / "bare"
+    (bare / "episodes" / "a").mkdir(parents=True)
+    (bare / "episodes" / "a" / "streams.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="manifest"):
+        module.load_open_records(bare)
+
+
+# --------------------------------------------------------------------------
+# B1 — 루프의 거짓 done 상태: 이전 지시의 대상을 그 지시의 영역에 막 놓은 틱 (수정 라운드 1, 리뷰 1 U-5)
+# --------------------------------------------------------------------------
+
+
+def test_old_target_release_ticks_mark_the_window_after_an_old_target_lands_in_its_old_zone():
+    from robo_jev.data.done_strata import old_target_release_ticks, old_target_releases
+
+    record = _false_done_record()
+    assert old_target_release_ticks(record) == [False, False, False, True, True, True]  # 틱 3에 o1(v1의 대상)을 zoneL(v1의 영역)에 놓았다
+    assert old_target_releases(record) == [{"tick": 3, "object": "o1", "instruction_version": 1, "ticks_since_instruction_change": 1}]
+    # 놓은 물체가 이전 대상이 아니거나(o9) 이전 영역 밖이면 그 상태가 아니다
+    other = _three_instruction_record(o1=IN_L, o2=OUT, released="o9")
+    assert not any(old_target_release_ticks(other)) and old_target_releases(other) == []
+    outside = _three_instruction_record(o1=OUT, o2=OUT, released="o1")
+    assert not any(old_target_release_ticks(outside)) and old_target_releases(outside) == []
+
+
+def test_the_loop_state_release_block_counts_releases_their_timing_and_a_q_done_that_follows():
+    import importlib.util
+    import sys
+
+    from helpers import REPO
+
+    spec = importlib.util.spec_from_file_location("done_strata_script_b1", REPO / "scripts" / "done_strata.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    record = _false_done_record()  # 틱 3에 옛 대상 o1을 옛 영역에 놓았고, 지금 지시(v2)는 틱 2에 시작했다; 모델 q_done은 틱 3에 0.7
+    block = module._release_block([record], answers=lambda rec, index: model_q_done(rec["ticks"][index]))
+    assert block == {"releases": 1, "episodes": 1, "ticks_since_instruction_change": {"median": 1.0, "min": 1, "max": 1}, "followed_by_q_done_within_3_ticks": 1}
+    quiet = copy.deepcopy(record)
+    for tick in quiet["ticks"]:
+        tick["model_output"]["q_done"] = 0.1
+    assert module._release_block([quiet], answers=lambda rec, index: model_q_done(rec["ticks"][index]))["followed_by_q_done_within_3_ticks"] == 0
+    assert "followed_by_q_done_within_3_ticks" not in module._release_block([record])  # 답이 없는 칸(전문가 기록)에는 세지 않는다

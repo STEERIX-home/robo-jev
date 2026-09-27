@@ -45,6 +45,8 @@ __all__ = [
     "model_q_done",
     "model_rates_by_stratum",
     "old_goal_variants",
+    "old_target_release_ticks",
+    "old_target_releases",
     "recovery_after_false_done",
     "reference_done",
     "release_events",
@@ -403,3 +405,54 @@ def recovery_after_false_done(records: list[dict[str, Any]], *, threshold: float
         "completed_after": sum(1 for row in per_episode.values() if row["completed"]),
         "threshold": float(threshold), "per_episode": per_episode,
     }
+
+
+# --------------------------------------------------------------------------
+# B1 — 루프의 거짓 done 상태 (수정 라운드 1, 리뷰 1 U-5): 이전 지시의 대상을 그 지시의 영역에 막 놓았다
+# --------------------------------------------------------------------------
+
+
+def _earlier_goal_holding(state: dict[str, Any], goals: dict[int, tuple[str | None, str | None]], version: int, object_id: str) -> int | None:
+    """`object_id`가 지금보다 낮은 버전의 대상이고 그 지시의 영역 안·손에 없으면 그 버전(가장 최근 것), 아니면 None."""
+    found = [old for old, (target, zone) in goals.items() if old < version and target == object_id and _inside_zone(state, object_id, zone)]
+    return max(found) if found else None
+
+
+def old_target_release_ticks(record: dict[str, Any], *, window: int = RELEASE_WINDOW_TICKS) -> list[bool]:
+    """틱마다: 놓은 뒤 ≤ 창이고 놓은 물체가 지금 대상이 아니며, **어느 이전 지시의 대상으로서 그 지시의 영역 안**(손에 없음)에 있는가 —
+    R5의 거짓 done 25편이 끝난 모양이다. 그 틱과 과거 틱만 읽는다."""
+    ticks = record["ticks"]
+    releases = dict(release_events(ticks))
+    last: tuple[int, str] | None = None
+    goals: dict[int, tuple[str | None, str | None]] = {}
+    out: list[bool] = []
+    for index, tick in enumerate(ticks):
+        if index in releases:
+            last = (index, releases[index])
+        goal = _goal(tick)
+        version = _version(tick)
+        goals.setdefault(version, (goal.get("target_ref"), goal.get("target_zone")))
+        released = last[1] if last is not None and index - last[0] <= int(window) else None
+        out.append(released is not None and released != goal.get("target_ref")
+                   and _earlier_goal_holding(_state(tick), goals, version, released) is not None)
+    return out
+
+
+def old_target_releases(record: dict[str, Any]) -> list[dict[str, Any]]:
+    """놓기 가운데 놓은 물체가 이전 지시의 대상이고 놓은 틱에 그 지시의 영역 안에 있는 것 — 틱, 물체, 그 지시의 버전, **지금 지시가 시작된 뒤
+    몇 틱**(모델이 옛 목표를 얼마나 오래 실행했는가)."""
+    ticks = record["ticks"]
+    goals: dict[int, tuple[str | None, str | None]] = {}
+    started: dict[int, int] = {}
+    for index, tick in enumerate(ticks):
+        goal = _goal(tick)
+        goals.setdefault(_version(tick), (goal.get("target_ref"), goal.get("target_zone")))
+        started.setdefault(_version(tick), index)
+    out: list[dict[str, Any]] = []
+    for index, released in release_events(ticks):
+        version = _version(ticks[index])
+        seen = {old: value for old, value in goals.items() if started[old] <= index}  # 과거에 본 지시만
+        old = _earlier_goal_holding(_state(ticks[index]), seen, version, released)
+        if old is not None and released != _goal(ticks[index]).get("target_ref"):
+            out.append({"tick": index, "object": released, "instruction_version": old, "ticks_since_instruction_change": index - started[version]})
+    return out

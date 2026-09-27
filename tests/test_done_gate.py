@@ -79,7 +79,9 @@ def test_attach_raw_done_puts_the_models_answer_in_usage_and_refuses_a_misaligne
 
 
 def test_the_collection_seed_base_is_the_dagger_cycle_start_and_overlaps_no_other_range():
-    assert collection_seed_base(CONFIG, cycle=1) == 600100
+    from robo_jev.data.dagger import dagger_seed_schedule
+
+    assert collection_seed_base(CONFIG, cycle=1) == 600100 == dagger_seed_schedule(CONFIG, 1, cycle=1)[0][1]  # 사이클 1 일정의 첫 seed
     for taken in (400100, 900100, 950100, 980100):
         assert abs(collection_seed_base(CONFIG, cycle=1) - taken) >= 100_000 - 1
 
