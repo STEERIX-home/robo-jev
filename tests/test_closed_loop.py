@@ -348,3 +348,131 @@ def test_the_report_merges_run_files_that_share_a_label_across_conditions_and_re
     clash.write_text(first.read_text(encoding="utf-8"), encoding="utf-8")
     with pytest.raises(ValueError, match="겹친다"):
         closed_loop_report([first, clash])
+
+
+def test_family_overlap_counts_the_scene_groups_and_seeds_a_condition_shares_with_training_material(tmp_path):
+    """Task R6 D1: "본 적 없는 seed·대부분 학습한 계열" — 조건의 장면 계열(origin group)이 학습 재료의 계열과 얼마나 겹치는가."""
+    from robo_jev.closed_loop import family_overlap
+
+    seeds = {"conditions": {"dev_new2": {"seeds": [
+        {"profile": "E1", "seed": 1, "origin_group": "robot/E1/family-a/goal-zoneL", "family": "family-a"},
+        {"profile": "E1", "seed": 2, "origin_group": "robot/E1/family-a/goal-zoneL", "family": "family-a"},
+        {"profile": "E2", "seed": 3, "origin_group": "robot/E2/family-b/goal-zoneR", "family": "family-b"},
+    ]}}}
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"files": {
+        "episodes/x/streams.jsonl": {"origin_group": "robot/E1/family-a/goal-zoneL"},
+        "episodes/y/streams.jsonl": {"origin_group": "robot/E2/family-b/goal-zoneL"},  # 같은 구조 계열, 다른 목표 영역
+        "episodes/z/streams.jsonl": {"origin_group": "robot/E2/family-b/goal-zoneR", "split": "dev"},  # train이 아닌 편은 재료가 아니다
+        "contrast/records.jsonl": {"records": 3},
+    }}), encoding="utf-8")
+    out = family_overlap(seeds, {"dagger": manifest})
+    block = out["dev_new2"]
+    assert block["origin_groups"] == 2 and block["seeds"] == 3
+    assert block["by_material"]["dagger"] == {"origin_groups": 1, "seeds": 2, "families": 2, "seeds_by_family": 3}
+    assert block["any_material"] == {"origin_groups": 1, "seeds": 2, "families": 2, "seeds_by_family": 3}
+
+
+def test_the_report_merges_two_conditions_into_one_table_and_pairs_false_dones(short_runs, tmp_path):
+    """Task R6 D2: ood_dev 100 = R4의 ood_dev 26 seed + 새 ood_dev 74 seed — 두 조건의 편을 한 표로 합치고(같은 seed가 둘에 있으면 거절),
+    짝지은 비교에 **거짓 done**(`done ∧ ¬target_inside_zone`, seed마다 0/1)의 차를 더한다."""
+    from robo_jev.data.robot_episodes import read_episodes, write_episode
+
+    paths = []
+    for kind in ("expert", "rule"):
+        records = [record for _, record in read_episodes(short_runs["out"] / kind)]
+        parts = {}
+        for name, record in zip(("part_a", "part_b"), records):
+            directory = tmp_path / kind / name
+            if kind == "expert" and name == "part_a":  # 한 편을 거짓 done으로 — 짝지은 거짓 done 차가 0이 아닌 값을 싣는지 본다
+                record = copy.deepcopy(record)
+                record["provenance"]["outcome"].update({"done": True, "target_inside_zone": False})
+            write_episode(record, directory)
+            parts[name] = {**short_runs["runs"][kind], "condition": name, "episodes_dir": str(directory)}
+        path = tmp_path / f"run-{kind}.json"
+        path.write_text(json.dumps({"label": kind, "policy": {"kind": kind}, "conditions": parts}, default=str), encoding="utf-8")
+        paths.append(path)
+    report = closed_loop_report(paths, merge={"both": ["part_a", "part_b"]}, only=["both"])
+    assert report["conditions"] == ["both"] and set(report["tables"]["both"]) == {"expert", "rule"}
+    assert report["tables"]["both"]["expert"]["episodes"] == 2 and report["tables"]["both"]["expert"]["merged_from"] == ["part_a", "part_b"]
+    pair = report["paired"]["both"]["expert - rule (false done)"]
+    rule_false = report["tables"]["both"]["rule"]["false_done"]
+    assert pair["seeds"] == 2 and pair["a_count"] == 1 and pair["b_count"] == len(rule_false)
+    assert pair["a"] == pytest.approx(0.5) and pair["margin"] == pytest.approx(0.5 - len(rule_false) / 2)
+    # seed 단위 짝지은 지표와 판정의 견고성 블록 (리뷰 1 I-2·I-3) — 청한 쌍에만, 합친 조건에도
+    seeded = closed_loop_report(paths, merge={"both": ["part_a", "part_b"]}, only=["both"], seed_pairs=[("expert", "rule")], alternative_seeds=range(1, 6))
+    block = seeded["seed_pairs"]["both"]["expert - rule"]
+    from robo_jev.closed_loop import SEED_METRICS
+
+    assert set(block["metrics"]) == set(SEED_METRICS) and block["metrics"]["aux_failure"]["seeds"] == 2
+    assert set(block["robustness"]) == {"strict", "false_done"} and block["robustness"]["false_done"]["discordant"]["a_only"] >= 1
+    assert block["robustness"]["strict"]["alternative_seeds"]["count"] == 5
+    assert report["seed_pairs"] == {}  # 청하지 않으면 비어 있다 (위의 `report`는 seed_pairs 없이 만들었다)
+    # 같은 seed가 두 조건에 있으면 합칠 수 없다
+    clash = tmp_path / "clash.json"
+    run = short_runs["runs"]["expert"]
+    clash.write_text(json.dumps({"label": "expert", "policy": {"kind": "expert"}, "conditions": {"x": run, "y": {**run, "condition": "y"}}}, default=str), encoding="utf-8")
+    with pytest.raises(ValueError, match="seed"):
+        closed_loop_report([clash], merge={"xy": ["x", "y"]})
+
+
+def test_paired_false_done_is_the_difference_of_seed_level_false_done_indicators():
+    from robo_jev.closed_loop import paired_false_done
+
+    def row(key, done, inside):
+        return {"key": key, "done": done, "done_inside": done and inside}
+
+    a = [row("E1:1", True, False), row("E1:2", True, True), row("E1:3", False, False)]
+    b = [row("E1:1", True, True), row("E1:2", True, True), row("E1:3", False, False)]
+    out = paired_false_done(a, b)
+    assert out["seeds"] == 3 and out["a"] == pytest.approx(1 / 3) and out["b"] == 0.0 and out["margin"] == pytest.approx(1 / 3)
+    assert paired_false_done(a, []) is None
+
+
+# --------------------------------------------------------------------------
+# seed 단위 짝지은 지표와 판정의 견고성 (Task R6 수정 라운드 1, 리뷰 1 I-2·I-3)
+# --------------------------------------------------------------------------
+
+
+def test_paired_seed_ratio_pools_numerators_and_denominators_over_the_same_resampled_seeds():
+    from robo_jev.closed_loop import paired_seed_ratio
+
+    a = {"E1:1": (1.0, 1.0), "E1:2": (0.0, 1.0), "E1:3": (2.0, 4.0)}
+    b = {"E1:1": (0.0, 1.0), "E1:2": (0.0, 1.0), "E1:3": (1.0, 4.0)}
+    out = paired_seed_ratio(a, b, resamples=300)
+    assert out["seeds"] == 3 and out["a"] == pytest.approx(3 / 6) and out["b"] == pytest.approx(1 / 6)
+    assert out["difference"] == pytest.approx(2 / 6) and out["ci"][0] >= 0.0 and out["includes_zero"] is (out["ci"][0] <= 0.0 <= out["ci"][1])
+    # 분모가 0인 재표집은 건너뛰고 그 수를 적는다 (정지 사건이 없는 seed만 뽑힌 경우)
+    sparse = paired_seed_ratio({"E1:1": (1.0, 1.0), "E1:2": (0.0, 0.0)}, {"E1:1": (0.0, 1.0), "E1:2": (0.0, 0.0)}, resamples=300)
+    assert sparse["difference"] == 1.0 and sparse["skipped_resamples"] > 0
+    assert paired_seed_ratio(a, {}, resamples=10) is None
+
+
+def test_seed_metrics_read_the_gripper_streak_the_wrong_action_and_the_stop_catch_of_one_record():
+    from robo_jev.closed_loop import seed_metrics
+
+    ticks = [{"gripper_label": ["closed"], "gripper": "open"} for _ in range(3)] + [
+        {"adopted": "c2", "allowed": ["c1"]},  # 다른 대상을 채택 — 오행동 틱
+        {"stop_label": True, "p_stop": 0.9, "stop": True},  # 정지가 필요해진 틱에 q_stop이 참 — 잡았다
+    ]
+    metrics = seed_metrics(_record(ticks, done=False))
+    assert metrics["gripper_streak"] == (1.0, 1.0) and metrics["wrong_action"][0] == 1.0 and metrics["wrong_action"][1] == 5.0
+    assert metrics["q_stop_caught"] == (1.0, 1.0) and metrics["aux_failure"][1] == 1.0 and metrics["gripper_duplicates"][1] == 1.0
+
+
+def test_paired_robustness_counts_discordant_seeds_the_exact_mcnemar_p_and_other_bootstrap_seeds():
+    from robo_jev.closed_loop import paired_robustness
+
+    def row(key, strict):
+        return {"key": key, "done": strict, "done_inside": strict}
+
+    a = [row(f"E1:{i}", i < 5) for i in range(10)]  # a만 성공 3, b만 성공 1, 둘 다 2
+    b = [row(f"E1:{i}", i in (0, 1, 7)) for i in range(10)]
+    out = paired_robustness(a, b, metric="strict", alternative_seeds=range(1, 21))
+    assert out["discordant"] == {"a_only": 3, "b_only": 1} and out["mcnemar_exact_p"] == pytest.approx(0.625)
+    assert out["registered"]["margin"] == pytest.approx(0.2) and out["alternative_seeds"]["count"] == 20
+    alternative = out["alternative_seeds"]
+    assert 0 <= alternative["intervals_containing_zero"] <= 20 and alternative["lower_bound"]["min"] <= alternative["lower_bound"]["max"]
+    assert alternative["lower_bound_at_or_below_zero"] + alternative["lower_bound_above_zero"] == 20
+    with pytest.raises(ValueError, match="metric"):
+        paired_robustness(a, b, metric="nonsense")

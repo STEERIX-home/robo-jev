@@ -325,6 +325,22 @@ def cmd_seeds(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_overlap(args: argparse.Namespace) -> int:
+    """D1 (Task R6): 조건의 장면 계열이 학습 재료(train 분할)의 계열과 겹치는 수 — "본 적 없는 seed·대부분 학습한 계열"의 숫자."""
+    from robo_jev.closed_loop import family_overlap
+
+    seeds = json.loads(Path(args.seeds).read_text(encoding="utf-8"))
+    materials = {pair.split("=", 1)[0]: pair.split("=", 1)[1] for pair in args.material}
+    payload = {"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit(), "seeds": args.seeds, "materials": materials,
+               "conditions": family_overlap(seeds, materials)}
+    _write(Path(args.out), payload)
+    for name, block in payload["conditions"].items():
+        any_ = block["any_material"]
+        print(f"{name}: {block['seeds']} seeds · origin groups {block['origin_groups']} (shared with training material {any_['origin_groups']}, seeds {any_['seeds']}) · "
+              f"families {block['families']} (shared {any_['families']}, seeds {any_['seeds_by_family']})")
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     from robo_jev.closed_loop import build_policy, load_closed_loop_config, run_condition, select_conditions
 
@@ -366,7 +382,10 @@ def cmd_report(args: argparse.Namespace) -> int:
     paths = [Path(item) for pattern in args.runs for item in sorted(map(str, REPO.glob(pattern) if not Path(pattern).is_absolute() else Path("/").glob(pattern.lstrip("/"))))]
     if not paths:
         paths = [Path(item) for item in args.runs]
-    report = closed_loop_report(paths, offline=[Path(item) for item in (args.offline or [])])
+    merge = {pair.split("=", 1)[0]: [part for part in pair.split("=", 1)[1].split(",") if part] for pair in (args.merge or [])}
+    only = [name for name in args.only.split(",") if name] if args.only else None
+    seed_pairs = [tuple(pair.split(":", 1)) for pair in (args.seed_pairs or [])]
+    report = closed_loop_report(paths, offline=[Path(item) for item in (args.offline or [])], merge=merge or None, only=only, seed_pairs=seed_pairs or None)
     report.update({"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit()})
     _write(Path(args.out), report)
     from robo_jev.closed_loop import print_report
@@ -416,6 +435,12 @@ def build_parser() -> argparse.ArgumentParser:
     seeds.add_argument("--out", required=True)
     seeds.set_defaults(func=cmd_seeds)
 
+    overlap = sub.add_parser("overlap", help="R6 D1: 조건의 장면 계열과 학습 재료(train 분할)의 계열 겹침")
+    overlap.add_argument("--seeds", required=True)
+    overlap.add_argument("--material", action="append", required=True, metavar="NAME=MANIFEST")
+    overlap.add_argument("--out", required=True)
+    overlap.set_defaults(func=cmd_overlap)
+
     run = sub.add_parser("run", help="B1: 정책 하나를 조건의 seed 전부에 돌린다")
     run.add_argument("--policy", required=True, choices=["model", "rule", "mechanical", "expert"])
     run.add_argument("--checkpoint", default=None)
@@ -438,6 +463,11 @@ def build_parser() -> argparse.ArgumentParser:
     report = sub.add_parser("report", help="B3·C: 정책·조건별 지표와 seed로 짝지은 구간")
     report.add_argument("--runs", nargs="+", required=True, help="run 요약 JSON (glob 가능)")
     report.add_argument("--offline", nargs="*", default=None, help="같은 checkpoint의 오프라인 판정 칸 산출물 (나란히 적는다)")
+    report.add_argument("--merge", action="append", default=None, metavar="NAME=COND,COND",
+                        help="조건 여럿을 한 표로 합친다 (R6: ood_dev100=ood_dev,ood_dev_new); 같은 seed가 둘에 있으면 거절")
+    report.add_argument("--only", default=None, help="보고할 조건 (쉼표로; 합친 이름도 된다)")
+    report.add_argument("--seed-pairs", dest="seed_pairs", nargs="*", default=None, metavar="A:B",
+                        help="이 쌍마다 seed 단위 짝지은 지표(그리퍼 연속·중복·q_stop·안전·오행동·실패 원인)와 엄격 성공·거짓 done의 견고성(다른 부트스트랩 seed 1~200)")
     report.add_argument("--out", required=True)
     report.set_defaults(func=cmd_report)
 

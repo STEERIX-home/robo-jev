@@ -119,8 +119,25 @@ R5_DEV_RUNS = {
     "2B T1 fp32 seed 18 (233 = 1 epoch, R3a)": "r3a-dev-2b-t1-fp32-s18.json",
     "2B T1 fp32 seed 18 + labels v2 + DAgger-0 (233, R5)": "r5-dev-2b-t1-fp32-r5.json",
 }
+#: Task R6의 run들 — R5 체크포인트를 `q_done` 예측까지 저장하게 다시 잰 것(B1, `configs/eval/r6-decision-cell.yaml` = R5 칸 + `q_done`,
+#: 해시 `6a3b69131243…` 그대로)과 DAgger 사이클 1로 같은 조리법(혼합 비율만 0.5 / 0.5)을 돌린 R6(C2). 두 줄은 같은 평가 집합 위에 있다.
+R6_RUNS = {
+    "R5 (labels v2 + DAgger-0, 233)": "r6-reeval-2b-t1-fp32-r5.json",
+    "R6 (+ DAgger-1 + done gate, shares 0.5/0.5, 233)": "r6-reeval-2b-t1-fp32-r6.json",
+}
+#: 둘째 칸(`dev` 42편): R5 줄은 **R5의 둘째 칸 보고서**를 그대로 읽는다(`q_main`·`q_stop`·`q_gripper` 예측; `q_done` 예측은 없다 — 그 줄을 위해
+#: GPU를 한 번 더 쓰지 않았다).
+R6_DEV_RUNS = {
+    "R5 (labels v2 + DAgger-0, 233)": "r5-dev-2b-t1-fp32-r5.json",
+    "R6 (+ DAgger-1 + done gate, shares 0.5/0.5, 233)": "r6-dev-2b-t1-fp32-r6.json",
+}
 RUN_SETS = {"p2": STRATA_RUNS, "p3": P3_RUNS, "r1": R1_RUNS, "r2": R2_RUNS, "r2dev": R2_DEV_RUNS,
-            "r3a": R3A_RUNS, "r3adev": R3A_DEV_RUNS, "r5": R5_RUNS, "r5dev": R5_DEV_RUNS}
+            "r3a": R3A_RUNS, "r3adev": R3A_DEV_RUNS, "r5": R5_RUNS, "r5dev": R5_DEV_RUNS, "r6": R6_RUNS, "r6dev": R6_DEV_RUNS}
+#: run 묶음마다 **짝지어 비교할** 두 줄 (a, b) — `comparisons["a − b"]`에 편 단위 쌍 구간으로 (Task R6 C2: "R5 +0.298과 짝지은 차").
+RUN_COMPARISONS = {
+    "r6": [("R6 (+ DAgger-1 + done gate, shares 0.5/0.5, 233)", "R5 (labels v2 + DAgger-0, 233)")],
+    "r6dev": [("R6 (+ DAgger-1 + done gate, shares 0.5/0.5, 233)", "R5 (labels v2 + DAgger-0, 233)")],
+}
 
 #: `q_gripper`의 층 (Task R5 B1) — R4 C0 표의 분류 그대로 (`robo_jev.data.gripper_labels.GRIPPER_LABEL_CLASSES`) + 전체.
 GRIPPER_QUESTION = "q_gripper"
@@ -533,6 +550,168 @@ def gripper_strata(table: dict[str, Any], ticks: list[dict[str, Any]], **options
     return out
 
 
+# --------------------------------------------------------------------------
+# `q_done`의 층 (Task R6 B1) — "이전 목표가 성립한 틱에서 현재 지시를 읽는가"
+# --------------------------------------------------------------------------
+
+DONE_QUESTION = "q_done"
+
+
+def done_dataset_ticks(base: Any, episodes: list[str]) -> list[dict[str, Any]]:
+    """데이터셋의 편들에서 `q_done` 라벨이 있는 틱마다 ``{episode_id, tick, stratum, reference}`` — 층은
+    :func:`robo_jev.data.done_strata.tick_done_strata`(그 틱과 과거 틱만 읽는다)이고 `reference`는 참조 라벨(전문가의 목표 평가기)이다."""
+    from robo_jev.data.done_strata import reference_done, tick_done_strata
+
+    base = Path(base)
+    out: list[dict[str, Any]] = []
+    for episode_id in episodes:
+        record = json.loads((base / "episodes" / episode_id / "streams.jsonl").read_text(encoding="utf-8").strip())
+        for index, (tick, stratum) in enumerate(zip(record["ticks"], tick_done_strata(record))):
+            if stratum is None:
+                continue
+            out.append({"episode_id": episode_id, "tick": index, "stratum": stratum, "reference": bool(reference_done(tick))})
+    return out
+
+
+def _done_per_episode(rows: list[dict[str, Any]], keep: set[tuple[str, int]], reference: dict[tuple[str, int], bool], *, metric: str) -> list[dict[str, Any]]:
+    """틱별 `q_done` 예측을 층으로 좁혀 편 단위 집계로. `accuracy`는 **데이터셋의 참조 라벨로 다시** 채점한 정확도(참조 거짓 층에서는
+    1 − 거짓 양성률), `true_rate`는 'true'를 낸 비율(참조 거짓 층에서는 거짓 양성률 그 자체)."""
+    counts: dict[str, list[int]] = {}
+    for row in rows:
+        key = (str(row["record_id"]), int(row["tick"]))
+        if key not in keep:
+            continue
+        entry = counts.setdefault(str(row["record_id"]), [0, 0, 0])
+        said = str(row["predicted"]) == "true"
+        entry[0] += 1
+        entry[1] += 1
+        entry[2] += int(said if metric == "true_rate" else said == reference[key])
+    return [{"episode_id": name, "n": value[0], "graded": value[1], "correct": value[2]} for name, value in sorted(counts.items())]
+
+
+def done_strata_table(table: dict[str, Any], ticks: list[dict[str, Any]], **options: Any) -> dict[str, Any]:
+    """한 run의 `q_done` 틱별 예측 → 층마다 (정확도, 'true' 비율) × (모델·대조군·기준선)과 대조군 대비 **쌍** 구간 (:func:`gripper_strata`의 꼴)."""
+    from robo_jev.data.done_strata import DONE_STRATA
+
+    columns = {name: ((table.get(source) or {}).get(DONE_QUESTION) or {}).get("per_record") for name, source in COLUMNS.items()}
+    if not columns["model"]:
+        return {"available": False, "reason": f"the report has no per_record for {DONE_QUESTION} (the split did not ask for store_predictions)"}
+    reference = {(row["episode_id"], row["tick"]): bool(row["reference"]) for row in ticks}
+    strata: dict[str, set[tuple[str, int]]] = {name: {(row["episode_id"], row["tick"]) for row in ticks if row["stratum"] == name} for name in DONE_STRATA}
+    strata["whole"] = set(reference)
+    out: dict[str, Any] = {"available": True, "population": {name: len(keep) for name, keep in strata.items()}, "strata": {}}
+    for name, keep in strata.items():
+        block: dict[str, Any] = {"n": len(keep), "episodes": len({episode for episode, _ in keep})}
+        for metric in ("accuracy", "true_rate"):
+            per_episode = {column: _done_per_episode(rows, keep, reference, metric=metric) for column, rows in columns.items() if rows}
+            entry = episode_bootstrap(per_episode.get("model"), **options) or {}
+            metric_block: dict[str, Any] = {"model": entry.get("accuracy"), "model_ci": entry.get("accuracy_ci"), "graded": entry.get("graded")}
+            for column in [item for item in COLUMNS if item != "model"]:
+                rows = per_episode.get(column)
+                if not rows:
+                    continue
+                paired = episode_bootstrap(per_episode["model"], rows, **options) or {}
+                metric_block[column] = paired.get("control_accuracy")
+                if column in CONTROL_COLUMNS:
+                    metric_block[f"{column}_margin"] = paired.get("margin")
+                    metric_block[f"{column}_margin_ci"] = paired.get("margin_ci")
+                    metric_block[f"{column}_margin_includes_zero"] = paired.get("margin_includes_zero")
+            block[metric] = metric_block
+        out["strata"][name] = block
+    return out
+
+
+def paired_difference(
+    a: list[dict[str, Any]] | None, b: list[dict[str, Any]] | None, *, a_control: list[dict[str, Any]] | None = None,
+    b_control: list[dict[str, Any]] | None = None, resamples: int | None = None, seed: int | None = None, level: float | None = None,
+) -> dict[str, Any] | None:
+    """**두 run**의 같은 층을 편 단위로 짝지은 차 — `a − b`, 또는 대조군을 주면 여유의 차 `(a − a_control) − (b − b_control)`.
+
+    편(에피소드)을 복원추출하고 네 열을 **같은 재표집 안에서** 센다(:func:`robo_jev.evaluate.episode_bootstrap`와 같은 재표집 수·seed·수준).
+    같은 평가 집합(같은 해시)의 두 run이라 편 목록이 같다 — 한쪽에 없는 편은 빼고 센다."""
+    import random
+
+    from robo_jev.evaluate import EPISODE_BOOTSTRAP, _quantile
+
+    resamples = int(EPISODE_BOOTSTRAP["resamples"] if resamples is None else resamples)
+    seed = int(EPISODE_BOOTSTRAP["seed"] if seed is None else seed)
+    level = float(EPISODE_BOOTSTRAP["level"] if level is None else level)
+    columns = {"a": a, "b": b, "a_control": a_control, "b_control": b_control}
+    tables = {name: {str(row["episode_id"]): row for row in rows} for name, rows in columns.items() if rows}
+    if "a" not in tables or "b" not in tables or (("a_control" in tables) != ("b_control" in tables)):
+        return None
+    groups = sorted(name for name in tables["a"] if all(name in table and int(table[name]["graded"]) for table in tables.values()))
+    if not groups:
+        return None
+
+    def accuracy(table: dict[str, dict[str, Any]], names: list[str]) -> float:
+        graded = sum(int(table[name]["graded"]) for name in names)
+        return sum(int(table[name]["correct"]) for name in names) / graded
+
+    def value(names: list[str]) -> float:
+        if "a_control" in tables:
+            return (accuracy(tables["a"], names) - accuracy(tables["a_control"], names)) - (accuracy(tables["b"], names) - accuracy(tables["b_control"], names))
+        return accuracy(tables["a"], names) - accuracy(tables["b"], names)
+
+    rng = random.Random(seed)
+    draws = sorted(value([groups[rng.randrange(len(groups))] for _ in groups]) for _ in range(resamples))
+    low, high = (1.0 - level) / 2.0, 1.0 - (1.0 - level) / 2.0
+    interval = [_quantile(draws, low), _quantile(draws, high)]
+    return {"kind": "margin difference" if "a_control" in tables else "accuracy difference", "difference": value(groups), "ci": interval,
+            "includes_zero": bool(interval[0] <= 0.0 <= interval[1]), "episodes": len(groups), "resamples": resamples, "seed": seed, "level": level}
+
+
+def compare_runs(a_table: dict[str, Any], b_table: dict[str, Any], ticks: list[dict[str, Any]], done_ticks: list[dict[str, Any]] | None = None,
+                 *, gripper_ticks: list[dict[str, Any]] | None = None, **options: Any) -> dict[str, Any]:
+    """같은 칸의 두 run(a, b)을 편 단위로 짝지어: `q_main` 주 층의 모델 정확도 차와 대조군 여유의 차, `q_done` 층마다 정확도 차, 그리고
+    `gripper_ticks`(v2 라벨판의 틱)를 주면 `q_gripper` initiate 층의 `closed` 비율 차."""
+    def rows(table: dict[str, Any], column: str, question: str) -> list[dict[str, Any]] | None:
+        return ((table.get(COLUMNS[column]) or {}).get(question) or {}).get("per_record")
+
+    primary = {(row["episode_id"], row["tick"]) for row in ticks if not row["is_commitment"]}
+    out: dict[str, Any] = {"primary_stratum": {"n": len(primary)}}
+    a_model, b_model = rows(a_table, "model", QUESTION), rows(b_table, "model", QUESTION)
+    if a_model and b_model:
+        out["primary_stratum"]["model"] = paired_difference(stratum_per_episode(a_model, primary), stratum_per_episode(b_model, primary), **options)
+        for column in CONTROL_COLUMNS:
+            a_control, b_control = rows(a_table, column, QUESTION), rows(b_table, column, QUESTION)
+            if a_control and b_control:
+                out["primary_stratum"][f"{column}_margin"] = paired_difference(
+                    stratum_per_episode(a_model, primary), stratum_per_episode(b_model, primary),
+                    a_control=stratum_per_episode(a_control, primary), b_control=stratum_per_episode(b_control, primary), **options)
+    # 층 블록은 **언제나** 싣는다 — 청하지 않았거나 한쪽 run에 예측이 없으면 빈 dict가 아니라 까닭을 적은 표지다 (리뷰 1 M-4: 둘째 칸의 R5 줄은
+    # `q_done` 예측이 없어 조용히 비어 있었다).
+    if done_ticks is None:
+        out["done_strata"] = {"available": False, "reason": "done strata not requested"}
+    else:
+        from robo_jev.data.done_strata import DONE_STRATA
+
+        a_done, b_done = rows(a_table, "model", DONE_QUESTION), rows(b_table, "model", DONE_QUESTION)
+        if not (a_done and b_done):
+            out["done_strata"] = {"available": False, "reason": f"{'a' if not a_done else 'b'} has no per_record for {DONE_QUESTION} (the report did not store q_done predictions)"}
+        else:
+            reference = {(row["episode_id"], row["tick"]): bool(row["reference"]) for row in done_ticks}
+            out["done_strata"] = {"available": True}
+            for name in (*DONE_STRATA, "whole"):
+                keep = {(row["episode_id"], row["tick"]) for row in done_ticks if name == "whole" or row["stratum"] == name}
+                if not keep:
+                    continue
+                out["done_strata"][name] = {"n": len(keep), "accuracy": paired_difference(
+                    _done_per_episode(a_done, keep, reference, metric="accuracy"), _done_per_episode(b_done, keep, reference, metric="accuracy"), **options)}
+    if gripper_ticks is None:
+        out["gripper_initiate"] = {"available": False, "reason": "gripper label set not given"}
+    else:
+        a_grip, b_grip = rows(a_table, "model", GRIPPER_QUESTION), rows(b_table, "model", GRIPPER_QUESTION)
+        keep = {(row["episode_id"], row["tick"]) for row in gripper_ticks if row["class"] == "initiate"}
+        if not (a_grip and b_grip and keep):
+            out["gripper_initiate"] = {"available": False, "reason": "no initiate ticks or no stored q_gripper predictions in one of the runs"}
+        else:
+            labels = {(row["episode_id"], row["tick"]): list(row["label"]) for row in gripper_ticks}
+            out["gripper_initiate"] = {"available": True, "n": len(keep), "closed_rate": paired_difference(
+                _gripper_per_episode(a_grip, keep, labels, metric="closed_rate"), _gripper_per_episode(b_grip, keep, labels, metric="closed_rate"), **options)}
+    return out
+
+
 PRIMARY_STRATUM = "non_commitment"
 PRIMARY_STRATUM_NOTE = (
     "The primary metric is the non_commitment stratum: the ticks whose expert label is NOT the tick's own "
@@ -588,13 +767,20 @@ def reading_text(population: dict[str, Any], mechanism: dict[str, Any], donor: d
 
 def build(*, suite_path: Any = DEFAULT_SUITE, reports: Any = REPORTS, runs: dict[str, str] | None = None,
           split: str = SPLIT, task: str = "p2-decision-cell-strata", reading: str | None = None,
-          records: list[str] | None = None, gripper_manifests: dict[str, Any] | None = None) -> dict[str, Any]:
+          records: list[str] | None = None, gripper_manifests: dict[str, Any] | None = None,
+          done_strata: bool = False, comparisons: list[tuple[str, str]] | None = None) -> dict[str, Any]:
     """`gripper_manifests`(라벨판 이름 → 데이터셋 manifest)를 주면 같은 run들의 `q_gripper` 예측을 **그 라벨판마다** 층으로 채점해
-    `gripper` 블록에 싣는다 (Task R5 B1: 부모 라벨 대 v2 라벨을 나란히)."""
+    `gripper` 블록에 싣는다 (Task R5 B1: 부모 라벨 대 v2 라벨을 나란히). `done_strata`면 `q_done` 예측을 `q_done` 층(:mod:`robo_jev.data.done_strata`)
+    으로 채점해 `done` 블록에, `comparisons`(두 run 이름의 쌍)면 편 단위로 짝지은 차를 `comparisons`에 싣는다 (Task R6 B1·C2)."""
     reports = Path(reports)
     ticks = cell_ticks(suite_path, split=split)
     chosen_records = records if records is not None else cell_records(suite_path, split=split)
     gripper_ticks = {name: gripper_dataset_ticks(Path(path).parent, chosen_records) for name, path in (gripper_manifests or {}).items()}
+    done_ticks: list[dict[str, Any]] | None = None
+    if done_strata:
+        suite = load_eval_suite(suite_path)
+        entry = next(item for item in suite["splits"] if item["name"] == split)
+        done_ticks = done_dataset_ticks((REPO / entry["manifest"]).parent, chosen_records)
     population = population_composition(ticks)
     found = mechanism(ticks)
     donor = donor_rotation(ticks, records if records is not None else cell_records(suite_path, split=split))
@@ -615,6 +801,11 @@ def build(*, suite_path: Any = DEFAULT_SUITE, reports: Any = REPORTS, runs: dict
             for name, path in (gripper_manifests or {}).items()
         },
     }
+    if done_ticks is not None:
+        out["done"] = {"question": DONE_QUESTION, "population": dict(Counter(row["stratum"] for row in done_ticks)), "ticks": len(done_ticks),
+                       "episodes_per_stratum": {name: len({row["episode_id"] for row in done_ticks if row["stratum"] == name}) for name in sorted({row["stratum"] for row in done_ticks})},
+                       "runs": {}}
+    tables: dict[str, dict[str, Any]] = {}
     for label, name in (runs or STRATA_RUNS).items():
         path = reports / name
         if not path.is_file():
@@ -632,6 +823,16 @@ def build(*, suite_path: Any = DEFAULT_SUITE, reports: Any = REPORTS, runs: dict
         out["runs"][label] = {"report": name, "eval_set_sha256": ((payload.get("evaluation") or {}).get("eval_set") or {}).get("sha256"), **entry}
         for label_set, rows in gripper_ticks.items():
             out["gripper"][label_set]["runs"][label] = gripper_strata(table, rows)
+        if done_ticks is not None:
+            out["done"]["runs"][label] = done_strata_table(table, done_ticks)
+        tables[label] = table
+    if comparisons:
+        out["comparisons"] = {}
+        for a, b in comparisons:
+            if a in tables and b in tables:
+                out["comparisons"][f"{a} − {b}"] = compare_runs(tables[a], tables[b], ticks, done_ticks, gripper_ticks=gripper_ticks.get("v2"))
+            else:
+                out["comparisons"][f"{a} − {b}"] = {"available": False, "reason": f"missing run(s): {[name for name in (a, b) if name not in tables]}"}
     return out
 
 
@@ -718,6 +919,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="이미 저장된 재평가 보고서들의 commitment 섞기 열에 범위를 적는다 (:func:`rescope`; GPU 없음)")
     parser.add_argument("--gripper-manifest", dest="gripper_manifests", action="append", default=[], metavar="NAME=MANIFEST",
                         help="`q_gripper` 층을 이 라벨판으로도 채점한다 (반복; 예: parent=…/r1/manifest.json v2=…/r1-rollout-labels-g2/manifest.json)")
+    parser.add_argument("--done-strata", dest="done_strata", action="store_true",
+                        help="`q_done` 예측을 `q_done` 층(done_true·post_release_other·old_goal_satisfied·…)으로 채점한다 (Task R6 B1)")
     parser.add_argument("--reading", default=None,
                         help="읽기 문장을 직접 준다 — 기본은 이 파일의 `population`·`donor_rotation`·`mechanism`에서 **생성**한다")
     parser.add_argument("--out", default=str(REPORTS / "p2-decision-cell-strata.json"))
@@ -733,7 +936,8 @@ def main(argv: list[str] | None = None) -> int:
     else:
         gripper = {pair.split("=", 1)[0]: pair.split("=", 1)[1] for pair in args.gripper_manifests}
         payload = build(suite_path=args.suite, reports=args.reports, runs=RUN_SETS[args.runs], split=args.split,
-                        task=f"{args.runs}-decision-cell-strata", reading=args.reading, gripper_manifests=gripper or None)
+                        task=f"{args.runs}-decision-cell-strata", reading=args.reading, gripper_manifests=gripper or None,
+                        done_strata=args.done_strata, comparisons=RUN_COMPARISONS.get(args.runs))
         summary = f"{len(payload['runs'])} runs, {len(payload['missing'])} missing" + (f", gripper label sets {sorted(gripper)}" if gripper else "")
     target = Path(args.out)
     target.parent.mkdir(parents=True, exist_ok=True)

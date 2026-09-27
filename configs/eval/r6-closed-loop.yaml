@@ -1,0 +1,21 @@
+# Task R6 D1 — 폐루프 **새 장면** (브리프 D1). R5의 `r5-closed-loop.yaml`과 같은 생성 설정(`configs/data/r1_robot.yaml`)·프로파일 혼합
+# (E0/E1/E2 = 20/40/40)·split 규칙이고 seed 구간만 **980100~**이다 — r1 400100~ · R4 900100~ · R5 950100~(프로파일마다 10,000씩, 최대 4,000
+# seed 스캔) · done 게이트 수집 600100~(dagger 사이클 1)과 겹치지 않는다. 조건 둘:
+#   (i)  `dev_new2` 100 — 새 dev seed. R5 뒤로 R4 dev 100·R5 dev_new 100은 학습한 장면(DAgger 재료)이라 쓰지 않는다. **본 적 없는 seed이되
+#        계열은 대부분 학습한 것이다**(dev 분할의 계열 = DAgger 재료가 된 R4 dev·R5 dev_new 계열과 겹친다 — 보고서가 겹침 수를 적는다).
+#   (ii) `ood_dev_new` 74 — 같은 걸음에서 새로 뽑은 ood_dev seed. R4의 ood_dev 26 seed(`artifacts/reports/r4-seeds.json`, 학습 안 됨)와 합쳐
+#        **ood_dev 100**이 된다 — 계열 홀드아웃이 유일한 일반화 자이므로 편 수를 늘린다. ood_dev 계열은 어떤 학습 재료에도 없다.
+# `ood_test`에 떨어진 seed는 **만들지도 적지도 않는다**(봉인; 선택기가 세기만 한다).
+version: r6-closed-loop-v0.1
+generator_config: configs/data/r1_robot.yaml
+seeds:
+  base: 980100
+scan:
+  per_profile_max: 4000
+conditions:
+  dev_new2:
+    split: dev
+    count: 100
+  ood_dev_new:
+    split: ood_dev
+    count: 74
