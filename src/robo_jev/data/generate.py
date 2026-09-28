@@ -44,6 +44,7 @@ __all__ = [
     "load_config",
     "main",
     "semantic_answers",
+    "split_file_name",
     "write_dataset",
 ]
 
@@ -594,13 +595,49 @@ def _jsonl(records: Sequence[dict]) -> str:
     )
 
 
+#: 봉인 분할 — 분할별 배치에서 그 파일의 크기(bytes)는 manifest에 새로 적지 않는다 (docs/04 §5; 수는 `counts.splits`에 이미 있다).
+SEALED_SPLITS = ("ood_test",)
+
+
+def split_file_name(split: str) -> str:
+    """분할별 배치의 파일 이름 (Task R7 A2)."""
+    return f"records.{split}.jsonl"
+
+
 def write_dataset(
-    records: Sequence[dict], output: Path, *, seed: int, config: Mapping[str, Any]
+    records: Sequence[dict], output: Path, *, seed: int, config: Mapping[str, Any], by_split: bool = False,
+    expect_combined_sha256: str | None = None, relayout_of: Mapping[str, Any] | None = None,
 ) -> dict:
-    """`records.jsonl`과 `manifest.json`을 쓰고 manifest를 돌려준다."""
-    output.mkdir(parents=True, exist_ok=True)
+    """레코드와 `manifest.json`을 쓰고 manifest를 돌려준다. 기본은 한 파일(`records.jsonl`, 모든 분할이 섞인다)이다.
+
+    `by_split`(Task R7 A2)이면 분할마다 `records.<split>.jsonl`(분할 안의 순서는 생성 순서 그대로)을 쓰고 manifest의 파일 항목마다
+    `split`을 적는다 — 학습·평가 적재기는 요청하지 않은 분할(봉인 `ood_test` 포함)의 파일을 열지 않고 거를 수 있다. 한 파일 판이었다면
+    가졌을 sha256(`combined_sha256`)도 적는다. `expect_combined_sha256`을 주면 그 값과 다를 때 **아무것도 쓰지 않고** 멈춘다: 옛 한 파일
+    판을 열지 않고도 새 판이 옛 레코드와 바이트 단위로 같음을 보이는 근거가 그 해시다. `relayout_of`는 옛 manifest의 요약(경로·sha256)이다.
+    """
     payload = _jsonl(records).encode("utf-8")
-    (output / "records.jsonl").write_bytes(payload)
+    combined = hashlib.sha256(payload).hexdigest()
+    if expect_combined_sha256 is not None and combined != expect_combined_sha256:
+        raise ValueError(
+            f"combined sha256 {combined[:12]}…이 기대값 {str(expect_combined_sha256)[:12]}…과 다르다 — 다시 만든 레코드가 옛 파일과 같지 않다 "
+            "(생성기·설정·seed·수가 바뀌었다); 쓰지 않는다"
+        )
+    output.mkdir(parents=True, exist_ok=True)
+    if not by_split:
+        (output / "records.jsonl").write_bytes(payload)
+        files: dict[str, Any] = {"records.jsonl": {"sha256": combined, "bytes": len(payload), "records": len(records)}}
+    else:
+        from robo_jev.contracts import SPLITS
+
+        present = {str(record["split"]) for record in records}
+        files = {}
+        for split in [name for name in SPLITS if name in present] + sorted(present - set(SPLITS)):
+            data = _jsonl([record for record in records if str(record["split"]) == split]).encode("utf-8")
+            (output / split_file_name(split)).write_bytes(data)
+            entry: dict[str, Any] = {"split": split, "sha256": hashlib.sha256(data).hexdigest(), "records": sum(1 for r in records if str(r["split"]) == split)}
+            if split not in SEALED_SPLITS:
+                entry["bytes"] = len(data)
+            files[split_file_name(split)] = entry
 
     manifest = {
         "version": MANIFEST_VERSION,
@@ -610,15 +647,18 @@ def write_dataset(
         "config": config,
         "seed": seed,
         "count": len(records),
-        "files": {
-            "records.jsonl": {
-                "sha256": hashlib.sha256(payload).hexdigest(),
-                "bytes": len(payload),
-                "records": len(records),
-            }
-        },
+        "files": files,
         "counts": _counts(records),
     }
+    if by_split:
+        manifest["layout"] = "by-split"
+        manifest["combined_sha256"] = combined
+        manifest["relayout"] = {
+            "method": "regenerate (same generator, config and seed; one file per split)",
+            "combined_sha256": combined, "expected_combined_sha256": expect_combined_sha256,
+            "combined_sha256_verified": expect_combined_sha256 is not None,
+            **({"from": dict(relayout_of)} if relayout_of else {}),
+        }
     (output / "manifest.json").write_bytes(
         (json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=False) + "\n").encode("utf-8")
     )
@@ -664,11 +704,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--count", type=int, required=True, help="만들 상태(레코드) 수")
     parser.add_argument("--seed", type=int, required=True, help="재현용 씨앗")
     parser.add_argument("--output", type=Path, required=True, help="records.jsonl을 쓸 디렉터리")
+    parser.add_argument("--by-split", dest="by_split", action="store_true",
+                        help="분할마다 records.<split>.jsonl로 쓰고 manifest의 파일 항목마다 split을 적는다 (Task R7 A2)")
+    parser.add_argument("--expect-combined-sha256", dest="expect_combined_sha256", default=None,
+                        help="한 파일 판의 sha256이 이 값과 다르면 아무것도 쓰지 않는다 (옛 판을 열지 않고 같은 레코드임을 보인다)")
+    parser.add_argument("--relayout-of", dest="relayout_of", type=Path, default=None,
+                        help="옛 한 파일 판의 manifest — 그 records.jsonl의 sha256을 기대값으로 쓰고 설정 digest·seed·수가 같은지 본다 (메타데이터만 읽는다)")
     args = parser.parse_args(argv)
 
     config = load_config(args.config) if args.config else DEFAULT_CONFIG
+    expected = args.expect_combined_sha256
+    relayout = None
+    if args.relayout_of is not None:
+        old = json.loads(Path(args.relayout_of).read_text(encoding="utf-8"))
+        for key, value in (("config_sha256", config_digest(config)), ("seed", args.seed), ("count", args.count)):
+            if old.get(key) != value:
+                raise ValueError(f"{args.relayout_of}: {key} {old.get(key)!r} ≠ 이번 {value!r} — 같은 설정·seed·수로만 다시 놓는다")
+        old_entry = (old.get("files") or {}).get("records.jsonl") or {}
+        if not old_entry.get("sha256"):
+            raise ValueError(f"{args.relayout_of}: files[records.jsonl].sha256이 없다 — 한 파일 판의 manifest가 아니다")
+        if expected is not None and expected != old_entry["sha256"]:
+            raise ValueError("--expect-combined-sha256과 --relayout-of의 sha256이 다르다")
+        expected = old_entry["sha256"]
+        relayout = {"manifest": str(args.relayout_of), "manifest_sha256": hashlib.sha256(Path(args.relayout_of).read_bytes()).hexdigest(),
+                    "file": "records.jsonl", "file_sha256": old_entry["sha256"], "counts_equal": None}
     records = generate_records(args.count, args.seed, config=config)
-    manifest = write_dataset(records, args.output, seed=args.seed, config=config)
+    if relayout is not None:
+        relayout["counts_equal"] = _counts(records) == old.get("counts")
+        if not relayout["counts_equal"]:
+            raise ValueError(f"{args.relayout_of}: 다시 만든 레코드의 counts가 옛 manifest와 다르다; 쓰지 않는다")
+    manifest = write_dataset(records, args.output, seed=args.seed, config=config, by_split=args.by_split,
+                             expect_combined_sha256=expected, relayout_of=relayout)
     counts = manifest["counts"]
     print(
         f"{counts['states']}상태 · {counts['questions']}질문 · "

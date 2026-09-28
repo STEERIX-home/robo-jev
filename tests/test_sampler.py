@@ -79,15 +79,16 @@ def test_loader_accepts_both_manifest_shapes_for_files(tmp_path):
     manifest = json.loads(D0_MANIFEST.read_text(encoding="utf-8"))
     (tmp_path / "d0.jsonl").write_bytes(D0_MANIFEST.with_name("d0.jsonl").read_bytes())
     digest = hashlib.sha256((tmp_path / "d0.jsonl").read_bytes()).hexdigest()
-    as_dict = {**manifest, "files": {"d0.jsonl": {"sha256": digest}}}
-    as_list = {**manifest, "files": [{"path": "d0.jsonl", "sha256": digest, "episode_id": "x"}]}
+    inventory = manifest["files"]["d0.jsonl"]["splits"]  # 섞인 파일은 분할 목록을 적어야 적재기가 연다 (Task R7 A1)
+    as_dict = {**manifest, "files": {"d0.jsonl": {"sha256": digest, "splits": inventory}}}
+    as_list = {**manifest, "files": [{"path": "d0.jsonl", "sha256": digest, "episode_id": "x", "splits": inventory}]}
     (tmp_path / "dict.json").write_text(json.dumps(as_dict), encoding="utf-8")
     (tmp_path / "list.json").write_text(json.dumps(as_list), encoding="utf-8")
     from_dict = load_items(tmp_path / "dict.json", tokenizer=WhitespaceTokenizer())
     from_list = load_items(tmp_path / "list.json", tokenizer=WhitespaceTokenizer())
     assert [item.record_id for item in from_dict] == [item.record_id for item in from_list]
     assert len(from_dict) == 32 and from_dict[0].source == from_list[0].source
-    (tmp_path / "bad.json").write_text(json.dumps({**manifest, "files": [{"path": "d0.jsonl", "sha256": "0" * 64}]}), encoding="utf-8")
+    (tmp_path / "bad.json").write_text(json.dumps({**manifest, "files": [{"path": "d0.jsonl", "sha256": "0" * 64, "splits": inventory}]}), encoding="utf-8")
     with pytest.raises(ValueError, match="sha256"):
         load_items(tmp_path / "bad.json", tokenizer=WhitespaceTokenizer())
     (tmp_path / "nopath.json").write_text(json.dumps({**manifest, "files": [{"sha256": digest}]}), encoding="utf-8")
@@ -105,7 +106,7 @@ def test_loader_reads_domain_and_material_tags_and_rejects_unknown_values(tmp_pa
     (tmp_path / "d0.jsonl").write_text(text, encoding="utf-8")
     import hashlib
 
-    manifest["files"] = {"d0.jsonl": {"sha256": hashlib.sha256(text.encode("utf-8")).hexdigest()}}
+    manifest["files"] = {"d0.jsonl": {"sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(), "splits": manifest["files"]["d0.jsonl"]["splits"]}}
     (tmp_path / "m.json").write_text(json.dumps(manifest), encoding="utf-8")
     loaded = load_items(tmp_path / "m.json", tokenizer=WhitespaceTokenizer())
     assert [item.material for item in loaded[:3]] == ["error_family", "new_semantic_family", "existing"]
@@ -342,3 +343,127 @@ def test_sampler_position_names_the_record_files_and_refuses_a_position_over_dif
     resumed = MixedSampler(same, seed=17, nonrobot_tokens_per_unit=400)
     resumed.load_state_dict(position)
     assert resumed.state_dict() == position
+
+
+# --------------------------------------------------------------------------
+# 봉인 위생 (Task R7 A1) — manifest의 파일 항목을 **열기 전에** 분할로 거른다
+# --------------------------------------------------------------------------
+
+
+def _d0_singles() -> list[dict]:
+    return [json.loads(line) for line in D0_MANIFEST.with_name("d0.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def _write_jsonl(path, rows) -> str:
+    import hashlib
+
+    text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows)
+    path.write_text(text, encoding="utf-8")
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _sealed_file(path) -> None:
+    """열리면 안 되는 파일 — 파싱할 수 없고, 읽기 권한도 없다(열려고 하면 PermissionError)."""
+    path.write_text("this sealed file must never be opened, hashed or parsed\n", encoding="utf-8")
+    path.chmod(0)
+
+
+def test_the_loader_filters_file_entries_by_split_before_opening_and_never_hashes_or_parses_a_sealed_file(tmp_path):
+    """요청한 분할 밖의 파일(특히 봉인 `ood_test`)은 해시도 파싱도 하지 않는다 — 봉인 파일은 읽기 권한이 없고 manifest의 sha256도
+    틀렸고 내용은 JSON이 아닌데도 적재가 조용히 지나간다. 출처(`record_sources`)에는 연 파일만 든다."""
+    from robo_jev.sampler import record_sources
+
+    singles = _d0_singles()
+    train = [row for row in singles if row["split"] == "train"][:3]
+    dev = [row for row in singles if row["split"] == "dev"][:2]
+    files = {"records.train.jsonl": {"split": "train", "sha256": _write_jsonl(tmp_path / "records.train.jsonl", train), "records": 3}}
+    files["records.dev.jsonl"] = {"split": "dev", "sha256": "0" * 64, "records": 2}  # 틀린 해시 — 열면 거절될 것이다
+    (tmp_path / "records.dev.jsonl").write_text("not json either\n", encoding="utf-8")
+    _sealed_file(tmp_path / "records.ood_test.jsonl")
+    files["records.ood_test.jsonl"] = {"split": "ood_test", "sha256": "f" * 64, "records": 7}
+    (tmp_path / "manifest.json").write_text(json.dumps({"files": files}), encoding="utf-8")
+    try:
+        items = load_items(tmp_path / "manifest.json", tokenizer=WhitespaceTokenizer(), splits=("train",))
+    finally:
+        (tmp_path / "records.ood_test.jsonl").chmod(0o600)
+    assert [item.record_id for item in items] == [row["request"]["request_id"] for row in train]
+    assert {item.file for item in items} == {"records.train.jsonl"}
+    assert record_sources(items) == [{"file": "records.train.jsonl", "sha256": files["records.train.jsonl"]["sha256"], "first_index": 0, "items": 3}]
+
+
+def test_a_file_entry_that_does_not_say_its_split_is_refused_before_anything_is_opened(tmp_path):
+    """여러 분할이 한 파일에 섞였을 수 있는 항목(`split`도 `splits`도 없다 — R1의 비로봇 `records.jsonl`이 그렇다)은 이유를 적고 거절한다:
+    열지 않고는 봉인 레코드가 들었는지 알 수 없다. 조용히 다 읽고 버리지 않는다 — 옆의 멀쩡한 파일도 열기 전에 거절한다."""
+    singles = _d0_singles()
+    mixed = [dict(row) for row in singles[:6]]
+    mixed[5]["split"] = "ood_test"
+    good = {"sha256": _write_jsonl(tmp_path / "good.jsonl", [row for row in singles if row["split"] == "train"][:2]), "split": "train"}
+    _sealed_file(tmp_path / "records.jsonl")  # 섞인 파일 — 열리면 PermissionError
+    manifest = {"files": {"good.jsonl": good, "records.jsonl": {"sha256": "a" * 64, "records": 6}}}
+    (tmp_path / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    try:
+        with pytest.raises(ValueError, match=r"records\.jsonl.*split") as excinfo:
+            load_items(tmp_path / "manifest.json", tokenizer=WhitespaceTokenizer(), splits=("train",))
+    finally:
+        (tmp_path / "records.jsonl").chmod(0o600)
+    assert "열지 않고는" in str(excinfo.value)
+
+
+def test_a_declared_split_inventory_is_opened_only_when_no_unrequested_sealed_record_is_inside(tmp_path):
+    """파일마다 분할별 수(`splits`)를 적은 항목: 요청한 분할이 없으면 열지 않고, 요청하지 않은 봉인 분할이 들었으면 거절하고(열면 봉인
+    레코드를 읽고 버리게 된다), 그 밖이면 열어 요청한 분할만 남기되 레코드의 분할과 수를 manifest의 목록과 대조한다."""
+    singles = _d0_singles()
+    rows = [row for row in singles if row["split"] == "train"][:3] + [row for row in singles if row["split"] == "dev"][:2]
+    digest = _write_jsonl(tmp_path / "mixed.jsonl", rows)
+
+    def load(inventory, **kwargs):
+        (tmp_path / "m.json").write_text(json.dumps({"files": {"mixed.jsonl": {"sha256": digest, "splits": inventory}}}), encoding="utf-8")
+        return load_items(tmp_path / "m.json", tokenizer=WhitespaceTokenizer(), **kwargs)
+
+    assert [item.split for item in load({"train": 3, "dev": 2}, splits=("train",))] == ["train"] * 3
+    assert [item.split for item in load({"train": 3, "dev": 2}, splits=("dev", "train"))] == ["train"] * 3 + ["dev"] * 2
+    with pytest.raises(ValueError, match="ood_test"):
+        load({"train": 3, "dev": 2, "ood_test": 1}, splits=("train",))  # 요청하지 않은 봉인 분할 — 열지 않고 거절
+    with pytest.raises(ValueError, match="수가 manifest"):
+        load({"train": 2, "dev": 3}, splits=("train",))  # manifest가 적은 수와 다르다
+    with pytest.raises(ValueError, match="목록에 없는"):
+        load({"train": 3, "test": 2}, splits=("train",))  # dev 레코드가 목록에 없다
+    _sealed_file(tmp_path / "mixed.jsonl")
+    try:
+        assert load({"train": 3, "dev": 2}, splits=("calibration",)) == []  # 요청한 분할이 없는 파일은 열지 않는다
+    finally:
+        (tmp_path / "mixed.jsonl").chmod(0o600)
+
+
+def test_a_record_whose_split_differs_from_its_file_entry_is_refused(tmp_path):
+    singles = _d0_singles()
+    rows = [row for row in singles if row["split"] == "train"][:2] + [row for row in singles if row["split"] == "dev"][:1]
+    (tmp_path / "m.json").write_text(json.dumps({"files": {"t.jsonl": {"split": "train", "sha256": _write_jsonl(tmp_path / "t.jsonl", rows)}}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="split"):
+        load_items(tmp_path / "m.json", tokenizer=WhitespaceTokenizer(), splits=("train",))
+
+
+def test_the_training_and_evaluation_loader_refuses_to_load_the_sealed_split_itself():
+    with pytest.raises(ValueError, match="봉인"):
+        load_items(D0_MANIFEST, tokenizer=WhitespaceTokenizer(), splits=("train", "ood_test"))
+
+
+def test_resuming_a_sampler_position_saved_on_the_old_mixed_file_is_refused_after_the_split_relayout(tmp_path):
+    """옛 run(R2~R6)의 sampler 위치는 비로봇 출처를 섞인 `records.jsonl`로 적었다 — 새 적재기는 그 파일을 싣지 않고, 분할별 파일
+    (`records.train.jsonl`)로 다시 놓은 같은 레코드에서도 **출처가 달라** 옛 위치를 거절한다 (데이터를 바꾸는 학습은 새 run이다)."""
+    import hashlib
+
+    singles = _d0_singles()
+    train = [row for row in singles if row["split"] == "train"]
+    mixed_text = "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in singles)
+    old_sha = hashlib.sha256(mixed_text.encode("utf-8")).hexdigest()
+    digest = _write_jsonl(tmp_path / "records.train.jsonl", train)
+    (tmp_path / "m.json").write_text(json.dumps({"files": {"records.train.jsonl": {"split": "train", "sha256": digest, "records": len(train)}}}), encoding="utf-8")
+    items = load_items(tmp_path / "m.json", tokenizer=WhitespaceTokenizer(), splits=("train",))
+    assert [item.record_id for item in items] == [row["request"]["request_id"] for row in train]  # 같은 레코드, 같은 순서
+    position = MixedSampler(items, seed=17, nonrobot_tokens_per_unit=400).state_dict()
+    old = {**position, "sources": [{"file": "records.jsonl", "sha256": old_sha, "first_index": 0, "items": len(train)}]}  # 옛 적재기가 적은 출처
+    with pytest.raises(ValueError, match="sources") as excinfo:
+        MixedSampler(items, seed=17, nonrobot_tokens_per_unit=400).load_state_dict(old)
+    assert "records.jsonl" in str(excinfo.value) and "records.train.jsonl" in str(excinfo.value)
+    MixedSampler(items, seed=17, nonrobot_tokens_per_unit=400).load_state_dict(position)  # 새 적재기로 저장한 위치는 싣는다

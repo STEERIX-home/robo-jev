@@ -7,6 +7,7 @@
 """
 
 import functools
+import json
 import importlib.util
 import sys
 
@@ -247,3 +248,20 @@ def test_the_r6_training_config_changes_only_the_data_list_and_the_material_shar
     assert sampler5["material_shares"] == {"existing": 0.7, "error_family": 0.2, "new_semantic_family": 0.1}  # R5는 기본값(재정규화하면 0.78 / 0.22)
     assert resolved6["max_steps"] == 233 and resolved6["seed"] == 18 and sampler6["permute_candidates_seed"] == 18
     assert resolved6["splits"] == ["train"]  # ood_dev·ood_test 계열은 어느 manifest에도 학습 split로 없다
+
+
+def test_the_temporary_dataset_of_the_docs06_interface_names_each_files_split_so_the_loader_opens_it(tmp_path):
+    """docs/06의 `adapt_readout(model_id, records, steps, eval_records=…)`가 쓰는 임시 데이터셋 — 파일마다 분할을 적어야 새 적재기가 연다
+    (Task R7 A1: 분할을 모르는 항목은 거절). 학습 분할은 train.jsonl만, 평가 분할은 eval.jsonl만 연다."""
+    from helpers import D0
+
+    from robo_jev.model.tokenizer import WhitespaceTokenizer
+    from robo_jev.sampler import load_items
+
+    rows = [json.loads(line) for line in D0.read_text(encoding="utf-8").splitlines() if line.strip()]
+    manifest = script().write_temporary_dataset(tmp_path, rows[:3], rows[3:5])
+    assert {name: entry["split"] for name, entry in json.loads(manifest.read_text(encoding="utf-8"))["files"].items()} == {"train.jsonl": "train", "eval.jsonl": "dev"}
+    train = load_items(manifest, tokenizer=WhitespaceTokenizer(), splits=("train",))
+    dev = load_items(manifest, tokenizer=WhitespaceTokenizer(), splits=("dev",))
+    assert [item.file for item in train] == ["train.jsonl"] * 3 and [item.file for item in dev] == ["eval.jsonl"] * 2
+
