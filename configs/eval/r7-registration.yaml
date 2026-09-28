@@ -1,0 +1,81 @@
+# Task R7 사전 등록 — Stage C·D의 **어떤 숫자보다 먼저** 적고 커밋한다 (2026-09-29 07:15 KST 작성; 이 파일이 든 커밋이 등록 시각이다).
+# 사람이 읽는 판은 `docs/reports/run-report-4.md` §0이고, 판정은 이 파일을 `robo_jev.closed_loop.apply_registration`이
+# 폐루프 보고서(`scripts/closed_loop.py report` 산출물)에 **그대로** 적용해 낸다(`scripts/closed_loop.py verdict`) — 숫자를 본 뒤에
+# 규칙이 흔들리지 않게 규칙을 코드로 고정한다.
+#
+# 장면: 주 집합 **ood_dev200** = R4의 ood_dev 26 seed(`artifacts/reports/r4-seeds.json` 조건 `ood_dev`) + R6의 새 74 seed
+# (`artifacts/reports/r6-seeds.json` 조건 `ood_dev_new`) + 이 과제의 새 100 seed(`artifacts/reports/r7-seeds.json` 조건 `ood_dev_new2`,
+# base 1050100). 보고서는 `--merge ood_dev200=ood_dev,ood_dev_new,ood_dev_new2`로 한 표로 합친다(같은 seed가 둘에 있으면 거절).
+# 둘째 근거 **dev_new2** 100(R6의 새 dev seed)은 판정 옆에 적기만 하고 판정에 쓰지 않는다.
+#
+# 짝짓기·구간: seed(`profile:seed`)로 짝지은 편 단위 퍼센타일 부트스트랩, 2,000회, RNG seed 20260921, 95 %
+# (`robo_jev.evaluate.EPISODE_BOOTSTRAP`) — `paired_success(strict=True)`·`paired_false_done`·`paired_seed_ratio`.
+# 0을 포함하는 구간은 발견이 아니다.
+#
+# 지표(seed 하나의 값 → 모든 seed에 대해 합친 비율):
+#   strict           — `done ∧ target_inside_zone` (정책 자신의 done 게이트가 들었고 대상이 영역 안).
+#   false_done       — `done ∧ ¬target_inside_zone`인 seed의 몫 (분모 = **모든** seed; 완료한 편만의 몫은 분모가 달라 짝지을 수 없다).
+#   gripper_duplicates — 편당 중복 그리퍼 전환(짝 없는 정책 전환, `gripper_event_metrics`), Σ/편 수.
+#   q_stop_caught    — `q_stop`이 잡은 정지 사건 / 정지 사건(`stop_timing`), Σ/Σ.
+#   gripper_streak   — 그리퍼 불일치가 3틱 이상 이어진 편의 몫.
+version: r7-registration-v1
+task: r7
+written_at: "2026-09-29 07:15 KST"
+primary: ood_dev200
+secondary: [dev_new2]
+merge:
+  ood_dev200: [ood_dev, ood_dev_new, ood_dev_new2]
+bootstrap:
+  resamples: 2000
+  seed: 20260921
+  level: 0.95
+# 보고서 명령이 싣는 seed 단위 쌍 (`--seed-pairs r7:r5 r7:r6 rule:r7`) — 아래 조건이 읽는 쌍이 모두 들어 있어야 한다.
+seed_pairs: ["r7:r5", "r7:r6", "rule:r7"]
+
+# 클라우드(R7 조리법의 seed 셋)를 권고하는 조건 — **셋 모두**가 주 집합에서 성립해야 한다.
+cloud:
+  a:
+    what: "규칙 − r7 엄격 성공 — 규칙 판정기가 r7을 확실히 앞서지는 않는다"
+    pair: "rule - r7"
+    source: paired          # closed_loop_report의 `paired` 블록 (`paired_success`/`paired_false_done`)
+    metric: strict
+    holds_if: lower_le_zero  # 구간 하한 ≤ 0
+  b:
+    what: "r7 − r5 거짓 done 율 — R6의 수리가 유지된다"
+    pair: "r7 - r5"
+    source: paired
+    metric: false_done
+    holds_if: upper_lt_zero  # 구간 상한 < 0
+  c_duplicates:
+    what: "회귀 관문 1 — r7 − r5 편당 중복 그리퍼 전환의 구간이 전부 0 위가 아니다"
+    pair: "r7 - r5"
+    source: seed_pairs       # `seed_pairs[조건][쌍]["metrics"]` (`paired_seed_ratio`)
+    metric: gripper_duplicates
+    holds_if: lower_le_zero  # 하한 ≤ 0 (= 구간이 전부 0 위는 아니다)
+  c_q_stop:
+    what: "회귀 관문 2 — r7 − r5 q_stop 정지 사건 포착률의 구간이 전부 0 아래가 아니다"
+    pair: "r7 - r5"
+    source: seed_pairs
+    metric: q_stop_caught
+    holds_if: upper_ge_zero  # 상한 ≥ 0 (= 구간이 전부 0 아래는 아니다)
+# (a)·(b) 옆에 적는 견고성 — 판정을 바꾸지 않는다: 불일치 seed 수, 정확 McNemar p, 부트스트랩 RNG seed 1–200의 하한·상한 분포.
+robustness:
+  - {condition: a, pair: "rule - r7", metric: strict}
+  - {condition: b, pair: "r7 - r5", metric: false_done}
+
+# 원인 판정 (등록) — 주 집합, r7 − r6(같은 DAgger 노출·expert +71편). 지표마다 "r7 쪽으로 0을 제외"의 뜻을 적는다.
+# 셋 모두 r7 쪽으로 0을 제외 → `all`; 셋 모두 아니면 → `none`; 섞이면 → 지표마다 그 문장(어느 판단이 설명되고 어느 판단이 아닌지)을
+# 이름으로 적고 전체는 `mixed`. r6 쪽으로 0을 제외하는 지표(r7이 더 나쁘다)는 "설명되지 않음"으로 세고 r7의 새 퇴행으로 따로 이름을 붙인다.
+cause:
+  pair: "r7 - r6"
+  metrics:
+    gripper_duplicates: {toward_r7_if: upper_lt_zero, against_r7_if: lower_gt_zero}
+    gripper_streak: {toward_r7_if: upper_lt_zero, against_r7_if: lower_gt_zero}
+    q_stop_caught: {toward_r7_if: lower_gt_zero, against_r7_if: upper_lt_zero}
+  calls:
+    all: "R6의 퇴행은 expert 노출 비율 때문"
+    none: "노출 비율로 설명되지 않음 — DAgger 부가 라벨이 다음 표적"
+    mixed: "일부만 노출 비율로 설명된다 — 지표마다의 판정을 읽는다"
+  per_metric:
+    explained: "노출 비율로 설명된다"
+    not_explained: "노출 비율로 설명되지 않음 — DAgger 부가 라벨이 다음 표적"

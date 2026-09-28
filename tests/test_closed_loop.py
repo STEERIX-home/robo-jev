@@ -476,3 +476,172 @@ def test_paired_robustness_counts_discordant_seeds_the_exact_mcnemar_p_and_other
     assert alternative["lower_bound_at_or_below_zero"] + alternative["lower_bound_above_zero"] == 20
     with pytest.raises(ValueError, match="metric"):
         paired_robustness(a, b, metric="nonsense")
+
+
+# --------------------------------------------------------------------------
+# Task R7 사전 등록 — 등록한 판정 규칙을 보고서에 그대로 적용한다 (configs/eval/r7-registration.yaml)
+# --------------------------------------------------------------------------
+
+REGISTRATION_PATH = REPO / "configs/eval/r7-registration.yaml"
+
+
+def _interval(low, high):
+    return {"margin": (low + high) / 2.0, "margin_ci": [low, high], "margin_includes_zero": low <= 0.0 <= high, "seeds": 200, "a": 0.5, "b": 0.5}
+
+
+def _ratio(low, high, *, resamples=2000, seed=20260921, level=0.95):
+    return {"difference": (low + high) / 2.0, "ci": [low, high], "includes_zero": low <= 0.0 <= high, "seeds": 200, "a": 0.5, "b": 0.5,
+            "resamples": resamples, "seed": seed, "level": level}
+
+
+def _robust(a_only, b_only):
+    return {"discordant": {"a_only": a_only, "b_only": b_only}, "mcnemar_exact_p": 0.5, "registered": {"seed": 20260921, "resamples": 2000},
+            "alternative_seeds": {"count": 200, "lower_bound_at_or_below_zero": 3, "upper_bound_at_or_above_zero": 0}}
+
+
+def _verdict_report(*, a=(-0.05, 0.10), b=(-0.20, -0.05), dup=(-0.10, 0.30), stop=(-0.20, 0.10), cause=None, condition="ood_dev200", secondary=True):
+    """등록이 읽는 블록만 든 보고서 — `paired`(규칙 − r7 엄격·r7 − r5 거짓 done)와 `seed_pairs`(r7 − r5·r7 − r6·규칙 − r7)."""
+    cause = cause or {"gripper_duplicates": (-0.1, 0.4), "gripper_streak": (-0.1, 0.2), "q_stop_caught": (-0.2, 0.3)}
+
+    def block():
+        metrics_r5 = {"gripper_duplicates": _ratio(*dup), "q_stop_caught": _ratio(*stop), "gripper_streak": _ratio(-0.1, 0.1)}
+        metrics_r6 = {name: _ratio(*value) for name, value in cause.items()}
+        return {
+            "paired": {"rule - r7 (done ∧ inside)": _interval(*a), "r7 - r5 (false done)": _interval(*b)},
+            "seed_pairs": {
+                "r7 - r5": {"metrics": metrics_r5, "robustness": {"false_done": _robust(1, 12), "strict": _robust(20, 18)}},
+                "r7 - r6": {"metrics": metrics_r6, "robustness": {"false_done": _robust(2, 2), "strict": _robust(10, 9)}},
+                "rule - r7": {"metrics": {}, "robustness": {"strict": _robust(21, 15), "false_done": _robust(0, 3)}},
+            },
+        }
+
+    names = [condition] + (["dev_new2"] if secondary else [])
+    blocks = {name: block() for name in names}
+    return {"conditions": names, "paired": {name: blocks[name]["paired"] for name in names}, "seed_pairs": {name: blocks[name]["seed_pairs"] for name in names}}
+
+
+def test_the_r7_registration_is_the_briefs_rule_on_ood_dev200_with_the_registered_bootstrap():
+    """등록 파일이 브리프의 규칙 그대로인가 — 주 집합·합칠 조건·부트스트랩·(a)(b)(c)의 쌍·지표·경계·원인 판정의 쌍과 세 지표."""
+    from robo_jev.closed_loop import load_registration
+    from robo_jev.evaluate import EPISODE_BOOTSTRAP
+
+    registration = load_registration(REGISTRATION_PATH)
+    assert registration["primary"] == "ood_dev200" and registration["secondary"] == ["dev_new2"]
+    assert registration["merge"] == {"ood_dev200": ["ood_dev", "ood_dev_new", "ood_dev_new2"]}
+    assert registration["bootstrap"] == EPISODE_BOOTSTRAP == {"resamples": 2000, "seed": 20260921, "level": 0.95}
+    cloud = registration["cloud"]
+    assert (cloud["a"]["pair"], cloud["a"]["metric"], cloud["a"]["holds_if"]) == ("rule - r7", "strict", "lower_le_zero")
+    assert (cloud["b"]["pair"], cloud["b"]["metric"], cloud["b"]["holds_if"]) == ("r7 - r5", "false_done", "upper_lt_zero")
+    assert (cloud["c_duplicates"]["pair"], cloud["c_duplicates"]["metric"], cloud["c_duplicates"]["holds_if"]) == ("r7 - r5", "gripper_duplicates", "lower_le_zero")
+    assert (cloud["c_q_stop"]["pair"], cloud["c_q_stop"]["metric"], cloud["c_q_stop"]["holds_if"]) == ("r7 - r5", "q_stop_caught", "upper_ge_zero")
+    assert registration["cause"]["pair"] == "r7 - r6" and set(registration["cause"]["metrics"]) == {"gripper_duplicates", "gripper_streak", "q_stop_caught"}
+    assert registration["cause"]["calls"]["all"] == "R6의 퇴행은 expert 노출 비율 때문"
+    assert registration["cause"]["calls"]["none"] == "노출 비율로 설명되지 않음 — DAgger 부가 라벨이 다음 표적"
+    assert sorted(registration["seed_pairs"]) == sorted(["r7:r5", "r7:r6", "rule:r7"])
+
+
+def test_each_cloud_condition_holds_exactly_at_its_registered_bound_and_the_cloud_needs_all_three():
+    """(a) 하한 ≤ 0 · (b) 상한 < 0 · (c) 중복 하한 ≤ 0 그리고 q_stop 상한 ≥ 0 — 경계값에서 성립/불성립이 등록대로 갈린다."""
+    from robo_jev.closed_loop import apply_registration, load_registration
+
+    registration = load_registration(REGISTRATION_PATH)
+    at_bounds = apply_registration(_verdict_report(a=(0.0, 0.2), b=(-0.2, -0.001), dup=(0.0, 1.0), stop=(-0.5, 0.0)), registration)
+    conditions = at_bounds["primary"]["conditions"]
+    assert all(conditions[name]["holds"] for name in ("a", "b", "c_duplicates", "c_q_stop"))
+    assert at_bounds["primary"]["cloud"] is True and at_bounds["verdict"]["cloud"] is True and at_bounds["primary"]["failed"] == []
+    just_past = apply_registration(_verdict_report(a=(0.001, 0.2), b=(-0.2, 0.0), dup=(0.001, 1.0), stop=(-0.5, -0.001)), registration)
+    conditions = just_past["primary"]["conditions"]
+    assert not any(conditions[name]["holds"] for name in ("a", "b", "c_duplicates", "c_q_stop"))
+    assert just_past["verdict"]["cloud"] is False and just_past["primary"]["failed"] == ["a", "b", "c_duplicates", "c_q_stop"]
+    only_c_fails = apply_registration(_verdict_report(dup=(0.2, 1.0)), registration)
+    assert only_c_fails["primary"]["failed"] == ["c_duplicates"] and only_c_fails["verdict"]["cloud"] is False
+    # 값과 구간은 보고서의 것 그대로 옮긴다
+    assert conditions["a"]["ci"] == [0.001, 0.2] and conditions["c_q_stop"]["ci"] == [-0.5, -0.001]
+
+
+def test_a_pair_written_the_other_way_round_is_read_with_its_sign_flipped():
+    """보고서의 쌍 이름은 이름표 순서가 정한다 — `r7 - rule`로 적혔으면 구간을 뒤집어 `rule - r7`로 읽는다."""
+    from robo_jev.closed_loop import apply_registration, load_registration
+
+    report = _verdict_report()
+    for name in report["conditions"]:
+        paired = report["paired"][name]
+        paired["r7 - rule (done ∧ inside)"] = _interval(-0.3, 0.1)  # = rule − r7 [−0.1, +0.3]
+        del paired["rule - r7 (done ∧ inside)"]
+    out = apply_registration(report, load_registration(REGISTRATION_PATH))
+    assert out["primary"]["conditions"]["a"]["ci"] == pytest.approx([-0.1, 0.3]) and out["primary"]["conditions"]["a"]["holds"] is True
+    assert out["primary"]["conditions"]["a"]["read_as"] == "r7 - rule (done ∧ inside), sign flipped"
+
+
+def test_robustness_is_written_next_to_a_and_b_and_does_not_change_the_verdict():
+    from robo_jev.closed_loop import apply_registration, load_registration
+
+    out = apply_registration(_verdict_report(), load_registration(REGISTRATION_PATH))
+    robust = out["primary"]["robustness"]
+    assert robust["a"]["discordant"] == {"a_only": 21, "b_only": 15} and robust["b"]["discordant"] == {"a_only": 1, "b_only": 12}
+    assert robust["a"]["mcnemar_exact_p"] == 0.5 and robust["a"]["alternative_seeds"]["lower_bound_at_or_below_zero"] == 3
+    assert out["verdict"]["cloud"] is True  # 견고성 블록은 판정에 들어가지 않는다
+
+
+def test_the_cause_call_is_all_none_or_mixed_and_an_interval_against_r7_is_named_a_new_regression():
+    from robo_jev.closed_loop import apply_registration, load_registration
+
+    registration = load_registration(REGISTRATION_PATH)
+    calls = registration["cause"]["calls"]
+    toward = {"gripper_duplicates": (-1.5, -0.5), "gripper_streak": (-0.7, -0.4), "q_stop_caught": (0.2, 0.5)}
+    everything = apply_registration(_verdict_report(cause=toward), registration)["primary"]["cause"]
+    assert everything["call"] == "all" and everything["text"] == calls["all"] and everything["new_regressions"] == []
+    assert all(entry["status"] == "toward_r7" for entry in everything["metrics"].values())
+    nothing = apply_registration(_verdict_report(cause={"gripper_duplicates": (-0.5, 0.5), "gripper_streak": (-0.1, 0.0), "q_stop_caught": (0.0, 0.3)}), registration)["primary"]["cause"]
+    assert nothing["call"] == "none" and nothing["text"] == calls["none"]
+    assert [entry["status"] for entry in nothing["metrics"].values()] == ["includes_zero"] * 3  # 경계 0은 "제외"가 아니다
+    mixed = apply_registration(_verdict_report(cause={"gripper_duplicates": (-1.0, -0.2), "gripper_streak": (-0.1, 0.1), "q_stop_caught": (-0.4, -0.1)}), registration)["primary"]["cause"]
+    assert mixed["call"] == "mixed" and mixed["text"] == calls["mixed"]
+    assert mixed["metrics"]["gripper_duplicates"]["call"] == registration["cause"]["per_metric"]["explained"]
+    assert mixed["metrics"]["gripper_streak"]["call"] == registration["cause"]["per_metric"]["not_explained"]
+    assert mixed["metrics"]["q_stop_caught"]["status"] == "against_r7" and mixed["new_regressions"] == ["q_stop_caught"]
+
+
+def test_the_secondary_set_is_written_beside_the_verdict_but_does_not_make_it():
+    from robo_jev.closed_loop import apply_registration, load_registration
+
+    registration = load_registration(REGISTRATION_PATH)
+    report = _verdict_report()
+    report["paired"]["dev_new2"]["rule - r7 (done ∧ inside)"] = _interval(0.1, 0.3)  # 둘째 근거에서는 (a)가 떨어져도
+    out = apply_registration(report, registration)
+    assert out["secondary"]["dev_new2"]["conditions"]["a"]["holds"] is False and out["verdict"]["cloud"] is True
+    missing = apply_registration(_verdict_report(secondary=False), registration)
+    assert missing["secondary"]["dev_new2"] == {"available": False, "reason": "condition dev_new2 is not in the report"}
+
+
+def test_apply_registration_refuses_a_report_that_lacks_what_the_rule_reads():
+    from robo_jev.closed_loop import apply_registration, load_registration
+
+    registration = load_registration(REGISTRATION_PATH)
+    with pytest.raises(ValueError, match="ood_dev200"):
+        apply_registration(_verdict_report(condition="ood_dev100", secondary=False), registration)
+    report = _verdict_report()
+    del report["seed_pairs"]["ood_dev200"]["r7 - r6"]
+    with pytest.raises(ValueError, match="r7 - r6"):
+        apply_registration(report, registration)
+    report = _verdict_report()
+    report["seed_pairs"]["ood_dev200"]["r7 - r5"]["metrics"]["gripper_duplicates"]["seed"] = 1  # 등록하지 않은 부트스트랩
+    with pytest.raises(ValueError, match="bootstrap"):
+        apply_registration(report, registration)
+
+
+def test_the_verdict_command_writes_the_applied_rule_and_prints_the_table(tmp_path, capsys):
+    """`scripts/closed_loop.py verdict` — 보고서 JSON + 등록 파일 → 판정 JSON과 표 (E1이 쓰는 명령 그대로)."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("closed_loop_script", REPO / "scripts" / "closed_loop.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    report_path, out_path = tmp_path / "report.json", tmp_path / "verdict.json"
+    report_path.write_text(json.dumps(_verdict_report(dup=(0.2, 1.0))), encoding="utf-8")
+    assert module.main(["verdict", "--report", str(report_path), "--registration", str(REGISTRATION_PATH), "--out", str(out_path)]) == 0
+    written = json.loads(out_path.read_text(encoding="utf-8"))
+    assert written["verdict"]["cloud"] is False and written["verdict"]["failed"] == ["c_duplicates"] and written["report"] == str(report_path)
+    printed = capsys.readouterr().out
+    assert "| c_duplicates | r7 - r5 | gripper_duplicates | +0.600 [+0.200, +1.000] | lower_le_zero | no |" in printed
+    assert "cloud: **closed** (failed: ['c_duplicates'])" in printed and "ood_dev200 (primary)" in printed and "dev_new2 (secondary)" in printed
