@@ -150,7 +150,11 @@ GRIPPER_STRATA = ("initiate", "window", "settled", "open", "window_closed", "who
 
 
 def split_episodes(manifest_path: Any, split: str) -> list[str]:
-    """manifest가 아는 그 split의 에피소드 id 전부 (정렬). A1이 "8편이 24편을 얼마나 대표하는가"를 물을 때 쓴다."""
+    """manifest가 아는 그 split의 에피소드 id 전부 (정렬). A1이 "8편이 24편을 얼마나 대표하는가"를 물을 때 쓴다. 봉인 분할은 청할 수 없다 (Task R7 A3)."""
+    from robo_jev.data.sealed import SEALED_SPLITS
+
+    if str(split) in SEALED_SPLITS:
+        raise ValueError(f"split {split!r}는 봉인 분할이다 — 모집단 보기에 쓰지 않는다")
     manifest = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
     return sorted(
         str(entry["episode_id"])
@@ -181,10 +185,11 @@ def cell_records(suite_path: Any = DEFAULT_SUITE, *, split: str = SPLIT) -> list
 
 def dataset_ticks(base: Any, episodes: list[str]) -> list[dict[str, Any]]:
     """데이터셋에서 곧바로 — 평가 집합을 거치지 않고 편 목록만으로 (A1의 분할 전체 보기)."""
+    from robo_jev.data.sealed import read_episode_ids
+
     base = Path(base)
     out: list[dict[str, Any]] = []
-    for episode_id in episodes:
-        record = json.loads((base / "episodes" / episode_id / "streams.jsonl").read_text(encoding="utf-8").strip())
+    for episode_id, record in zip(episodes, read_episode_ids(base, list(episodes))):  # manifest로 먼저 — 봉인 편은 열지 않고 거절 (R7 A3)
         for index, tick in enumerate(record["ticks"]):
             label = next((row for row in tick.get("labels", []) if row.get("question_id") == QUESTION), None)
             if label is None:
@@ -480,10 +485,11 @@ def gripper_dataset_ticks(base: Any, episodes: list[str]) -> list[dict[str, Any]
     """
     from robo_jev.data.gripper_labels import gripper_tick_class
 
+    from robo_jev.data.sealed import read_episode_ids
+
     base = Path(base)
     out: list[dict[str, Any]] = []
-    for episode_id in episodes:
-        record = json.loads((base / "episodes" / episode_id / "streams.jsonl").read_text(encoding="utf-8").strip())
+    for episode_id, record in zip(episodes, read_episode_ids(base, list(episodes))):  # manifest로 먼저 — 봉인 편은 열지 않고 거절 (R7 A3)
         for index, tick in enumerate(record["ticks"]):
             label = next((row for row in tick.get("labels", []) if row.get("question_id") == GRIPPER_QUESTION), None)
             if label is None:
@@ -562,10 +568,11 @@ def done_dataset_ticks(base: Any, episodes: list[str]) -> list[dict[str, Any]]:
     :func:`robo_jev.data.done_strata.tick_done_strata`(그 틱과 과거 틱만 읽는다)이고 `reference`는 참조 라벨(전문가의 목표 평가기)이다."""
     from robo_jev.data.done_strata import reference_done, tick_done_strata
 
+    from robo_jev.data.sealed import read_episode_ids
+
     base = Path(base)
     out: list[dict[str, Any]] = []
-    for episode_id in episodes:
-        record = json.loads((base / "episodes" / episode_id / "streams.jsonl").read_text(encoding="utf-8").strip())
+    for episode_id, record in zip(episodes, read_episode_ids(base, list(episodes))):  # manifest로 먼저 — 봉인 편은 열지 않고 거절 (R7 A3)
         for index, (tick, stratum) in enumerate(zip(record["ticks"], tick_done_strata(record))):
             if stratum is None:
                 continue

@@ -488,8 +488,14 @@ def test_the_r3a_run_sets_name_this_rounds_reports_and_keep_r2s_row_on_the_same_
 # --------------------------------------------------------------------------
 
 
+def _episode_manifest(base, episode_ids, split: str = "ood_dev") -> None:
+    """편마다 `split`을 적은 manifest — 판정 칸의 편 읽기는 manifest로 먼저 거른다 (Task R7 A3: 봉인 편은 열지 않는다)."""
+    files = {f"episodes/{episode_id}/streams.jsonl": {"episode_id": episode_id, "split": split} for episode_id in episode_ids}
+    (base / "manifest.json").write_text(json.dumps({"files": files}), encoding="utf-8")
+
+
 def _gripper_dataset(base, episodes: dict) -> None:
-    """편마다 `(라벨 ids, 실행 그리퍼)` 목록으로 최소 스트림 레코드를 쓴다 — `gripper_dataset_ticks`가 읽는 꼴."""
+    """편마다 `(라벨 ids, 실행 그리퍼)` 목록으로 최소 스트림 레코드를 쓴다 — `gripper_dataset_ticks`가 읽는 꼴 (manifest 포함)."""
     for episode_id, ticks in episodes.items():
         record = {"episode_id": episode_id, "ticks": []}
         for index, (ids, executed) in enumerate(ticks):
@@ -498,6 +504,7 @@ def _gripper_dataset(base, episodes: dict) -> None:
         path = base / "episodes" / episode_id / "streams.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    _episode_manifest(base, list(episodes))
 
 
 def test_the_gripper_strata_score_the_same_predictions_against_any_label_set(tmp_path):
@@ -511,8 +518,6 @@ def test_the_gripper_strata_score_the_same_predictions_against_any_label_set(tmp
                               "b": [(["open"], "open"), (["open", "closed"], "open"), (["open", "closed"], "open"), (["closed"], "closed")]})
     _gripper_dataset(v2, {"a": [(["open"], "open"), (["open"], "open"), (["closed"], "open"), (["closed"], "closed"), (["closed"], "closed")],
                           "b": [(["open"], "open"), (["open"], "open"), (["closed"], "open"), (["closed"], "closed")]})
-    for base in (parent, v2):
-        (base / "manifest.json").write_text("{}", encoding="utf-8")
     parent_ticks = module.gripper_dataset_ticks(parent, ["a", "b"])
     v2_ticks = module.gripper_dataset_ticks(v2, ["a", "b"])
     assert Counter(row["class"] for row in parent_ticks) == {"open": 2, "window": 4, "settled": 3}
@@ -581,6 +586,7 @@ def _done_dataset(base):
         path = base / "episodes" / name / "streams.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"episode_id": name, "ticks": ticks}) + "\n", encoding="utf-8")
+    _episode_manifest(base, ["a", "b"])
 
 
 def test_the_done_strata_score_the_stored_q_done_answers_with_paired_controls(tmp_path):

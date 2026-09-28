@@ -1027,9 +1027,11 @@ def offline_gripper_transitions(report: dict[str, Any], records: list[dict[str, 
 
 
 def _read_records(directory: Path) -> list[dict[str, Any]]:
-    from robo_jev.data.robot_episodes import read_episodes
+    """run 디렉터리의 레코드 — manifest의 `split`으로 먼저 거르고 봉인 편은 열지 않는다 (Task R7 A3; 폐루프 조건은 봉인 분할을 만들지
+    않지만 보고서가 가리키는 디렉터리가 무엇이든 같은 규칙이다)."""
+    from robo_jev.data.sealed import read_open_episodes
 
-    return [record for _, record in read_episodes(directory)]
+    return read_open_episodes(directory)[0]
 
 
 def _offline_columns(paths: list[Path]) -> dict[str, Any]:

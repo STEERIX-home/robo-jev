@@ -1265,3 +1265,22 @@ def test_relayout_of_reads_only_the_old_manifest_and_refuses_another_seed(tmp_pa
     assert relayout["combined_sha256_verified"] is True and relayout["combined_sha256"] == old["files"]["records.jsonl"]["sha256"]
     assert relayout["from"]["manifest"] == str(tmp_path / "old" / "manifest.json") and relayout["from"]["counts_equal"] is True
     assert not (tmp_path / "other").exists()
+
+
+def test_the_qa_reads_a_by_split_layout_as_the_same_records_as_the_combined_file(tmp_path):
+    """QA(`python -m robo_jev.data.validate`)는 분할별 판의 `records.<split>.jsonl`도 찾는다 — 같은 레코드이므로 한 파일 판과 같은 보고를 낸다."""
+    from robo_jev.data.validate import load_dataset
+
+    common = ["--config", str(PILOT_CONFIG), "--count", "60", "--seed", "11"]
+    assert generate_main([*common, "--output", str(tmp_path / "combined")]) == 0
+    assert generate_main([*common, "--output", str(tmp_path / "split"), "--by-split"]) == 0
+    combined, _ = load_dataset(tmp_path / "combined")
+    by_split, paths = load_dataset(tmp_path / "split")
+    assert len(paths) == len({record["split"] for record in combined})
+    key = lambda record: record["request"]["request_id"]  # noqa: E731
+    assert sorted(map(key, by_split)) == sorted(map(key, combined))
+    for directory in ("combined", "split"):
+        report = tmp_path / f"{directory}-qa.json"
+        assert validate_main(["--dataset", str(tmp_path / directory), "--report", str(report)]) == 0
+    reports = [json.loads((tmp_path / f"{directory}-qa.json").read_text(encoding="utf-8")) for directory in ("combined", "split")]
+    assert reports[0]["states"] == reports[1]["states"] == 60 and reports[0]["invalid_records"] == reports[1]["invalid_records"] == 0

@@ -439,13 +439,13 @@ def cmd_verdict(args: argparse.Namespace) -> int:
 
 def cmd_transitions(args: argparse.Namespace) -> int:
     from robo_jev.closed_loop import offline_gripper_transitions
-    from robo_jev.data.robot_episodes import read_episodes
+    from robo_jev.data.sealed import read_open_episodes
 
     report = json.loads(Path(args.report).read_text(encoding="utf-8"))
     out: dict[str, Any] = {"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit(), "report": str(args.report), "splits": {}}
     for pair in args.split:
         name, directory = pair.split("=", 1)
-        records = [record for _, record in read_episodes(Path(directory))]
+        records = read_open_episodes(Path(directory))[0]  # manifest로 먼저 — 봉인 편은 열지 않는다 (R7 A3)
         out["splits"][name] = {"records_dir": directory, "episodes": len(records), **offline_gripper_transitions(report, records, split_name=name)}
         block = out["splits"][name]
         print(f"{name}: q_gripper whole {block['whole_question_accuracy']:.4f} · initiate {block['initiate']['accuracy']} ({block['initiate']['correct']}/{block['initiate']['n']}) · "

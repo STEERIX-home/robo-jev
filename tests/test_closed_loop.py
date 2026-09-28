@@ -373,10 +373,11 @@ def test_family_overlap_counts_the_scene_groups_and_seeds_a_condition_shares_wit
     assert block["any_material"] == {"origin_groups": 1, "seeds": 2, "families": 2, "seeds_by_family": 3}
 
 
-def test_the_report_merges_two_conditions_into_one_table_and_pairs_false_dones(short_runs, tmp_path):
+def test_the_report_merges_two_conditions_into_one_table_and_pairs_false_dones(short_runs, tmp_path, config):
     """Task R6 D2: ood_dev 100 = R4의 ood_dev 26 seed + 새 ood_dev 74 seed — 두 조건의 편을 한 표로 합치고(같은 seed가 둘에 있으면 거절),
-    짝지은 비교에 **거짓 done**(`done ∧ ¬target_inside_zone`, seed마다 0/1)의 차를 더한다."""
-    from robo_jev.data.robot_episodes import read_episodes, write_episode
+    짝지은 비교에 **거짓 done**(`done ∧ ¬target_inside_zone`, seed마다 0/1)의 차를 더한다. 조건 디렉터리는 manifest가 있어야 읽힌다
+    (Task R7 A3: 보고서는 manifest의 split으로 먼저 거른다)."""
+    from robo_jev.data.robot_episodes import build_manifest, read_episodes, write_episode
 
     paths = []
     for kind in ("expert", "rule"):
@@ -388,6 +389,7 @@ def test_the_report_merges_two_conditions_into_one_table_and_pairs_false_dones(s
                 record = copy.deepcopy(record)
                 record["provenance"]["outcome"].update({"done": True, "target_inside_zone": False})
             write_episode(record, directory)
+            (directory / "manifest.json").write_text(json.dumps(build_manifest(directory, config["generator"]), default=str), encoding="utf-8")
             parts[name] = {**short_runs["runs"][kind], "condition": name, "episodes_dir": str(directory)}
         path = tmp_path / f"run-{kind}.json"
         path.write_text(json.dumps({"label": kind, "policy": {"kind": kind}, "conditions": parts}, default=str), encoding="utf-8")
@@ -645,3 +647,4 @@ def test_the_verdict_command_writes_the_applied_rule_and_prints_the_table(tmp_pa
     printed = capsys.readouterr().out
     assert "| c_duplicates | r7 - r5 | gripper_duplicates | +0.600 [+0.200, +1.000] | lower_le_zero | no |" in printed
     assert "cloud: **closed** (failed: ['c_duplicates'])" in printed and "ood_dev200 (primary)" in printed and "dev_new2 (secondary)" in printed
+
