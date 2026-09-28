@@ -1,0 +1,59 @@
+# Task R7 C1 — R6 설정을 잇고 **조리법에서 둘만** 바꾼다: 혼합 비율 existing 0.6 / error_family 0.4와 `max_steps` 304. `qwen35-2b-r6.yaml`을 잇는다.
+#
+#   uv run python scripts/adapt_readout.py --config configs/train/qwen35-2b-r7.yaml --mode t1 --steps 304 --seed 18 \
+#       --set checkpoint_every=50 --set 'checkpoint_keep_steps=[]' --run-id r7-t1-fp32-2b-s18 --no-eval \
+#       --out artifacts/reports/r7-2b-t1-fp32-s18.json
+#   (저장마다 26.35 GB 여유가 checkpoint.pt 옆에 있어야 한다 — 저장은 atomic(임시 파일 → rename)이라 run의 최고 사용량 ≈ 53 GB.
+#    `/`에 ≥ 65 GB 여유가 있을 때만 학습 유닛을 띄운다.)
+#
+# **왜 (브리프 R7):** R6는 혼합 비율 하나(0.5/0.5)를 바꿨고 그것이 expert 노출을 182편(0.78 epoch, R5) → 111편(0.48 epoch)으로 줄였다 — 그리고
+# 부가 판단(그리퍼 연속 불일치·중복 전환)과 `q_stop`이 seed로 짝지은 구간이 0을 제외하는 퇴행을 보였다. 가설 둘: (1) expert 노출이 줄었다,
+# (2) DAgger 재료의 부가 라벨(모델 자신의 commitment에 조건화된)이 그리퍼를 서두르게 했다. R7은 둘을 가른다: 비율을 줄이는 대신 **step을
+# 늘려** DAgger 노출은 R6 수준(0.4 × 304 = 121.6 ≈ 122)으로 지키고 expert 노출을 R5 수준(0.6 × 304 = 182.4 ≈ 182)으로 되돌린다 — r7 − r6은
+# "같은 DAgger 노출, expert +71편"이다. 실현된 수는 run의 `metrics.json` `summary.sampler.units`에 있고 보고서 C1이 적는다.
+# 조리법의 나머지(fp32 master·5초 구간·backbone_lr 1e-5·readout_lr 3e-4·tick weights·seed 18·후보 치환)와 저장 주기는 R6와 같다
+# (시험 `test_the_r7_training_config_changes_only_the_mixture_the_steps_and_the_non_robot_layout_from_r6`가 키마다 고정한다). 일정(warmup 비율·
+# lr 감쇠)은 `max_steps`를 따라 304 step에 걸쳐 다시 그려진다 — "같은 일정의 연장"이 아니라 "더 긴 한 일정"이다.
+#
+# 데이터: R6와 같은 다섯 — 로봇 넷(g2 expert 편 · DAgger-0 · DAgger-1 · done 게이트 수집)은 그대로, **비로봇은 A2의 분할별 판**
+# (`artifacts/datasets/r1/single-by-split` — R1의 `r1/single`과 같은 생성기·설정·seed로 다시 만든 같은 레코드를 분할마다 한 파일로; 한 파일 판의
+# sha256 `2ed780fd…`이 옛 manifest와 같다). 옛 한 파일 판은 봉인 레코드가 섞여 있어 새 적재기가 열지 않는다(Task R7 A1). train 2,620건은 같은
+# 레코드·같은 순서다. `sampler:`와 `dataset_manifests:`는 **통째로** 적는다 — `extends`는 얕게 합친다.
+# ood_dev·ood_test 계열은 어느 manifest에도 학습 split로 들어 있지 않다(`splits: [train]`).
+extends: qwen35-2b-r6.yaml
+run_name: r7-2b
+max_steps: 304                 # R7의 조리법 변경 1: expert ≈ 182(R5) · DAgger ≈ 122(R6)
+checkpoint_every: 50
+checkpoint_keep_steps: []
+dataset_manifests:
+  - path: artifacts/datasets/r1-robot/r1-rollout-labels-g2/manifest.json
+    domain: robot
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r5-dagger/dagger-0/manifest.json
+    domain: robot
+    material: error_family
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r6-dagger/dagger-1/manifest.json
+    domain: robot
+    material: error_family
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r6-dagger/dagger-1-donegate/manifest.json
+    domain: robot
+    material: error_family
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r1/single-by-split/manifest.json   # A2의 분할별 판 (R6는 r1/single)
+    domain: non_robot
+sampler:
+  domain_tag: provenance.robojev_domain   # R6와 같다
+  material_tag: provenance.material
+  permute_candidates_seed: 17             # `--seed 18`이 18로 덮는다 (R5·R6와 같다)
+  steady_min_held_ticks: 3
+  tick_weights:                           # 바꾸지 않는다
+    steady: 0.25
+    event: 2.0
+    goal_change: 2.0
+    other: 1.0
+  material_shares:                        # R7의 조리법 변경 2 (R6 0.5/0.5, R5 기본값 → 재정규화 0.78/0.22)
+    existing: 0.6
+    error_family: 0.4
+    new_semantic_family: 0.0

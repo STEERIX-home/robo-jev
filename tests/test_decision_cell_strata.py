@@ -698,3 +698,14 @@ def test_compare_runs_pairs_the_primary_stratum_the_done_strata_and_the_gripper_
     refused = module.compare_runs(a_table, missing, ticks, done_ticks, resamples=50)["done_strata"]
     assert refused["available"] is False and "q_done" in refused["reason"]
     assert module.compare_runs(a_table, b_table, ticks, done_ticks, resamples=50)["gripper_initiate"]["available"] is False
+
+
+def test_the_r7_run_set_reads_r5_and_r6_from_their_stored_reports_and_pairs_r7_against_both():
+    """Task R7 C2: R5·R6 줄은 R6가 같은 칸(해시 6a3b69131243)에서 잰 보고서를 그대로 읽고(GPU를 다시 쓰지 않는다), R7 줄만 새 보고서다;
+    짝지은 비교는 r7 − r6과 r7 − r5 (주 층 지시 섞기 여유의 차 — 사전 등록의 '또 적는 것')."""
+    module = script()
+    assert module.RUN_SETS["r7"][module.R7_LABEL] == "r7-reeval-2b-t1-fp32-r7.json"
+    assert {name: report for name, report in module.RUN_SETS["r7"].items() if name != module.R7_LABEL} == module.R6_RUNS
+    assert module.RUN_SETS["r7dev"][module.R7_LABEL] == "r7-dev-2b-t1-fp32-r7.json"
+    r6, r5 = list(module.R6_RUNS)[1], list(module.R6_RUNS)[0]
+    assert module.RUN_COMPARISONS["r7"] == [(module.R7_LABEL, r6), (module.R7_LABEL, r5)] == module.RUN_COMPARISONS["r7dev"]
