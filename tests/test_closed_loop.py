@@ -648,3 +648,26 @@ def test_the_verdict_command_writes_the_applied_rule_and_prints_the_table(tmp_pa
     assert "| c_duplicates | r7 - r5 | gripper_duplicates | +0.600 [+0.200, +1.000] | lower_le_zero | no |" in printed
     assert "cloud: **closed** (failed: ['c_duplicates'])" in printed and "ood_dev200 (primary)" in printed and "dev_new2 (secondary)" in printed
 
+
+def test_the_r7_seed_walk_is_r6s_generator_and_mix_on_a_range_no_earlier_walk_or_dagger_collection_touches():
+    """Task R7 B1: 새 ood_dev 100 — R6와 같은 생성 설정·프로파일 혼합, seed base 1050100. 프로파일마다 걷는 구간(base + 프로파일 × 10,000,
+    최대 4,000 seed)이 r1 · DAgger 사이클 0~5 · R4 · R5 · R6의 구간과 겹치지 않는다."""
+    r7 = load_closed_loop_config(REPO / "configs/eval/r7-closed-loop.yaml")
+    r6 = load_closed_loop_config(REPO / "configs/eval/r6-closed-loop.yaml")
+    assert r7["conditions"] == {"ood_dev_new2": {"split": "ood_dev", "count": 100}} and r7["seeds"]["base"] == 1050100
+    assert r7["generator"] == r6["generator"] and r7["generator_config_path"] == r6["generator_config_path"]
+    assert r7["generator"]["profile_weights"] == [20, 40, 40] and r7["scan"] == r6["scan"] == {"per_profile_max": 4000}
+    offset = int(r7["generator"]["seeds"]["profile_offset"])
+
+    def ranges(base: int) -> set[tuple[int, int]]:
+        return {(base + index * offset, base + index * offset + r7["scan"]["per_profile_max"]) for index in range(len(r7["generator"]["profiles"]))}
+
+    def disjoint(a: set[tuple[int, int]], b: set[tuple[int, int]]) -> bool:
+        return all(high_a <= low_b or high_b <= low_a for low_a, high_a in a for low_b, high_b in b)
+
+    mine = ranges(1050100)
+    earlier = {"r1": 400100, "R4": 900100, "R5": 950100, "R6": 980100}
+    earlier.update({f"dagger cycle {cycle}": int(r7["generator"]["seeds"]["base"]) + (cycle + 1) * int(r7["generator"]["seeds"]["dagger_cycle_offset"]) for cycle in range(6)})
+    assert earlier["dagger cycle 1"] == 600100 and earlier["r1"] == int(r7["generator"]["seeds"]["base"])
+    for name, base in earlier.items():
+        assert disjoint(mine, ranges(base)), name
