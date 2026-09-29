@@ -112,6 +112,26 @@ readers of episode directories follow the same rule (`robo_jev.data.sealed`). An
 loader: its non-robot manifest is refused, and on the re-layout the dataset identity and the sampler's record sources differ.
 The audit of every other path is in `.superpowers/sdd/task-r7-report.md` A3.
 
+## 4. Per-question quality (offline — the decision cell is `ood_dev`, 26 episodes / 3,162 ticks, hash `6a3b69131243`; the `dev` cell `9b484441b23b`)
+
+| checkpoint | primary stratum (235) | **instruction-shuffle margin** (paired 95 %) | whole `q_main` | `q_gripper` whole (parent) | `q_gripper` initiate (43): `closed` | `q_gripper` settled (1,015): accuracy | `q_gripper` single-`open` (1,860): accuracy | `q_stop` onsets caught / 10 |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| **R7** | 0.881 [0.849, 0.914] | **+0.370 [+0.241, +0.483]** | 0.982 | **0.680** | **0.279** | **0.043** | 0.990 | **0** |
+| R6 | 0.877 [0.842, 0.909] | +0.374 [+0.268, +0.465] | 0.990 | 0.905 | 0.837 | 0.897 | 0.916 | 0 |
+| R5 | 0.902 [0.874, 0.933] | +0.298 [+0.232, +0.354] | 0.992 | 0.980 | 0.674 | 0.996 | 0.981 | 5 |
+| R7 − R6 (paired by episode) | +0.004 [−0.031, +0.046] | −0.004 [−0.058, +0.046] | | | −0.558 [−0.718, −0.400] | | | |
+| R7 − R5 (paired by episode) | −0.021 [−0.052, +0.009] | +0.072 [−0.041, +0.199] | | | −0.395 [−0.571, −0.234] | | | |
+
+Reading (R7 C2). **Instruction reading is intact**: the primary-stratum margin excludes zero, every leave-one-episode-out refit
+excludes zero, and it does not move against R6 or R5 (both paired differences contain zero); the non-selecting `dev` cell
+replicates the sign (+0.257 [+0.182, +0.328]; paired against R6 +0.036 [−0.012, +0.083]). **The gripper head collapsed to
+"open"**: r7 answers `closed` on 3.1 % of the labelled ticks (R6 38.9 %, R5 37.4 %), 4.3 % right on the ticks where the gripper
+is already closed on the object — a copy of the execution state that R5 gets 99.6 % right — and 27.9 % on the ticks where the
+reference says "close now"; the `dev` cell repeats it (settled 0.035, initiate 0.233). `q_stop` catches none of the 10 (dev: 14)
+stop onsets, like R6. The `q_done` strata show no offline regression (`post_release_other` 0.984). Sources:
+`artifacts/reports/r7-reeval-2b-t1-fp32-r7.json`, `r7-dev-2b-t1-fp32-r7.json`, `r7-decision-cell-strata.json`,
+`r7-dev-cell-strata.json`.
+
 ## 5. Closed-loop success (R7 D — the fourth time the model moves the robot)
 
 Setup as in run reports 1–3 (the same `ModelPolicy` serving path, `h0.9` / `c0.6` / `ts0.6`, expert reference labels).
