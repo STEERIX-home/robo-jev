@@ -76,3 +76,19 @@ means no difference between the seeds was found, not that they are equal. `dev_n
 baselines (`q_gripper`, `q_stop`, `q_main`), the in-training gripper and stop probes, wall and peak memory. Stage D offline, per
 seed, on the same cells (hashes `6a3b69131243`, `9b484441b23b`): the primary-stratum instruction-shuffle margin, `q_gripper`
 settled / initiate / open, `q_stop` onsets, the `q_done` strata. Seed-paired `r8 − r5` closed-loop tables.
+
+## 1. Trained weights (Stage C)
+
+| run | steps | seed | checkpoint | contract digest | training | head-fit monitor (step 150, q_gripper, steps 131–150) |
+| --- | ---: | ---: | --- | --- | --- | --- |
+| **`r8-t1-fp32-2b-s18`** | **150 of 233 — stopped by the monitor** (`stopped_head_not_fitting`) | 18 | `artifacts/runs/r8-t1-fp32-2b-s18/checkpoint.pt` (step 150; model + optimizer — a resume unit, not a finished run) | `93fe26725a4c…` | unit wall 8,985 s = **2.50 GPU-h** (train 8,485.4 s, 56.57 s/step, load 137.3 s), peak 56.01 GiB, loss 2.633 → 0.526 | weighted loss 0.3682 / baseline 0.5094 = **0.723 ≥ 0.70 → not fitting**; closed loop skipped; **fails its four cloud conditions** |
+
+Seed 18: **step-1 loss `2.633075326681137` — identical to R5 seed 18**, so the per-question logging did not change training (the
+draws equal R5's for steps 1–6 and diverge at the first DAgger draw, step 7). Realized draws in its 150 steps: expert 123 (0.53
+epoch), DAgger 27 (dagger-0 9 · dagger-1 9 · done-gate 9). The main-decision head fit early (`q_main` at 0.03–0.04 of its uniform
+baseline from step ≈ 61); the gripper head said `open` on nearly every tick from step ≈ 21 to ≈ 140 (settled 0/621 in steps 81–100;
+loss 1.0–1.2 × the constant-prior head's) — R7's collapse on R5's recipe and seed — and began to fit only at step ≈ 142 (settled
+266/593 in steps 131–150, almost all of it in the last nine steps). `q_stop` stayed above its constant head throughout (ratio 1.3–5.8;
+0 of 136 true ticks fired). Beside the rule, not changing it: two window steps were g2 episodes without any `closed` label (baseline
+0); without them the statistic would be 0.674, and the brief's original 0.95 would have passed the run. Curves:
+`artifacts/runs/r8-t1-fp32-2b-s18/metrics.json` (`steps[].loss_by_question`, `steps[].probes`).
