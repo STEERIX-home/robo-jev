@@ -144,8 +144,9 @@ of 21 origin groups are training material) repeats the ordering: primary instruc
 0.882 (s18); `q_stop` 0 of 14 onsets for both seeds (R5 9 / 14). The `q_done` strata of seed 19 equal R5's (`post_release_other`
 0.984); seed 18's stopped state is lower (0.742).
 
-**Reading.** Seed 19, trained to the end, has the **weakest instruction reading of any checkpoint since R2's**: on the primary
-stratum its margin over the instruction-shuffled control is +0.064 — still above zero, a quarter of R5's — and on the `grasp`
+**Reading.** Seed 19, trained to the end, has the **weakest instruction reading of any T1 checkpoint measured on this cell** (R2
++0.111; R3a seeds 18 / 19 +0.247 / +0.128, 466 +0.191; R5 +0.298; R6 +0.374; R7 +0.370): on the primary stratum its margin over the
+instruction-shuffled control is +0.064 — still above zero, a fifth of R5's — and on the `grasp`
 ticks it picks the instructed object 57.7 % of the time (R5 94.8 %). Its gripper head is R5-like on the settled ticks (0.994) and
 weak on "close now" (0.372). Seed 18 stopped at step 150 already read instructions better (+0.209) than seed 19 did at 233, while
 its gripper head had not yet learned "close now" (0.047). `q_stop` catches none of the stop onsets in either seed.
@@ -180,3 +181,35 @@ red box, do not touch the green box"): the model commits at tick 0 to `grasp:o1:
 probability 1.000 and keeps it until the stall watchdog ends the episode. This is the offline `grasp` weakness (57.7 %) compounded by
 commitment inertia in the loop. Latency (non-first ticks): p50 / p95 / p99 43.2–43.7 / 55.4–56.5 / 79.0–82.1 ms, 1 of 21,892
 over 100 ms; first ticks p50 91.5–94.6 ms, 40 of 300 over 100 ms (max 303 ms) — overall 0.18 %; the gate passes.
+
+## 6. Measured cost and the G1 recommendation
+
+| item | GPU-h | source |
+| --- | ---: | --- |
+| R2 + R3a + R4 · R5 · R6 · R7 (run reports 1–4) | 46.8 | `docs/reports/run-report-4.md` §6 |
+| **R8** (unit wall clocks: A3 teacher-forced probe 6 m 57 s · seed 18 training 2 h 29 m 45 s · chain `r8-rest` 5 h 02 m 06 s = seed 19 training 4 h 03 m 54 s + its closed loop and cells 58 m 12 s · seed 18's stopped-state cells 29 m 08 s · full test suite 9 m 49 s = 29,865 s) | **8.30** | `journalctl --user`, `artifacts/scratch/r8/*.log` |
+| total on the DGX Spark GB10 | **≈ 55.1** | — |
+
+CPU this round: the checkpoint slimming 6 m 40 s (nine files), reports and strata minutes, a CPU-only test pass during training.
+Cloud spend: 0. Disk: `/` had 40.88 GB free at the start, **244.27 GB after the slimming** (203.26 GB freed), **190.90 GB at the end**
+(two 26.35 GB R8 checkpoints and the loop records).
+
+**G1, decided by the rule registered before the numbers (§0; applied by `scripts/closed_loop.py verdict`,
+`artifacts/reports/r8-verdict.json`).** Seed 18: stopped by the head-fit monitor at step 150 (0.723 ≥ 0.70) → no closed loop → all
+four conditions fail. Seed 19: (a) `rule − r8s19` strict **+0.585 [+0.510, +0.660]** — fails (discordant 122 vs 5, lower bound > 0 under
+all 200 RNG seeds); (b) `r8s19 − r5` false-done rate **+0.130 [+0.050, +0.205]** — fails (r8s19 has more false dones than r5); (c)
+duplicates +0.135 [−0.140, +0.570] holds, `q_stop` **−0.583 [−0.750, −0.379]** fails. **Both seeds fail; under the registered
+procedure the cloud stays closed — not on a knife-edge.** dev_new2 agrees (seed 19 fails (a), (b), (c₂)).
+
+**Stability, from the numbers.** (1) The gripper head fits late and at a seed-dependent time: flat at the constant-prior level
+for ≈ 100 steps in both seeds, then a fit within ≈ 20 steps (onset ≈ 120 in seed 19, ≈ 142 in seed 18); the step-150 monitor fell
+between them. Where it fit, it copies the executed state (settled 0.994 offline) but "close now" stays weak (0.372). `q_stop` never
+leaves its prior in either seed (0 true ticks fired in training; 0 onsets caught offline or in the loop). (2) The main head is not
+seed-stable: seed 19's primary instruction margin +0.064 against seed 18's +0.209 at step 150 (paired +0.145 [+0.100, +0.192]); R5, R6
+and R7 were all seed 18, and R3a's seeds 17 / 18 / 19 read +0.111 / +0.247 / +0.128 — "instruction reading is robust to recipe
+changes" held at seed 18. (3) The completed seed's loop failed on target selection (first grasp commitment on a non-target object in
+139 of 200 episodes; r5 1 of 200), which the training-batch `q_main` loss (0.03–0.05 × its uniform baseline in both seeds) did not show.
+**Recommendation for the next Spark round:** measure a recipe at three or more seeds before attributing recipe effects (the
+seed-to-seed spread here is as large as the R5–R7 recipe effects); add a held-out primary-stratum probe (target selection) to the
+in-training instruments; and target the gripper head's ≈ 100-step flat phase (and its weak "close now") and `q_stop`'s non-learning
+before any cloud run. Provider, account and first paid run remain the user's decisions.
