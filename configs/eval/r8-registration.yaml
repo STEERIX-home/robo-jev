@@ -1,0 +1,135 @@
+# Task R8 사전 등록 — Stage C·D의 **어떤 숫자보다 먼저** 적고 커밋한다 (이 파일이 든 커밋이 등록 시각이다).
+# 사람이 읽는 판은 `docs/reports/run-report-5.md` §0이고, 판정은 이 파일을 `robo_jev.closed_loop.apply_registration`이 폐루프 보고서
+# (`scripts/closed_loop.py report` 산출물)에 **그대로** 적용해 낸다(`scripts/closed_loop.py verdict --registration configs/eval/r8-registration.yaml`)
+# — 숫자를 본 뒤에 규칙이 흔들리지 않게 규칙을 코드로 고정한다. R7의 등록(`r7-registration.yaml`)과 같은 (a)(b)(c)를 **seed마다** 적용하고,
+# 두 seed가 **모두** 셋을 통과할 때만 클라우드를 권고한다(`cloud`의 조건 여덟이 전부 성립 = 두 묶음 모두 통과).
+#
+# 조리법: `configs/train/qwen35-2b-r8.yaml` — R5 조리법 그대로(혼합 비율 기본값 0.7/0.2/0.1 → 재정규화 0.78/0.22, `max_steps` 233, 같은 일정) +
+# DAgger 묶음에 사이클 1 재료(dagger-1 + dagger-1-donegate, dagger-0과 한 `error_family` 묶음) + 비로봇 분할별 판. seed 18과 19,
+# run id `r8-t1-fp32-2b-s18`·`-s19`, 폐루프 이름표 `r8s18`·`r8s19`(id 꼬리 `-r8-<이름표>`).
+#
+# head 적합 감시(부드러운 중단): step 150에서 `q_gripper`의 질문별 가중 손실(step 131–150 평균)이 그 기준선(같은 step들의 평균 — 상수
+# 사전분포 head의 손실, `robo_jev.train.question_table`)의 **0.70배 이상**이면 그 run을 멈추고(status `stopped_head_not_fitting`) metrics를
+# 남기고 폐루프를 건너뛴다. 멈춘 seed는 클라우드 조건 넷을 모두 **통과하지 못한 것으로** 센다(폐루프가 없다). 판정 명령은 run 디렉터리의
+# `metrics.json` 요약에서 감시 판정을 읽고, 학습이 적용한 감시(질문·step·창·비율)가 아래 등록값과 다르면 판정을 거절한다.
+# 상수: 브리프는 0.95였고 "A3의 r7 수치를 본 뒤 첫 학습 step 전에만 바꿀 수 있다" — **A3 뒤·첫 학습 step 전에 0.70으로 바꿨다**(`monitor.changed`).
+#
+# 장면: 주 집합 **ood_dev200** = R4의 ood_dev 26 + R6의 새 74 + R7의 새 100 seed(학습 재료와 origin group 0 공유) — R7과 같은 200편.
+# 둘째 근거 **dev_new2** 100(R6의 새 dev seed; 31 origin group 중 27이 학습 재료)은 판정 옆에 적기만 한다.
+# 기준 정책(expert·규칙·기계적·r5·r6)은 R4·R6·R7의 run을 합친다(`report --merge ood_dev200=ood_dev,ood_dev_new,ood_dev_new2`).
+#
+# 짝짓기·구간: seed(`profile:seed`)로 짝지은 편 단위 퍼센타일 부트스트랩, 2,000회, RNG seed 20260921, 95 % (`EPISODE_BOOTSTRAP`) —
+# `paired_success(strict=True)`·`paired_false_done`·`paired_seed_ratio`. 0을 포함하는 구간은 발견이 아니다. 주 지표는 엄격 성공.
+version: r8-registration-v1
+task: r8
+written_at: "2026-09-29 KST (commit time is the registration time)"
+primary: ood_dev200
+secondary: [dev_new2]
+merge:
+  ood_dev200: [ood_dev, ood_dev_new, ood_dev_new2]
+bootstrap:
+  resamples: 2000
+  seed: 20260921
+  level: 0.95
+# 보고서 명령이 싣는 seed 단위 쌍 (`--seed-pairs r8s18:r5 r8s19:r5 rule:r8s18 rule:r8s19 r8s18:r8s19`).
+seed_pairs: ["r8s18:r5", "r8s19:r5", "rule:r8s18", "rule:r8s19", "r8s18:r8s19"]
+
+# seed 묶음 — 조건마다 `group`이 어느 seed의 것인지 말한다. `run`은 감시 판정을 읽을 run 디렉터리(저장소 기준).
+groups:
+  r8s18: {seed: 18, run: artifacts/runs/r8-t1-fp32-2b-s18}
+  r8s19: {seed: 19, run: artifacts/runs/r8-t1-fp32-2b-s19}
+
+monitor:
+  question: q_gripper
+  step: 150
+  window: 20
+  ratio: 0.70
+  stopped: fail            # 감시가 멈춘 seed = 그 seed의 클라우드 조건 넷이 모두 불성립
+  changed:                 # A3 뒤·첫 학습 step 전 (브리프가 허용한 유일한 변경)
+    from: 0.95
+    to: 0.70
+    evidence: artifacts/reports/r8-a3-teacher-forced.json
+    why: >-
+      r7 teacher-forced on the ten g2 train episodes it drew last (steps 286-304): q_gripper weighted loss 0.3899 vs its
+      constant-prior baseline 0.5306 = 0.735 x baseline while the head does not work (settled 13/336 = 0.039, initiate 0/11,
+      open 549/586); the training computation (run_stream_chunk) and the C2 evaluation computation (predict_items, fused) give
+      the same values (argmax agreement 1018/1018). The brief's 0.95 would read that head as fitting. r5 on the same ten
+      episodes, which it never drew, is at 0.067 x baseline (settled 336/336, initiate 9/11). 0.70 is the largest round
+      constant below r7's measured state and ten times r5's.
+
+# 클라우드(R8 조리법의 seed 셋·클라우드 학습)를 권고하는 조건 — **여덟 모두**(= 두 seed가 각각 셋 모두)가 주 집합에서 성립해야 한다.
+cloud:
+  s18_a:
+    group: r8s18
+    what: "규칙 − r8s18 엄격 성공 — 규칙 판정기가 r8s18을 확실히 앞서지는 않는다"
+    pair: "rule - r8s18"
+    source: paired
+    metric: strict
+    holds_if: lower_le_zero
+  s18_b:
+    group: r8s18
+    what: "r8s18 − r5 거짓 done 율 — R6의 수리가 선다"
+    pair: "r8s18 - r5"
+    source: paired
+    metric: false_done
+    holds_if: upper_lt_zero
+  s18_c_duplicates:
+    group: r8s18
+    what: "회귀 관문 1 — r8s18 − r5 편당 중복 그리퍼 전환의 구간이 전부 0 위가 아니다"
+    pair: "r8s18 - r5"
+    source: seed_pairs
+    metric: gripper_duplicates
+    holds_if: lower_le_zero
+  s18_c_q_stop:
+    group: r8s18
+    what: "회귀 관문 2 — r8s18 − r5 q_stop 정지 사건 포착률의 구간이 전부 0 아래가 아니다"
+    pair: "r8s18 - r5"
+    source: seed_pairs
+    metric: q_stop_caught
+    holds_if: upper_ge_zero
+  s19_a:
+    group: r8s19
+    what: "규칙 − r8s19 엄격 성공 — 규칙 판정기가 r8s19를 확실히 앞서지는 않는다"
+    pair: "rule - r8s19"
+    source: paired
+    metric: strict
+    holds_if: lower_le_zero
+  s19_b:
+    group: r8s19
+    what: "r8s19 − r5 거짓 done 율 — R6의 수리가 선다"
+    pair: "r8s19 - r5"
+    source: paired
+    metric: false_done
+    holds_if: upper_lt_zero
+  s19_c_duplicates:
+    group: r8s19
+    what: "회귀 관문 1 — r8s19 − r5 편당 중복 그리퍼 전환의 구간이 전부 0 위가 아니다"
+    pair: "r8s19 - r5"
+    source: seed_pairs
+    metric: gripper_duplicates
+    holds_if: lower_le_zero
+  s19_c_q_stop:
+    group: r8s19
+    what: "회귀 관문 2 — r8s19 − r5 q_stop 정지 사건 포착률의 구간이 전부 0 아래가 아니다"
+    pair: "r8s19 - r5"
+    source: seed_pairs
+    metric: q_stop_caught
+    holds_if: upper_ge_zero
+
+# (a)·(b) 옆에 적는 견고성 — 판정을 바꾸지 않는다: 불일치 seed 수, 정확 McNemar p, 부트스트랩 RNG seed 1–200의 하한·상한 분포.
+robustness:
+  - {condition: s18_a, pair: "rule - r8s18", metric: strict}
+  - {condition: s18_b, pair: "r8s18 - r5", metric: false_done}
+  - {condition: s19_a, pair: "rule - r8s19", metric: strict}
+  - {condition: s19_b, pair: "r8s19 - r5", metric: false_done}
+
+# 안정성 판독 — 판정 옆에 적기만 한다(판정을 바꾸지 않는다): 두 seed의 엄격 성공 차(짝지은), 부가 지표의 seed 간 차, 두 seed의 head 적합
+# 여부(감시 판정 — `groups`의 run에서 읽는다). 0을 포함하면 "seed 사이 차가 발견되지 않았다"이지 "같다"가 아니다.
+stability:
+  - {name: strict, pair: "r8s18 - r8s19", source: paired, metric: strict}
+  - {name: false_done, pair: "r8s18 - r8s19", source: paired, metric: false_done}
+  - {name: gripper_duplicates, pair: "r8s18 - r8s19", source: seed_pairs, metric: gripper_duplicates}
+  - {name: gripper_streak, pair: "r8s18 - r8s19", source: seed_pairs, metric: gripper_streak}
+  - {name: q_stop_caught, pair: "r8s18 - r8s19", source: seed_pairs, metric: q_stop_caught}
+  - {name: unsafe, pair: "r8s18 - r8s19", source: seed_pairs, metric: unsafe}
+  - {name: aux_failure, pair: "r8s18 - r8s19", source: seed_pairs, metric: aux_failure}

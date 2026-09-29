@@ -825,3 +825,292 @@ def test_a_step_named_in_checkpoint_keep_steps_is_saved_under_its_own_name(tmp_p
     for bad in ("40", [0], [1.5], [2, 2]):
         with pytest.raises(ValueError, match="checkpoint_keep_steps"):
             resolve_config(tiny_config(tmp_path, checkpoint_keep_steps=bad))
+
+
+# --------------------------------------------------------------------------
+# 질문별 손실·기준선·학습 중 탐침·head 적합 감시 (Task R8 A1·Stage B)
+# --------------------------------------------------------------------------
+
+from robo_jev.contracts import QUESTION_SET_V0  # noqa: E402
+from robo_jev.loss import prior_label_loss, question_losses  # noqa: E402
+from robo_jev.train import (  # noqa: E402
+    HEAD_FIT_STOPPED,
+    gripper_stratum,
+    head_fit_monitor_result,
+    question_records,
+    question_table,
+)
+
+
+def _drawn_items(trainer: Trainer, metrics: dict) -> dict[str, list]:
+    """step 지표의 `units`(레코드 id)가 가리키는 Item들 — 스트림과 단일 요청으로."""
+    by_id = {item.record_id: item for item in trainer.items}
+    out: dict[str, list] = {"stream": [], "single": []}
+    for unit in metrics["units"]:
+        out[unit["kind"]].extend(by_id[record_id] for record_id in unit["records"])
+    return out
+
+
+def _contributing(label: dict) -> bool:
+    if label.get("mask", True) is False or float(label.get("weight", 1.0)) <= 0:
+        return False
+    return not (label["kind"] == "event" and int(label.get("successes", 0)) + int(label.get("failures", 0)) == 0)
+
+
+def test_per_question_contributions_add_up_to_the_step_loss_and_their_masses_to_the_applied_shares(tmp_path):
+    """질문 q의 기여 C_q = Σ_s c_s·w_q/W_s·L_{s,q}의 합이 step 손실이고, 질량의 합이 적용된 계수 질량(로봇 0.6 + 비로봇 0.4)이다.
+    열쇠마다 ``loss = contribution / mass``, ``n`` = 그 step의 유효 틱·상태에 실린 그 질문의 기여 라벨 수 (float64 fixture로 정확히)."""
+    with Trainer(tiny_config(tmp_path, max_steps=2, dtype="float64")) as trainer:
+        for _ in range(2):
+            metrics = trainer.run_step()
+            table = metrics["loss_by_question"]
+            assert sum(entry["contribution"] for entry in table.values()) == pytest.approx(metrics["loss"], rel=1e-10, abs=1e-12)
+            assert sum(entry["mass"] for entry in table.values()) == pytest.approx(1.0, rel=1e-12)
+            robot = {key: entry for key, entry in table.items() if not key.startswith("non_robot/")}
+            assert set(robot) <= set(QUESTION_SET_V0) and "q_gripper" in robot and "q_main" in robot
+            assert sum(entry["mass"] for entry in robot.values()) == pytest.approx(0.6, rel=1e-12)
+            assert {key for key in table if key.startswith("non_robot/")} <= {"non_robot/choice", "non_robot/boolean", "non_robot/ordinal"}
+            for entry in table.values():
+                assert entry["loss"] == pytest.approx(entry["contribution"] / entry["mass"], rel=1e-12)
+                assert entry["baseline"] == pytest.approx(entry["baseline_contribution"] / entry["mass"], rel=1e-12)
+                assert entry["n"] == sum(entry["labels"].values())
+            drawn = _drawn_items(trainer, metrics)
+            (episode,) = drawn["stream"]
+            plan = trainer._plan(episode)
+            for qid in robot:
+                expected = sum(
+                    1 for index, tick in enumerate(episode.record["ticks"]) if plan.valid[index] and plan.weights[index] > 0
+                    for label in tick.get("labels", []) if label["question_id"] == qid and _contributing(label)
+                )  # fmt: skip
+                assert table[qid]["n"] == expected, qid
+            singles = sum(1 for item in drawn["single"] for label in item.record.get("labels", []) if _contributing(label))
+            assert sum(entry["n"] for key, entry in table.items() if key.startswith("non_robot/")) == singles
+
+
+def test_a_constant_head_that_outputs_the_batch_marginal_scores_exactly_the_baseline():
+    """기준선의 정의 그대로: 후보가 고정된 질문에서 배치 주변분포 π를 logits(log π)로 내는 head의 질량 가중 손실 = 표의 기준선.
+    single·boolean·ordinal 라벨만 있으면 그 π가 가장 좋은 상수 head다(다른 π는 기준선보다 나쁘다). 두 값 허용 라벨은 둘 다 0이다."""
+    gripper, boolean, force = ["open", "closed"], ["true", "false"], ["0", "1", "2"]
+    states = [
+        ([{"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ["closed"]}, {"question_id": "q_stop", "kind": "single", "answer": False},
+          {"question_id": "q_force", "kind": "single", "answer": "1"}], 0.2),
+        ([{"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ["open"]}, {"question_id": "q_stop", "kind": "single", "answer": True},
+          {"question_id": "q_force", "kind": "single", "answer": "0", "weight": 0.25}], 0.3),
+        ([{"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ["open", "closed"]}, {"question_id": "q_stop", "kind": "single", "answer": False},
+          {"question_id": "q_force", "kind": "single", "answer": "0"}], 0.1),
+        ([{"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ["open"]}, {"question_id": "q_stop", "kind": "single", "answer": False},
+          {"question_id": "q_force", "kind": "single", "answer": "2"}], 0.4),
+    ]  # fmt: skip
+    candidates = {"q_gripper": gripper, "q_stop": boolean, "q_force": force}
+    types = {qid: spec["type"] for qid, spec in QUESTION_SET_V0.items()}
+
+    def records_for(logits_of) -> list[dict]:
+        rows = []
+        for labels, coefficient in states:
+            outputs = {"logits": [{qid: logits_of(qid) for qid in candidates}], "candidates": [candidates]}
+            entries = question_losses(outputs, {"labels": [labels]})[0]
+            values = {qid: float(entry["loss"].detach()) for qid, entry in entries.items()}
+            rows.extend(question_records(entries, values, labels, candidates, coefficient=coefficient, domain="robot", question_types=types))
+        return rows
+
+    first = question_table(records_for(lambda qid: torch.zeros(len(candidates[qid]), dtype=torch.float64)))
+    priors = {qid: first[qid]["prior"] for qid in candidates}
+    # π(closed) = (0.2 × 1/3 + 0.1 × 1/3 × ½) / (Σ 질량) — 상태 안 가중 평균의 몫(w_q/W_s)까지 들어간 질량의 주변분포
+    assert priors["q_gripper"]["closed"] == pytest.approx((0.2 / 3 + 0.1 / 3 / 2) / (0.2 / 3 + 0.3 / 2.25 + 0.1 / 3 + 0.4 / 3))
+    assert first["q_gripper"]["labels"] == {"valid_set": 3, "valid_set_two_valued": 1} and first["q_gripper"]["baseline_kind"] == "batch_marginal"
+    constant = question_table(records_for(lambda qid: torch.tensor([math.log(priors[qid][cid]) for cid in candidates[qid]], dtype=torch.float64)))
+    for qid in candidates:
+        assert constant[qid]["loss"] == pytest.approx(constant[qid]["baseline"], rel=1e-12), qid
+        assert constant[qid]["baseline"] == pytest.approx(first[qid]["baseline"], rel=1e-12)  # 기준선은 모델 출력과 무관하다
+    # 가장 좋은 상수 head (single·boolean 라벨): π를 어느 쪽으로 옮겨도 질량 가중 손실이 는다
+    rows = [row for row in records_for(lambda qid: torch.zeros(len(candidates[qid]), dtype=torch.float64)) if row["key"] == "q_stop"]
+    mass = sum(row["mass"] for row in rows)
+    for shifted in (0.5, 0.9, 0.05, priors["q_stop"]["true"] + 0.02, priors["q_stop"]["true"] - 0.02):
+        other = {"true": shifted, "false": 1.0 - shifted}
+        worse = sum(row["mass"] * prior_label_loss(other, boolean, row["label"]) for row in rows) / mass
+        assert worse > first["q_stop"]["baseline"]
+
+
+def test_a_dynamic_candidate_question_is_scored_against_the_uniform_head_on_its_own_candidates():
+    """q_main·q_path·비로봇 choice의 기준선은 그 상태 후보 위의 균등 head다 — single은 log K, 허용 집합은 −log(|A|/|A∪I|)."""
+    types = {qid: spec["type"] for qid, spec in QUESTION_SET_V0.items()}
+    rows = []
+    for labels, ids, coefficient in (
+        ([{"question_id": "q_main", "kind": "valid_set", "candidate_ids": ["a"]}], ["a", "b", "c", "d"], 0.5),
+        ([{"question_id": "q_main", "kind": "valid_set", "candidate_ids": ["x", "y"], "unknown": ["z"]}], ["x", "y", "z", "w", "v"], 0.25),
+    ):
+        outputs = {"logits": [{"q_main": torch.zeros(len(ids), dtype=torch.float64)}], "candidates": [{"q_main": ids}]}
+        entries = question_losses(outputs, {"labels": [labels]})[0]
+        rows.extend(question_records(entries, {q: float(e["loss"]) for q, e in entries.items()}, labels, {"q_main": ids}, coefficient=coefficient, domain="robot", question_types=types))
+    table = question_table(rows)["q_main"]
+    assert table["baseline_kind"] == "uniform" and "prior" not in table
+    assert table["baseline"] == pytest.approx((0.5 * math.log(4) + 0.25 * -math.log(2 / 4)) / 0.75)
+    assert table["loss"] == pytest.approx(table["baseline"])  # 로짓 0 = 균등이라 모델이 곧 기준선이다
+    single = [{"question_id": "q_count", "kind": "single", "answer": "c1"}]
+    outputs = {"logits": [{"q_count": torch.zeros(3, dtype=torch.float64)}], "candidates": [{"q_count": ["c0", "c1", "c2"]}]}
+    entries = question_losses(outputs, {"labels": [single]})[0]
+    nonrobot = question_records(entries, {"q_count": float(entries["q_count"]["loss"])}, single, {"q_count": ["c0", "c1", "c2"]}, coefficient=0.4, domain="non_robot", question_types={"q_count": "choice"})
+    assert nonrobot[0]["key"] == "non_robot/choice" and nonrobot[0]["baseline"] == pytest.approx(math.log(3))
+
+
+def test_per_question_logging_leaves_training_bit_identical(tmp_path, monkeypatch):
+    """기록은 학습을 바꾸지 않는다: 질문별 기록과 탐침을 끈 run과 켠 run의 step 손실·타입별 손실·gradient norm·최종 가중치가 비트 단위로 같다."""
+    import robo_jev.train as train_module
+
+    def run(tag: str) -> tuple[list[dict], dict[str, torch.Tensor]]:
+        with Trainer(tiny_config(tmp_path, max_steps=3, run_id=f"bits-{tag}")) as trainer:
+            steps = [trainer.run_step() for _ in range(3)]
+            return steps, snapshot(trainer.model)
+
+    logged, weights = run("on")
+    assert logged[0]["loss_by_question"] and logged[0]["probes"]["q_gripper"]
+    monkeypatch.setattr(train_module, "question_records", lambda *args, **kwargs: [])
+    monkeypatch.setattr(train_module, "_probe_tick", lambda *args, **kwargs: None)
+    silent, silent_weights = run("off")
+    assert silent[0]["loss_by_question"] == {} and silent[0]["probes"] == {}
+    for a, b in zip(logged, silent):
+        assert a["loss"] == b["loss"] and a["loss_by_type"] == b["loss_by_type"] and a["grad_norm"] == b["grad_norm"]
+        assert a["loss_by_domain"] == b["loss_by_domain"]
+    for name in weights:
+        assert torch.equal(weights[name], silent_weights[name]), name
+
+
+def test_the_training_probe_counts_gripper_ticks_by_stratum_and_stop_ticks_by_answer(tmp_path):
+    """탐침은 손실에 들어간 틱만 센다: q_gripper 층(initiate·settled·open·window…)별 수와 argmax 정답·`closed` 수, q_stop 참/거짓 틱별
+    수와 argmax `true` 수 — 층의 정의는 라벨과 실행된 그리퍼(`state.exec.gripper`)다."""
+    with Trainer(tiny_config(tmp_path, max_steps=1)) as trainer:
+        metrics = trainer.run_step()
+        (episode,) = _drawn_items(trainer, metrics)["stream"]
+        plan = trainer._plan(episode)
+    ticks = [(tick, label) for index, tick in enumerate(episode.record["ticks"]) if plan.valid[index] and plan.weights[index] > 0
+             for label in tick.get("labels", []) if _contributing(label)]  # fmt: skip
+    expected: dict[str, int] = {}
+    for tick, label in ticks:
+        if label["question_id"] == "q_gripper":
+            name = gripper_stratum(tick, label)
+            expected[name] = expected.get(name, 0) + 1
+    probes = metrics["probes"]
+    assert {name: block["n"] for name, block in probes["q_gripper"].items()} == expected
+    for name, block in probes["q_gripper"].items():
+        assert 0 <= block["predicted_closed"] <= block["n"] and block["closed_rate"] == pytest.approx(block["predicted_closed"] / block["n"])
+        if name in ("initiate", "settled", "open"):
+            assert 0 <= block["correct"] <= block["n"] and block["accuracy"] == pytest.approx(block["correct"] / block["n"])
+    stops = [label for _, label in ticks if label["question_id"] == "q_stop"]
+    truth = {"true": sum(1 for label in stops if label["answer"] is True), "false": sum(1 for label in stops if label["answer"] is False)}
+    assert {name: block["n"] for name, block in probes["q_stop"].items()} == {name: n for name, n in truth.items() if n}
+    # 층의 정의: 한 값 closed + 실행 open = initiate, + 실행 closed = settled, 두 값 + 실행 closed = window_closed
+    tick = {"request": {"state": {"exec": {"gripper": "open"}}}}
+    assert gripper_stratum(tick, {"kind": "valid_set", "candidate_ids": ["closed"]}) == "initiate"
+    assert gripper_stratum({"request": {"state": {"exec": {"gripper": "closed"}}}}, {"kind": "valid_set", "candidate_ids": ["closed"]}) == "settled"
+    assert gripper_stratum(tick, {"kind": "valid_set", "candidate_ids": ["open"]}) == "open"
+    assert gripper_stratum({"request": {"state": {"exec": {"gripper": "closed"}}}}, {"kind": "valid_set", "candidate_ids": ["open", "closed"]}) == "window_closed"
+
+
+def test_metrics_json_is_rewritten_after_every_step(tmp_path):
+    """`metrics.json`은 step마다 다시 쓴다 — 도중에 죽어도 그때까지의 질문별 기록이 남는다(학습 중 확인도 이것을 읽는다)."""
+    seen: list[int] = []
+
+    def hook(trainer: Trainer, metrics: dict) -> None:
+        path = trainer.run_dir / "metrics.json"
+        if metrics["step"] > 1:
+            written = json.loads(path.read_text(encoding="utf-8"))
+            seen.append(len(written["steps"]))
+            assert written["steps"][-1]["step"] == metrics["step"] - 1 and "loss_by_question" in written["steps"][-1]
+
+    with Trainer(tiny_config(tmp_path, max_steps=3, run_id="every-step")) as trainer:
+        trainer.step_hook = hook
+        trainer.run()
+    assert seen == [1, 2]
+    final = json.loads((tmp_path / "runs" / "every-step" / "metrics.json").read_text(encoding="utf-8"))
+    assert [step["step"] for step in final["steps"]] == [1, 2, 3] and final["status"] == "completed"
+    assert not (tmp_path / "runs" / "every-step" / "metrics.json.tmp").exists()
+
+
+def test_the_head_fit_monitor_stops_a_run_whose_head_does_not_beat_its_baseline(tmp_path):
+    """감시 step에서 창의 평균 가중 손실 ≥ ratio × 평균 기준선이면 멈춘다: status `stopped_head_not_fitting`, 그 step까지의 지표와
+    checkpoint가 남고 요약에 판정(창·평균·문턱)이 적힌다. (ratio를 아주 작게 둬 어떤 head도 '맞지 않음'이 되게 한다. 질문은 기준선이
+    언제나 양수인 q_main(균등 head)이다 — D0의 앞 20틱은 그리퍼 라벨이 전부 `open`이라 q_gripper의 에피소드 주변분포 기준선이 0이다.)"""
+    monitor = {"question": "q_main", "step": 2, "window": 2, "ratio": 1e-9}
+    with Trainer(tiny_config(tmp_path, max_steps=4, run_id="monitor-stop", head_fit_monitor=monitor)) as trainer:
+        result = trainer.run()
+    assert result["status"] == HEAD_FIT_STOPPED and result["step"] == 2
+    run_dir = tmp_path / "runs" / "monitor-stop"
+    assert int(load_checkpoint(run_dir / "checkpoint.pt")["step"]) == 2
+    written = json.loads((run_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert written["status"] == HEAD_FIT_STOPPED and [step["step"] for step in written["steps"]] == [1, 2]
+    verdict = written["summary"]["head_fit_monitor"]
+    losses = [step["loss_by_question"]["q_main"]["loss"] for step in written["steps"]]
+    baselines = [step["loss_by_question"]["q_main"]["baseline"] for step in written["steps"]]
+    assert verdict["verdict"] == "not_fitting" and verdict["window"] == [1, 2] and verdict["steps_used"] == 2
+    assert verdict["loss_mean"] == pytest.approx(sum(losses) / 2) and verdict["baseline_mean"] == pytest.approx(sum(baselines) / 2)
+    assert verdict["threshold"] == pytest.approx(1e-9 * verdict["baseline_mean"])
+
+
+def test_the_head_fit_monitor_lets_a_fitting_head_train_to_the_end(tmp_path):
+    """평균 가중 손실이 문턱 아래면(ratio를 크게) 멈추지 않고 끝까지 돈다 — 요약에 `fits`와 같은 창의 평균이 남는다."""
+    monitor = {"question": "q_main", "step": 2, "window": 1, "ratio": 1e9}
+    with Trainer(tiny_config(tmp_path, max_steps=3, run_id="monitor-pass", head_fit_monitor=monitor)) as trainer:
+        result = trainer.run()
+    assert result["status"] == "completed" and result["step"] == 3
+    verdict = result["metrics"]["summary"]["head_fit_monitor"]
+    assert verdict["verdict"] == "fits" and verdict["window"] == [2, 2] and verdict["baseline_mean"] > 0
+    assert verdict["loss_mean"] == pytest.approx(result["metrics"]["steps"][1]["loss_by_question"]["q_main"]["loss"])
+
+
+def test_the_head_fit_monitor_reads_no_data_as_not_fitting_and_is_a_validated_stopping_rule(tmp_path):
+    """창의 step 가운데 그 질문의 기록이 없는 step이 있으면 `no_data`(맞는다는 증거가 없다 → 멈춘다). 설정은 네 키만 받고
+    재개에서 자유로운 키다(발동 전에는 계산을 바꾸지 않는 중단 규칙)."""
+    history = [{"step": 1, "loss_by_question": {"q_gripper": {"loss": 0.1, "baseline": 0.5}}}, {"step": 2, "loss_by_question": {}}]
+    monitor = {"question": "q_gripper", "step": 2, "window": 2, "ratio": 0.95}
+    assert head_fit_monitor_result(history, monitor)["verdict"] == "no_data"
+    assert head_fit_monitor_result(history[:1], monitor) is None  # 기록이 아직 그 step에 닿지 않았다
+    assert head_fit_monitor_result(history, None) is None
+    full = [{"step": 1, "loss_by_question": {"q_gripper": {"loss": 0.48, "baseline": 0.5}}}, {"step": 2, "loss_by_question": {"q_gripper": {"loss": 0.46, "baseline": 0.5}}}]
+    assert head_fit_monitor_result(full, monitor)["verdict"] == "fits"  # 0.47 < 0.95 × 0.5
+    edge = [{"step": 1, "loss_by_question": {"q_gripper": {"loss": 0.475, "baseline": 0.5}}}, {"step": 2, "loss_by_question": {"q_gripper": {"loss": 0.475, "baseline": 0.5}}}]
+    assert head_fit_monitor_result(edge, monitor)["verdict"] == "not_fitting"  # 경계 ≥ 는 멈춘다
+    assert "head_fit_monitor" in RESUME_FREE_KEYS
+    assert resolve_config(tiny_config(tmp_path, head_fit_monitor={**monitor, "step": 2}))["head_fit_monitor"] == {**monitor, "ratio": 0.95}
+    for bad in ({**monitor, "extra": 1}, {**monitor, "step": 3}, {**monitor, "window": 0}, {**monitor, "ratio": 0}, {**monitor, "question": ""}, "q_gripper"):
+        with pytest.raises(ValueError, match="head_fit_monitor"):
+            resolve_config(tiny_config(tmp_path, head_fit_monitor=bad))
+
+
+def test_a_zero_baseline_step_inside_the_monitor_window_counts_as_zero_in_the_baseline_mean():
+    """R8 seed 18의 멈춤을 가른 동작을 못 박는다 (리뷰 1 M-7). 그리퍼 라벨이 전부 `open`인 에피소드의 step은 에피소드 주변분포가
+    π(open) = 1이라 기준선이 **0**이다(한 값 `open` 라벨의 상수 head 손실 −log 1; 표의 `ratio`는 None) — 모델은 그래도 손실을 치른다.
+    감시는 그 step을 창에서 **빼지 않고**(`no_data`도 아니다) 가중 손실은 손실 평균에, 0은 기준선 평균에 그대로 넣는다: 판정 통계는
+    창 평균의 비 = Σ손실 / Σ기준선이라 그런 step은 분자에만 더해져 언제나 '맞지 않음' 쪽으로 민다. 창 전체가 0이면 문턱도 0이라 멈춘다."""
+    types = {qid: spec["type"] for qid, spec in QUESTION_SET_V0.items()}
+    gripper = ["open", "closed"]
+    rows = []
+    for coefficient in (0.2, 0.1):  # 한 에피소드(step)의 두 틱 — 둘 다 한 값 `open`
+        labels = [{"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ["open"]}]
+        outputs = {"logits": [{"q_gripper": torch.zeros(2, dtype=torch.float64)}], "candidates": [{"q_gripper": gripper}]}
+        entries = question_losses(outputs, {"labels": [labels]})[0]
+        values = {qid: float(entry["loss"]) for qid, entry in entries.items()}
+        rows.extend(question_records(entries, values, labels, {"q_gripper": gripper}, coefficient=coefficient, domain="robot", question_types=types))
+    all_open = question_table(rows)["q_gripper"]
+    assert all_open["prior"] == {"open": 1.0} and all_open["baseline"] == 0.0 and all_open["ratio"] is None
+    assert all_open["loss"] == pytest.approx(math.log(2))  # 로짓 0 → P(open) ½
+
+    def step(number: int, loss: float, baseline: float) -> dict:
+        return {"step": number, "loss_by_question": {"q_gripper": {"loss": loss, "baseline": baseline}}}
+
+    monitor = {"question": "q_gripper", "step": 4, "window": 4, "ratio": 0.70}
+    fitting = [(0.30, 0.50), (0.30, 0.50), (0.30, 0.50)]  # 세 step만이면 0.9 / 1.5 = 0.60 < 0.70
+    history = [step(1, *fitting[0]), step(2, *fitting[1]), step(3, all_open["loss"], all_open["baseline"]), step(4, *fitting[2])]
+    verdict = head_fit_monitor_result(history, monitor)
+    assert verdict["steps_used"] == 4 and verdict["window"] == [1, 4]  # 기준선 0인 step도 창의 한 step이다
+    assert verdict["baseline_mean"] == pytest.approx(1.5 / 4)  # 0이 평균에 들어간다 (빠지면 0.5)
+    assert verdict["loss_mean"] == pytest.approx((0.9 + math.log(2)) / 4)
+    assert verdict["ratio_to_baseline"] == pytest.approx((0.9 + math.log(2)) / 1.5)  # = Σ손실 / Σ기준선
+    assert sum(loss for loss, _ in fitting) / sum(base for _, base in fitting) < monitor["ratio"]
+    assert verdict["verdict"] == "not_fitting"  # 그 한 step이 판정을 '맞음'에서 '맞지 않음'으로 바꿨다
+    # 기준선 0인 step의 손실이 작아도 분자에 더해진다 — 0이면 판정 통계가 세 step의 값과 같다
+    zero_loss = head_fit_monitor_result([step(1, *fitting[0]), step(2, *fitting[1]), step(3, 0.0, 0.0), step(4, *fitting[2])], monitor)
+    assert zero_loss["ratio_to_baseline"] == pytest.approx(0.60) and zero_loss["verdict"] == "fits"
+    # 창 전체가 기준선 0: 비는 정의되지 않고(None) 문턱이 0이라 멈춘다
+    empty = head_fit_monitor_result([step(n, 0.1, 0.0) for n in (1, 2, 3, 4)], monitor)
+    assert empty["baseline_mean"] == 0.0 and empty["ratio_to_baseline"] is None and empty["threshold"] == 0.0
+    assert empty["verdict"] == "not_fitting"

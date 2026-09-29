@@ -85,6 +85,26 @@ def _require_host_available(required_bytes: int, *, what: str) -> dict[str, int]
     return {"available_bytes": available, "free_bytes": fields.get("MemFree"), "total_bytes": fields.get("MemTotal")}
 #: RSS를 적는 step (docs/06 Task 5 선결 조건 1의 확인 — sampler 적재가 D1에서 몇 GiB인가).
 RSS_STEPS = (1, 10)
+#: step 로그 한 줄에 앞세우는 질문 (Task R8 A1: 긴 run의 부가 head를 로그로 본다).
+LOG_QUESTIONS = ("q_gripper", "q_stop", "q_main")
+
+
+def step_line(metrics: dict[str, Any]) -> str:
+    """학습 로그의 step 한 줄 — step 손실, 질문별 가중 손실/기준선(q_gripper·q_stop·q_main, :func:`robo_jev.train.question_table`),
+    학습 배치의 그리퍼 탐침(initiate·settled·open 정답/수), step 초 (Task R8 A1 — 25분마다의 확인이 이 줄을 읽는다)."""
+    table = metrics.get("loss_by_question") or {}
+    parts = [f"[train] step {metrics['step']} loss {float(metrics['loss']):.4f}"]
+    for key in LOG_QUESTIONS:
+        entry = table.get(key) or {}
+        if entry.get("loss") is not None and entry.get("baseline") is not None:
+            parts.append(f"{key} {entry['loss']:.4f}/{entry['baseline']:.4f}")
+    gripper = (metrics.get("probes") or {}).get("q_gripper") or {}
+    strata = [f"{name} {gripper[name]['correct']}/{gripper[name]['n']}" for name in ("initiate", "settled", "open") if name in gripper]
+    if strata:
+        parts.append("grip " + " ".join(strata))
+    if metrics.get("seconds") is not None:
+        parts.append(f"{float(metrics['seconds']):.1f}s")
+    return " · ".join(parts)
 
 
 def _tokenizer_id(name: str | None = None) -> str:
@@ -219,12 +239,14 @@ def run_training(
         def hook(_: Any, metrics: dict[str, Any]) -> None:
             if metrics["step"] in RSS_STEPS:
                 per_step.append({"step": metrics["step"], "rss_gib": _rss_gib(), "gpu_peak_allocated_bytes": int(torch.cuda.max_memory_allocated())})
+            print(step_line(metrics), file=log_stream, flush=True)
 
         trainer.step_hook = hook
         result = trainer.run()
         tokenizer = trainer.tokenizer
         curve = [
-            {"step": m["step"], "loss": m["loss"], "loss_by_domain": m["loss_by_domain"], "loss_by_type": m["loss_by_type"], "grad_norm": m["grad_norm"], "lr": m["lr"], "tokens": m["tokens"]["total"], "seconds": m["seconds"]}
+            {"step": m["step"], "loss": m["loss"], "loss_by_domain": m["loss_by_domain"], "loss_by_type": m["loss_by_type"], "grad_norm": m["grad_norm"], "lr": m["lr"], "tokens": m["tokens"]["total"], "seconds": m["seconds"],
+             "loss_by_question": m.get("loss_by_question"), "probes": m.get("probes")}
             for m in result["metrics"]["steps"]
         ]
         memory = _memory()
@@ -247,8 +269,10 @@ def run_training(
             "rss_gib": {"before_load": rss_before_load, "after_load": rss_after_load, "per_step": per_step, "end": _rss_gib()},
             "curve": curve,
             "loss_first_last": [curve[0]["loss"], curve[-1]["loss"]] if curve else None,
+            # head 적합 감시의 판정 (Task R8 Stage B; 감시가 없으면 None) — 멈췄으면 status가 `stopped_head_not_fitting`이다
+            "head_fit_monitor": (result["metrics"].get("summary") or {}).get("head_fit_monitor"),
         }
-        if eval_after:
+        if eval_after and result["status"] != "stopped_head_not_fitting":  # 감시가 멈춘 run은 평가하지 않는다 (Task R8 Stage B)
             trainer.model.eval()
             out["evaluation"] = evaluate_judge(trainer.model, tokenizer, eval_config=eval_config)
             out["rss_gib"]["after_eval"] = _rss_gib()

@@ -291,3 +291,49 @@ def test_the_r7_training_config_changes_only_the_mixture_the_steps_and_the_non_r
     assert resolved7["splits"] == ["train"]
     # 기대 draw (로봇 단위 = step마다 하나): expert 0.6 × 304 = 182.4 ≈ R5의 182, DAgger 0.4 × 304 = 121.6 ≈ R6의 122
     assert round(0.6 * resolved7["max_steps"]) == 182 and round(0.4 * resolved7["max_steps"]) == 122
+
+
+def test_the_step_log_line_shows_the_per_question_loss_against_its_baseline_and_the_gripper_probe():
+    """Task R8 A1: 긴 학습 유닛은 25분에 한 번 로그만 본다 — step 한 줄에 q_gripper·q_stop·q_main의 가중 손실/기준선과 학습 배치의 그리퍼
+    탐침(initiate·settled·open 정답/수)이 있어야 한다. 기록이 없는 질문은 줄에서 빠진다."""
+    module = script()
+    metrics = {
+        "step": 7, "loss": 0.5, "seconds": 61.25,
+        "loss_by_question": {"q_gripper": {"loss": 0.2, "baseline": 0.6}, "q_main": {"loss": 0.05, "baseline": 1.9}, "q_stop": {"loss": None, "baseline": 0.1}},
+        "probes": {"q_gripper": {"initiate": {"n": 4, "correct": 1}, "settled": {"n": 30, "correct": 29}, "window": {"n": 2, "predicted_closed": 1}}},
+    }  # fmt: skip
+    line = module.step_line(metrics)
+    assert line == "[train] step 7 loss 0.5000 · q_gripper 0.2000/0.6000 · q_main 0.0500/1.9000 · grip initiate 1/4 settled 29/30 · 61.2s"
+    assert module.step_line({"step": 1, "loss": 2.6}) == "[train] step 1 loss 2.6000"
+
+
+def test_the_r8_training_config_is_r5s_recipe_with_r7s_data_list_and_the_registered_head_fit_monitor():
+    """Task R8 Stage B: `qwen35-2b-r8.yaml` = **R5 조리법 그대로**(혼합 비율 기본값 0.7/0.2/0.1, `max_steps` 233, 같은 일정·lr·구간·tick
+    weights·후보 치환) + R7의 데이터 목록(g2 · DAgger-0 · DAgger-1 · done 게이트 수집 · 비로봇 분할별 판) + 사전 등록한 head 적합 감시
+    (q_gripper, step 150, 창 20 = step 131–150, 비율 0.70 — 브리프의 0.95를 A3 뒤에 바꿨다). R5의 해석된 설정과 다른 키는 데이터 목록·이름·저장 지점·감시뿐이고, R7과 다른
+    키는 혼합 비율·`max_steps`·이름·감시뿐이다. seed 18과 19가 후보 치환 seed도 정한다."""
+    from pathlib import Path
+
+    load_train_config = script().load_train_config
+    r8 = {seed: resolve_config(dict(load_train_config(REPO / "configs/train/qwen35-2b-r8.yaml", mode="t1", steps=233, seed=seed, run_id="test",
+                                                      overrides={"checkpoint_every": 50, "checkpoint_keep_steps": []}))) for seed in (18, 19)}  # fmt: skip
+    r5 = resolve_config(dict(load_train_config(REPO / "configs/train/qwen35-2b-r5.yaml", mode="t1", steps=233, seed=18, run_id="test",
+                                               overrides={"checkpoint_every": 50, "checkpoint_keep_steps": [40]})))  # fmt: skip
+    r7 = resolve_config(dict(load_train_config(REPO / "configs/train/qwen35-2b-r7.yaml", mode="t1", steps=304, seed=18, run_id="test",
+                                               overrides={"checkpoint_every": 50, "checkpoint_keep_steps": []})))  # fmt: skip
+    resolved = r8[18]
+    assert sorted(key for key in set(resolved) | set(r5) if resolved.get(key) != r5.get(key)) == ["checkpoint_keep_steps", "dataset_manifests", "head_fit_monitor", "run_name"]
+    assert resolved["sampler"] == r5["sampler"] and resolved["sampler"]["material_shares"] == {"existing": 0.7, "error_family": 0.2, "new_semantic_family": 0.1}
+    assert sorted(key for key in set(resolved) | set(r7) if resolved.get(key) != r7.get(key)) == ["head_fit_monitor", "max_steps", "run_name", "sampler"]
+    assert sorted(key for key in resolved["sampler"] if resolved["sampler"][key] != r7["sampler"][key]) == ["material_shares"]
+    assert resolved["dataset_manifests"] == r7["dataset_manifests"]
+    manifests = resolved["dataset_manifests"]
+    assert [Path(entry["path"]).parent.name for entry in manifests] == ["r1-rollout-labels-g2", "dagger-0", "dagger-1", "dagger-1-donegate", "single-by-split"]
+    assert [entry.get("material") for entry in manifests] == [None, "error_family", "error_family", "error_family", None]
+    assert resolved["head_fit_monitor"] == {"question": "q_gripper", "step": 150, "window": 20, "ratio": 0.70}  # 브리프 0.95 → A3 뒤 0.70
+    assert resolved["max_steps"] == 233 and resolved["checkpoint_every"] == 50 and resolved["checkpoint_keep_steps"] == [] and resolved["splits"] == ["train"]
+    assert r8[18]["seed"] == 18 and r8[18]["sampler"]["permute_candidates_seed"] == 18
+    assert r8[19]["seed"] == 19 and r8[19]["sampler"]["permute_candidates_seed"] == 19
+    assert sorted(key for key in r8[18] if r8[18][key] != r8[19][key]) == ["sampler", "seed"]
+    # 기대 draw: 새 의미 계열이 비어 재정규화 → expert 0.7/0.9, DAgger 0.2/0.9 (R5와 같은 비율); DAgger 묶음 600편 중 사이클 1이 400편
+    assert round(0.7 / 0.9 * 233) == 181 and round(0.2 / 0.9 * 233) == 52 and round(0.2 / 0.9 * 233 * 400 / 600) == 35
