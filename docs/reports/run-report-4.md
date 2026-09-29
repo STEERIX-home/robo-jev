@@ -112,6 +112,16 @@ readers of episode directories follow the same rule (`robo_jev.data.sealed`). An
 loader: its non-robot manifest is refused, and on the re-layout the dataset identity and the sampler's record sources differ.
 The audit of every other path is in `.superpowers/sdd/task-r7-report.md` A3.
 
+## 3. Resume verification
+
+Nothing to resume: the run completed in one process (`summary.rescheduled` None, status `completed`, step 304) with periodic
+atomic saves at steps 50 / 100 / 150 / 200 / 250 / 300 and the final one (08:56:40, 09:42:57, 10:31:46, 11:25:53, 12:15:05,
+13:05:28, 13:10:57; `artifacts/scratch/r7/t1-polls.log`). The disk gate held: 67.86 GB free at launch (≥ 65 GB), 39 GiB between
+saves, 18 GiB once in the middle of the step-200 save (the computed peak is ≈ 15 GB). **An old run cannot be resumed with the new
+loader** (A1): its non-robot manifest (`r1/single`, one mixed file) is refused before any file is opened, and on the
+split-by-split layout the dataset identity and the sampler's record sources differ (`records.jsonl` → `records.train.jsonl`);
+a test pins the refusal. The license for the T1 resume path is unchanged (R2 A1, R3a A2, R5's first long walk).
+
 ## 4. Per-question quality (offline — the decision cell is `ood_dev`, 26 episodes / 3,162 ticks, hash `6a3b69131243`; the `dev` cell `9b484441b23b`)
 
 | checkpoint | primary stratum (235) | **instruction-shuffle margin** (paired 95 %) | whole `q_main` | `q_gripper` whole (parent) | `q_gripper` initiate (43): `closed` | `q_gripper` settled (1,015): accuracy | `q_gripper` single-`open` (1,860): accuracy | `q_stop` onsets caught / 10 |
@@ -167,3 +177,40 @@ knife-edge on 100 seeds is settled on 200), R6 − R5 strict −0.050 [−0.125,
 
 Latency (non-first ticks): R7 p50 / p95 / p99 46.4–46.9 / 57.4–58.9 / 82.0–84.7 ms, **0 of 42,786 over 100 ms**; first ticks
 (prefix build) p50 ≈ 93 ms, max 291 ms, 26 of 300 over 100 ms — overall 0.06 %; the gate passes.
+
+## 6. Measured cost and the G1 recommendation
+
+| item | GPU-h | source |
+| --- | ---: | --- |
+| R2 + R3a + R4 (run report 1) | 28.56 | `docs/reports/run-report-1.md` §6 |
+| R5 (run report 2) | 5.29 | `docs/reports/run-report-2.md` §6 |
+| R6 (run report 3) | 5.92 | `docs/reports/run-report-3.md` §6 |
+| **R7** (unit wall clocks: B3 r5 · r6 on the new seeds 26 m 27 s · training 5 h 06 m 04 s · D + C2 1 h 22 m 37 s · full test suite 8 m 13 s = 25,401 s) | **7.06** | `journalctl --user`, `artifacts/scratch/r7/*.log` |
+| total on the DGX Spark GB10 | **≈ 46.8** | — |
+
+CPU this round: minutes (the three baseline policies 3.5–5 min each in parallel, reports and strata minutes). Cloud spend: 0.
+Disk: `/` had 68.45 GB free at the start and 40.83 GB at the end (one 26.35 GB checkpoint, ≈ 1.2 GB of loop records, the
+43 MB re-layout); nothing outside this task's own outputs was deleted.
+
+**G1, decided by the rule registered before the numbers (§0; applied by `scripts/closed_loop.py verdict`,
+`artifacts/reports/r7-verdict.json`).** On ood_dev 200: (a) `rule − R7` strict **+0.725 [+0.665, +0.785]** — fails (discordant
+seeds 145 vs 0; the lower bound is above zero under all 200 alternative bootstrap RNG seeds); (b) `R7 − R5` false-done rate
+**−0.135 [−0.185, −0.085]** — holds, but only because R7 almost never reaches a done state; (c) `R7 − R5` duplicate gripper
+transitions **+4.165 [+2.640, +5.795]** and `q_stop` catch rate **−0.583 [−0.750, −0.379]** — both fail. **Under the registered
+procedure the cloud stays closed** — this time not on a knife-edge. The dev_new2 values fail all four conditions.
+
+**Cause call, as registered (`R7 − R6` on ood_dev 200).** Duplicates per episode +2.290 [+0.545, +4.110] (against R7 — a new
+regression), gripper-streak episodes −0.030 [−0.080, +0.020] and `q_stop` −0.033 [−0.098, 0.000] (both contain zero): none moves
+toward R7, so the registered sentence applies — **"노출 비율로 설명되지 않음 — DAgger 부가 라벨이 다음 표적"** (not explained by
+the exposure ratio — the DAgger auxiliary labels are the next target).
+
+**What the call cannot carry.** The realized contrast was +84 expert / −13 DAgger draws, not the designed +71 / 0, and R7 did
+not repeat R6's regression at another size — its gripper head collapsed to `open` (offline 3.1 % `closed`, 4.3 % right on
+ticks where the gripper is already closed on the object; R5 99.6 %), which neither hypothesis predicts: R7 drew fewer DAgger
+episodes than R6 and more expert episodes than R5. With instruction reading unchanged (+0.370) and the data pipeline verified
+(R6's 233 steps replayed identically with the new loader), the round's finding is that **the auxiliary heads are unstable across
+recipe changes at one seed** (gripper: right → hasty → never closes; `q_stop` 5 → 0 → 0 of 10 offline; R3a: `q_stop` 1 / 8 / 0
+across three seeds). **Recommendation for the next Spark round:** make that instability measurable before attributing it —
+seed repeats of one recipe, per-question training losses and a cheap in-training probe on the `q_gripper` settled / initiate
+strata and the `q_stop` onsets — and only then the DAgger-auxiliary-label question the registered call names. One seed: R3a's
+seed spread on the primary instruction margin (+0.111 … +0.247) is the noise a single run carries on the *stable* head.
