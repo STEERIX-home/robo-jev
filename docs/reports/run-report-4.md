@@ -84,7 +84,7 @@ recipe numbers differ, and a test pins that it is exactly these two** (plus the 
 (`metrics.json` `summary.sampler.units` and `steps[].units`): **expert 195 (0.84 epoch of 233) and DAgger 109** (dagger-0 42,
 dagger-1 33, done-gate 34) — the seeded material coin came out 1.5 SD from its mean, so against R6 this run has **+84 expert
 draws and −13 DAgger draws** rather than "+71 and the same". Of the 43 episodes whose model raw `q_done` rose on a
-reference-False tick, **10** were drawn (3 + 7; R6 9). Non-robot 1,818 bundles, tokens 14.99 M (R6 11.55 M: 71 more steps).
+reference-False tick, **10** were drawn (3 + 7; R6 9). Non-robot 1,818 records in 304 bundles (one bundle per step), tokens 14.99 M (R6 11.55 M: 71 more steps).
 
 ## 2. Reproducible data
 
@@ -202,7 +202,7 @@ procedure the cloud stays closed** — this time not on a knife-edge. The dev_ne
 **Cause call, as registered (`R7 − R6` on ood_dev 200).** Duplicates per episode +2.290 [+0.545, +4.110] (against R7 — a new
 regression), gripper-streak episodes −0.030 [−0.080, +0.020] and `q_stop` −0.033 [−0.098, 0.000] (both contain zero): none moves
 toward R7, so the registered sentence applies — **"노출 비율로 설명되지 않음 — DAgger 부가 라벨이 다음 표적"** (not explained by
-the exposure ratio — the DAgger auxiliary labels are the next target).
+the exposure ratio — the DAgger auxiliary labels are the next target). **The contrast is also confounded with the schedule:** `max_steps` 304 stretched the cosine schedule, so R7's learning rate was 2.05× R6's at step 161 and 5.55× at step 201 (R6 reached zero at step 233; `metrics.json` `lr`). R7 − R6 therefore mixes the mixture, the realized draws and the schedule; the next round's control must hold `max_steps` fixed when it varies the mixture.
 
 **What the call cannot carry.** The realized contrast was +84 expert / −13 DAgger draws, not the designed +71 / 0, and R7 did
 not repeat R6's regression at another size — its gripper head collapsed to `open` (offline 3.1 % `closed`, 4.3 % right on
