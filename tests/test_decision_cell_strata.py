@@ -709,3 +709,16 @@ def test_the_r7_run_set_reads_r5_and_r6_from_their_stored_reports_and_pairs_r7_a
     assert module.RUN_SETS["r7dev"][module.R7_LABEL] == "r7-dev-2b-t1-fp32-r7.json"
     r6, r5 = list(module.R6_RUNS)[1], list(module.R6_RUNS)[0]
     assert module.RUN_COMPARISONS["r7"] == [(module.R7_LABEL, r6), (module.R7_LABEL, r5)] == module.RUN_COMPARISONS["r7dev"]
+
+
+def test_the_r8_run_set_reads_r5_r6_r7_from_stored_reports_and_pairs_each_seed_with_r5_and_the_seeds_with_each_other():
+    """Task R8 D: R5·R6·R7 줄은 같은 칸(해시 6a3b69131243)에서 잰 저장 보고서를 그대로 읽고, seed 18·19 줄만 새 보고서다. 짝지은 비교는
+    seed마다 r8 − r5(사전 등록의 '또 적는 것')와 두 seed 사이(r8s18 − r8s19, 안정성 판독). 둘째 칸도 같은 모양이다."""
+    module = script()
+    for name, suffix in (("r8", "reeval"), ("r8dev", "dev")):
+        runs = module.RUN_SETS[name]
+        assert runs[module.R8_S18_LABEL] == f"r8-{suffix}-2b-t1-fp32-r8s18.json" and runs[module.R8_S19_LABEL] == f"r8-{suffix}-2b-t1-fp32-r8s19.json"
+        stored = module.R7_RUNS if name == "r8" else module.R7_DEV_RUNS
+        assert {label: report for label, report in runs.items() if label not in (module.R8_S18_LABEL, module.R8_S19_LABEL)} == stored
+        r5 = list(module.R6_RUNS)[0]
+        assert module.RUN_COMPARISONS[name] == [(module.R8_S18_LABEL, r5), (module.R8_S19_LABEL, r5), (module.R8_S18_LABEL, module.R8_S19_LABEL)]

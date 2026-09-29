@@ -137,9 +137,17 @@ R7_LABEL = "R7 (R6 data, shares 0.6/0.4, 304)"
 R7_RUNS = {**R6_RUNS, R7_LABEL: "r7-reeval-2b-t1-fp32-r7.json"}
 #: 둘째 칸(`dev` 42편): R5·R6 줄은 각자의 둘째 칸 보고서(R5의 것에는 `q_done` 예측이 없다).
 R7_DEV_RUNS = {**R6_DEV_RUNS, R7_LABEL: "r7-dev-2b-t1-fp32-r7.json"}
+#: Task R8의 run 둘 — R5 조리법 + DAgger 사이클 1 재료, seed 18·19(`configs/train/qwen35-2b-r8.yaml`). 같은 평가 집합(`r6-decision-cell.yaml`,
+#: 해시 `6a3b69131243…`; 둘째 칸 `9b484441b23b…`) 위에서 R5·R6·R7 줄은 저장된 보고서를 그대로 읽는다(GPU를 다시 쓰지 않는다). seed 18은
+#: head 적합 감시가 step 150에서 멈춘 run이다 — 그 줄은 멈춘 상태(step 150 checkpoint)의 칸이고 판정에 들어가지 않는다. 보고서가 없는 줄은
+#: `missing`에 이유가 남는다.
+R8_S18_LABEL = "R8 seed 18 (R5 recipe + cycle-1 DAgger; stopped by the head-fit monitor at step 150)"
+R8_S19_LABEL = "R8 seed 19 (R5 recipe + cycle-1 DAgger, 233)"
+R8_RUNS = {**R7_RUNS, R8_S18_LABEL: "r8-reeval-2b-t1-fp32-r8s18.json", R8_S19_LABEL: "r8-reeval-2b-t1-fp32-r8s19.json"}
+R8_DEV_RUNS = {**R7_DEV_RUNS, R8_S18_LABEL: "r8-dev-2b-t1-fp32-r8s18.json", R8_S19_LABEL: "r8-dev-2b-t1-fp32-r8s19.json"}
 RUN_SETS = {"p2": STRATA_RUNS, "p3": P3_RUNS, "r1": R1_RUNS, "r2": R2_RUNS, "r2dev": R2_DEV_RUNS,
             "r3a": R3A_RUNS, "r3adev": R3A_DEV_RUNS, "r5": R5_RUNS, "r5dev": R5_DEV_RUNS, "r6": R6_RUNS, "r6dev": R6_DEV_RUNS,
-            "r7": R7_RUNS, "r7dev": R7_DEV_RUNS}
+            "r7": R7_RUNS, "r7dev": R7_DEV_RUNS, "r8": R8_RUNS, "r8dev": R8_DEV_RUNS}
 #: run 묶음마다 **짝지어 비교할** 두 줄 (a, b) — `comparisons["a − b"]`에 편 단위 쌍 구간으로 (Task R6 C2: "R5 +0.298과 짝지은 차";
 #: Task R7 C2: r6 +0.374·r5 +0.298과 짝지은 차).
 _R6_LABEL, _R5_LABEL = "R6 (+ DAgger-1 + done gate, shares 0.5/0.5, 233)", "R5 (labels v2 + DAgger-0, 233)"
@@ -148,6 +156,9 @@ RUN_COMPARISONS = {
     "r6dev": [(_R6_LABEL, _R5_LABEL)],
     "r7": [(R7_LABEL, _R6_LABEL), (R7_LABEL, _R5_LABEL)],
     "r7dev": [(R7_LABEL, _R6_LABEL), (R7_LABEL, _R5_LABEL)],
+    # Task R8: seed마다 r8 − r5(사전 등록의 '또 적는 것'), 그리고 두 seed 사이(안정성 판독)
+    "r8": [(R8_S18_LABEL, _R5_LABEL), (R8_S19_LABEL, _R5_LABEL), (R8_S18_LABEL, R8_S19_LABEL)],
+    "r8dev": [(R8_S18_LABEL, _R5_LABEL), (R8_S19_LABEL, _R5_LABEL), (R8_S18_LABEL, R8_S19_LABEL)],
 }
 
 #: `q_gripper`의 층 (Task R5 B1) — R4 C0 표의 분류 그대로 (`robo_jev.data.gripper_labels.GRIPPER_LABEL_CLASSES`) + 전체.
