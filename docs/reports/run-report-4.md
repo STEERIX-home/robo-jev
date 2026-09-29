@@ -111,3 +111,39 @@ opening any, refuses entries that do not say their split, and cannot load the se
 readers of episode directories follow the same rule (`robo_jev.data.sealed`). An old run cannot be resumed with the new
 loader: its non-robot manifest is refused, and on the re-layout the dataset identity and the sampler's record sources differ.
 The audit of every other path is in `.superpowers/sdd/task-r7-report.md` A3.
+
+## 5. Closed-loop success (R7 D — the fourth time the model moves the robot)
+
+Setup as in run reports 1–3 (the same `ModelPolicy` serving path, `h0.9` / `c0.6` / `ts0.6`, expert reference labels).
+**ood_dev 200** = R4's 26 + R6's 74 + R7's 100 new ood_dev seeds (0 origin groups shared with training; the E1 ruler);
+**dev_new2 100** (R6's new dev seeds; secondary). `artifacts/reports/r7-closed-loop.json` (`--merge
+ood_dev200=ood_dev,ood_dev_new,ood_dev_new2 --seed-pairs r7:r5 r7:r6 rule:r7 r6:r5`); records `artifacts/datasets/r7-closed-loop/`.
+
+| policy | ood_dev 200: `done` / **strict** (false done) | dev_new2 100: `done` / **strict** (false done) | gripper duplicates (ood · dev) | `q_stop` onsets caught (ood · dev) | failures main / aux / geom (ood) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| expert | 0.910 / **182** (0) | 0.900 / **90** (0) | 33 · 15 | 65/65 · 41/41 | 2 / 0 / 16 |
+| rule judge | 0.725 / **145** (0) | 0.670 / **67** (0) | 759 · 491 | 31/43 · 25/30 | 2 / 51 / 2 |
+| mechanical | 0 / 0 | 0 / 0 | — | — | 200 / 0 / 0 |
+| model R5 | 0.810 / **132** (**30**) | 0.790 / **68** (11) | 64 · 27 | 21/36 · 13/31 | 17 / 13 / 8 |
+| model R6 | 0.670 / **122** (**12**) | 0.720 / **69** (3) | 439 · 190 | 3/92 · 0/59 | 28 / 38 / 0 |
+| **model R7 (shares 0.6/0.4, 304 steps)** | **0.015 / 0 (3)** | **0.060 / 0 (6)** | **897 · 388** | **0/113 · 0/101** | 45 / 151 / 1 |
+
+**The R7 checkpoint does not complete the task in the loop**: strict success 0 of 200 and 0 of 100; its nine `done`s are all
+false dones. 244 of its 300 episodes end by the stall watchdog (218 with the arm pinned), because at the grasp point the
+gripper head does not say `closed` — r7's raw P(closed) never exceeds 0.59 on R4's 26 seeds (mean 0.43 on the ticks where the
+reference says "close now", 0.52 on ticks where the gripper is already closed on the object; r6 0.55 / 0.78, r5 0.66 / 0.97),
+and when it wobbles across 0.5 the gripper flickers (897 duplicate transitions on ood_dev 200). The offline cell confirms it
+is the model (§4). The data pipeline was ruled out by replaying R6's training with the new loader and the re-laid-out
+non-robot set — 233 of 233 steps drew the same records with the same token counts (`artifacts/scratch/r7/replay-r6.json`).
+
+Paired by seed (ood_dev 200 / dev_new2): **rule − R7 strict +0.725 [+0.665, +0.785]** / +0.670 [+0.570, +0.760] (discordant 145
+vs 0); **R7 − R5 false-done rate −0.135 [−0.185, −0.085]** / −0.050 [−0.130, +0.030]; R7 − R5 strict −0.660 [−0.725, −0.590];
+R7 − R6 strict −0.610 [−0.675, −0.540]. Per seed, R7 − R5 on ood_dev 200: gripper-streak episodes +0.665 [+0.595, +0.735],
+**duplicate transitions per episode +4.165 [+2.640, +5.795]**, **`q_stop` onsets caught −0.583 [−0.750, −0.379]**, auxiliary
+failures +0.690 [+0.625, +0.760]; R7 − R6: duplicates **+2.290 [+0.545, +4.110]**, gripper-streak episodes −0.030 [−0.080, +0.020]
+(0 inside), `q_stop` −0.033 [−0.098, 0.000] (0 inside). The lower false-done rate is not a repaired `q_done` — r7 rarely holds
+an object long enough to reach a done state. For reference on the larger set: rule − R6 strict **+0.115 [+0.035, +0.195]** (R6's
+knife-edge on 100 seeds is settled on 200), R6 − R5 strict −0.050 [−0.125, +0.025] (0 inside), false done −0.090 [−0.145, −0.035].
+
+Latency (non-first ticks): R7 p50 / p95 / p99 46.4–46.9 / 57.4–58.9 / 82.0–84.7 ms, **0 of 42,786 over 100 ms**; first ticks
+(prefix build) p50 ≈ 93 ms, max 291 ms, 26 of 300 over 100 ms — overall 0.06 %; the gate passes.

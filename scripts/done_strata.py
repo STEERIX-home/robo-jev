@@ -103,7 +103,8 @@ def build_counts(datasets: dict[str, Path]) -> dict[str, Any]:
 
 #: B1의 판정 칸과 그 칸에 대한 두 run의 저장된 예측 (`q_done` 틱별 예측이 있는 보고서).
 CELL_SUITE = REPO / "configs" / "eval" / "r6-decision-cell.yaml"
-CELL_REPORTS = {"R5": REPO / "artifacts" / "reports" / "r6-reeval-2b-t1-fp32-r5.json", "R6": REPO / "artifacts" / "reports" / "r6-reeval-2b-t1-fp32-r6.json"}
+CELL_REPORTS = {"R5": REPO / "artifacts" / "reports" / "r6-reeval-2b-t1-fp32-r5.json", "R6": REPO / "artifacts" / "reports" / "r6-reeval-2b-t1-fp32-r6.json",
+                "R7": REPO / "artifacts" / "reports" / "r7-reeval-2b-t1-fp32-r7.json"}
 #: 모델이 운전한 폐루프 기록 (이름 → 디렉터리). R5의 셋은 B1의 문장이 인용한 것이고, 새 seed의 R5·R6 줄은 같은 자로 나란히 둔다.
 LOOPS = {
     "R5 × ood_dev (R4 26)": DATASETS / "r5-closed-loop" / "r5" / "ood_dev",
@@ -114,6 +115,13 @@ LOOPS = {
     "R6 × ood_dev (R4 26)": DATASETS / "r6-closed-loop" / "r6" / "ood_dev",
     "R6 × ood_dev_new (R6 74)": DATASETS / "r6-closed-loop" / "r6" / "ood_dev_new",
     "R6 × dev_new2 (R6 100)": DATASETS / "r6-closed-loop" / "r6" / "dev_new2",
+    # Task R7: 새 ood_dev 100(ood_dev_new2)의 R5·R6 줄과 R7의 네 조건 — 같은 자로 나란히 (없는 디렉터리는 None으로 적힌다)
+    "R5 × ood_dev_new2 (R7 100)": DATASETS / "r7-closed-loop" / "r5" / "ood_dev_new2",
+    "R6 × ood_dev_new2 (R7 100)": DATASETS / "r7-closed-loop" / "r6" / "ood_dev_new2",
+    "R7 × ood_dev (R4 26)": DATASETS / "r7-closed-loop" / "r7" / "ood_dev",
+    "R7 × ood_dev_new (R6 74)": DATASETS / "r7-closed-loop" / "r7" / "ood_dev_new",
+    "R7 × ood_dev_new2 (R7 100)": DATASETS / "r7-closed-loop" / "r7" / "ood_dev_new2",
+    "R7 × dev_new2 (R6 100)": DATASETS / "r7-closed-loop" / "r7" / "dev_new2",
 }
 #: 놓은 틱과 그 뒤 두 틱 — "놓은 뒤 3틱 안에 `q_done` ≥ 0.5가 들었는가"의 창.
 FOLLOW_TICKS = 3
