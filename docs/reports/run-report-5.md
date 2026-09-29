@@ -81,6 +81,7 @@ settled / initiate / open, `q_stop` onsets, the `q_done` strata. Seed-paired `r8
 
 | run | steps | seed | checkpoint | contract digest | training | head-fit monitor (step 150, q_gripper, steps 131–150) |
 | --- | ---: | ---: | --- | --- | --- | --- |
+| **`r8-t1-fp32-2b-s19`** | **233 — completed** (the monitor let it continue) | 19 | `artifacts/runs/r8-t1-fp32-2b-s19/checkpoint.pt` (model + optimizer) | `93fe26725a4c…` | 4 h 03 m 54 s inside the chain unit `r8-rest` = **4.06 GPU-h** (train 13,884.8 s, 59.59 s/step, load 137.2 s), peak 56.01 GiB, loss 3.092 → 0.182 | weighted loss 0.3065 / baseline 0.5181 = **0.592 < 0.70 → fits** |
 | **`r8-t1-fp32-2b-s18`** | **150 of 233 — stopped by the monitor** (`stopped_head_not_fitting`) | 18 | `artifacts/runs/r8-t1-fp32-2b-s18/checkpoint.pt` (step 150; model + optimizer — a resume unit, not a finished run) | `93fe26725a4c…` | unit wall 8,985 s = **2.50 GPU-h** (train 8,485.4 s, 56.57 s/step, load 137.3 s), peak 56.01 GiB, loss 2.633 → 0.526 | weighted loss 0.3682 / baseline 0.5094 = **0.723 ≥ 0.70 → not fitting**; closed loop skipped; **fails its four cloud conditions** |
 
 Seed 18: **step-1 loss `2.633075326681137` — identical to R5 seed 18**, so the per-question logging did not change training (the
@@ -92,3 +93,12 @@ loss 1.0–1.2 × the constant-prior head's) — R7's collapse on R5's recipe an
 0 of 136 true ticks fired). Beside the rule, not changing it: two window steps were g2 episodes without any `closed` label (baseline
 0); without them the statistic would be 0.674, and the brief's original 0.95 would have passed the run. Curves:
 `artifacts/runs/r8-t1-fp32-2b-s18/metrics.json` (`steps[].loss_by_question`, `steps[].probes`).
+
+Seed 19: realized draws expert **193** (0.83 epoch) and DAgger **40** (dagger-0 13 · dagger-1 17 · done-gate 10) — the seeded
+material coin came out 1.8 SD below the expected 52 DAgger draws. Its gripper head sat at the constant-prior level and said `open`
+almost everywhere until step ≈ 120 (settled 1/642 in steps 101–120) and then fit: window ratios 0.62 (121–140), **0.592** (131–150,
+the monitor), 0.23 · 0.29 · 0.10 · 0.19 afterwards; in its last 23 steps the training batch's settled ticks were 613/613 right and
+the "close now" (initiate) ticks 12/43. `q_stop` fired on 0 of 180 true ticks during training and ended near its constant head
+(ratio 0.95). The run was launched by a chain on HEAD `65d38d5` with uncommitted edits outside `src/` only (`git.dirty: true`;
+`git diff 65d38d5 -- src/` is empty). **Both seeds show the same shape — a flat gripper head for ≈ 100 steps, then a late fit
+whose onset differs by ≈ 20 steps (seed 19 ≈ 120, seed 18 ≈ 142); the step-150 window falls on either side of it (0.592 / 0.723).**
