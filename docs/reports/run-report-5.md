@@ -3,7 +3,9 @@
 The document docs/06 Task 6 defines (:384) for the fifth and sixth trained checkpoints of this project (Task R8). Every number
 is copied from an artifact named next to it. Korean prose lives in `docs/06`, `docs/08` and `HANDOFF.md`; this report is the
 English ledger. Run reports 1–4 stay as they are; this one only adds. **Sections are appended as each stage's numbers land;
-§0 was committed before any Stage C or D number existed.**
+§0 was committed before any Stage C or D number existed.** Fix round 1 after review 1 (2026-09-30) corrected wording and added
+evidence in §1, §2, §4, §5 and §6 (a false superlative, the example episode's tick-0 probability, the two-sided reading of seed 18's
+stop, the stability reading, the training-batch `q_main` comparison); §0 and every registered number are unchanged.
 
 ## 0. Pre-registration (written 2026-09-29 before any Stage C or D number; machine-readable copy `configs/eval/r8-registration.yaml`)
 
@@ -84,24 +86,43 @@ settled / initiate / open, `q_stop` onsets, the `q_done` strata. Seed-paired `r8
 | **`r8-t1-fp32-2b-s19`** | **233 — completed** (the monitor let it continue) | 19 | `artifacts/runs/r8-t1-fp32-2b-s19/checkpoint.pt` (model + optimizer) | `93fe26725a4c…` | 4 h 03 m 54 s inside the chain unit `r8-rest` = **4.06 GPU-h** (train 13,884.8 s, 59.59 s/step, load 137.2 s), peak 56.01 GiB, loss 3.092 → 0.182 | weighted loss 0.3065 / baseline 0.5181 = **0.592 < 0.70 → fits** |
 | **`r8-t1-fp32-2b-s18`** | **150 of 233 — stopped by the monitor** (`stopped_head_not_fitting`) | 18 | `artifacts/runs/r8-t1-fp32-2b-s18/checkpoint.pt` (step 150; model + optimizer — a resume unit, not a finished run) | `93fe26725a4c…` | unit wall 8,985 s = **2.50 GPU-h** (train 8,485.4 s, 56.57 s/step, load 137.3 s), peak 56.01 GiB, loss 2.633 → 0.526 | weighted loss 0.3682 / baseline 0.5094 = **0.723 ≥ 0.70 → not fitting**; closed loop skipped; **fails its four cloud conditions** |
 
-Seed 18: **step-1 loss `2.633075326681137` — identical to R5 seed 18**, so the per-question logging did not change training (the
-draws equal R5's for steps 1–6 and diverge at the first DAgger draw, step 7). Realized draws in its 150 steps: expert 123 (0.53
-epoch), DAgger 27 (dagger-0 9 · dagger-1 9 · done-gate 9). The main-decision head fit early (`q_main` at 0.03–0.04 of its uniform
-baseline from step ≈ 61); the gripper head said `open` on nearly every tick from step ≈ 21 to ≈ 140 (settled 0/621 in steps 81–100;
-loss 1.0–1.2 × the constant-prior head's) — R7's collapse on R5's recipe and seed — and began to fit only at step ≈ 142 (settled
-266/593 in steps 131–150, almost all of it in the last nine steps). `q_stop` stayed above its constant head throughout (ratio 1.3–5.8;
-0 of 136 true ticks fired). Beside the rule, not changing it: two window steps were g2 episodes without any `closed` label (baseline
-0); without them the statistic would be 0.674, and the brief's original 0.95 would have passed the run. Curves:
-`artifacts/runs/r8-t1-fp32-2b-s18/metrics.json` (`steps[].loss_by_question`, `steps[].probes`).
+Seed 18: **step-1 loss `2.633075326681137` — identical to R5 seed 18.** That checks the forward pass and the draws only (the draws
+equal R5's for steps 1–6 and diverge at the first DAgger draw, step 7): T1 training on this GPU is not bit-deterministic — the
+step-1 gradient norms of R5 / R6 / R7 / R8 differ (313.98349 / 313.96979 / 313.96680 / 313.96954) and steps 2–6 differ from R5's
+with identical draws (step 2: 2.705630 vs 2.709165). That the per-question logging leaves training unchanged rests on the CPU test
+that runs the trainer with the logging on and off (bit-identical losses, per-type losses, gradient norms and final weights).
+Realized draws in its 150 steps: expert 123 (0.53 epoch), DAgger 27 (dagger-0 9 · dagger-1 9 · done-gate 9). The main-decision head
+fit early (`q_main` at 0.03–0.04 of its uniform baseline from step ≈ 61; 0.25 / 0.30 in steps 21–40 / 41–60); the gripper head said
+`open` on nearly every tick from step ≈ 21 to ≈ 140 (settled 0/621 in steps 81–100; loss 1.0–1.2 × the constant-prior head's;
+short-lived fits at steps 118–122 and 134 collapsed again) — R7's collapse on R5's recipe and seed — and began to fit durably only at step 142
+(settled 266/593 in steps 131–150, 246 of them in steps 142–150). `q_stop` stayed above its constant head throughout (ratio
+1.3–5.8; 0 of 136 true ticks fired). Curves: `artifacts/runs/r8-t1-fp32-2b-s18/metrics.json` (`steps[].loss_by_question`,
+`steps[].probes`).
+
+**Seed 18's stop is by the registered rule, and it is a boundary call.** Two window steps (135, 136) were g2 episodes whose gripper
+labels are all `open`, so their per-episode baseline is 0 (the registered statistic, a ratio of window means, adds their losses to
+the numerator and nothing to the denominator); without them the statistic would be 0.674. But the calibration value the constant
+was set against has the same property: r7's 0.735 includes one all-`open` episode of its ten (`ep-E2-420185`), 0.676 without it.
+Under every consistent alternative seed 18 stays within 0.014 of r7's calibration value — zero-baseline steps excluded 0.674 vs
+0.676, a prior pooled over the window 0.652 vs 0.665, a run-wide prior 0.652 vs 0.665 — while under a mean of per-step ratios it is
+seed 19 (0.725), not seed 18 (0.683), that sits at r7's level (0.723). Behaviourally seed 18 at step 150 is not r7-like: its settled
+ticks are right 0.886 offline against r7's 0.043 (§4), and the window mixes steps from before and after its transition. The
+per-episode baseline is a weak instrument for this decision (it is the best constant for its own episode, so it leans toward
+stopping; zero-baseline steps were 5 of seed 18's 150 steps and 10 of seed 19's 233). The brief's original 0.95 would have let the run
+continue.
 
 Seed 19: realized draws expert **193** (0.83 epoch) and DAgger **40** (dagger-0 13 · dagger-1 17 · done-gate 10) — the seeded
 material coin came out 1.8 SD below the expected 52 DAgger draws. Its gripper head sat at the constant-prior level and said `open`
-almost everywhere until step ≈ 120 (settled 1/642 in steps 101–120) and then fit: window ratios 0.62 (121–140), **0.592** (131–150,
-the monitor), 0.23 · 0.29 · 0.10 · 0.19 afterwards; in its last 23 steps the training batch's settled ticks were 613/613 right and
-the "close now" (initiate) ticks 12/43. `q_stop` fired on 0 of 180 true ticks during training and ended near its constant head
-(ratio 0.95). The run was launched by a chain on HEAD `65d38d5` with uncommitted edits outside `src/` only (`git.dirty: true`;
-`git diff 65d38d5 -- src/` is empty). **Both seeds show the same shape — a flat gripper head for ≈ 100 steps, then a late fit
-whose onset differs by ≈ 20 steps (seed 19 ≈ 120, seed 18 ≈ 142); the step-150 window falls on either side of it (0.592 / 0.723).**
+almost everywhere (settled 1/642 in steps 101–120, 0 on every step from 114 to 126; a short-lived fit at steps 80–83 had collapsed
+again) and then fit: by the training-batch argmax, settled 3/21 at step 127, 18/62 at 130, 29/29 at 133 and ≥ 0.5 on every step
+from 132; window ratios 0.62 (121–140), **0.592** (131–150, the monitor), 0.23 · 0.29 · 0.10 · 0.19 afterwards; in its last 23 steps
+the training batch's settled ticks were 613/613 right and the "close now" (initiate) ticks 12/43. `q_stop` fired on 0 of 180 true
+ticks during training and ended near its constant head (ratio 0.95). The run was launched by a chain on HEAD `65d38d5` with
+uncommitted edits outside `src/` only (`git.dirty: true`; `git diff 65d38d5 -- src/` is empty). **Both seeds show the same shape —
+a flat gripper head for ≈ 100 steps, then a late fit whose onset differs by ≈ 10–15 steps (seed 19 ≈ 127–132, seed 18 142); the
+step-150 window falls on either side of it (0.592 / 0.723).** By step 150 the two seeds had drawn almost the same mix (expert 123 /
+DAgger 27 vs 121 / 29), so seed 19's whole-run 1.8 SD material coin does not explain the onset difference; episode order and
+candidate permutation remain, and two seeds cannot separate them.
 
 ## 2. Reproducible data
 
@@ -113,7 +134,11 @@ split-by-split set (`r1/single-by-split` `cfd632dd568f…`). Items loaded 3,453 
 ood_dev-family record is in any training manifest; no sealed file was opened by training, evaluation or analysis code. The
 closed-loop scenes are R7's (`ood_dev200` = `r4-seeds.json` 26 + `r6-seeds.json` 74 + `r7-seeds.json` 100; `dev_new2` 100).
 **Checkpoint slimming (Task R8 A2, user-approved):** the nine finished-run files of R2–R7 now hold the model weights only
-(26.35 → 3.77 GB each; `artifacts/reports/r8-a2-slim.json`); they evaluate and serve as before but cannot be resumed.
+(26.35 → 3.77 GB each; `artifacts/reports/r8-a2-slim.json`); they evaluate and serve as before but cannot be resumed. The slimming
+ran (17:04–17:11) on the working tree before the tool was committed: the JSON records `git: 7588a60`, the base, which does not
+contain the tool, and no dirty flag. The files it executed (`scripts/slim_checkpoint.py`, `src/robo_jev/checkpoint.py`,
+`src/robo_jev/train.py`) were last modified at 17:00–17:03 and committed unchanged in `30e9af9` (17:17); the per-file checks the
+JSON records (bit-identical model tensors, equal other keys, the serving loader) verify each result on their own.
 
 ## 3. Resume verification
 
@@ -144,12 +169,14 @@ of 21 origin groups are training material) repeats the ordering: primary instruc
 0.882 (s18); `q_stop` 0 of 14 onsets for both seeds (R5 9 / 14). The `q_done` strata of seed 19 equal R5's (`post_release_other`
 0.984); seed 18's stopped state is lower (0.742).
 
-**Reading.** Seed 19, trained to the end, has the **weakest instruction reading of any T1 checkpoint measured on this cell** (R2
-+0.111; R3a seeds 18 / 19 +0.247 / +0.128, 466 +0.191; R5 +0.298; R6 +0.374; R7 +0.370): on the primary stratum its margin over the
-instruction-shuffled control is +0.064 — still above zero, a fifth of R5's — and on the `grasp`
-ticks it picks the instructed object 57.7 % of the time (R5 94.8 %). Its gripper head is R5-like on the settled ticks (0.994) and
-weak on "close now" (0.372). Seed 18 stopped at step 150 already read instructions better (+0.209) than seed 19 did at 233, while
-its gripper head had not yet learned "close now" (0.047). `q_stop` catches none of the stop onsets in either seed.
+**Reading.** Seed 19, trained to the end, has the **weakest instruction reading of any full-schedule (≥ 233-step) T1 run measured
+on this cell** (R2 +0.111; R3a seeds 18 / 19 +0.247 / +0.128, 466 +0.191; R5 +0.298; R6 +0.374; R7 +0.370; only R2's 40-step
+checkpoint read less, +0.009 [−0.007, +0.027]): on the primary stratum its margin over the instruction-shuffled control is +0.064 —
+a fifth of R5's, but still above zero in every one of the 26 leave-one-out refits, so the direction replicates — and on the `grasp`
+ticks it picks the instructed object 57.7 % of the time (R5 94.8 %; R2's 233-step run 62.9 %). Its gripper head is R5-like on the
+settled ticks (0.994) and weak on "close now" (0.372). Seed 18 stopped at step 150 already read instructions better (+0.209) than
+seed 19 did at 233 — a comparison of a stopped step-150 state with a completed 233-step run, so training length is part of that
+difference — while its gripper head had not yet learned "close now" (0.047). `q_stop` catches none of the stop onsets in either seed.
 
 ## 5. Closed-loop success (seed 19 only — seed 18's loop was skipped by the registered rule)
 
@@ -178,7 +205,8 @@ the instructed target in 139 of the 200 ood_dev episodes** (R5: 1 of 200); 59.8 
 object (R5 4.1 %), and 48 of its 56 false dones followed a non-target grasp (it moves the wrong object into the zone and declares
 done). Example `ep-E0-1050128-r8-r8s19` (E0, one fixed instruction "put the gray cylinder in the left zone; do not go near the
 red box, do not touch the green box"): the model commits at tick 0 to `grasp:o1:top:zoneL` — the wrong, fragile object — with
-probability 1.000 and keeps it until the stall watchdog ends the episode. This is the offline `grasp` weakness (57.7 %) compounded by
+probability 0.764 (≥ 0.9999 from tick 2) and keeps it for 36 ticks; at tick 36 the harness's stall guard switches the adopted action
+to `replan`, and the episode ends `stall_exhausted` at tick 38. This is the offline `grasp` weakness (57.7 %) compounded by
 commitment inertia in the loop. Latency (non-first ticks): p50 / p95 / p99 43.2–43.7 / 55.4–56.5 / 79.0–82.1 ms, 1 of 21,892
 over 100 ms; first ticks p50 91.5–94.6 ms, 40 of 300 over 100 ms (max 303 ms) — overall 0.18 %; the gate passes.
 
@@ -195,21 +223,32 @@ Cloud spend: 0. Disk: `/` had 40.88 GB free at the start, **244.27 GB after the 
 (two 26.35 GB R8 checkpoints and the loop records).
 
 **G1, decided by the rule registered before the numbers (§0; applied by `scripts/closed_loop.py verdict`,
-`artifacts/reports/r8-verdict.json`).** Seed 18: stopped by the head-fit monitor at step 150 (0.723 ≥ 0.70) → no closed loop → all
-four conditions fail. Seed 19: (a) `rule − r8s19` strict **+0.585 [+0.510, +0.660]** — fails (discordant 122 vs 5, lower bound > 0 under
+`artifacts/reports/r8-verdict.json`).** Seed 18: stopped by the head-fit monitor at step 150 (0.723 ≥ 0.70 — by the registered rule,
+and a boundary call: under every consistent alternative definition it stays within 0.014 of r7's calibration value, §1) → no closed
+loop → all four conditions fail. Seed 19: (a) `rule − r8s19` strict **+0.585 [+0.510, +0.660]** — fails (discordant 122 vs 5, lower bound > 0 under
 all 200 RNG seeds); (b) `r8s19 − r5` false-done rate **+0.130 [+0.050, +0.205]** — fails (r8s19 has more false dones than r5); (c)
 duplicates +0.135 [−0.140, +0.570] holds, `q_stop` **−0.583 [−0.750, −0.379]** fails. **Both seeds fail; under the registered
 procedure the cloud stays closed — not on a knife-edge.** dev_new2 agrees (seed 19 fails (a), (b), (c₂)).
 
-**Stability, from the numbers.** (1) The gripper head fits late and at a seed-dependent time: flat at the constant-prior level
-for ≈ 100 steps in both seeds, then a fit within ≈ 20 steps (onset ≈ 120 in seed 19, ≈ 142 in seed 18); the step-150 monitor fell
-between them. Where it fit, it copies the executed state (settled 0.994 offline) but "close now" stays weak (0.372). `q_stop` never
-leaves its prior in either seed (0 true ticks fired in training; 0 onsets caught offline or in the loop). (2) The main head is not
-seed-stable: seed 19's primary instruction margin +0.064 against seed 18's +0.209 at step 150 (paired +0.145 [+0.100, +0.192]); R5, R6
-and R7 were all seed 18, and R3a's seeds 17 / 18 / 19 read +0.111 / +0.247 / +0.128 — "instruction reading is robust to recipe
-changes" held at seed 18. (3) The completed seed's loop failed on target selection (first grasp commitment on a non-target object in
-139 of 200 episodes; r5 1 of 200), which the training-batch `q_main` loss (0.03–0.05 × its uniform baseline in both seeds) did not show.
+**Stability, from the numbers.** (1) **Gripper head — a late fit at a seed-dependent step.** In both seeds it sat at the
+constant-prior level for ≈ 100 steps and then fit — durably from step ≈ 127–132 in seed 19 and 142 in seed 18 (≈ 10–15 steps
+apart; both had short-lived earlier fits that collapsed again) — and the step-150 monitor fell between them. Seed 19's head fit
+(settled 0.994 offline; "close now" still weak, 0.372); seed 18 was stopped mid-transition by the rule, so whether it would have fit
+is not shown. By step 150 the two seeds had drawn almost the same material mix (123 / 27 vs 121 / 29), so the material coin does not
+explain the onset difference. (2) **`q_stop` failed the same way in both seeds** (0 true ticks fired in training; 0 onsets caught
+offline or in the loop) — a consistent failure of this recipe, not seed instability. (3) **Main head — the direction replicated,
+the size did not.** Instruction reading beat its shuffled control in every seed measured — seed 19 +0.064 [+0.020, +0.104] with all
+26 leave-one-out refits excluding zero, seed 18's step-150 state +0.209, R3a's seeds 17 / 18 / 19 +0.111 / +0.247 / +0.128 on the
+older recipe (gripper labels v1, no DAgger material) — but its magnitude varies strongly by seed, and so does the loop's target
+selection (seed 19's first grasp commitment went to a non-instructed object in 139 of 200 episodes; r5 1 of 200). R5, R6 and R7 were
+all seed 18, so "instruction reading is robust to recipe changes" held at seed 18. The paired seed difference +0.145 [+0.100, +0.192]
+compares a stopped step-150 state with a completed 233-step run, so training length is part of it. (4) **The training curve did
+separate the two main heads at matched steps:** seed 19's training-batch `q_main` ratio was 3–6× seed 18's over steps 61–150
+(step-150 window 0.119 vs 0.031); at the two evaluated states the ratios are close (seed 18 at step 150: 0.031; seed 19 at steps
+211–233: 0.048) while the offline reading differs by +0.145.
 **Recommendation for the next Spark round:** measure a recipe at three or more seeds before attributing recipe effects (the
-seed-to-seed spread here is as large as the R5–R7 recipe effects); add a held-out primary-stratum probe (target selection) to the
-in-training instruments; and target the gripper head's ≈ 100-step flat phase (and its weak "close now") and `q_stop`'s non-learning
-before any cloud run. Provider, account and first paid run remain the user's decisions.
+seed-to-seed spread in size here is as large as the R5–R7 recipe effects); add a held-out primary-stratum probe (target selection)
+to the in-training instruments — the training-batch `q_main` loss ranks the seeds at matched steps but is a coarse signal of the
+held-out reading; target the gripper head's ≈ 100-step flat phase (and its weak "close now") and `q_stop`'s non-learning before
+any cloud run; and, if a head-fit monitor is kept, calibrate it on a baseline that does not drop to zero on single-valued episodes
+(a prior pooled over the window or the run). Provider, account and first paid run remain the user's decisions.

@@ -1074,3 +1074,43 @@ def test_the_head_fit_monitor_reads_no_data_as_not_fitting_and_is_a_validated_st
     for bad in ({**monitor, "extra": 1}, {**monitor, "step": 3}, {**monitor, "window": 0}, {**monitor, "ratio": 0}, {**monitor, "question": ""}, "q_gripper"):
         with pytest.raises(ValueError, match="head_fit_monitor"):
             resolve_config(tiny_config(tmp_path, head_fit_monitor=bad))
+
+
+def test_a_zero_baseline_step_inside_the_monitor_window_counts_as_zero_in_the_baseline_mean():
+    """R8 seed 18의 멈춤을 가른 동작을 못 박는다 (리뷰 1 M-7). 그리퍼 라벨이 전부 `open`인 에피소드의 step은 에피소드 주변분포가
+    π(open) = 1이라 기준선이 **0**이다(한 값 `open` 라벨의 상수 head 손실 −log 1; 표의 `ratio`는 None) — 모델은 그래도 손실을 치른다.
+    감시는 그 step을 창에서 **빼지 않고**(`no_data`도 아니다) 가중 손실은 손실 평균에, 0은 기준선 평균에 그대로 넣는다: 판정 통계는
+    창 평균의 비 = Σ손실 / Σ기준선이라 그런 step은 분자에만 더해져 언제나 '맞지 않음' 쪽으로 민다. 창 전체가 0이면 문턱도 0이라 멈춘다."""
+    types = {qid: spec["type"] for qid, spec in QUESTION_SET_V0.items()}
+    gripper = ["open", "closed"]
+    rows = []
+    for coefficient in (0.2, 0.1):  # 한 에피소드(step)의 두 틱 — 둘 다 한 값 `open`
+        labels = [{"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ["open"]}]
+        outputs = {"logits": [{"q_gripper": torch.zeros(2, dtype=torch.float64)}], "candidates": [{"q_gripper": gripper}]}
+        entries = question_losses(outputs, {"labels": [labels]})[0]
+        values = {qid: float(entry["loss"]) for qid, entry in entries.items()}
+        rows.extend(question_records(entries, values, labels, {"q_gripper": gripper}, coefficient=coefficient, domain="robot", question_types=types))
+    all_open = question_table(rows)["q_gripper"]
+    assert all_open["prior"] == {"open": 1.0} and all_open["baseline"] == 0.0 and all_open["ratio"] is None
+    assert all_open["loss"] == pytest.approx(math.log(2))  # 로짓 0 → P(open) ½
+
+    def step(number: int, loss: float, baseline: float) -> dict:
+        return {"step": number, "loss_by_question": {"q_gripper": {"loss": loss, "baseline": baseline}}}
+
+    monitor = {"question": "q_gripper", "step": 4, "window": 4, "ratio": 0.70}
+    fitting = [(0.30, 0.50), (0.30, 0.50), (0.30, 0.50)]  # 세 step만이면 0.9 / 1.5 = 0.60 < 0.70
+    history = [step(1, *fitting[0]), step(2, *fitting[1]), step(3, all_open["loss"], all_open["baseline"]), step(4, *fitting[2])]
+    verdict = head_fit_monitor_result(history, monitor)
+    assert verdict["steps_used"] == 4 and verdict["window"] == [1, 4]  # 기준선 0인 step도 창의 한 step이다
+    assert verdict["baseline_mean"] == pytest.approx(1.5 / 4)  # 0이 평균에 들어간다 (빠지면 0.5)
+    assert verdict["loss_mean"] == pytest.approx((0.9 + math.log(2)) / 4)
+    assert verdict["ratio_to_baseline"] == pytest.approx((0.9 + math.log(2)) / 1.5)  # = Σ손실 / Σ기준선
+    assert sum(loss for loss, _ in fitting) / sum(base for _, base in fitting) < monitor["ratio"]
+    assert verdict["verdict"] == "not_fitting"  # 그 한 step이 판정을 '맞음'에서 '맞지 않음'으로 바꿨다
+    # 기준선 0인 step의 손실이 작아도 분자에 더해진다 — 0이면 판정 통계가 세 step의 값과 같다
+    zero_loss = head_fit_monitor_result([step(1, *fitting[0]), step(2, *fitting[1]), step(3, 0.0, 0.0), step(4, *fitting[2])], monitor)
+    assert zero_loss["ratio_to_baseline"] == pytest.approx(0.60) and zero_loss["verdict"] == "fits"
+    # 창 전체가 기준선 0: 비는 정의되지 않고(None) 문턱이 0이라 멈춘다
+    empty = head_fit_monitor_result([step(n, 0.1, 0.0) for n in (1, 2, 3, 4)], monitor)
+    assert empty["baseline_mean"] == 0.0 and empty["ratio_to_baseline"] is None and empty["threshold"] == 0.0
+    assert empty["verdict"] == "not_fitting"
