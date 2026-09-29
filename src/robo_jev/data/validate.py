@@ -766,8 +766,9 @@ def load_holdouts(path: Path | None) -> dict | None:
 
 
 def load_dataset(dataset: Path) -> tuple[list[dict], list[Path]]:
-    """`records.jsonl`·`streams.jsonl`을 아래 단계까지 찾아 모은다."""
-    paths = sorted(dataset.rglob("records.jsonl")) + sorted(dataset.rglob("streams.jsonl"))
+    """`records.jsonl`·분할별 `records.<split>.jsonl`(Task R7 A2)·`streams.jsonl`을 아래 단계까지 찾아 모은다. QA는 봉인 분할의 계약·누출도
+    검사하는 정당한 경로라 봉인 파일도 읽는다(학습·평가 적재기와 다르다)."""
+    paths = sorted(dataset.rglob("records.jsonl")) + sorted(dataset.rglob("records.*.jsonl")) + sorted(dataset.rglob("streams.jsonl"))
     records: list[dict] = []
     for path in paths:
         records.extend(_read_jsonl(path))

@@ -7,6 +7,7 @@
 """
 
 import functools
+import json
 import importlib.util
 import sys
 
@@ -247,3 +248,46 @@ def test_the_r6_training_config_changes_only_the_data_list_and_the_material_shar
     assert sampler5["material_shares"] == {"existing": 0.7, "error_family": 0.2, "new_semantic_family": 0.1}  # R5는 기본값(재정규화하면 0.78 / 0.22)
     assert resolved6["max_steps"] == 233 and resolved6["seed"] == 18 and sampler6["permute_candidates_seed"] == 18
     assert resolved6["splits"] == ["train"]  # ood_dev·ood_test 계열은 어느 manifest에도 학습 split로 없다
+
+
+def test_the_temporary_dataset_of_the_docs06_interface_names_each_files_split_so_the_loader_opens_it(tmp_path):
+    """docs/06의 `adapt_readout(model_id, records, steps, eval_records=…)`가 쓰는 임시 데이터셋 — 파일마다 분할을 적어야 새 적재기가 연다
+    (Task R7 A1: 분할을 모르는 항목은 거절). 학습 분할은 train.jsonl만, 평가 분할은 eval.jsonl만 연다."""
+    from helpers import D0
+
+    from robo_jev.model.tokenizer import WhitespaceTokenizer
+    from robo_jev.sampler import load_items
+
+    rows = [json.loads(line) for line in D0.read_text(encoding="utf-8").splitlines() if line.strip()]
+    manifest = script().write_temporary_dataset(tmp_path, rows[:3], rows[3:5])
+    assert {name: entry["split"] for name, entry in json.loads(manifest.read_text(encoding="utf-8"))["files"].items()} == {"train.jsonl": "train", "eval.jsonl": "dev"}
+    train = load_items(manifest, tokenizer=WhitespaceTokenizer(), splits=("train",))
+    dev = load_items(manifest, tokenizer=WhitespaceTokenizer(), splits=("dev",))
+    assert [item.file for item in train] == ["train.jsonl"] * 3 and [item.file for item in dev] == ["eval.jsonl"] * 2
+
+
+def test_the_r7_training_config_changes_only_the_mixture_the_steps_and_the_non_robot_layout_from_r6():
+    """Task R7 C1: `qwen35-2b-r7.yaml`은 R6 설정을 잇고 **조리법에서 둘만** 바꾼다 — `material_shares` existing 0.6 / error_family 0.4 /
+    new_semantic_family 0.0과 `max_steps` 304(기대 draw: expert ≈ 182 = R5, DAgger ≈ 122 = R6). 데이터 목록은 R6와 같되 비로봇만 A2의
+    분할별 manifest(같은 레코드, 파일 배치만 다르다). 나머지(fp32 master·lr·5초 구간·tick weights·seed 18·후보 치환·분야 태그·저장 주기)는
+    R6의 해석된 설정과 **키마다** 같다."""
+    from pathlib import Path
+
+    load_train_config = script().load_train_config
+    r7 = load_train_config(REPO / "configs/train/qwen35-2b-r7.yaml", mode="t1", seed=18, run_id="test")
+    r6 = load_train_config(REPO / "configs/train/qwen35-2b-r6.yaml", mode="t1", seed=18, run_id="test")
+    resolved7, resolved6 = resolve_config(dict(r7)), resolve_config(dict(r6))
+    differing = sorted(key for key in set(resolved7) | set(resolved6) if resolved7.get(key) != resolved6.get(key))
+    assert differing == ["dataset_manifests", "max_steps", "run_name", "sampler"]
+    assert resolved7["max_steps"] == 304 and resolved6["max_steps"] == 233
+    sampler7, sampler6 = resolved7["sampler"], resolved6["sampler"]
+    assert sorted(key for key in sampler7 if sampler7[key] != sampler6[key]) == ["material_shares"]
+    assert sampler7["material_shares"] == {"existing": 0.6, "error_family": 0.4, "new_semantic_family": 0.0}
+    manifests7, manifests6 = resolved7["dataset_manifests"], resolved6["dataset_manifests"]
+    assert [entry for entry in manifests7[:4]] == [entry for entry in manifests6[:4]]  # 로봇 넷은 R6 그대로
+    assert Path(manifests6[4]["path"]).parent.name == "single" and Path(manifests7[4]["path"]).parent.name == "single-by-split"
+    assert {k: v for k, v in manifests7[4].items() if k != "path"} == {k: v for k, v in manifests6[4].items() if k != "path"}
+    assert resolved7["seed"] == 18 and resolved7["checkpoint_every"] == 50 and resolved7["checkpoint_keep_steps"] == []
+    assert resolved7["splits"] == ["train"]
+    # 기대 draw (로봇 단위 = step마다 하나): expert 0.6 × 304 = 182.4 ≈ R5의 182, DAgger 0.4 × 304 = 121.6 ≈ R6의 122
+    assert round(0.6 * resolved7["max_steps"]) == 182 and round(0.4 * resolved7["max_steps"]) == 122

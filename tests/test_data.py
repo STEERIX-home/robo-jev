@@ -1193,3 +1193,94 @@ def test_origin_prefix_renames_groups_and_request_ids_for_a_disjoint_dataset_lin
     assert DEFAULT_CONFIG["origin_prefix"] == "" and load_config(Path(__file__).resolve().parent.parent / "configs" / "data" / "pilot.yaml")["origin_prefix"] == ""
     ood = generate_records(count=40, seed=9001, config={**config, "split": {**config["split"], "holdout_prefixes": ["dood/"]}})
     assert {record["split"] for record in ood} <= {"ood_dev", "ood_test"} and len({record["split"] for record in ood}) == 2
+
+
+# --------------------------------------------------------------------------
+# 분할별 배치 (Task R7 A2) — 한 파일에 섞인 분할을 분할마다 한 파일로
+# --------------------------------------------------------------------------
+
+
+def test_the_by_split_layout_is_the_combined_file_cut_by_split_and_its_manifest_names_each_files_split(tmp_path):
+    """`--by-split`: 같은 설정·seed의 레코드를 분할마다 `records.<split>.jsonl`로 쓴다 — 분할마다 줄은 한 파일 판의 그 분할 줄과 같고
+    순서도 같으며, manifest는 파일마다 `split`을 적고 한 파일 판의 sha256(`combined_sha256`)과 `counts`를 그대로 싣는다. 새 학습 적재기는
+    분할별 판에서 train 파일만 열고, 한 파일 판은 열지 않고 거절한다."""
+    import hashlib
+
+    from robo_jev.model.tokenizer import WhitespaceTokenizer
+    from robo_jev.sampler import load_items
+
+    common = ["--config", str(PILOT_CONFIG), "--count", "120", "--seed", "11"]
+    assert generate_main([*common, "--output", str(tmp_path / "combined")]) == 0
+    assert generate_main([*common, "--output", str(tmp_path / "split"), "--by-split"]) == 0
+    combined = json.loads((tmp_path / "combined" / "manifest.json").read_text(encoding="utf-8"))
+    by_split = json.loads((tmp_path / "split" / "manifest.json").read_text(encoding="utf-8"))
+    lines = (tmp_path / "combined" / "records.jsonl").read_text(encoding="utf-8").splitlines()
+    assert by_split["counts"] == combined["counts"] and by_split["config_sha256"] == combined["config_sha256"]
+    assert by_split["layout"] == "by-split" and by_split["combined_sha256"] == combined["files"]["records.jsonl"]["sha256"]
+    splits = combined["counts"]["splits"]
+    assert set(by_split["files"]) == {f"records.{split}.jsonl" for split in splits}
+    for split, count in splits.items():
+        name = f"records.{split}.jsonl"
+        entry = by_split["files"][name]
+        text = (tmp_path / "split" / name).read_text(encoding="utf-8")
+        assert entry["split"] == split and entry["records"] == count
+        assert entry["sha256"] == hashlib.sha256(text.encode("utf-8")).hexdigest()
+        assert text.splitlines() == [line for line in lines if json.loads(line)["split"] == split]  # 같은 줄, 같은 순서
+    assert "bytes" not in by_split["files"]["records.ood_test.jsonl"]  # 봉인 파일의 크기는 새로 적지 않는다
+    options = {"tokenizer": WhitespaceTokenizer(), "splits": ("train",), "domain": "non_robot", "domain_tag": "provenance.robojev_domain"}  # 학습 설정과 같은 태그
+    items = load_items(tmp_path / "split" / "manifest.json", **options)
+    assert {item.file for item in items} == {"records.train.jsonl"} and len(items) == splits["train"]
+    with pytest.raises(ValueError, match="split"):
+        load_items(tmp_path / "combined" / "manifest.json", **options)
+
+
+def test_a_relayout_that_does_not_reproduce_the_old_combined_file_is_refused_and_writes_nothing(tmp_path):
+    """`--expect-combined-sha256`: 다시 만든 레코드의 한 파일 판 sha256이 옛 manifest가 적은 값과 다르면 아무것도 쓰지 않고 멈춘다 —
+    옛 파일을 열지 않고도 분할별 판이 옛 레코드 그대로임을 보이는 유일한 근거가 그 해시다."""
+    common = ["--config", str(PILOT_CONFIG), "--count", "40", "--seed", "11", "--by-split"]
+    with pytest.raises(ValueError, match="combined"):
+        generate_main([*common, "--output", str(tmp_path / "bad"), "--expect-combined-sha256", "0" * 64])
+    assert not (tmp_path / "bad").exists()
+    assert generate_main([*common, "--output", str(tmp_path / "plain")]) == 0
+    good = json.loads((tmp_path / "plain" / "manifest.json").read_text(encoding="utf-8"))["combined_sha256"]
+    assert generate_main([*common, "--output", str(tmp_path / "good"), "--expect-combined-sha256", good]) == 0
+    assert json.loads((tmp_path / "good" / "manifest.json").read_text(encoding="utf-8"))["relayout"]["combined_sha256_verified"] is True
+
+
+def test_relayout_of_reads_only_the_old_manifest_and_refuses_another_seed(tmp_path):
+    """`--relayout-of <옛 manifest>`: 옛 manifest(메타데이터)의 records.jsonl sha256을 기대값으로 쓰고 설정 digest·seed·수·counts가 같은지 본다.
+    옛 records.jsonl은 열지 않는다 — 그 파일의 읽기 권한을 없애도 다시 놓기가 된다."""
+    common = ["--config", str(PILOT_CONFIG), "--count", "40", "--seed", "11"]
+    assert generate_main([*common, "--output", str(tmp_path / "old")]) == 0
+    (tmp_path / "old" / "records.jsonl").chmod(0)
+    try:
+        assert generate_main([*common, "--output", str(tmp_path / "new"), "--by-split", "--relayout-of", str(tmp_path / "old" / "manifest.json")]) == 0
+        with pytest.raises(ValueError, match="seed"):
+            generate_main(["--config", str(PILOT_CONFIG), "--count", "40", "--seed", "12", "--output", str(tmp_path / "other"), "--by-split",
+                           "--relayout-of", str(tmp_path / "old" / "manifest.json")])
+    finally:
+        (tmp_path / "old" / "records.jsonl").chmod(0o600)
+    relayout = json.loads((tmp_path / "new" / "manifest.json").read_text(encoding="utf-8"))["relayout"]
+    old = json.loads((tmp_path / "old" / "manifest.json").read_text(encoding="utf-8"))
+    assert relayout["combined_sha256_verified"] is True and relayout["combined_sha256"] == old["files"]["records.jsonl"]["sha256"]
+    assert relayout["from"]["manifest"] == str(tmp_path / "old" / "manifest.json") and relayout["from"]["counts_equal"] is True
+    assert not (tmp_path / "other").exists()
+
+
+def test_the_qa_reads_a_by_split_layout_as_the_same_records_as_the_combined_file(tmp_path):
+    """QA(`python -m robo_jev.data.validate`)는 분할별 판의 `records.<split>.jsonl`도 찾는다 — 같은 레코드이므로 한 파일 판과 같은 보고를 낸다."""
+    from robo_jev.data.validate import load_dataset
+
+    common = ["--config", str(PILOT_CONFIG), "--count", "60", "--seed", "11"]
+    assert generate_main([*common, "--output", str(tmp_path / "combined")]) == 0
+    assert generate_main([*common, "--output", str(tmp_path / "split"), "--by-split"]) == 0
+    combined, _ = load_dataset(tmp_path / "combined")
+    by_split, paths = load_dataset(tmp_path / "split")
+    assert len(paths) == len({record["split"] for record in combined})
+    key = lambda record: record["request"]["request_id"]  # noqa: E731
+    assert sorted(map(key, by_split)) == sorted(map(key, combined))
+    for directory in ("combined", "split"):
+        report = tmp_path / f"{directory}-qa.json"
+        assert validate_main(["--dataset", str(tmp_path / directory), "--report", str(report)]) == 0
+    reports = [json.loads((tmp_path / f"{directory}-qa.json").read_text(encoding="utf-8")) for directory in ("combined", "split")]
+    assert reports[0]["states"] == reports[1]["states"] == 60 and reports[0]["invalid_records"] == reports[1]["invalid_records"] == 0

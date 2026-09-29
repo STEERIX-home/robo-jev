@@ -54,28 +54,10 @@ def _now() -> str:
 def load_open_records(directory: Path) -> tuple[list[dict[str, Any]], dict[str, dict[str, int]]]:
     """디렉터리의 **봉인되지 않은** 레코드와 봉인 분할의 편 수. 봉인 분할(`ood_test`)의 파일은 **읽지 않는다** — manifest의 `files` 항목이
     가진 `split`으로 먼저 거르고(편 수만 센다), 남은 파일만 연다. manifest가 없거나 어떤 에피소드 항목에 `split`이 없으면 파일을 열지 않고는
-    분할을 알 수 없으므로 **거절한다**(읽고 버리지 않는다 — 리뷰 1 I-1)."""
-    directory = Path(directory)
-    manifest_path = directory / "manifest.json"
-    if not manifest_path.is_file():
-        raise ValueError(f"{directory}: manifest.json이 없다 — 파일을 열지 않고는 봉인 분할을 가를 수 없으므로 읽지 않는다")
-    sealed: dict[str, dict[str, int]] = {}
-    entries = (json.loads(manifest_path.read_text(encoding="utf-8")).get("files") or {})
-    wanted: list[Path] = []
-    for name, entry in entries.items():
-        if not str(name).startswith("episodes/"):
-            continue
-        if not isinstance(entry, dict) or entry.get("split") is None:
-            raise ValueError(f"{directory}: manifest의 {name}에 split이 없다 — 열지 않고는 봉인 여부를 알 수 없다")
-        split = str(entry["split"])
-        if split in SEALED_SPLITS:
-            sealed.setdefault(split, {"episodes": 0})["episodes"] += 1
-            continue
-        wanted.append(directory / name)
-    out: list[dict[str, Any]] = []
-    for path in sorted(wanted):
-        out.extend(json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip())
-    return out, sealed
+    분할을 알 수 없으므로 **거절한다**(읽고 버리지 않는다 — 리뷰 1 I-1). Task R7 A3부터 규칙의 정본은 :func:`robo_jev.data.sealed.read_open_episodes`다."""
+    from robo_jev.data.sealed import read_open_episodes
+
+    return read_open_episodes(directory)
 
 
 def _records(directory: Path) -> list[dict[str, Any]]:
@@ -121,7 +103,8 @@ def build_counts(datasets: dict[str, Path]) -> dict[str, Any]:
 
 #: B1의 판정 칸과 그 칸에 대한 두 run의 저장된 예측 (`q_done` 틱별 예측이 있는 보고서).
 CELL_SUITE = REPO / "configs" / "eval" / "r6-decision-cell.yaml"
-CELL_REPORTS = {"R5": REPO / "artifacts" / "reports" / "r6-reeval-2b-t1-fp32-r5.json", "R6": REPO / "artifacts" / "reports" / "r6-reeval-2b-t1-fp32-r6.json"}
+CELL_REPORTS = {"R5": REPO / "artifacts" / "reports" / "r6-reeval-2b-t1-fp32-r5.json", "R6": REPO / "artifacts" / "reports" / "r6-reeval-2b-t1-fp32-r6.json",
+                "R7": REPO / "artifacts" / "reports" / "r7-reeval-2b-t1-fp32-r7.json"}
 #: 모델이 운전한 폐루프 기록 (이름 → 디렉터리). R5의 셋은 B1의 문장이 인용한 것이고, 새 seed의 R5·R6 줄은 같은 자로 나란히 둔다.
 LOOPS = {
     "R5 × ood_dev (R4 26)": DATASETS / "r5-closed-loop" / "r5" / "ood_dev",
@@ -132,6 +115,13 @@ LOOPS = {
     "R6 × ood_dev (R4 26)": DATASETS / "r6-closed-loop" / "r6" / "ood_dev",
     "R6 × ood_dev_new (R6 74)": DATASETS / "r6-closed-loop" / "r6" / "ood_dev_new",
     "R6 × dev_new2 (R6 100)": DATASETS / "r6-closed-loop" / "r6" / "dev_new2",
+    # Task R7: 새 ood_dev 100(ood_dev_new2)의 R5·R6 줄과 R7의 네 조건 — 같은 자로 나란히 (없는 디렉터리는 None으로 적힌다)
+    "R5 × ood_dev_new2 (R7 100)": DATASETS / "r7-closed-loop" / "r5" / "ood_dev_new2",
+    "R6 × ood_dev_new2 (R7 100)": DATASETS / "r7-closed-loop" / "r6" / "ood_dev_new2",
+    "R7 × ood_dev (R4 26)": DATASETS / "r7-closed-loop" / "r7" / "ood_dev",
+    "R7 × ood_dev_new (R6 74)": DATASETS / "r7-closed-loop" / "r7" / "ood_dev_new",
+    "R7 × ood_dev_new2 (R7 100)": DATASETS / "r7-closed-loop" / "r7" / "ood_dev_new2",
+    "R7 × dev_new2 (R6 100)": DATASETS / "r7-closed-loop" / "r7" / "dev_new2",
 }
 #: 놓은 틱과 그 뒤 두 틱 — "놓은 뒤 3틱 안에 `q_done` ≥ 0.5가 들었는가"의 창.
 FOLLOW_TICKS = 3
@@ -171,7 +161,9 @@ def build_loop_state(*, suite: Path = CELL_SUITE, reports: dict[str, Path] | Non
     loaded = load_eval_suite(suite)
     entry = next(item for item in loaded["splits"] if item["name"] == "robot/ood_dev")
     base = (REPO / entry["manifest"]).parent
-    records = [json.loads((base / "episodes" / name / "streams.jsonl").read_text(encoding="utf-8").strip()) for name in entry["records"]]
+    from robo_jev.data.sealed import read_episode_ids
+
+    records = read_episode_ids(base, list(entry["records"]))  # manifest로 먼저 — 봉인 편은 열지 않고 거절 (R7 A3)
     state = {(str(record["episode_id"]), index) for record in records for index, flag in enumerate(old_target_release_ticks(record)) if flag}
     cell: dict[str, Any] = {"suite": str(suite.relative_to(REPO)), "split": entry["name"], "episodes": len(records), "ticks": len(state),
                             "episodes_with_the_state": len({episode for episode, _ in state}), "releases": _release_block(records), "answers_true": {}}

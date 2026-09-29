@@ -518,3 +518,15 @@ def test_stream_retry_labels_are_masked_before_any_failure(streams):
         not any(label["question_id"] == "q_retry" for label in tick["labels"])
         for tick in episode["ticks"][:40]
     )
+
+
+def test_manifest_declares_each_files_split_inventory_so_the_loader_knows_before_opening(manifest):
+    """Task R7 A1: D0의 두 파일은 여러 분할을 섞어 담는다 — manifest가 파일마다 분할별 레코드 수(`splits`)를 적어 학습·평가 적재기가
+    **열기 전에** 그 파일에 무엇이 들었는지 안다. 봉인 분할(`ood_test`)은 D0에 없다."""
+    for name in ("d0.jsonl", "d0_streams.jsonl"):
+        records = [json.loads(line) for line in (FIXTURES / name).read_text(encoding="utf-8").splitlines() if line.strip()]
+        counts: dict[str, int] = {}
+        for record in records:
+            counts[record["split"]] = counts.get(record["split"], 0) + 1
+        assert manifest["files"][name]["splits"] == dict(sorted(counts.items()))
+        assert "ood_test" not in manifest["files"][name]["splits"]

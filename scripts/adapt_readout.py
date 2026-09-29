@@ -297,21 +297,34 @@ def evaluate_checkpoint(config: dict[str, Any], *, mode: str, checkpoint: str, e
     return out
 
 
+def write_temporary_dataset(root: Path, records: list[dict], eval_records: list[dict] | None = None) -> Path:
+    """:func:`adapt_readout` 의 임시 데이터셋 — `train.jsonl`(split train)·`eval.jsonl`(split dev)과 manifest. 파일마다 분할을 적는다:
+    학습·평가 적재기는 분할을 모르는 파일 항목을 열지 않고 거절한다 (Task R7 A1)."""
+    from robo_jev.model.tokenizer import sha256_of_file
+
+    splits = {"train.jsonl": "train", "eval.jsonl": "dev"}
+    files: dict[str, Any] = {}
+    for name, rows in (("train.jsonl", records), ("eval.jsonl", eval_records or [])):
+        (root / name).write_text("".join(json.dumps({**row, "split": splits[name]}, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
+        if rows:
+            files[name] = {"sha256": sha256_of_file(root / name), "records": len(rows), "split": splits[name]}
+    manifest = root / "manifest.json"
+    manifest.write_text(json.dumps({"version": "manifest-v0", "files": files}), encoding="utf-8")
+    return manifest
+
+
 def adapt_readout(model_id: str, records: list[dict], steps: int, *, eval_records: list[dict] | None = None, mode: str = "t0", seed: int = 17) -> dict[str, Any]:
     """docs/06 인터페이스 — 레코드 묶음(단일 요청·스트림)을 임시 manifest로 써서 readout만 `steps` step 학습하고 `eval_records`로 평가한다."""
     import tempfile
 
     from robo_jev.evaluate import evaluate_items
-    from robo_jev.model.tokenizer import load_tokenizer, sha256_of_file
+    from robo_jev.model.tokenizer import load_tokenizer
     from robo_jev.sampler import load_items
     from robo_jev.train import Trainer
 
     with tempfile.TemporaryDirectory() as directory:
         root = Path(directory)
-        for name, rows in (("train.jsonl", records), ("eval.jsonl", eval_records or [])):
-            (root / name).write_text("".join(json.dumps({**row, "split": "train" if name == "train.jsonl" else "dev"}, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8")
-        files = {name: {"sha256": sha256_of_file(root / name), "records": len(rows)} for name, rows in (("train.jsonl", records), ("eval.jsonl", eval_records or [])) if rows}
-        (root / "manifest.json").write_text(json.dumps({"version": "manifest-v0", "files": files}), encoding="utf-8")
+        write_temporary_dataset(root, records, eval_records)
         config = load_train_config(DEFAULT_TRAIN_CONFIG, mode=mode, steps=steps, seed=seed, run_id=f"adapt-{dt.datetime.now().strftime('%H%M%S')}")
         config["model_id"] = model_id
         config["dataset_manifests"] = [{"path": str(root / "manifest.json")}]

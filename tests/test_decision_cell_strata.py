@@ -488,8 +488,14 @@ def test_the_r3a_run_sets_name_this_rounds_reports_and_keep_r2s_row_on_the_same_
 # --------------------------------------------------------------------------
 
 
+def _episode_manifest(base, episode_ids, split: str = "ood_dev") -> None:
+    """편마다 `split`을 적은 manifest — 판정 칸의 편 읽기는 manifest로 먼저 거른다 (Task R7 A3: 봉인 편은 열지 않는다)."""
+    files = {f"episodes/{episode_id}/streams.jsonl": {"episode_id": episode_id, "split": split} for episode_id in episode_ids}
+    (base / "manifest.json").write_text(json.dumps({"files": files}), encoding="utf-8")
+
+
 def _gripper_dataset(base, episodes: dict) -> None:
-    """편마다 `(라벨 ids, 실행 그리퍼)` 목록으로 최소 스트림 레코드를 쓴다 — `gripper_dataset_ticks`가 읽는 꼴."""
+    """편마다 `(라벨 ids, 실행 그리퍼)` 목록으로 최소 스트림 레코드를 쓴다 — `gripper_dataset_ticks`가 읽는 꼴 (manifest 포함)."""
     for episode_id, ticks in episodes.items():
         record = {"episode_id": episode_id, "ticks": []}
         for index, (ids, executed) in enumerate(ticks):
@@ -498,6 +504,7 @@ def _gripper_dataset(base, episodes: dict) -> None:
         path = base / "episodes" / episode_id / "streams.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+    _episode_manifest(base, list(episodes))
 
 
 def test_the_gripper_strata_score_the_same_predictions_against_any_label_set(tmp_path):
@@ -511,8 +518,6 @@ def test_the_gripper_strata_score_the_same_predictions_against_any_label_set(tmp
                               "b": [(["open"], "open"), (["open", "closed"], "open"), (["open", "closed"], "open"), (["closed"], "closed")]})
     _gripper_dataset(v2, {"a": [(["open"], "open"), (["open"], "open"), (["closed"], "open"), (["closed"], "closed"), (["closed"], "closed")],
                           "b": [(["open"], "open"), (["open"], "open"), (["closed"], "open"), (["closed"], "closed")]})
-    for base in (parent, v2):
-        (base / "manifest.json").write_text("{}", encoding="utf-8")
     parent_ticks = module.gripper_dataset_ticks(parent, ["a", "b"])
     v2_ticks = module.gripper_dataset_ticks(v2, ["a", "b"])
     assert Counter(row["class"] for row in parent_ticks) == {"open": 2, "window": 4, "settled": 3}
@@ -581,6 +586,7 @@ def _done_dataset(base):
         path = base / "episodes" / name / "streams.jsonl"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({"episode_id": name, "ticks": ticks}) + "\n", encoding="utf-8")
+    _episode_manifest(base, ["a", "b"])
 
 
 def test_the_done_strata_score_the_stored_q_done_answers_with_paired_controls(tmp_path):
@@ -692,3 +698,14 @@ def test_compare_runs_pairs_the_primary_stratum_the_done_strata_and_the_gripper_
     refused = module.compare_runs(a_table, missing, ticks, done_ticks, resamples=50)["done_strata"]
     assert refused["available"] is False and "q_done" in refused["reason"]
     assert module.compare_runs(a_table, b_table, ticks, done_ticks, resamples=50)["gripper_initiate"]["available"] is False
+
+
+def test_the_r7_run_set_reads_r5_and_r6_from_their_stored_reports_and_pairs_r7_against_both():
+    """Task R7 C2: R5·R6 줄은 R6가 같은 칸(해시 6a3b69131243)에서 잰 보고서를 그대로 읽고(GPU를 다시 쓰지 않는다), R7 줄만 새 보고서다;
+    짝지은 비교는 r7 − r6과 r7 − r5 (주 층 지시 섞기 여유의 차 — 사전 등록의 '또 적는 것')."""
+    module = script()
+    assert module.RUN_SETS["r7"][module.R7_LABEL] == "r7-reeval-2b-t1-fp32-r7.json"
+    assert {name: report for name, report in module.RUN_SETS["r7"].items() if name != module.R7_LABEL} == module.R6_RUNS
+    assert module.RUN_SETS["r7dev"][module.R7_LABEL] == "r7-dev-2b-t1-fp32-r7.json"
+    r6, r5 = list(module.R6_RUNS)[1], list(module.R6_RUNS)[0]
+    assert module.RUN_COMPARISONS["r7"] == [(module.R7_LABEL, r6), (module.R7_LABEL, r5)] == module.RUN_COMPARISONS["r7dev"]

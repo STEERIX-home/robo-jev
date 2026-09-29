@@ -1,8 +1,11 @@
 """학습 데이터의 읽기 전용 적재와 혼합 sampler (docs/04 §2·§7, docs/08 §8, docs/06 Task 5).
 
-**적재.** :func:`load_items` 는 데이터 manifest(`files: {경로: {sha256, …}}`)가 가리키는 JSONL 파일을
-manifest 순서·줄 순서로 읽고(sha256 대조), `split`으로 거른 뒤 레코드를 그 종류의 배치로 직렬화한다
-(`judgment-v0` → ``state_first``, `stream-v0` → ``stream_l1a``). :func:`load_manifests` 는 여러 manifest
+**적재.** :func:`load_items` 는 데이터 manifest(`files: {경로: {sha256, split | splits, …}}`)가 가리키는 JSONL 파일
+가운데 **요청한 분할의 파일만** manifest 순서·줄 순서로 읽고(sha256 대조) 레코드를 그 종류의 배치로 직렬화한다
+(`judgment-v0` → ``state_first``, `stream-v0` → ``stream_l1a``). 어느 파일을 열지는 파일을 열기 **전에** manifest의
+파일 항목(`split` 또는 분할 목록 `splits`)만 보고 정한다(:func:`plan_manifest_files`, Task R7 A1) — 요청하지 않은 분할의 파일,
+특히 봉인 분할(`ood_test`)의 파일은 해시도 파싱도 하지 않고, 분할을 적지 않은 항목(여러 분할이 한 파일에 섞였을 수 있다)은
+거절한다. R2~R6의 적재기는 모든 파일을 해시·파싱한 뒤 split으로 걸렀다 — 봉인 레코드가 열리고 버려졌다(쓰이지는 않았다). :func:`load_manifests` 는 여러 manifest
 (로봇 batch + 비로봇 데이터)를 manifest 순서로 이어 붙이고 manifest마다 분야·자료 태그의 기본값을 달 수 있다. 직렬화를 **적재 시점에 고정된 순서로**
 하는 이유는 공백 tokenizer가 id를 처음 본 순서로 주기 때문이다 — 재개한 프로세스도 같은 순서로
 읽어 같은 토큰 id를 얻는다(실제 tokenizer는 순서와 무관하다). 레코드는 라벨·틱 종류 계산에 쓰려고
@@ -59,6 +62,7 @@ from robo_jev.model.tokenizer import sha256_of_file
 __all__ = [
     "DOMAINS",
     "MATERIALS",
+    "SEALED_SPLITS",
     "TICK_CLASSES",
     "Item",
     "MixedSampler",
@@ -67,6 +71,7 @@ __all__ = [
     "load_manifests",
     "manifest_files",
     "permute_candidates",
+    "plan_manifest_files",
     "record_sources",
     "sha256_of",
     "tick_class",
@@ -81,6 +86,8 @@ DOMAINS = ("robot", "non_robot")
 MATERIALS = ("existing", "error_family", "new_semantic_family")
 #: 틱 종류 (모듈 설명 참조).
 TICK_CLASSES = ("steady", "event", "goal_change", "other")
+#: 봉인 분할 — 학습·평가 적재기는 이 분할을 싣지 않고, 요청하지 않은 이 분할의 파일은 **열지도** 않는다 (docs/04 §5, Task R7 A1).
+SEALED_SPLITS = ("ood_test",)
 
 DEFAULT_MATERIAL_SHARES = {"existing": 0.7, "error_family": 0.2, "new_semantic_family": 0.1}
 DEFAULT_LAYOUTS = {"single": "state_first", "stream": "stream_l1a"}
@@ -187,6 +194,68 @@ def sha256_of(path: Path) -> str:
     return sha256_of_file(path)
 
 
+def _declared_splits(name: str, entry: dict, where: str | Path) -> tuple[str | None, dict[str, int] | None]:
+    """파일 항목이 적은 분할 — 한 분할(`split`)이면 ``(split, None)``, 여러 분할의 목록(`splits`: {분할: 수} 또는 [분할, …])이면
+    ``(None, {분할: 수 또는 -1})``. 둘 다 없으면 **열지 않고** 거절한다 (Task R7 A1: 열지 않고는 봉인 레코드가 들었는지 알 수 없다)."""
+    split, inventory = entry.get("split"), entry.get("splits")
+    if split is not None:
+        if split not in SPLITS:
+            raise ValueError(f"{where}: files[{name}].split: 알 수 없는 분할 {split!r}")
+        return str(split), None
+    if inventory:
+        counts = {str(key): int(value) for key, value in inventory.items()} if isinstance(inventory, dict) else {str(key): -1 for key in inventory}
+        unknown = sorted(key for key in counts if key not in SPLITS)
+        if unknown:
+            raise ValueError(f"{where}: files[{name}].splits: 알 수 없는 분할 {unknown}")
+        return None, counts
+    raise ValueError(
+        f"{where}: files[{name}]에 split(파일 하나의 분할)도 splits(파일에 든 분할의 목록)도 없다 — 여러 분할이 한 파일에 섞였을 수 있고 "
+        "열지 않고는 봉인 분할(ood_test)의 레코드가 들었는지 알 수 없다. 읽고 버리지 않고 거절한다 — 분할별 파일로 다시 놓거나"
+        "(`python -m robo_jev.data.generate --by-split`, Task R7 A2) 파일마다 분할을 manifest에 적는다"
+    )
+
+
+def plan_manifest_files(
+    manifest: dict, manifest_file: str | Path, *, splits: tuple[str, ...] | list[str], files: list[str] | None = None,
+) -> list[tuple[str, dict, str | None, dict[str, int] | None]]:
+    """manifest의 파일 항목 가운데 **열 것**을 파일을 열기 전에 고른다 — ``[(이름, 항목, split, 분할 목록), …]`` (manifest 순서).
+
+    * `files`(fnmatch 패턴)에 맞지 않는 항목은 보지 않는다.
+    * 한 분할 항목(`split`): 요청한 분할이면 열고, 아니면 **해시·파싱하지 않는다**(봉인 `ood_test`가 여기서 걸러진다).
+    * 분할 목록 항목(`splits`): 요청한 분할이 없으면 열지 않는다. 요청하지 않은 **봉인** 분할이 들었으면 거절한다 — 열면 봉인 레코드를
+      읽고 버리게 된다. 그 밖(예: D0처럼 봉인 없는 섞인 파일)은 연다.
+    * 둘 다 없는 항목은 거절한다(:func:`_declared_splits`). 거절은 **어느 파일도 열기 전에** 한다 — 계획을 끝까지 세운 뒤에 연다.
+    """
+    entries = manifest_files(manifest, manifest_file)
+    if files is not None:
+        from fnmatch import fnmatch
+
+        patterns = list(files)
+        selected = {name: entry for name, entry in entries.items() if any(fnmatch(name, pattern) for pattern in patterns)}
+        if not selected:
+            raise ValueError(f"{manifest_file}: files 패턴 {patterns}에 맞는 파일이 없다 (있는 것: {list(entries)[:5]}…)")
+        entries = selected
+    wanted = set(splits)
+    plan: list[tuple[str, dict, str | None, dict[str, int] | None]] = []
+    for name, entry in entries.items():
+        split, inventory = _declared_splits(name, entry or {}, manifest_file)
+        if split is not None:
+            if split in wanted:
+                plan.append((name, entry, split, None))
+            continue
+        assert inventory is not None
+        if not wanted & set(inventory):
+            continue
+        sealed = sorted(key for key in inventory if key in SEALED_SPLITS and key not in wanted)
+        if sealed:
+            raise ValueError(
+                f"{manifest_file}: files[{name}]는 요청하지 않은 봉인 분할 {sealed}의 레코드를 {sorted(wanted & set(inventory))}와 한 파일에 담는다 — "
+                "열면 봉인 레코드를 읽고 버리게 되므로 열지 않는다. 분할별 파일로 다시 놓는다 (Task R7 A2)"
+            )
+        plan.append((name, entry, None, inventory))
+    return plan
+
+
 def load_items(
     manifest_path: str | Path,
     *,
@@ -205,7 +274,13 @@ def load_items(
     permute_seed: int | None = None,
     files: list[str] | None = None,
 ) -> list[Item]:
-    """manifest의 파일들을 읽어 직렬화된 :class:`Item` 목록으로 (모듈 설명 참조).
+    """manifest의 파일들 가운데 요청한 분할(`splits`)의 파일만 읽어 직렬화된 :class:`Item` 목록으로 (모듈 설명 참조).
+
+    **봉인 위생 (Task R7 A1).** 어느 파일을 열지는 :func:`plan_manifest_files` 가 파일을 열기 전에 정한다: 요청한 분할 밖의 파일(봉인
+    `ood_test` 포함)은 해시·파싱하지 않고, `split`도 `splits`도 적지 않은 항목은 거절한다(읽고 버리지 않는다). 연 파일의 레코드는 그
+    항목이 적은 분할과 맞아야 하고(분할 목록이면 목록 안·수가 같아야 한다), 봉인 분할 자체는 요청할 수 없다. 그러므로
+    :func:`record_sources` 의 출처에는 연 파일만 든다 — 섞인 파일을 분할별 파일로 다시 놓으면 같은 레코드라도 출처가 달라 옛 run의
+    sampler 위치는 실리지 않는다(:meth:`MixedSampler.load_state_dict`).
 
     ``permute_seed``가 있으면 레코드마다 :func:`permute_candidates` 로 후보 순서를 바꾼 뒤 직렬화한다(학습 증강; 라벨은
     id 기준이라 그대로). `Item.record`도 치환된 레코드다 — 라벨·틱 종류 계산은 순서와 무관하다. ``files``는 manifest 파일
@@ -231,6 +306,8 @@ def load_items(
     for split in splits:
         if split not in SPLITS:
             raise ValueError(f"splits: {list(SPLITS)} 중에서 골라야 한다 (받은 값: {split!r})")
+        if split in SEALED_SPLITS:
+            raise ValueError(f"splits: {split!r}는 봉인 분할이다 — 학습·평가 적재기는 싣지 않는다 (docs/04 §5)")
     if stream_max_ticks is not None and int(stream_max_ticks) < 1:
         raise ValueError(f"stream_max_ticks: 1 이상이거나 None이어야 한다 (받은 값: {stream_max_ticks})")
     if domain is not None and domain not in DOMAINS:
@@ -239,18 +316,11 @@ def load_items(
         raise ValueError(f"{manifest_file}: material은 {list(MATERIALS)} 중 하나여야 한다 (받은 값: {material!r})")
     layouts = {**DEFAULT_LAYOUTS, **(layouts or {})}
     manifest = json.loads(manifest_file.read_text(encoding="utf-8"))
-    files_all = manifest_files(manifest, manifest_file)
+    # 열 파일을 **열기 전에** 고른다 — 요청한 분할 밖의 파일(봉인 포함)은 해시·파싱하지 않고, 분할을 모르는 항목은 거절한다 (Task R7 A1)
+    plan = plan_manifest_files(manifest, manifest_file, splits=splits, files=files)
 
     items: list[Item] = []
-    if files is not None:
-        from fnmatch import fnmatch
-
-        patterns = list(files)
-        selected = {name: entry for name, entry in files_all.items() if any(fnmatch(name, pattern) for pattern in patterns)}
-        if not selected:
-            raise ValueError(f"{manifest_file}: files 패턴 {patterns}에 맞는 파일이 없다 (있는 것: {list(files_all)[:5]}…)")
-        files_all = selected
-    for name, entry in files_all.items():
+    for name, entry, file_split, inventory in plan:
         path = manifest_file.parent / name
         if not path.is_file():
             raise FileNotFoundError(f"{manifest_file}: 파일이 없다: {path}")
@@ -260,6 +330,7 @@ def load_items(
         actual = sha256_of(path)
         if actual != expected:
             raise ValueError(f"{path}: sha256이 manifest와 다르다 ({actual[:12]}… != {expected[:12]}…)")
+        seen: dict[str, int] = {}
         for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines()):
             if not line.strip():
                 continue
@@ -271,6 +342,11 @@ def load_items(
             split = record.get("split")
             if split not in SPLITS:
                 raise ValueError(f"{where}: split이 없거나 알 수 없다: {split!r}")
+            if file_split is not None and split != file_split:
+                raise ValueError(f"{where}: 레코드의 split {split!r}이 manifest가 이 파일에 적은 split {file_split!r}와 다르다")
+            if inventory is not None and split not in inventory:
+                raise ValueError(f"{where}: 레코드의 split {split!r}이 manifest가 이 파일에 적은 분할 목록에 없는 분할이다 ({sorted(inventory)})")
+            seen[split] = seen.get(split, 0) + 1
             if split not in splits:
                 continue
             record_domain = _tag(record, domain_tag)
@@ -306,6 +382,11 @@ def load_items(
                     manifest=str(manifest_path), file=name, file_sha256=actual,
                 )  # fmt: skip
             )
+        if inventory is not None:
+            declared = {key: count for key, count in inventory.items() if count >= 0}
+            found = {key: seen.get(key, 0) for key in declared}
+            if found != declared:
+                raise ValueError(f"{path}: 분할별 레코드 수가 manifest의 목록과 다르다 (manifest {declared}, 파일 {found})")
     return items
 
 

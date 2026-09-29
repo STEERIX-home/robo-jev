@@ -22,7 +22,7 @@ exactly these two**: the data list (five manifests, below) and `sampler.material
 draws (`metrics.json` `summary.sampler.units`): **expert 111 episodes (0.48 epoch of 233) and DAgger 122 (0.20 epoch of
 600: dagger-0 39, dagger-1 37, done-gate 46)**. Of the **43 episodes whose model raw `q_done` rose on a reference-False
 tick** (22 in dagger-1 — its 20 outcome-level false dones plus 2 that recovered — and 21 in the done-gate set), **9 were
-drawn** (2 + 7). Non-robot 1,376 bundles, tokens 11.55 M.
+drawn** (2 + 7). Non-robot 1,376 records in 233 bundles (one bundle per step), tokens 11.55 M.
 
 ## 2. Reproducible data
 

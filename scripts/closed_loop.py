@@ -394,15 +394,58 @@ def cmd_report(args: argparse.Namespace) -> int:
     return 0
 
 
+def print_verdict(verdict: dict[str, Any], file: Any = None) -> None:
+    """등록 규칙 적용 결과의 표 (보고서에 옮겨 적는다)."""
+    file = file or sys.stdout
+
+    def row(name: str, entry: dict[str, Any]) -> str:
+        low, high = entry["ci"]
+        return f"| {name} | {entry['pair']} | {entry['metric']} | {entry['value']:+.3f} [{low:+.3f}, {high:+.3f}] | {entry['holds_if']} | {'yes' if entry['holds'] else 'no'} |"
+
+    blocks = [(verdict["primary"]["condition"] + " (primary)", verdict["primary"])]
+    blocks += [(f"{name} (secondary)", block) for name, block in verdict["secondary"].items() if block.get("conditions")]
+    for title, block in blocks:
+        print(f"\n#### {title}\n", file=file)
+        print("| condition | pair | metric | difference [95 %] | holds if | holds? |", file=file)
+        print("| --- | --- | --- | --- | --- | --- |", file=file)
+        for name, entry in block["conditions"].items():
+            print(row(name, entry), file=file)
+        for name, entry in block["robustness"].items():
+            if entry.get("available") is False:
+                continue
+            alt = entry["alternative_seeds"]
+            print(f"- robustness ({name}, {entry['pair']} {entry['metric']}): discordant {entry['discordant']['a_only']} vs {entry['discordant']['b_only']}, "
+                  f"exact McNemar p {entry['mcnemar_exact_p']:.3f}; RNG seeds {alt.get('seeds')}: lower ≤ 0 in {alt.get('lower_bound_at_or_below_zero')} of {alt.get('count')}, "
+                  f"upper ≥ 0 in {alt.get('upper_bound_at_or_above_zero')} of {alt.get('count')}", file=file)
+        cause = block["cause"]
+        for name, entry in cause["metrics"].items():
+            low, high = entry["ci"]
+            print(f"- cause ({cause['pair']}) {name}: {entry['value']:+.3f} [{low:+.3f}, {high:+.3f}] → {entry['status']} — {entry['call']}", file=file)
+        print(f"- cause call: **{cause['call']}** — {cause['text']}" + (f"; new regressions against r7: {cause['new_regressions']}" if cause["new_regressions"] else ""), file=file)
+        print(f"- cloud: **{'recommend' if block['cloud'] else 'closed'}**" + (f" (failed: {block['failed']})" if block["failed"] else ""), file=file)
+
+
+def cmd_verdict(args: argparse.Namespace) -> int:
+    """E1 (Task R7): 사전 등록 규칙(`configs/eval/r7-registration.yaml`)을 폐루프 보고서에 적힌 그대로 적용한다."""
+    from robo_jev.closed_loop import apply_registration, load_registration
+
+    report = json.loads(Path(args.report).read_text(encoding="utf-8"))
+    verdict = apply_registration(report, load_registration(args.registration))
+    verdict.update({"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit(), "report": str(args.report)})
+    _write(Path(args.out), verdict)
+    print_verdict(verdict)
+    return 0
+
+
 def cmd_transitions(args: argparse.Namespace) -> int:
     from robo_jev.closed_loop import offline_gripper_transitions
-    from robo_jev.data.robot_episodes import read_episodes
+    from robo_jev.data.sealed import read_open_episodes
 
     report = json.loads(Path(args.report).read_text(encoding="utf-8"))
     out: dict[str, Any] = {"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit(), "report": str(args.report), "splits": {}}
     for pair in args.split:
         name, directory = pair.split("=", 1)
-        records = [record for _, record in read_episodes(Path(directory))]
+        records = read_open_episodes(Path(directory))[0]  # manifest로 먼저 — 봉인 편은 열지 않는다 (R7 A3)
         out["splits"][name] = {"records_dir": directory, "episodes": len(records), **offline_gripper_transitions(report, records, split_name=name)}
         block = out["splits"][name]
         print(f"{name}: q_gripper whole {block['whole_question_accuracy']:.4f} · initiate {block['initiate']['accuracy']} ({block['initiate']['correct']}/{block['initiate']['n']}) · "
@@ -470,6 +513,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="이 쌍마다 seed 단위 짝지은 지표(그리퍼 연속·중복·q_stop·안전·오행동·실패 원인)와 엄격 성공·거짓 done의 견고성(다른 부트스트랩 seed 1~200)")
     report.add_argument("--out", required=True)
     report.set_defaults(func=cmd_report)
+
+    verdict = sub.add_parser("verdict", help="E1 (R7): 사전 등록 규칙을 폐루프 보고서에 적힌 그대로 적용한다 (클라우드 조건·원인 판정)")
+    verdict.add_argument("--report", required=True, help="`report`의 산출물 (주 집합과 seed 단위 쌍이 든 것)")
+    verdict.add_argument("--registration", default=str(REPO / "configs/eval/r7-registration.yaml"))
+    verdict.add_argument("--out", required=True)
+    verdict.set_defaults(func=cmd_verdict)
 
     transitions = sub.add_parser("transitions", help="C: 오프라인 재생의 q_gripper 예측을 전환 틱(initiate)·정착 틱(settled)·open 틱으로 나눠 채점")
     transitions.add_argument("--report", required=True, help="adapt_readout --eval-checkpoint 산출물 (q_gripper per_record가 있는 것)")

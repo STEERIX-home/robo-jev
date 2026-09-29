@@ -1,0 +1,17 @@
+# Task R7 B1 — 폐루프 **새 ood_dev 100** (브리프 B1). R6의 `r6-closed-loop.yaml`과 같은 생성 설정(`configs/data/r1_robot.yaml`)·분할 규칙·
+# 프로파일 혼합(E0/E1/E2 = 20/40/40)이고 seed 구간만 **1050100~**이다(E0 1050100~ · E1 1060100~ · E2 1070100~, 프로파일마다 최대 4,000 seed 스캔):
+# r1 400100~ · DAgger 사이클 1(done 게이트 수집) 600100~ · R4 900100~ · R5 950100~ · R6 980100~(dev_new2·ood_dev_new 두 걸음, 최대 1004100)와
+# 겹치지 않는다(시험이 구간을 대조한다; 보고서가 실제 seed의 교집합 0을 적는다).
+# 이 100 seed는 R4의 ood_dev 26 + R6의 ood_dev_new 74와 합쳐 **ood_dev 200**(사전 등록의 주 집합; `report --merge ood_dev200=ood_dev,ood_dev_new,ood_dev_new2`)이
+# 된다. ood_dev 계열은 어떤 학습 재료에도 없다(겹침 보고서 `artifacts/reports/r7-seeds-overlap.json`).
+# `ood_test`에 떨어진 seed는 **만들지도 적지도 않는다**(봉인; 선택기가 세기만 한다).
+version: r7-closed-loop-v0.1
+generator_config: configs/data/r1_robot.yaml
+seeds:
+  base: 1050100
+scan:
+  per_profile_max: 4000
+conditions:
+  ood_dev_new2:
+    split: ood_dev
+    count: 100

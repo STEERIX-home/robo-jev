@@ -1774,6 +1774,15 @@ def _stream_coverage(records: list[dict]) -> dict:
     }
 
 
+def _split_inventory(records: list[dict]) -> dict:
+    """파일 하나에 든 레코드의 분할별 수 — 한 파일에 여러 분할이 섞였음을 manifest가 **열기 전에** 알린다 (Task R7 A1: 학습·평가 적재기는
+    분할을 모르는 파일 항목을 거절하고, 요청하지 않은 봉인 분할이 섞인 파일은 열지 않는다). D0에는 봉인 분할(`ood_test`)이 없다."""
+    counts: dict[str, int] = {}
+    for record in records:
+        counts[record["split"]] = counts.get(record["split"], 0) + 1
+    return dict(sorted(counts.items()))
+
+
 def build_all(out_dir: Path) -> dict:
     """세 파일을 `out_dir`에 쓰고 manifest를 돌려준다."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1793,12 +1802,14 @@ def build_all(out_dir: Path) -> dict:
                 "sha256": _sha256(single_text),
                 "bytes": len(single_text.encode("utf-8")),
                 "records": len(singles),
+                "splits": _split_inventory(singles),
                 **_single_request_coverage(singles),
             },
             "d0_streams.jsonl": {
                 "sha256": _sha256(stream_text),
                 "bytes": len(stream_text.encode("utf-8")),
                 "records": len(streams),
+                "splits": _split_inventory(streams),
                 **_stream_coverage(streams),
             },
         },
