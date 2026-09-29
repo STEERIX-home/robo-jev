@@ -399,6 +399,8 @@ def print_verdict(verdict: dict[str, Any], file: Any = None) -> None:
     file = file or sys.stdout
 
     def row(name: str, entry: dict[str, Any]) -> str:
+        if entry.get("stopped"):
+            return f"| {name} | {entry['pair']} | {entry['metric']} | — (stopped: {entry['stopped']}) | {entry['holds_if']} | no |"
         low, high = entry["ci"]
         return f"| {name} | {entry['pair']} | {entry['metric']} | {entry['value']:+.3f} [{low:+.3f}, {high:+.3f}] | {entry['holds_if']} | {'yes' if entry['holds'] else 'no'} |"
 
@@ -417,21 +419,67 @@ def print_verdict(verdict: dict[str, Any], file: Any = None) -> None:
             print(f"- robustness ({name}, {entry['pair']} {entry['metric']}): discordant {entry['discordant']['a_only']} vs {entry['discordant']['b_only']}, "
                   f"exact McNemar p {entry['mcnemar_exact_p']:.3f}; RNG seeds {alt.get('seeds')}: lower ≤ 0 in {alt.get('lower_bound_at_or_below_zero')} of {alt.get('count')}, "
                   f"upper ≥ 0 in {alt.get('upper_bound_at_or_above_zero')} of {alt.get('count')}", file=file)
-        cause = block["cause"]
-        for name, entry in cause["metrics"].items():
+        cause = block.get("cause")
+        if cause:
+            for name, entry in cause["metrics"].items():
+                low, high = entry["ci"]
+                print(f"- cause ({cause['pair']}) {name}: {entry['value']:+.3f} [{low:+.3f}, {high:+.3f}] → {entry['status']} — {entry['call']}", file=file)
+            print(f"- cause call: **{cause['call']}** — {cause['text']}" + (f"; new regressions against r7: {cause['new_regressions']}" if cause["new_regressions"] else ""), file=file)
+        for name, group in (block.get("groups") or {}).items():
+            state = f"stopped ({group['stopped']})" if group.get("stopped") else ("passes all" if group["passed"] else f"fails {group['failed']}")
+            print(f"- seed group {name}: {state}", file=file)
+        for entry in block.get("stability") or ():
+            if not entry.get("available"):
+                print(f"- stability {entry['name']} ({entry['pair']}): not available", file=file)
+                continue
             low, high = entry["ci"]
-            print(f"- cause ({cause['pair']}) {name}: {entry['value']:+.3f} [{low:+.3f}, {high:+.3f}] → {entry['status']} — {entry['call']}", file=file)
-        print(f"- cause call: **{cause['call']}** — {cause['text']}" + (f"; new regressions against r7: {cause['new_regressions']}" if cause["new_regressions"] else ""), file=file)
+            print(f"- stability {entry['name']} ({entry['pair']} {entry['metric']}): {entry['value']:+.3f} [{low:+.3f}, {high:+.3f}]" + (" (0 inside)" if entry["includes_zero"] else ""), file=file)
         print(f"- cloud: **{'recommend' if block['cloud'] else 'closed'}**" + (f" (failed: {block['failed']})" if block["failed"] else ""), file=file)
 
 
+def monitor_verdicts(registration: dict[str, Any], runs_root: Path) -> tuple[dict[str, str], dict[str, Any]]:
+    """R8: 등록의 `groups`마다 run 디렉터리의 `metrics.json` 요약에서 head 적합 감시 판정을 읽는다 → (폐루프가 없는 묶음 → 이유, 묶음 → 판정 블록).
+
+    감시가 `fits`가 아니면 그 seed는 멈춘 것이고, run이 없거나 감시 step에 닿지 않았거나 끝나지 않았으면(status가 `completed`가 아니면) 그 이유로
+    폐루프가 없는 것이다. 학습이 적용한 감시(질문·step·창·비율)가 등록값과 다르면 판정하지 않는다(ValueError) — 규칙을 조용히 바꾸지 않는다."""
+    monitor = registration.get("monitor")
+    if not monitor:
+        return {}, {}
+    registered = (str(monitor["question"]), int(monitor["step"]), [int(monitor["step"]) - int(monitor["window"]) + 1, int(monitor["step"])], float(monitor["ratio"]))
+    stopped: dict[str, str] = {}
+    blocks: dict[str, Any] = {}
+    for group, entry in registration["groups"].items():
+        path = Path(runs_root) / entry["run"] / "metrics.json"
+        if not path.is_file():
+            stopped[group], blocks[group] = f"no training run ({entry['run']}/metrics.json is missing)", None
+            continue
+        metrics = json.loads(path.read_text(encoding="utf-8"))
+        result = (metrics.get("summary") or {}).get("head_fit_monitor")
+        if result is None:
+            stopped[group], blocks[group] = f"the run did not reach the monitor step {registered[1]} (status {metrics.get('status')}, step {metrics.get('step')})", None
+            continue
+        applied = (result.get("question"), result.get("step"), list(result.get("window") or []), result.get("stop_ratio"))
+        if applied != registered:
+            raise ValueError(f"{group}: 학습이 적용한 감시 {applied}가 등록값 {registered}와 다르다 — 판정하지 않는다")
+        blocks[group] = {**result, "status": metrics.get("status"), "step_reached": metrics.get("step")}
+        if result.get("verdict") != "fits":
+            stopped[group] = (f"head-fit monitor: {result.get('verdict')} ({result.get('question')} loss mean {result.get('loss_mean')} ≥ "
+                              f"{result.get('stop_ratio')} × baseline mean {result.get('baseline_mean')})")  # fmt: skip
+        elif metrics.get("status") != "completed":
+            stopped[group] = f"the run did not complete (status {metrics.get('status')}, step {metrics.get('step')})"
+    return stopped, blocks
+
+
 def cmd_verdict(args: argparse.Namespace) -> int:
-    """E1 (Task R7): 사전 등록 규칙(`configs/eval/r7-registration.yaml`)을 폐루프 보고서에 적힌 그대로 적용한다."""
+    """E1 (Task R7·R8): 사전 등록 규칙(`configs/eval/r7-registration.yaml`·`r8-registration.yaml`)을 폐루프 보고서에 적힌 그대로 적용한다.
+    R8 등록이면 seed 묶음마다 run의 head 적합 감시 판정을 먼저 읽는다(:func:`monitor_verdicts`)."""
     from robo_jev.closed_loop import apply_registration, load_registration
 
     report = json.loads(Path(args.report).read_text(encoding="utf-8"))
-    verdict = apply_registration(report, load_registration(args.registration))
-    verdict.update({"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit(), "report": str(args.report)})
+    registration = load_registration(args.registration)
+    stopped, monitors = monitor_verdicts(registration, Path(args.runs_root))
+    verdict = apply_registration(report, registration, stopped=stopped)
+    verdict.update({"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit(), "report": str(args.report), "monitor": monitors})
     _write(Path(args.out), verdict)
     print_verdict(verdict)
     return 0
@@ -517,6 +565,7 @@ def build_parser() -> argparse.ArgumentParser:
     verdict = sub.add_parser("verdict", help="E1 (R7): 사전 등록 규칙을 폐루프 보고서에 적힌 그대로 적용한다 (클라우드 조건·원인 판정)")
     verdict.add_argument("--report", required=True, help="`report`의 산출물 (주 집합과 seed 단위 쌍이 든 것)")
     verdict.add_argument("--registration", default=str(REPO / "configs/eval/r7-registration.yaml"))
+    verdict.add_argument("--runs-root", dest="runs_root", default=str(REPO), help="등록의 groups[].run이 가리키는 run 디렉터리의 뿌리 (R8; 기본: 저장소)")
     verdict.add_argument("--out", required=True)
     verdict.set_defaults(func=cmd_verdict)
 

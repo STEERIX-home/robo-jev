@@ -1,0 +1,65 @@
+# Task R8 C — **R5 조리법 그대로 + DAgger 묶음에 사이클 1 재료**, seed 18과 19로 두 번. `qwen35-2b-r7.yaml`을 잇는다(데이터 목록이 같다).
+#
+#   artifacts/scratch/r8/gpu.sh t1-s18 scripts/adapt_readout.py --config configs/train/qwen35-2b-r8.yaml --mode t1 --steps 233 --seed 18 \
+#       --set checkpoint_every=50 --set 'checkpoint_keep_steps=[]' --run-id r8-t1-fp32-2b-s18 --no-eval --out artifacts/reports/r8-2b-t1-fp32-s18.json
+#   (seed 19는 `--seed 19 --run-id r8-t1-fp32-2b-s19 --out …-s19.json`; 저장마다 26.35 GB 여유가 checkpoint.pt 옆에 있어야 한다)
+#
+# **왜 (브리프 R8):** R5 → R6 → R7에서 주 결정 head(지시 읽기)는 조리법 변경에 견고했지만 부가 head는 아니었다(그리퍼 맞음 → 서두름 → 학습 내내
+# 맞지 않음; q_stop 오프라인 5/10 → 0/10 → 0/10). 지금까지의 비교는 전부 **한 seed**였다. 이 라운드는 가장 좋은 폐루프였던 R5의 조리법을 그대로
+# 두고(혼합 비율 기본값 0.7/0.2/0.1 → 비어 있는 새 의미 계열을 빼고 재정규화하면 로봇 단위의 0.78이 expert, 0.22가 DAgger; `max_steps` 233; 같은
+# 일정·lr·구간·tick weights·후보 치환) DAgger 묶음에만 사이클 1 재료(dagger-1 + done 게이트 수집)를 더해 **seed 18·19로 두 번** 돌린다 — 부가 head가
+# seed를 넘어 맞는가를 잰다. 기대 draw(로봇 단위 = step마다 하나): expert ≈ 0.778 × 233 = 181, DAgger ≈ 52(그중 사이클 1 ≈ 35 = 400/600 × 52).
+# 실현된 수는 run의 `metrics.json` `summary.sampler.units`에 있다(재료 동전은 seed가 정한다 — R7에서 1.5 SD 벗어났다).
+#
+# **학습 중 계기 (Task R8 A1):** step마다 `metrics.json`에 질문별 가중 손실·라벨 수·상수 사전분포 head의 기준선과 그리퍼·q_stop 탐침이 적힌다.
+# **head 적합 감시 (Stage B, 사전 등록):** step 150에서 `q_gripper`의 질문별 가중 손실(step 131–150 평균)이 그 기준선(같은 step들의 평균)의
+# **0.70배** 이상이면 그 run을 멈춘다(status `stopped_head_not_fitting`; metrics·checkpoint를 남기고 폐루프를 건너뛴다). 감시는 발동하기 전에는 계산을
+# 바꾸지 않는다(재개에서 자유로운 키). 브리프의 상수는 0.95였고 **A3의 r7 수치를 본 뒤·첫 학습 step 전에** 0.70으로 바꿨다: r7을 자기가 마지막에
+# 뽑은 g2 train 10편에 교사 강제로 돌리면 그리퍼가 일하지 않는데(settled 13/336 = 0.039, initiate 0/11) 가중 손실이 기준선의 0.735배다 — 0.95는
+# 그 head를 "맞음"으로 읽는다. 같은 10편에서 r5(그 편들을 학습하지 않았다)는 0.067배다. 0.70은 r7이 잰 상태 바로 아래의 둥근 값이고 r5의 10배다
+# (`artifacts/reports/r8-a3-teacher-forced.json`, `configs/eval/r8-registration.yaml` `monitor.changed`).
+#
+# 데이터: R7과 같은 다섯 — g2 expert 편(existing) · DAgger-0 · DAgger-1 · done 게이트 수집(셋 다 `error_family`) · 비로봇 분할별 판.
+# `sampler:`·`dataset_manifests:`는 **통째로** 적는다 — `extends`는 얕게 합친다. ood_dev·ood_test 계열은 어느 manifest에도 학습 split로 없다(`splits: [train]`).
+extends: qwen35-2b-r7.yaml
+run_name: r8-2b
+max_steps: 233                 # R5와 같은 일정 (R7의 304가 아니다)
+checkpoint_every: 50
+checkpoint_keep_steps: []
+dataset_manifests:
+  - path: artifacts/datasets/r1-robot/r1-rollout-labels-g2/manifest.json
+    domain: robot
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r5-dagger/dagger-0/manifest.json
+    domain: robot
+    material: error_family
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r6-dagger/dagger-1/manifest.json
+    domain: robot
+    material: error_family
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r6-dagger/dagger-1-donegate/manifest.json
+    domain: robot
+    material: error_family
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r1/single-by-split/manifest.json
+    domain: non_robot
+sampler:
+  domain_tag: provenance.robojev_domain   # R5·R6·R7과 같다
+  material_tag: provenance.material
+  permute_candidates_seed: 17             # `--seed`가 18·19로 덮는다 (R5와 같은 규칙)
+  steady_min_held_ticks: 3
+  tick_weights:                           # 바꾸지 않는다
+    steady: 0.25
+    event: 2.0
+    goal_change: 2.0
+    other: 1.0
+  material_shares:                        # **R5의 조리법 = 기본값** (재정규화하면 0.78 / 0.22)
+    existing: 0.7
+    error_family: 0.2
+    new_semantic_family: 0.1
+head_fit_monitor:                         # 사전 등록 (configs/eval/r8-registration.yaml `monitor`와 같은 값)
+  question: q_gripper
+  step: 150
+  window: 20                              # step 131–150
+  ratio: 0.70                             # 브리프 0.95 → A3 뒤 0.70 (위의 까닭)

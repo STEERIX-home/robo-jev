@@ -1157,12 +1157,17 @@ _PAIRED_SUFFIX = {"done": "", "strict": " (done ∧ inside)", "false_done": " (f
 
 
 def load_registration(path: str | Path) -> dict[str, Any]:
-    """사전 등록 파일(`configs/eval/r7-registration.yaml`)을 읽고 검사한다 — 모르는 경계·출처·빈 조건은 거절한다."""
+    """사전 등록 파일(`configs/eval/r7-registration.yaml`, `r8-registration.yaml`)을 읽고 검사한다 — 모르는 경계·출처·빈 조건은 거절한다.
+
+    R8에서 더한 것(없으면 R7과 똑같이 읽힌다): `groups`(seed 묶음 — 조건마다 `group`이 그 이름이어야 한다; 클라우드는 여전히 **모든** 조건이
+    성립해야 한다 = 모든 묶음이 통과), `monitor`(학습의 head 적합 감시 — 판정 명령이 run에서 읽어 대조한다), `stability`(판정 옆의 판독 목록),
+    그리고 `cause`는 있을 때만 검사·적용한다(R8은 원인 판정이 없다)."""
     path = Path(path)
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    for key in ("version", "primary", "bootstrap", "cloud", "cause"):
+    for key in ("version", "primary", "bootstrap", "cloud"):
         if not raw.get(key):
             raise ValueError(f"{path}: {key}가 필요하다")
+    groups = dict(raw.get("groups") or {})
     for name, entry in raw["cloud"].items():
         if entry.get("source") not in ("paired", "seed_pairs") or entry.get("holds_if") not in _BOUNDS or not entry.get("pair") or not entry.get("metric"):
             raise ValueError(f"{path}: cloud.{name}에는 pair·metric·source(paired|seed_pairs)·holds_if({sorted(_BOUNDS)})가 필요하다")
@@ -1170,10 +1175,26 @@ def load_registration(path: str | Path) -> dict[str, Any]:
             raise ValueError(f"{path}: cloud.{name}.metric: paired 블록의 지표는 {sorted(_PAIRED_SUFFIX)} 중 하나다")
         if entry["source"] == "seed_pairs" and entry["metric"] not in SEED_METRICS:
             raise ValueError(f"{path}: cloud.{name}.metric: seed 단위 지표는 {list(SEED_METRICS)} 중 하나다")
-    for name, entry in raw["cause"]["metrics"].items():
-        if name not in SEED_METRICS or entry.get("toward_r7_if") not in _BOUNDS or entry.get("against_r7_if") not in _BOUNDS:
-            raise ValueError(f"{path}: cause.metrics.{name}: seed 단위 지표와 toward_r7_if·against_r7_if 경계가 필요하다")
-    return {**raw, "path": str(path), "secondary": list(raw.get("secondary") or []), "seed_pairs": list(raw.get("seed_pairs") or [])}
+        if groups and entry.get("group") not in groups:
+            raise ValueError(f"{path}: cloud.{name}.group: groups({sorted(groups)}) 가운데 하나여야 한다 (받은 값: {entry.get('group')!r})")
+    cause = raw.get("cause")
+    if cause:
+        for name, entry in cause["metrics"].items():
+            if name not in SEED_METRICS or entry.get("toward_r7_if") not in _BOUNDS or entry.get("against_r7_if") not in _BOUNDS:
+                raise ValueError(f"{path}: cause.metrics.{name}: seed 단위 지표와 toward_r7_if·against_r7_if 경계가 필요하다")
+    monitor = raw.get("monitor")
+    if monitor is not None:
+        missing = [key for key in ("question", "step", "window", "ratio") if monitor.get(key) is None]
+        if missing or not groups or not all(entry.get("run") for entry in groups.values()):
+            raise ValueError(f"{path}: monitor에는 question·step·window·ratio가, groups에는 묶음마다 run이 필요하다 (빠진 것: {missing})")
+    stability = list(raw.get("stability") or [])
+    for position, entry in enumerate(stability):
+        source, metric = entry.get("source"), entry.get("metric")
+        valid = (source == "paired" and metric in _PAIRED_SUFFIX) or (source == "seed_pairs" and metric in SEED_METRICS)
+        if not valid or not entry.get("pair") or not entry.get("name"):
+            raise ValueError(f"{path}: stability[{position}]: name·pair·source(paired|seed_pairs)와 그 출처의 지표가 필요하다")
+    return {**raw, "path": str(path), "secondary": list(raw.get("secondary") or []), "seed_pairs": list(raw.get("seed_pairs") or []),
+            "groups": groups, "stability": stability, "cause": cause or None}
 
 
 def _flip(low: float, high: float) -> list[float]:
@@ -1211,70 +1232,111 @@ def _read_seed_pair(report: dict[str, Any], condition: str, pair: str, metric: s
             "a_totals": block.get("a_totals"), "b_totals": block.get("b_totals"), "skipped_resamples": block.get("skipped_resamples")}
 
 
-def _apply_to_condition(report: dict[str, Any], condition: str, registration: dict[str, Any]) -> dict[str, Any]:
+def _apply_to_condition(report: dict[str, Any], condition: str, registration: dict[str, Any], stopped: dict[str, str] | None = None) -> dict[str, Any]:
     bootstrap = registration["bootstrap"]
+    stopped = dict(stopped or {})
     conditions: dict[str, Any] = {}
     for name, rule in registration["cloud"].items():
+        group = rule.get("group")
+        base = {"what": rule.get("what"), "group": group, "pair": rule["pair"], "metric": rule["metric"], "source": rule["source"], "holds_if": rule["holds_if"]}
+        if group is not None and group in stopped:
+            # 감시가 멈춘(또는 학습이 없는) seed — 폐루프가 없으므로 보고서를 읽지 않고 불성립으로 센다 (R8 등록 `monitor.stopped: fail`)
+            conditions[name] = {**base, "value": None, "ci": None, "holds": False, "stopped": stopped[group]}
+            continue
         if rule["source"] == "paired":
             read = _read_paired(report, condition, rule["pair"], rule["metric"])
         else:
             read = _read_seed_pair(report, condition, rule["pair"], rule["metric"], bootstrap)
         low, high = read["ci"]
-        conditions[name] = {"what": rule.get("what"), "pair": rule["pair"], "metric": rule["metric"], "source": rule["source"], "holds_if": rule["holds_if"],
-                            **read, "holds": bool(_BOUNDS[rule["holds_if"]](low, high))}
+        conditions[name] = {**base, **read, "holds": bool(_BOUNDS[rule["holds_if"]](low, high))}
     robustness: dict[str, Any] = {}
     for entry in registration.get("robustness") or ():
+        group = (registration["cloud"].get(entry["condition"]) or {}).get("group")
+        if group is not None and group in stopped:
+            robustness[entry["condition"]] = {"available": False, "reason": f"{group} stopped: {stopped[group]}"}
+            continue
         block = ((report.get("seed_pairs") or {}).get(condition) or {}).get(entry["pair"]) or {}
         found = (block.get("robustness") or {}).get(entry["metric"])
         robustness[entry["condition"]] = ({"pair": entry["pair"], "metric": entry["metric"], **found} if found
                                           else {"available": False, "reason": f"seed_pairs[{entry['pair']!r}].robustness[{entry['metric']!r}] is not in the report"})
-    cause_rule = registration["cause"]
-    metrics: dict[str, Any] = {}
-    for name, rule in cause_rule["metrics"].items():
-        read = _read_seed_pair(report, condition, cause_rule["pair"], name, bootstrap)
+    cause_out = None
+    cause_rule = registration.get("cause")
+    if cause_rule:
+        metrics: dict[str, Any] = {}
+        for name, rule in cause_rule["metrics"].items():
+            read = _read_seed_pair(report, condition, cause_rule["pair"], name, bootstrap)
+            low, high = read["ci"]
+            if _BOUNDS[rule["toward_r7_if"]](low, high):
+                status = "toward_r7"
+            elif _BOUNDS[rule["against_r7_if"]](low, high):
+                status = "against_r7"
+            else:
+                status = "includes_zero"
+            call = cause_rule["per_metric"]["explained"] if status == "toward_r7" else cause_rule["per_metric"]["not_explained"]
+            metrics[name] = {**read, "toward_r7_if": rule["toward_r7_if"], "status": status, "call": call}
+        toward = [name for name, entry in metrics.items() if entry["status"] == "toward_r7"]
+        call = "all" if len(toward) == len(metrics) else ("none" if not toward else "mixed")
+        cause_out = {"pair": cause_rule["pair"], "metrics": metrics, "call": call, "text": cause_rule["calls"][call],
+                     "new_regressions": [name for name, entry in metrics.items() if entry["status"] == "against_r7"]}
+    stability: list[dict[str, Any]] = []
+    for entry in registration.get("stability") or ():
+        base = {"name": entry["name"], "pair": entry["pair"], "source": entry["source"], "metric": entry["metric"]}
+        try:
+            if entry["source"] == "paired":
+                read = _read_paired(report, condition, entry["pair"], entry["metric"])
+            else:
+                read = _read_seed_pair(report, condition, entry["pair"], entry["metric"], bootstrap)
+        except ValueError as exc:  # 판정 옆의 판독이라 없으면 없다고 적는다(판정을 막지 않는다)
+            stability.append({**base, "available": False, "reason": str(exc)})
+            continue
         low, high = read["ci"]
-        if _BOUNDS[rule["toward_r7_if"]](low, high):
-            status = "toward_r7"
-        elif _BOUNDS[rule["against_r7_if"]](low, high):
-            status = "against_r7"
-        else:
-            status = "includes_zero"
-        call = cause_rule["per_metric"]["explained"] if status == "toward_r7" else cause_rule["per_metric"]["not_explained"]
-        metrics[name] = {**read, "toward_r7_if": rule["toward_r7_if"], "status": status, "call": call}
-    toward = [name for name, entry in metrics.items() if entry["status"] == "toward_r7"]
-    call = "all" if len(toward) == len(metrics) else ("none" if not toward else "mixed")
+        stability.append({**base, **read, "available": True, "includes_zero": bool(low <= 0.0 <= high)})
     failed = [name for name, entry in conditions.items() if not entry["holds"]]
-    return {
-        "condition": condition, "conditions": conditions, "cloud": not failed, "failed": failed, "robustness": robustness,
-        "cause": {"pair": cause_rule["pair"], "metrics": metrics, "call": call, "text": cause_rule["calls"][call],
-                  "new_regressions": [name for name, entry in metrics.items() if entry["status"] == "against_r7"]},
-    }
+    groups: dict[str, Any] = {}
+    for name, entry in conditions.items():
+        group = entry.get("group")
+        if group is None:
+            continue
+        block = groups.setdefault(group, {"conditions": [], "failed": [], "stopped": stopped.get(group)})
+        block["conditions"].append(name)
+        if not entry["holds"]:
+            block["failed"].append(name)
+    for block in groups.values():
+        block["passed"] = not block["failed"]
+    return {"condition": condition, "conditions": conditions, "cloud": not failed, "failed": failed, "groups": groups, "robustness": robustness,
+            "cause": cause_out, "stability": stability}
 
 
-def apply_registration(report: dict[str, Any], registration: dict[str, Any]) -> dict[str, Any]:
-    """사전 등록한 규칙(:func:`load_registration`)을 폐루프 보고서(:func:`closed_loop_report`의 JSON)에 **적힌 그대로** 적용한다 (Task R7 E1).
+def apply_registration(report: dict[str, Any], registration: dict[str, Any], *, stopped: dict[str, str] | None = None) -> dict[str, Any]:
+    """사전 등록한 규칙(:func:`load_registration`)을 폐루프 보고서(:func:`closed_loop_report`의 JSON)에 **적힌 그대로** 적용한다 (Task R7 E1, R8).
 
-    주 집합에서 클라우드 조건(`cloud`의 전부)과 원인 판정(`cause`)을 내고, 둘째 근거(`secondary`)의 같은 값은 옆에 적기만 한다 — 판정은 주 집합만
-    정한다. 쌍은 보고서가 그 이름표 순서로 적은 것을 읽되 반대로 적혔으면 부호를 뒤집는다. 등록한 부트스트랩(재표집 수·RNG seed·수준)과 다른
-    seed 단위 구간, 등록한 쌍이 없는 보고서는 거절한다 — 규칙이 읽을 수를 조용히 다른 것으로 바꾸지 않는다."""
+    주 집합에서 클라우드 조건(`cloud`의 전부)과(등록돼 있으면) 원인 판정(`cause`)을 내고, 둘째 근거(`secondary`)의 같은 값은 옆에 적기만 한다 — 판정은
+    주 집합만 정한다. 쌍은 보고서가 그 이름표 순서로 적은 것을 읽되 반대로 적혔으면 부호를 뒤집는다. 등록한 부트스트랩(재표집 수·RNG seed·수준)과 다른
+    seed 단위 구간, 등록한 쌍이 없는 보고서는 거절한다 — 규칙이 읽을 수를 조용히 다른 것으로 바꾸지 않는다. `stopped`(묶음 → 이유)는 폐루프가 없는
+    seed(학습 감시가 멈췄거나 학습이 없다)다: 그 묶음의 조건은 보고서를 읽지 않고 불성립이다 — 이유를 주지 않았는데 쌍이 없으면 여전히 거절한다."""
     from robo_jev.evaluate import EPISODE_BOOTSTRAP as registered_default
 
     if dict(registration["bootstrap"]) != dict(registered_default):
         raise ValueError(f"registration bootstrap {registration['bootstrap']}가 코드의 EPISODE_BOOTSTRAP {registered_default}와 다르다 — paired 블록은 코드의 값으로 계산됐다")
+    unknown = sorted(set(stopped or {}) - set(registration.get("groups") or {}))
+    if unknown:
+        raise ValueError(f"stopped: 등록에 없는 묶음 {unknown} (groups: {sorted(registration.get('groups') or {})})")
     primary = registration["primary"]
     if primary not in (report.get("conditions") or []):
         raise ValueError(f"보고서에 주 집합 {primary!r}가 없다 (있는 조건: {report.get('conditions')}) — `report --merge {primary}=…`로 만든다")
-    out = _apply_to_condition(report, primary, registration)
+    out = _apply_to_condition(report, primary, registration, stopped)
     secondary: dict[str, Any] = {}
     for name in registration["secondary"]:
         if name not in (report.get("conditions") or []):
             secondary[name] = {"available": False, "reason": f"condition {name} is not in the report"}
             continue
-        secondary[name] = _apply_to_condition(report, name, registration)
+        secondary[name] = _apply_to_condition(report, name, registration, stopped)
+    cause = out["cause"]
     return {
         "registration": {"version": registration["version"], "path": registration.get("path"), "written_at": registration.get("written_at")},
-        "bootstrap": dict(registration["bootstrap"]), "primary": out, "secondary": secondary,
-        "verdict": {"cloud": out["cloud"], "failed": out["failed"], "cause": out["cause"]["call"], "cause_text": out["cause"]["text"]},
+        "bootstrap": dict(registration["bootstrap"]), "primary": out, "secondary": secondary, "stopped": dict(stopped or {}),
+        "verdict": {"cloud": out["cloud"], "failed": out["failed"], "groups": {name: block["passed"] for name, block in out["groups"].items()},
+                    "cause": cause["call"] if cause else None, "cause_text": cause["text"] if cause else None},
     }
 
 

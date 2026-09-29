@@ -671,3 +671,147 @@ def test_the_r7_seed_walk_is_r6s_generator_and_mix_on_a_range_no_earlier_walk_or
     assert earlier["dagger cycle 1"] == 600100 and earlier["r1"] == int(r7["generator"]["seeds"]["base"])
     for name, base in earlier.items():
         assert disjoint(mine, ranges(base)), name
+
+
+# --------------------------------------------------------------------------
+# Task R8 사전 등록 — R7의 (a)(b)(c)를 seed마다, 두 seed가 모두 통과해야 클라우드 (configs/eval/r8-registration.yaml)
+# --------------------------------------------------------------------------
+
+R8_REGISTRATION_PATH = REPO / "configs/eval/r8-registration.yaml"
+PASSING = {"a": (-0.05, 0.10), "b": (-0.20, -0.05), "dup": (-0.10, 0.30), "stop": (-0.20, 0.10)}
+
+
+def _r8_report(*, s18=None, s19=None, seeds=("r8s18", "r8s19"), between=None, secondary=True):
+    """등록이 읽는 블록만 든 R8 보고서 — seed마다 `paired`(규칙 − r8sXX 엄격·r8sXX − r5 거짓 done)와 `seed_pairs`(r8sXX − r5·규칙 − r8sXX),
+    그리고 두 seed가 다 있으면 seed 사이 쌍(r8s18 − r8s19)."""
+    values = {"r8s18": {**PASSING, **(s18 or {})}, "r8s19": {**PASSING, **(s19 or {})}}
+    between = between or {"strict": (-0.08, 0.06), "false_done": (-0.03, 0.02), "gripper_duplicates": (-0.4, 0.2)}
+
+    def block():
+        paired: dict = {}
+        pairs: dict = {}
+        for label in seeds:
+            v = values[label]
+            paired[f"rule - {label} (done ∧ inside)"] = _interval(*v["a"])
+            paired[f"{label} - r5 (false done)"] = _interval(*v["b"])
+            pairs[f"{label} - r5"] = {"metrics": {"gripper_duplicates": _ratio(*v["dup"]), "q_stop_caught": _ratio(*v["stop"]), "gripper_streak": _ratio(-0.1, 0.1)},
+                                      "robustness": {"false_done": _robust(1, 12), "strict": _robust(20, 18)}}  # fmt: skip
+            pairs[f"rule - {label}"] = {"metrics": {}, "robustness": {"strict": _robust(21, 15), "false_done": _robust(0, 3)}}
+        if len(seeds) == 2:
+            paired["r8s18 - r8s19 (done ∧ inside)"] = _interval(*between["strict"])
+            paired["r8s18 - r8s19 (false done)"] = _interval(*between["false_done"])
+            pairs["r8s18 - r8s19"] = {"metrics": {"gripper_duplicates": _ratio(*between["gripper_duplicates"])}, "robustness": {}}
+        return {"paired": paired, "seed_pairs": pairs}
+
+    names = ["ood_dev200"] + (["dev_new2"] if secondary else [])
+    blocks = {name: block() for name in names}
+    return {"conditions": names, "paired": {name: blocks[name]["paired"] for name in names}, "seed_pairs": {name: blocks[name]["seed_pairs"] for name in names}}
+
+
+def test_the_r8_registration_is_r7s_three_conditions_for_each_seed_with_the_training_configs_monitor():
+    """등록 파일 = 브리프: 조건 (a)(b)(c)를 seed 18·19 각각에, 주 집합 ood_dev200·부트스트랩 등록값, 감시(q_gripper · step 150 · 창 20 ·
+    0.70 — 브리프의 0.95를 A3 뒤에 바꿨다)는 학습 설정(`qwen35-2b-r8.yaml`)의 `head_fit_monitor`와 같은 값이고, 원인 판정은 없다(이 라운드는 안정성을 잰다)."""
+    import yaml
+
+    from robo_jev.closed_loop import load_registration
+    from robo_jev.evaluate import EPISODE_BOOTSTRAP
+
+    registration = load_registration(R8_REGISTRATION_PATH)
+    assert registration["primary"] == "ood_dev200" and registration["secondary"] == ["dev_new2"]
+    assert registration["merge"] == {"ood_dev200": ["ood_dev", "ood_dev_new", "ood_dev_new2"]} and registration["bootstrap"] == EPISODE_BOOTSTRAP
+    assert registration["groups"] == {"r8s18": {"seed": 18, "run": "artifacts/runs/r8-t1-fp32-2b-s18"}, "r8s19": {"seed": 19, "run": "artifacts/runs/r8-t1-fp32-2b-s19"}}
+    r7 = load_registration(REGISTRATION_PATH)["cloud"]
+    for label, prefix in (("r8s18", "s18"), ("r8s19", "s19")):
+        for name in ("a", "b", "c_duplicates", "c_q_stop"):
+            mine, theirs = registration["cloud"][f"{prefix}_{name}"], r7[name]
+            assert mine["group"] == label and mine["pair"] == theirs["pair"].replace("r7", label)
+            assert (mine["metric"], mine["source"], mine["holds_if"]) == (theirs["metric"], theirs["source"], theirs["holds_if"])
+    assert len(registration["cloud"]) == 8 and registration.get("cause") is None
+    training = yaml.safe_load((REPO / "configs/train/qwen35-2b-r8.yaml").read_text(encoding="utf-8"))["head_fit_monitor"]
+    assert {key: registration["monitor"][key] for key in ("question", "step", "window", "ratio")} == training == {"question": "q_gripper", "step": 150, "window": 20, "ratio": 0.70}
+    changed = registration["monitor"]["changed"]  # 브리프의 0.95를 A3 뒤·첫 학습 step 전에 바꿨다 — 까닭과 근거 파일이 등록에 있다
+    assert (changed["from"], changed["to"]) == (0.95, 0.70) and changed["evidence"] == "artifacts/reports/r8-a3-teacher-forced.json" and "0.735" in changed["why"]
+    assert sorted(registration["seed_pairs"]) == sorted(["r8s18:r5", "r8s19:r5", "rule:r8s18", "rule:r8s19", "r8s18:r8s19"])
+    assert {entry["pair"] for entry in registration["stability"]} == {"r8s18 - r8s19"}
+
+
+def test_the_cloud_is_recommended_only_when_both_seeds_pass_all_three_conditions():
+    from robo_jev.closed_loop import apply_registration, load_registration
+
+    registration = load_registration(R8_REGISTRATION_PATH)
+    both = apply_registration(_r8_report(), registration)
+    assert both["verdict"]["cloud"] is True and both["verdict"]["groups"] == {"r8s18": True, "r8s19": True}
+    one = apply_registration(_r8_report(s19={"a": (0.01, 0.2)}), registration)
+    assert one["verdict"]["cloud"] is False and one["verdict"]["failed"] == ["s19_a"]
+    assert one["verdict"]["groups"] == {"r8s18": True, "r8s19": False} and one["primary"]["groups"]["r8s19"]["failed"] == ["s19_a"]
+    edge = apply_registration(_r8_report(s18={"b": (-0.2, 0.0)}, s19={"stop": (-0.5, -0.001)}), registration)
+    assert edge["verdict"]["failed"] == ["s18_b", "s19_c_q_stop"] and edge["verdict"]["groups"] == {"r8s18": False, "r8s19": False}
+    assert edge["primary"]["cause"] is None and edge["verdict"]["cause"] is None
+
+
+def test_a_seed_the_head_fit_monitor_stopped_fails_its_conditions_without_a_closed_loop():
+    """감시가 멈춘 seed는 폐루프가 없다 — 그 seed의 조건 넷은 보고서를 읽지 않고 불성립(이유: 감시), 다른 seed는 그대로 읽는다; 클라우드는 닫힌다."""
+    from robo_jev.closed_loop import apply_registration, load_registration
+
+    registration = load_registration(R8_REGISTRATION_PATH)
+    stopped = {"r8s19": "head-fit monitor: not_fitting (q_gripper 0.61 ≥ 0.95 × 0.60)"}
+    out = apply_registration(_r8_report(seeds=("r8s18",)), registration, stopped=stopped)
+    conditions = out["primary"]["conditions"]
+    assert all(conditions[f"s19_{name}"]["holds"] is False and conditions[f"s19_{name}"]["stopped"] == stopped["r8s19"] for name in ("a", "b", "c_duplicates", "c_q_stop"))
+    assert all(conditions[f"s18_{name}"]["holds"] for name in ("a", "b", "c_duplicates", "c_q_stop"))
+    assert out["verdict"]["cloud"] is False and out["verdict"]["groups"] == {"r8s18": True, "r8s19": False}
+    assert out["primary"]["groups"]["r8s19"]["stopped"] == stopped["r8s19"]
+    assert out["primary"]["robustness"]["s19_a"]["available"] is False and out["primary"]["robustness"]["s18_a"]["discordant"] == {"a_only": 21, "b_only": 15}
+    assert all(entry["available"] is False for entry in out["primary"]["stability"])  # seed 사이 쌍은 한 seed가 없으면 읽을 수 없다
+    with pytest.raises(ValueError, match="r8s19"):
+        apply_registration(_r8_report(seeds=("r8s18",)), registration)  # 멈췄다는 말 없이 쌍이 없으면 거절 — 조용히 넘기지 않는다
+
+
+def test_the_stability_readings_sit_beside_the_verdict_and_do_not_make_it():
+    from robo_jev.closed_loop import apply_registration, load_registration
+
+    registration = load_registration(R8_REGISTRATION_PATH)
+    out = apply_registration(_r8_report(between={"strict": (0.05, 0.3), "false_done": (-0.1, 0.1), "gripper_duplicates": (1.0, 3.0)}), registration)
+    stability = {entry["name"]: entry for entry in out["primary"]["stability"]}
+    assert stability["strict"]["ci"] == [0.05, 0.3] and stability["strict"]["includes_zero"] is False
+    assert stability["gripper_duplicates"]["ci"] == [1.0, 3.0] and stability["false_done"]["includes_zero"] is True
+    assert stability["q_stop_caught"]["available"] is False  # 보고서에 없는 지표는 없다고 적는다
+    assert out["verdict"]["cloud"] is True  # seed 사이 차가 커도 판정은 조건만 정한다
+
+
+def test_the_verdict_command_reads_each_seeds_monitor_and_refuses_one_that_is_not_the_registered_rule(tmp_path, capsys):
+    """`verdict`는 등록의 `groups[].run/metrics.json`에서 감시 판정을 읽는다 — `fits`가 아니면 그 seed는 멈춘 것, 학습이 적용한 감시(질문·
+    step·창·비율)가 등록값과 다르면 판정하지 않는다."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("closed_loop_script", REPO / "scripts" / "closed_loop.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def write_run(name: str, verdict: str, *, ratio: float = 0.70) -> None:
+        run = tmp_path / "artifacts" / "runs" / name
+        run.mkdir(parents=True, exist_ok=True)
+        monitor = {"question": "q_gripper", "step": 150, "window": [131, 150], "stop_ratio": ratio, "steps_used": 20, "loss_mean": 0.3,
+                   "baseline_mean": 0.6, "ratio_to_baseline": 0.5, "threshold": ratio * 0.6, "verdict": verdict}  # fmt: skip
+        status = "completed" if verdict == "fits" else "stopped_head_not_fitting"
+        (run / "metrics.json").write_text(json.dumps({"status": status, "step": 233 if verdict == "fits" else 150, "summary": {"head_fit_monitor": monitor}}), encoding="utf-8")
+
+    write_run("r8-t1-fp32-2b-s18", "fits")
+    write_run("r8-t1-fp32-2b-s19", "not_fitting")
+    report_path, out_path = tmp_path / "report.json", tmp_path / "verdict.json"
+    report_path.write_text(json.dumps(_r8_report(seeds=("r8s18",))), encoding="utf-8")
+    args = ["verdict", "--report", str(report_path), "--registration", str(R8_REGISTRATION_PATH), "--runs-root", str(tmp_path), "--out", str(out_path)]
+    assert module.main(args) == 0
+    written = json.loads(out_path.read_text(encoding="utf-8"))
+    assert written["verdict"]["cloud"] is False and written["verdict"]["groups"] == {"r8s18": True, "r8s19": False}
+    assert written["monitor"]["r8s19"]["verdict"] == "not_fitting" and written["monitor"]["r8s18"]["verdict"] == "fits"
+    printed = capsys.readouterr().out
+    assert "r8s19" in printed and "stopped" in printed and "cloud: **closed**" in printed
+    write_run("r8-t1-fp32-2b-s19", "fits", ratio=0.95)  # 브리프의 옛 상수로 돈 run은 등록과 다르다
+    with pytest.raises(ValueError, match="등록"):
+        module.main(args)
+    import shutil
+
+    shutil.rmtree(tmp_path / "artifacts" / "runs" / "r8-t1-fp32-2b-s19")
+    assert module.main(args) == 0  # 학습이 없던 seed도 멈춘 것으로 센다 (이유: run 없음)
+    assert "no training run" in json.loads(out_path.read_text(encoding="utf-8"))["primary"]["groups"]["r8s19"]["stopped"]
