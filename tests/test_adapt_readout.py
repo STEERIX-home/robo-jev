@@ -291,3 +291,18 @@ def test_the_r7_training_config_changes_only_the_mixture_the_steps_and_the_non_r
     assert resolved7["splits"] == ["train"]
     # 기대 draw (로봇 단위 = step마다 하나): expert 0.6 × 304 = 182.4 ≈ R5의 182, DAgger 0.4 × 304 = 121.6 ≈ R6의 122
     assert round(0.6 * resolved7["max_steps"]) == 182 and round(0.4 * resolved7["max_steps"]) == 122
+
+
+def test_the_step_log_line_shows_the_per_question_loss_against_its_baseline_and_the_gripper_probe():
+    """Task R8 A1: 긴 학습 유닛은 25분에 한 번 로그만 본다 — step 한 줄에 q_gripper·q_stop·q_main의 가중 손실/기준선과 학습 배치의 그리퍼
+    탐침(initiate·settled·open 정답/수)이 있어야 한다. 기록이 없는 질문은 줄에서 빠진다."""
+    module = script()
+    metrics = {
+        "step": 7, "loss": 0.5, "seconds": 61.25,
+        "loss_by_question": {"q_gripper": {"loss": 0.2, "baseline": 0.6}, "q_main": {"loss": 0.05, "baseline": 1.9}, "q_stop": {"loss": None, "baseline": 0.1}},
+        "probes": {"q_gripper": {"initiate": {"n": 4, "correct": 1}, "settled": {"n": 30, "correct": 29}, "window": {"n": 2, "predicted_closed": 1}}},
+    }  # fmt: skip
+    line = module.step_line(metrics)
+    assert line == "[train] step 7 loss 0.5000 · q_gripper 0.2000/0.6000 · q_main 0.0500/1.9000 · grip initiate 1/4 settled 29/30 · 61.2s"
+    assert module.step_line({"step": 1, "loss": 2.6}) == "[train] step 1 loss 2.6000"
+

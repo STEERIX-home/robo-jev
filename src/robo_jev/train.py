@@ -45,6 +45,18 @@ step 도중(구간 경계)에서는 여기에 진행 위치(단위·구간 index
 이어가며, 같은 seed의 연속 실행과 FP32·CPU에서 비트 단위로 같아야 한다(tests/test_resume.py). 중단은
 ``stop_after``(결정적 검사용)나 ``max_wall_hours``(예산)로 구간 경계에서 일어난다.
 
+**질문별 손실과 기준선 (Task R8 A1).** step 손실은 상태(틱·비로봇 상태) s마다 계수 ``c_s``(로봇 틱이면 ``scale·w_t``,
+비로봇 상태면 ``scale``)와 상태 손실 ``L_s = Σ_q w_q L_q / W_s``의 곱의 합이다. 그러므로 질문 q의 **계수 질량**
+``m_{s,q} = c_s·w_q/W_s``와 **기여** ``C_q = Σ_s m_{s,q}·L_{s,q}``를 두면 ``Σ_q C_q``가 step 손실, ``Σ_q M_q``(``M_q = Σ_s m_{s,q}``)가
+적용된 계수 질량(로봇 0.6 + 비로봇 0.4)이다. step 지표 `loss_by_question`은 열쇠마다 라벨 수 ``n``·질량·기여·**가중 손실**
+``C_q/M_q``와 같은 질량으로 잰 **기준선**(상수 사전분포 head의 손실, :func:`question_table`)을 적는다. 열쇠는 로봇 질문이면
+id, 비로봇이면 ``non_robot/<타입>``이다(비로봇 질문 id는 레코드마다 새로 붙어 train 분할에만 116개다). 이 기록은
+학습 그래프에 닿지 않는다 — 이미 타입별 손실을 적으려고 부르던 `question_losses`의 값을 한 번만 float로 읽어 같이 쓴다.
+같은 틱들에서 `q_gripper`의 층(initiate·settled·open·window)별 argmax 정답 수와 `q_stop`의 참/거짓 틱별 발화 수를
+`probes`로 적는다(학습 배치의 교사 강제 값). `head_fit_monitor`가 있으면 그 step에서 창의 평균 가중 손실이 기준선의 `ratio`배
+이상인지 보고 그러면 run을 멈춘다(status `stopped_head_not_fitting`, :func:`head_fit_monitor_result`). `metrics.json`은 step마다
+atomic하게 다시 쓴다 — 도중에 멈춰도 그때까지의 step 기록이 남는다.
+
 **run의 정체 (리뷰 11 S1).** 재개는 두 가지를 대조한다. (1) 설정 — 중단·예산·경로·이름(:data:`RESUME_FREE_KEYS`)과
 내용으로 대조하는 경로 키(:data:`RESUME_PATH_KEYS`: 모델 설정 파일, tokenizer; `dataset_manifests`의 경로)를 뺀
 나머지는 문자 그대로 같아야 한다. (2) manifest의 **identity 블록**(:func:`manifest_identity`) — 데이터 manifest의
@@ -64,6 +76,7 @@ import contextlib
 import copy
 import json
 import math
+import os
 import random
 import subprocess
 import sys
@@ -82,13 +95,14 @@ from robo_jev.checkpoint import (
     CHECKPOINT_FORMAT,
     collect_rng_state,
     load_checkpoint,
+    load_model_checkpoint,
     restore_rng_state,
     save_checkpoint,
     stream_state_from_dict,
     stream_state_to_dict,
 )
 from robo_jev.contracts import QUESTION_SET_V0
-from robo_jev.loss import judgment_loss, question_losses
+from robo_jev.loss import judgment_loss, label_prior_share, prior_label_loss, question_losses
 from robo_jev.model.backbone_qwen import DEFAULT_WINDOW_CAPACITY, QwenBackbone, candidate_ids
 from robo_jev.model.contract_digest import contract_differences, contract_digest
 from robo_jev.model.hybrid import DEFAULT_CONFIG, TinyHybrid
@@ -116,6 +130,7 @@ from robo_jev.sampler import (
 __all__ = [
     "ChunkResult",
     "EpisodePlan",
+    "HEAD_FIT_STOPPED",
     "MASTER_WEIGHTS_KEY",
     "MODEL_IDS",
     "MasterWeightAdamW",
@@ -129,6 +144,8 @@ __all__ = [
     "detach_stream_state",
     "episode_chunks",
     "fp32_master_weights",
+    "gripper_stratum",
+    "head_fit_monitor_result",
     "identity_differences",
     "layout_prefix",
     "lr_factor",
@@ -137,6 +154,10 @@ __all__ = [
     "model_block",
     "parameter_groups",
     "plan_episode",
+    "probe_summary",
+    "question_key",
+    "question_records",
+    "question_table",
     "resolve_config",
     "resume_config",
     "resume_config_differences",
@@ -178,8 +199,15 @@ DEFAULT_SAMPLER = {
 }
 
 #: 재개할 때 checkpoint의 설정과 달라도 되는 키 — 중단·예산·경로·이름뿐이다(run id는 checkpoint의 것을
-#: 쓴다). 나머지는 run의 정체라 같아야 한다.
-RESUME_FREE_KEYS = ("resume", "stop_after", "max_wall_hours", "checkpoint_every", "checkpoint_keep_steps", "artifacts_dir", "run_id", "run_name", "resume_reschedule")
+#: 쓴다). 나머지는 run의 정체라 같아야 한다. `head_fit_monitor`(Task R8)도 중단 규칙이다 — 발동하기 전에는 계산을 바꾸지 않는다.
+RESUME_FREE_KEYS = (
+    "resume", "stop_after", "max_wall_hours", "checkpoint_every", "checkpoint_keep_steps", "artifacts_dir", "run_id", "run_name",
+    "resume_reschedule", "head_fit_monitor",
+)  # fmt: skip
+#: head 적합 감시가 run을 멈췄을 때의 status (Task R8 Stage B의 "부드러운 중단").
+HEAD_FIT_STOPPED = "stopped_head_not_fitting"
+#: `head_fit_monitor` 블록의 키 — 질문(열쇠), 판정 step, 창(그 step까지의 step 수), 멈춤 비율(창 평균 가중 손실 ≥ 비율 × 창 평균 기준선이면 멈춘다).
+HEAD_FIT_MONITOR_KEYS = ("question", "step", "window", "ratio")
 #: **일정**을 정하는 키 — 기본은 다른 키와 똑같이 거절이고, 설정이 `resume_reschedule: true`로 그러겠다고
 #: 말할 때만 달라도 된다 (Task R3a C1). `max_wall_hours`가 그냥 자유로운 것과 대비된다: 그것은 예산이라 돌던
 #: 계산을 바꾸지 않지만, `max_steps`는 warmup과 cosine을 정하므로 **남은 step의 learning rate가 전부 달라진다**.
@@ -255,6 +283,9 @@ DEFAULTS: dict[str, Any] = {
     "model_root": None,  # 가중치 보관 디렉터리 (null = artifacts/models)
     "window_capacity": None,  # 윈도우 KV 버퍼 용량(토큰; null = DEFAULT_WINDOW_CAPACITY)
     "lora": None,  # trainable: lora_and_readout일 때 {r, alpha, dropout, targets} (없는 키는 DEFAULT_LORA)
+    # head 적합 감시 (Task R8): {question, step, window, ratio} — `step`에서 창(step−window+1 … step)의 평균 가중 손실이
+    # 평균 기준선의 `ratio`배 이상이면 run을 멈춘다(:func:`head_fit_monitor_result`). null이면 감시하지 않는다.
+    "head_fit_monitor": None,
 }
 
 
@@ -394,6 +425,14 @@ def resolve_config(config: dict) -> dict:
     _need(sampler["permute_candidates_seed"] is None or _is_int(sampler["permute_candidates_seed"]), "sampler.permute_candidates_seed: 정수이거나 null이어야 한다")
     weights = sampler["tick_weights"]
     _need(isinstance(weights, dict) and set(weights) == set(TICK_CLASSES), f"sampler.tick_weights: {list(TICK_CLASSES)} 네 종류의 가중치가 필요하다 (받은 값: {weights!r})")
+    monitor = out["head_fit_monitor"]
+    if monitor is not None:
+        _need(isinstance(monitor, dict) and set(monitor) == set(HEAD_FIT_MONITOR_KEYS), f"head_fit_monitor: {list(HEAD_FIT_MONITOR_KEYS)} 네 키의 블록이거나 null이어야 한다 (받은 값: {monitor!r})")
+        _need(isinstance(monitor["question"], str) and bool(monitor["question"]), "head_fit_monitor.question: 질문 열쇠(예: q_gripper)여야 한다")
+        _need(_is_int(monitor["step"]) and 1 <= monitor["step"] <= out["max_steps"], f"head_fit_monitor.step: 1 이상 max_steps({out['max_steps']}) 이하의 정수여야 한다 (받은 값: {monitor['step']!r})")
+        _need(_is_int(monitor["window"]) and 1 <= monitor["window"] <= monitor["step"], f"head_fit_monitor.window: 1 이상 step 이하의 정수여야 한다 (받은 값: {monitor['window']!r})")
+        _need(_is_number(monitor["ratio"]) and monitor["ratio"] > 0, f"head_fit_monitor.ratio: 양수여야 한다 (받은 값: {monitor['ratio']!r})")
+        out["head_fit_monitor"] = {"question": str(monitor["question"]), "step": int(monitor["step"]), "window": int(monitor["window"]), "ratio": float(monitor["ratio"])}
     return out
 
 
@@ -495,8 +534,11 @@ def load_readout_checkpoint(model: Judge, path: str | Path, *, tokenizer_sha256:
     `tokenizer_sha256`은 지금 체크아웃의 tokenizer 파일 해시(`tokenizer_block(name)["sha256"]`)다. `None`은
     `trust_checkpoint_tokenizer=True`와 함께일 때만 허용되며(checkpoint가 적은 해시로 digest를 만들어 코드·하네스 버전만 대조 —
     tokenizer가 없는 검사용), 그 밖에는 ValueError. 돌려주는 것은 checkpoint의 manifest.
+
+    재개용 저장 단위와 **model-only 파일**(optimizer를 지운 슬림 checkpoint, Task R8 A2)을 둘 다 받는다 — 평가·서빙이 읽는 것은
+    `manifest`(계약 digest·rank)와 `model`뿐이다(:func:`robo_jev.checkpoint.load_model_checkpoint`).
     """
-    state = load_checkpoint(path)
+    state = load_model_checkpoint(path)
     manifest = state.get("manifest") if isinstance(state.get("manifest"), dict) else {}
     if tokenizer_sha256 is None:
         if not trust_checkpoint_tokenizer:
@@ -760,12 +802,237 @@ class ChunkResult:
     stats: dict = field(default_factory=dict)
 
 
-def _add_type_losses(by_type: dict[str, list[float]], entries: dict, question_types: dict[str, str]) -> None:
+def _add_type_losses(by_type: dict[str, list[float]], entries: dict, question_types: dict[str, str], values: dict[str, float] | None = None) -> None:
+    """타입별 손실 합과 라벨 수. `values`(질문 → 이미 읽은 float 손실)가 있으면 그것을 쓴다 — 같은 값을 두 번 읽지 않는다."""
     for qid, entry in entries.items():
         kind = question_types.get(qid, "unknown")
         slot = by_type.setdefault(kind, [0.0, 0])
-        slot[0] += float(entry["loss"].detach())
+        slot[0] += values[qid] if values is not None else float(entry["loss"].detach())
         slot[1] += 1
+
+
+# --------------------------------------------------------------------------
+# 질문별 손실·기준선·학습 중 탐침 (Task R8 A1 — 모듈 설명 "질문별 손실과 기준선")
+# --------------------------------------------------------------------------
+
+#: 라벨의 손실 관련 필드 — 기준선을 다시 계산하는 데 필요한 것만 기록에 남긴다(평문 자료형, checkpoint에 실릴 수 있다).
+_BASELINE_LABEL_FIELDS = ("question_id", "kind", "candidate_ids", "unknown", "answer", "probabilities", "successes", "failures", "mask")
+
+
+def question_key(question_id: str, question_type: str, domain: str) -> str:
+    """질문별 기록의 열쇠 — 로봇 질문은 id 그대로(열 개의 고정된 결정 표지·head), 비로봇은 ``<분야>/<타입>``으로 묶는다
+    (비로봇 질문 id는 레코드마다 새로 붙어 train 분할에만 116개다 — 같은 공유 readout의 한 head가 아니다)."""
+    return str(question_id) if domain == "robot" else f"{domain}/{question_type}"
+
+
+def _fixed_vocabulary(question_id: str, question_type: str, domain: str) -> bool:
+    """후보가 질문 세트에 **고정된** 질문인가 — 그런 질문의 기준선은 배치의 라벨 주변분포다. 로봇: 질문 세트의 기준이 비어 있지
+    않은 질문(`q_gripper`, boolean 다섯, ordinal 둘); 비로봇: boolean·ordinal. 후보가 틱·레코드마다 바뀌는 질문(`q_main`·`q_path`·
+    비로봇 choice)은 후보 id가 상태 밖에서 뜻이 없어 주변분포를 상태의 후보로 좁히면 그 상태의 답을 아는 head가 된다 — 그래서
+    그 질문의 기준선은 이 상태 후보 위의 **균등** head다(:func:`question_table`)."""
+    if domain == "robot":
+        spec = QUESTION_SET_V0.get(question_id)
+        return bool(spec and spec["criteria"])
+    return question_type in ("boolean", "ordinal")
+
+
+def question_records(
+    entries: dict[str, dict[str, Any]],
+    values: dict[str, float],
+    labels: list[dict],
+    candidates: dict[str, list[str]],
+    *,
+    coefficient: float,
+    domain: str,
+    question_types: dict[str, str],
+) -> list[dict[str, Any]]:
+    """상태 하나의 질문별 기록 — :func:`robo_jev.loss.question_losses` 의 항목(`entries`)과 그 float 값(`values`)에서.
+
+    ``mass = coefficient · w_q / Σ_q w_q``(`coefficient` = 이 상태가 step 손실에 곱해지는 계수: 로봇 틱 ``scale·w_t``, 비로봇 상태
+    ``scale``)라 기록의 ``Σ mass·loss``가 이 상태의 step 손실 기여와 같다(:func:`robo_jev.loss.judgment_loss` 의 상태 안 가중 평균을
+    풀어 쓴 것). 후보가 고정된 질문은 주변분포 몫(`share`)과 기준선을 다시 잴 라벨을, 후보가 바뀌는 질문은 균등 head의 손실(`baseline`)을
+    바로 남긴다. 유효 라벨이 없거나 가중치 합이 0인 상태는 `judgment_loss`처럼 세지 않는다(빈 목록)."""
+    total = sum(float(entry["weight"]) for entry in entries.values())
+    if not entries or total <= 0:
+        return []
+    by_question = {str(label.get("question_id")): label for label in labels if label.get("question_id") in entries}
+    out: list[dict[str, Any]] = []
+    for qid, entry in entries.items():
+        question_type = question_types.get(qid, "unknown")
+        label = by_question[qid]
+        ids = [str(cid) for cid in candidates[qid]]
+        row: dict[str, Any] = {
+            "key": question_key(qid, question_type, domain), "mass": float(coefficient) * float(entry["weight"]) / total,
+            "loss": float(values[qid]), "kind": str(entry["kind"]),
+            "two_valued": bool(entry["kind"] == "valid_set" and len(label.get("candidate_ids") or ()) == 2),
+        }
+        if _fixed_vocabulary(qid, question_type, domain):
+            row["share"] = label_prior_share(ids, label)
+            row["label"] = {key: copy.deepcopy(label[key]) for key in _BASELINE_LABEL_FIELDS if key in label}
+            row["candidates"] = ids
+        else:
+            row["baseline"] = prior_label_loss({cid: 1.0 for cid in ids}, ids, label)
+        out.append(row)
+    return out
+
+
+def question_table(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """step의 질문별 기록(:func:`question_records`) → 열쇠마다 ``{n, mass, contribution, loss, baseline, baseline_contribution, ratio,
+    baseline_kind, prior?, labels}``.
+
+    * ``loss`` = ``contribution / mass`` — 그 질문의 **질량 가중** 평균 손실(step 손실에 실제로 들어간 가중치 그대로).
+    * ``baseline`` — 같은 라벨·같은 질량에서 **상수 사전분포 head**가 받을 손실의 질량 가중 평균. 그 head가 내는 분포는
+      - 후보가 고정된 질문(`q_gripper`·boolean·ordinal; 비로봇 boolean·ordinal): **배치(이 step)의 라벨 주변분포**
+        ``π = Σ mass·share / Σ mass`` — 라벨 하나의 몫(:func:`robo_jev.loss.label_prior_share`)은 single·boolean이면 답 하나,
+        valid_set이면 허용 집합에 고르게(두 값 허용 = 반씩), distribution이면 그 분포, event면 성공 비율. 손실은 그 π를 각 상태의
+        후보 위로 다시 정규화해 모델과 같은 식으로 잰다(:func:`robo_jev.loss.prior_label_loss`). single·boolean·ordinal-single
+        라벨만 있으면 이 π가 질량 가중 손실을 가장 작게 만드는 상수 head다. `q_gripper`의 두 값 허용 라벨(후보 전체)은 어떤
+        head에도 손실 0이라 모델·기준선 양쪽에 질량만 보탠다.
+      - 후보가 바뀌는 질문(`q_main`·`q_path`·비로봇 choice): 이 상태 후보 위의 **균등** head — single은 ``log K``,
+        허용 집합은 ``−log(|A| / |A ∪ I|)``(unknown은 정규화에서 빠진다).
+    * ``ratio`` = ``loss / baseline`` (기준선이 0이면 None). ``prior``는 고정 후보 질문의 π다(예: `q_gripper`의 P(closed)).
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in records:
+        groups.setdefault(str(row["key"]), []).append(row)
+    out: dict[str, dict[str, Any]] = {}
+    for key in sorted(groups):
+        rows = groups[key]
+        mass = sum(float(row["mass"]) for row in rows)
+        contribution = sum(float(row["mass"]) * float(row["loss"]) for row in rows)
+        fixed = "share" in rows[0]
+        entry: dict[str, Any] = {"n": len(rows), "mass": mass, "contribution": contribution, "loss": (contribution / mass) if mass > 0 else None}
+        if fixed:
+            prior: dict[str, float] = {}
+            for row in rows:
+                for cid, share in (row["share"] or {}).items():
+                    prior[cid] = prior.get(cid, 0.0) + float(row["mass"]) * float(share)
+            prior = {cid: (value / mass if mass > 0 else 0.0) for cid, value in sorted(prior.items())}
+            baselines = [prior_label_loss(prior, row["candidates"], row["label"]) for row in rows]
+            entry["prior"] = prior
+        else:
+            baselines = [row["baseline"] for row in rows]
+        base = sum(float(row["mass"]) * float(value) for row, value in zip(rows, baselines) if value is not None)
+        entry["baseline"] = (base / mass) if mass > 0 else None
+        entry["baseline_contribution"] = base
+        entry["ratio"] = (entry["loss"] / entry["baseline"]) if entry["loss"] is not None and entry["baseline"] else None
+        entry["baseline_kind"] = "batch_marginal" if fixed else "uniform"
+        kinds: dict[str, int] = {}
+        for row in rows:
+            name = "valid_set_two_valued" if row.get("two_valued") else str(row["kind"])
+            kinds[name] = kinds.get(name, 0) + 1
+        entry["labels"] = dict(sorted(kinds.items()))
+        out[key] = entry
+    return out
+
+
+#: `q_gripper` 탐침의 층 — 라벨과 **실행된** 그리퍼(`state.exec.gripper`)로 가른다 (`robo_jev.data.gripper_labels.gripper_tick_class`와
+#: 같은 정의; 학습 코드는 data 패키지를 import하지 않으므로 여기 다시 둔다).
+GRIPPER_STRATA = ("initiate", "settled", "open", "window", "window_closed")
+
+
+def gripper_stratum(tick: dict[str, Any], label: dict[str, Any]) -> str:
+    """`q_gripper` 라벨이 있는 틱의 층: 한 값 `closed` + 실행된 그리퍼 open → ``initiate``("지금 닫아라"), 한 값 `closed` + 이미
+    closed → ``settled``(실행 상태를 베끼면 맞는다), 한 값 `open` → ``open``, 두 값(허용 창) → 실행이 open이면 ``window``, closed면
+    ``window_closed``. single 라벨(옛 fixture)은 답 하나를 한 값으로 읽는다."""
+    if label.get("kind") == "valid_set":
+        ids = [str(cid) for cid in (label.get("candidate_ids") or ())]
+    else:
+        ids = [str(label.get("answer"))]
+    executed = str((((tick.get("request") or {}).get("state") or {}).get("exec") or {}).get("gripper") or "")
+    if len(ids) != 1:
+        return "window" if executed != "closed" else "window_closed"
+    if ids[0] == "closed":
+        return "initiate" if executed != "closed" else "settled"
+    return "open"
+
+
+def _contributes(label: dict[str, Any]) -> bool:
+    return label.get("mask", True) is not False and float(label.get("weight", 1.0)) > 0
+
+
+def _probe_tick(probes: dict[str, Any], tick: dict[str, Any], logits: dict[str, Tensor], candidates: dict[str, list[str]]) -> None:
+    """학습 배치의 한 틱에서 `q_gripper`의 층별 argmax(정답·`closed` 수)와 `q_stop`의 참/거짓별 발화(argmax `true`) 수를 센다."""
+    for label in tick.get("labels") or ():
+        if not _contributes(label):
+            continue
+        qid = label.get("question_id")
+        if qid not in ("q_gripper", "q_stop") or qid not in logits:
+            continue
+        ids = list(candidates[qid])
+        predicted = ids[int(torch.argmax(logits[qid].detach()))]
+        if qid == "q_gripper":
+            stratum = gripper_stratum(tick, label)
+            slot = probes.setdefault("q_gripper", {}).setdefault(stratum, {"n": 0, "correct": 0, "predicted_closed": 0})
+            slot["n"] += 1
+            slot["predicted_closed"] += int(predicted == "closed")
+            if stratum in ("initiate", "settled", "open"):
+                target = label["candidate_ids"][0] if label.get("kind") == "valid_set" else str(label.get("answer"))
+                slot["correct"] += int(predicted == target)
+        else:
+            answer = label.get("answer")
+            truth = "true" if answer is True or answer == "true" else "false"
+            slot = probes.setdefault("q_stop", {}).setdefault(truth, {"n": 0, "predicted_true": 0})
+            slot["n"] += 1
+            slot["predicted_true"] += int(predicted == "true")
+
+
+def _merge_probes(into: dict[str, Any], probes: dict[str, Any]) -> None:
+    for qid, strata in probes.items():
+        for name, counts in strata.items():
+            slot = into.setdefault(qid, {}).setdefault(name, {key: 0 for key in counts})
+            for key, value in counts.items():
+                slot[key] = slot.get(key, 0) + int(value)
+
+
+def probe_summary(probes: dict[str, Any]) -> dict[str, Any]:
+    """step의 탐침 수 → 층마다 수와 비율 (`accuracy` = 정답/수 — initiate·settled·open; `closed_rate`; `q_stop`은 `fire_rate`)."""
+    out: dict[str, Any] = {}
+    for qid, strata in sorted(probes.items()):
+        block: dict[str, Any] = {}
+        for name, counts in sorted(strata.items()):
+            n = int(counts.get("n", 0))
+            entry: dict[str, Any] = dict(counts)
+            if qid == "q_gripper":
+                entry["accuracy"] = (counts["correct"] / n) if n and name in ("initiate", "settled", "open") else None
+                entry["closed_rate"] = (counts["predicted_closed"] / n) if n else None
+            else:
+                entry["fire_rate"] = (counts["predicted_true"] / n) if n else None
+            block[name] = entry
+        out[qid] = block
+    return out
+
+
+def head_fit_monitor_result(history: list[dict[str, Any]], monitor: dict[str, Any] | None) -> dict[str, Any] | None:
+    """head 적합 감시의 판정 (Task R8 Stage B) — step 기록에서만 계산한다(상태 없음; 재개해도 같은 값).
+
+    창 = ``step − window + 1 … step``. 창의 **모든** step에 그 질문의 `loss_by_question` 항목(가중 손실·기준선)이 있어야 하고,
+    ``loss_mean``(창의 가중 손실 단순 평균) ≥ ``ratio × baseline_mean``(창의 기준선 단순 평균)이면 ``not_fitting``, 아니면 ``fits``.
+    창이 비었거나 빠진 step이 있으면 ``no_data``다 — 맞는다는 증거가 없으므로 멈추는 쪽으로 읽는다. `monitor`가 없거나 기록이 아직
+    그 step에 닿지 않았으면 None."""
+    if monitor is None:
+        return None
+    question, step, window, ratio = str(monitor["question"]), int(monitor["step"]), int(monitor["window"]), float(monitor["ratio"])
+    if not history or int(history[-1]["step"]) < step:
+        return None
+    first = step - window + 1
+    rows = [entry for entry in history if first <= int(entry["step"]) <= step]
+    pairs = []
+    for entry in rows:
+        block = (entry.get("loss_by_question") or {}).get(question) or {}
+        if block.get("loss") is not None and block.get("baseline") is not None:
+            pairs.append((float(block["loss"]), float(block["baseline"])))
+    out: dict[str, Any] = {"question": question, "step": step, "window": [first, step], "stop_ratio": ratio, "steps_used": len(pairs)}
+    if len(pairs) != window:
+        return {**out, "loss_mean": None, "baseline_mean": None, "ratio_to_baseline": None, "threshold": None, "verdict": "no_data"}
+    loss_mean = sum(value for value, _ in pairs) / len(pairs)
+    baseline_mean = sum(value for _, value in pairs) / len(pairs)
+    threshold = ratio * baseline_mean
+    return {
+        **out, "loss_mean": loss_mean, "baseline_mean": baseline_mean,
+        "ratio_to_baseline": (loss_mean / baseline_mean) if baseline_mean > 0 else None, "threshold": threshold,
+        "verdict": "not_fitting" if loss_mean >= threshold else "fits",
+    }  # fmt: skip
 
 
 def _count_labels(states: list[dict]) -> tuple[int, int]:
@@ -809,12 +1076,15 @@ def run_stream_chunk(
     value_by_class: dict[str, float] = {}
     weight_by_class: dict[str, float] = {}
     by_type: dict[str, list[float]] = {}
+    questions: list[dict[str, Any]] = []
+    probes: dict[str, Any] = {}
     valid_ticks = 0
     for offset, index in enumerate(range(start, end)):
         if not plan.valid[index] or plan.weights[index] <= 0:
             continue
         one = {"logits": [outputs["logits"][offset]], "candidates": [outputs["candidates"][offset]]}
-        labels = {"labels": [record["ticks"][index].get("labels", [])]}
+        tick_labels = record["ticks"][index].get("labels", [])
+        labels = {"labels": [tick_labels]}
         tick_loss = judgment_loss(one, labels)
         weight = plan.weights[index]
         term = tick_loss * (weight * scale)
@@ -825,7 +1095,15 @@ def run_stream_chunk(
         name = plan.classes[index]
         value_by_class[name] = value_by_class.get(name, 0.0) + float(term.detach())
         weight_by_class[name] = weight_by_class.get(name, 0.0) + weight * scale
-        _add_type_losses(by_type, question_losses(one, labels)[0], item.question_types)
+        # 기록 (Task R8 A1) — 학습 그래프에 닿지 않는다: 질문별 손실은 한 번만 float로 읽어 타입별 합과 질문별 기록이 같이 쓴다
+        entries = question_losses(one, labels)[0]
+        values = {qid: float(entry["loss"].detach()) for qid, entry in entries.items()}
+        _add_type_losses(by_type, entries, item.question_types, values)
+        questions.extend(question_records(
+            entries, values, tick_labels, outputs["candidates"][offset], coefficient=weight * scale, domain=item.domain,
+            question_types=item.question_types,
+        ))  # fmt: skip
+        _probe_tick(probes, record["ticks"][index], outputs["logits"][offset], outputs["candidates"][offset])
     tokens = (int(layout["prefix_end"]) if start == 0 else 0) + sum(
         int(t["end"]) - int(t["start"]) for t in layout["ticks"][start:end]
     )
@@ -839,6 +1117,7 @@ def run_stream_chunk(
             "tokens": tokens, "ticks": end - start, "valid_ticks": valid_ticks, "loss_sum": loss_sum,
             "weight_sum": weight_sum, "loss_by_class": value_by_class, "weight_by_class": weight_by_class,
             "loss_by_type": by_type, "labels_total": labels_total, "labels_low_confidence": labels_low,
+            "questions": questions, "probes": probes,
         },  # fmt: skip
     )
 
@@ -849,13 +1128,15 @@ def run_single_unit(judge: Judge, items: list[Item], *, scale: float = 1.0) -> C
     total: Tensor | None = None
     per_item: list[dict[str, Any]] = []
     by_type: dict[str, list[float]] = {}
+    questions: list[dict[str, Any]] = []
     valid_states = 0
     for position, item in enumerate(items):
         if not valid_single(item.record):
             per_item.append({"index": item.index, "valid": False, "loss": 0.0, "contribution": 0.0})
             continue
         one = {"logits": [outputs["logits"][position]], "candidates": [outputs["candidates"][position]]}
-        labels = {"labels": [item.record.get("labels", [])]}
+        state_labels = item.record.get("labels", [])
+        labels = {"labels": [state_labels]}
         state_loss = judgment_loss(one, labels)
         term = state_loss * scale
         total = term if total is None else total + term
@@ -863,7 +1144,14 @@ def run_single_unit(judge: Judge, items: list[Item], *, scale: float = 1.0) -> C
         per_item.append(
             {"index": item.index, "valid": True, "loss": float(state_loss.detach()), "contribution": float(term.detach())}
         )
-        _add_type_losses(by_type, question_losses(one, labels)[0], item.question_types)
+        # 기록 (Task R8 A1) — 학습 그래프에 닿지 않는다
+        entries = question_losses(one, labels)[0]
+        values = {qid: float(entry["loss"].detach()) for qid, entry in entries.items()}
+        _add_type_losses(by_type, entries, item.question_types, values)
+        questions.extend(question_records(
+            entries, values, state_labels, outputs["candidates"][position], coefficient=scale, domain=item.domain,
+            question_types=item.question_types,
+        ))  # fmt: skip
     labels_total, labels_low = _count_labels([item.record for item in items])
     return ChunkResult(
         loss=total,
@@ -873,7 +1161,7 @@ def run_single_unit(judge: Judge, items: list[Item], *, scale: float = 1.0) -> C
         stats={
             "tokens": sum(item.tokens for item in items), "states": len(items), "valid_states": valid_states,
             "per_item": per_item, "loss_by_type": by_type, "labels_total": labels_total,
-            "labels_low_confidence": labels_low,
+            "labels_low_confidence": labels_low, "questions": questions, "probes": {},
         },  # fmt: skip
     )
 
@@ -1083,6 +1371,8 @@ def _new_accumulators() -> dict[str, Any]:
         "valid_states": {"single": 0, "stream": 0},  # 유효 라벨이 있는 단일 요청 상태 / 틱
         "labels_total": 0,  # step의 상태들에 실린 라벨 수
         "labels_low_confidence": 0,  # 그 가운데 낮은 신뢰도(퇴화 틱, weight로 내린) 라벨 수
+        "questions": [],  # 질문별 기록 (Task R8 A1, :func:`question_records`) — apply에서 :func:`question_table`
+        "probes": {},  # 학습 배치의 q_gripper 층·q_stop 탐침 수 (:func:`_probe_tick`)
         "chunks": 0,
         "seconds": 0.0,
     }
@@ -1246,6 +1536,9 @@ class Trainer:
         acc["chunks"] += 1
         acc["labels_total"] = acc.get("labels_total", 0) + int(stats["labels_total"])
         acc["labels_low_confidence"] = acc.get("labels_low_confidence", 0) + int(stats["labels_low_confidence"])
+        # R8 이전 checkpoint의 진행 중 누적에는 이 두 키가 없다 — 있으면 이어 붙이고 없으면 만든다
+        acc.setdefault("questions", []).extend(stats.get("questions") or [])
+        _merge_probes(acc.setdefault("probes", {}), stats.get("probes") or {})
         for kind, (total, count) in stats["loss_by_type"].items():
             slot = acc["loss_by_type"].setdefault(kind, [0.0, 0])
             slot[0] += total
@@ -1361,6 +1654,9 @@ class Trainer:
                 for domain in DOMAINS
             },
             "loss_by_type": {kind: value / count for kind, (value, count) in acc["loss_by_type"].items() if count},
+            # 질문별 가중 손실·라벨 수·상수 사전분포 head의 기준선 (Task R8 A1; 기여의 합 = `loss`)
+            "loss_by_question": question_table(acc.get("questions") or []),
+            "probes": probe_summary(acc.get("probes") or {}),
             "grad_norm": grad_norm,
             "lr": {"backbone": lrs.get("backbone"), "readout": lrs.get("readout")},
             "tokens": {**acc["tokens"], "total": tokens_total},
@@ -1412,6 +1708,7 @@ class Trainer:
         every = int(self.config["checkpoint_every"])
         keep_steps = set(self.config.get("checkpoint_keep_steps") or ())
         stop = self.config["stop_after"]
+        monitor = self.config.get("head_fit_monitor")
         while self.step < max_steps:
             if not self.accumulate():
                 break
@@ -1421,12 +1718,20 @@ class Trainer:
             if stop is not None and "unit" not in stop and stop["step"] == self.step:
                 self.status = "interrupted"
                 break
+            if monitor is not None and self.step == int(monitor["step"]):
+                # head 적합 감시 (Task R8 Stage B) — 맞지 않으면(또는 판정할 기록이 없으면) 여기서 멈춘다; 아래의 저장·지표가 그 상태를 남긴다
+                verdict = head_fit_monitor_result(self.history, monitor)
+                if verdict is None or verdict["verdict"] != "fits":
+                    self.status = HEAD_FIT_STOPPED
+                    break
             if self.step in keep_steps:
                 # 덮어쓰이지 않는 비교점 — 긴 run 안의 짧은 예산과 나란히 읽기 위한 것이다 (R2 B1).
                 self.save(self.run_dir / f"checkpoint-step{self.step}.pt")
             if self.step < max_steps and every and self.step % every == 0:
                 self.save()
-        if self.step >= max_steps and self.status != "interrupted":
+            if self.step < max_steps:
+                self.write_metrics()  # step마다 (Task R8 A1) — 도중에 죽거나 멈춰도 그때까지의 기록이 남는다; 마지막 step은 아래에서
+        if self.step >= max_steps and self.status not in ("interrupted", HEAD_FIT_STOPPED):
             self.status = "completed"
         path = self.save()
         self.write_metrics()
@@ -1451,6 +1756,8 @@ class Trainer:
             },  # fmt: skip
             # 이 곡선이 **한 일정**에서 나왔는지 — 다시 잡았으면 무엇이 어떻게 (R3a C1)
             "rescheduled": copy.deepcopy(self.rescheduled),
+            # head 적합 감시의 판정 (Task R8) — 기록이 그 step에 닿기 전이거나 감시가 없으면 None
+            "head_fit_monitor": head_fit_monitor_result(self.history, self.config.get("head_fit_monitor")),
         }
 
     def checkpoint_state(self) -> dict[str, Any]:
@@ -1587,7 +1894,10 @@ class Trainer:
             "summary": self._summary(),
         }
         path = self.run_dir / "metrics.json"
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+        # atomic하게 (임시 파일 → rename): step마다 다시 쓰므로(Task R8 A1) 읽는 쪽이 반쯤 쓴 파일을 보지 않게 한다
+        temp = path.with_name(path.name + ".tmp")
+        temp.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(temp, path)
         return path
 
 

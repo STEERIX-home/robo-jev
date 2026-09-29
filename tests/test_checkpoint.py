@@ -266,3 +266,72 @@ def test_stream_state_survives_the_checkpoint_detached(tmp_path):
     torch.testing.assert_close(restored.advance([41, 42]).recurrent, state.advance([41, 42]).recurrent)
     with pytest.raises(ValueError, match="branch"):
         stream_state_to_dict(state.fork(1)[0])
+
+
+# --------------------------------------------------------------------------
+# model-only 파일 — optimizer를 지운 슬림 checkpoint (Task R8 A2, 사용자 승인)
+# --------------------------------------------------------------------------
+
+from robo_jev.checkpoint import (  # noqa: E402
+    MODEL_ONLY_FORMAT,
+    MODEL_ONLY_REQUIRED_KEYS,
+    compare_model_tensors,
+    load_model_checkpoint,
+    model_only_state,
+    write_temporary,
+)
+
+SLIMMED = {"source_sha256": "ab" * 32, "source_bytes": 123, "at": "2026-09-29T00:00:00+00:00", "tool": "test"}
+
+
+def test_a_model_only_state_drops_only_the_optimizer_and_says_so_in_its_format(tmp_path):
+    """슬림 파일 = 재개용 저장 단위에서 `optimizer`만 뺀 것: 형식 표지가 model-only이고 `slimmed`에 무엇을 뺐는지·원본 해시가 적힌다.
+    나머지 키(model·scheduler·rng·sampler·progress·config·manifest…)는 그대로다."""
+    state = tiny_state()
+    slim = model_only_state(state, slimmed=SLIMMED)
+    assert slim["format"] == MODEL_ONLY_FORMAT and "optimizer" not in slim
+    assert slim["slimmed"] == {"from_format": CHECKPOINT_FORMAT, "removed": ["optimizer"], **SLIMMED}
+    assert set(slim) == (set(state) - {"optimizer"}) | {"slimmed"}
+    assert set(MODEL_ONLY_REQUIRED_KEYS) == (set(REQUIRED_KEYS) - {"optimizer"}) | {"slimmed"}
+    for key in set(state) - {"optimizer", "format"}:
+        assert_same_tree(state[key], slim[key], key)
+    temp = write_temporary(slim, tmp_path, prefix="checkpoint.pt")
+    assert temp.parent == tmp_path and temp.name.startswith("checkpoint.pt.") and temp.name.endswith(".tmp")
+    loaded = load_model_checkpoint(temp)
+    assert loaded["format"] == MODEL_ONLY_FORMAT
+    assert_same_tree(slim["model"], loaded["model"])
+    with pytest.raises(ValueError, match="optimizer"):
+        model_only_state(slim, slimmed=SLIMMED)  # 이미 슬림한 파일을 다시 슬림하지 않는다
+
+
+def test_the_resume_loader_refuses_a_model_only_file_and_names_the_reason(tmp_path):
+    """재개 경로(`load_checkpoint`)는 model-only 파일을 거절한다 — optimizer(AdamW 모멘트·fp32 master)가 없어 이어 학습할 수 없다는
+    이유를 적는다. 평가 경로(`load_model_checkpoint`)는 두 형식을 모두 받는다."""
+    full = tmp_path / "checkpoint.pt"
+    save_checkpoint(full, tiny_state())
+    slim = write_temporary(model_only_state(load_checkpoint(full), slimmed=SLIMMED), tmp_path, prefix="slim.pt")
+    with pytest.raises(ValueError, match="model-only") as excinfo:
+        load_checkpoint(slim)
+    assert "optimizer" in str(excinfo.value) and "이어 학습할 수 없다" in str(excinfo.value)
+    assert load_model_checkpoint(full)["format"] == CHECKPOINT_FORMAT
+    assert load_model_checkpoint(slim)["format"] == MODEL_ONLY_FORMAT
+    broken = model_only_state(load_checkpoint(full), slimmed=SLIMMED)
+    del broken["manifest"]
+    with pytest.raises(ValueError, match="manifest"):
+        load_model_checkpoint(write_temporary(broken, tmp_path, prefix="broken.pt"))
+    torch.save({"weights": torch.zeros(2)}, tmp_path / "foreign.pt")
+    with pytest.raises(ValueError, match="format"):
+        load_model_checkpoint(tmp_path / "foreign.pt")
+
+
+def test_tensor_comparison_is_bitwise_on_keys_shapes_dtypes_and_values():
+    """비트 단위 대조: 같은 키·모양·dtype·바이트여야 같다 — NaN도 같은 비트면 같고, 부호만 다른 0(−0.0)은 다르다."""
+    a = {"w": torch.tensor([1.0, float("nan"), 0.0]), "b": torch.arange(4, dtype=torch.bfloat16)}
+    same = compare_model_tensors(a, {"w": a["w"].clone(), "b": a["b"].clone()})
+    assert same["equal"] and same["tensors"] == 2 and same["bytes"] == 3 * 4 + 4 * 2 and same["mismatches"] == []
+    signed = compare_model_tensors(a, {"w": torch.tensor([1.0, float("nan"), -0.0]), "b": a["b"].clone()})
+    assert not signed["equal"] and signed["mismatches"] == [{"key": "w", "reason": "values"}]
+    assert compare_model_tensors(a, {"w": a["w"].clone()})["mismatches"] == [{"key": "b", "reason": "missing"}]
+    assert compare_model_tensors(a, {**a, "extra": torch.zeros(1)})["mismatches"] == [{"key": "extra", "reason": "unexpected"}]
+    assert compare_model_tensors(a, {"w": a["w"].double(), "b": a["b"]})["mismatches"] == [{"key": "w", "reason": "dtype"}]
+    assert compare_model_tensors(a, {"w": a["w"][:2], "b": a["b"]})["mismatches"] == [{"key": "w", "reason": "shape"}]

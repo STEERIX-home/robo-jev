@@ -370,3 +370,82 @@ def test_serialized_d0_stream_ticks_feed_the_loss(streams):
         {"labels": [record["ticks"][0]["labels"]]},
     )
     assert one.shape == () and torch.isfinite(one) and one.requires_grad
+
+
+# --------------------------------------------------------------------------
+# 상수 사전분포 head의 손실 — 질문별 기준선 (Task R8 A1)
+# --------------------------------------------------------------------------
+
+from robo_jev.loss import label_prior_share, prior_label_loss  # noqa: E402
+
+GRIPPER = ["open", "closed"]
+BOOLEAN = ["true", "false"]
+
+
+def test_a_labels_share_of_the_marginal_is_its_answer_its_allowed_set_its_distribution_or_its_success_fraction():
+    """라벨 하나가 배치 주변분포에 보태는 몫(합 1): single·boolean은 답 하나, valid_set은 허용 집합에 고르게(두 값 허용이면 반씩),
+    distribution은 그 분포, event는 true에 성공 비율·나머지 후보에 실패 비율. 기여하지 않는 라벨은 None."""
+    assert label_prior_share(GRIPPER, {"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ["closed"]}) == {"closed": 1.0}
+    assert label_prior_share(GRIPPER, {"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ["open", "closed"]}) == {"open": 0.5, "closed": 0.5}
+    assert label_prior_share(BOOLEAN, {"question_id": "q_stop", "kind": "single", "answer": False}) == {"false": 1.0}
+    assert label_prior_share(["0", "1", "2"], {"question_id": "q_force", "kind": "single", "answer": "2"}) == {"2": 1.0}
+    assert label_prior_share(["a", "b", "c"], {"question_id": "q", "kind": "distribution", "probabilities": {"a": 0.25, "c": 0.75}}) == {"a": 0.25, "c": 0.75}
+    event = label_prior_share(["true", "false"], {"question_id": "q", "kind": "event", "successes": 3, "failures": 1})
+    assert event == pytest.approx({"true": 0.75, "false": 0.25})
+    assert label_prior_share(BOOLEAN, {"question_id": "q", "kind": "event", "successes": 0, "failures": 0}) is None
+    assert label_prior_share(GRIPPER, {"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ["open"], "mask": False}) is None
+    with pytest.raises(ValueError, match="후보"):
+        label_prior_share(GRIPPER, {"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ["ajar"]})
+
+
+@pytest.mark.parametrize(
+    "candidates,label",
+    [
+        (GRIPPER, {"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ["closed"]}),
+        (GRIPPER, {"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ["open"]}),
+        (BOOLEAN, {"question_id": "q_stop", "kind": "single", "answer": True}),
+        (["0", "1", "2", "3"], {"question_id": "q_speed", "kind": "valid_set", "candidate_ids": ["1", "2"]}),
+        (["0", "1", "2"], {"question_id": "q_force", "kind": "single", "answer": "0"}),
+        (["a", "b", "c", "d"], {"question_id": "q", "kind": "valid_set", "candidate_ids": ["b"], "unknown": ["d"]}),
+        (["a", "b", "c"], {"question_id": "q", "kind": "distribution", "probabilities": {"a": 0.2, "b": 0.8}}),
+        (["true", "false"], {"question_id": "q", "kind": "event", "successes": 2, "failures": 5}),
+    ],
+)
+def test_the_constant_prior_heads_loss_is_label_loss_on_the_log_prior(candidates, label):
+    """기준선의 정의 = 같은 `label_loss` 식에 logits 대신 log π(이 상태의 후보 위로 다시 정규화한 사전분포)를 넣은 값 — 모델 손실과
+    같은 자로 잰다. 후보 밖에 있는 사전분포 질량(다른 상태의 후보)은 정규화에서 빠진다."""
+    prior = {cid: 0.1 + 0.2 * position for position, cid in enumerate(candidates)}
+    prior["elsewhere"] = 5.0  # 이 상태의 후보가 아니다 — 무시돼야 한다
+    total = sum(prior[cid] for cid in candidates)
+    logits = torch.tensor([math.log(prior[cid] / total) for cid in candidates], dtype=torch.float64)
+    expected = float(label_loss(logits, list(candidates), label))
+    assert prior_label_loss(prior, list(candidates), label) == pytest.approx(expected, rel=1e-12, abs=1e-12)
+
+
+def test_a_two_valued_gripper_label_costs_nothing_for_the_model_and_for_the_baseline():
+    """두 값 허용(open·closed 둘 다 허용)은 후보 전체라 어떤 head에도 손실 0 — 모델과 기준선 모두 0이다(질량만 같이 진다)."""
+    label = {"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ["open", "closed"]}
+    assert prior_label_loss({"open": 0.9, "closed": 0.1}, GRIPPER, label) == pytest.approx(0.0, abs=1e-15)
+    assert float(label_loss(torch.tensor([3.0, -2.0]), GRIPPER, label)) == pytest.approx(0.0, abs=1e-6)
+
+
+def test_a_uniform_prior_is_the_no_information_baseline_of_a_dynamic_candidate_question():
+    """후보가 틱마다 바뀌는 질문(q_main·q_path·비로봇 choice)의 기준선: 이 상태 후보 위의 균등 — single은 log K, 허용 집합 A는
+    −log(|A| / |A ∪ I|)(unknown은 정규화에서 빠진다)."""
+    candidates = ["c1", "c2", "c3", "c4", "c5"]
+    uniform = {cid: 1.0 for cid in candidates}
+    assert prior_label_loss(uniform, candidates, {"question_id": "q_main", "kind": "valid_set", "candidate_ids": ["c2"]}) == pytest.approx(math.log(5))
+    assert prior_label_loss(uniform, candidates, {"question_id": "q_main", "kind": "valid_set", "candidate_ids": ["c2", "c3"], "unknown": ["c5"]}) == pytest.approx(-math.log(2 / 4))
+
+
+def test_an_event_label_with_only_failures_does_not_turn_a_zero_prior_into_nan():
+    """성공 0인 사건 라벨은 log π(true) 항의 계수가 0이다 — π(true) = 0이어도 0·log 0 = 0으로 읽는다(nan이 아니다)."""
+    value = prior_label_loss({"true": 0.0, "false": 1.0}, ["true", "false"], {"question_id": "q", "kind": "event", "successes": 0, "failures": 3})
+    assert value == 0.0
+
+
+def test_a_label_that_contributes_nothing_to_the_model_loss_has_no_baseline_either():
+    """mask=false·근거 없는 사건 라벨은 모델 손실에서 빠지므로(`label_loss`가 None) 기준선도 None이다 — 같은 라벨 집합 위에서 잰다."""
+    prior = {"true": 0.5, "false": 0.5}
+    assert prior_label_loss(prior, BOOLEAN, {"question_id": "q_stop", "kind": "single", "answer": True, "mask": False}) is None
+    assert prior_label_loss(prior, BOOLEAN, {"question_id": "q", "kind": "event", "successes": 0, "failures": 0}) is None

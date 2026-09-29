@@ -374,3 +374,26 @@ def test_rescheduling_puts_the_first_resumed_step_on_the_new_schedule_not_the_ol
         for group in trainer.optimizer.param_groups:
             assert group["lr"] == pytest.approx(group["initial_lr"] * expected)
         assert trainer.rescheduled == {"max_steps": {"from": 10, "to": 20}}
+
+
+def test_a_run_cannot_be_resumed_from_a_model_only_checkpoint_but_its_weights_still_load_for_evaluation(tmp_path):
+    """Task R8 A2 (체크포인트 슬림화): optimizer를 지운 model-only 파일로는 **재개가 거절된다** — 오류가 이유(optimizer·fp32 master가
+    없어 같은 run이 되지 않는다)를 적는다. 같은 파일을 평가 경로(`load_readout_checkpoint`)는 싣고, 실린 가중치는 원본과 같다."""
+    from robo_jev.checkpoint import model_only_state, write_temporary
+    from robo_jev.train import build_model, load_readout_checkpoint, resolve_config, trainable_state_dict
+
+    config = {**base_config(tmp_path), "max_steps": 2, "run_id": "slim-me"}
+    with Trainer(config) as trainer:
+        trainer.run()
+    full = tmp_path / "runs" / "slim-me" / "checkpoint.pt"
+    original = load_checkpoint(full)
+    slim = write_temporary(model_only_state(original, slimmed={"source_sha256": "0" * 64, "at": "test"}), full.parent, prefix="checkpoint.pt")
+    with pytest.raises(ValueError, match="model-only") as excinfo:
+        Trainer({**config, "max_steps": 4}, resume=slim)
+    assert "이어 학습할 수 없다" in str(excinfo.value) and "optimizer" in str(excinfo.value)
+    judge = build_model(resolve_config({**config, "run_id": "eval"}))
+    load_readout_checkpoint(judge, slim, tokenizer_sha256=None, trust_checkpoint_tokenizer=True)
+    loaded = trainable_state_dict(judge)
+    assert set(loaded) == set(original["model"])
+    for name, tensor in original["model"].items():
+        assert torch.equal(loaded[name], tensor), name
