@@ -67,3 +67,47 @@ regression of r7. The same values on `dev_new2` are written beside it.
 instruction-shuffle margin (does it exclude zero; paired against r6 +0.374 and r5 +0.298), the `q_done` strata, the
 `q_gripper` initiate and `open` ticks, the `q_stop` onsets; the `dev` cell as a family-overlap caveat. Latency reports the
 first tick of each episode separately.
+
+## 1. Trained weights
+
+| run | steps | seed | checkpoint | contract digest | training | evaluated by |
+| --- | ---: | ---: | --- | --- | --- | --- |
+| **`r7-t1-fp32-2b-s18`** | 304 = one schedule, one process (no resume) | 18 | `artifacts/runs/r7-t1-fp32-2b-s18/checkpoint.pt` (24.5 GiB; model + optimizer + fp32 masters) | `93fe26725a4c…` (unchanged) | 18,361.1 s of unit wall = **5.10 GPU-h** (train seconds 17,384.0; 57.18 s/step), peak 56.05 GiB, loss 2.633 → 0.128 | R7 C2 (cells), **R7 D (closed loop)** |
+| `r6-t1-fp32-2b-s18`, `r5-t1-fp32-2b-s18` (baselines) | 233 each | 18 | `artifacts/runs/r{6,5}-t1-fp32-2b-s18/checkpoint.pt` | same | run reports 3 and 2 | R7 B3 (the 100 new ood_dev seeds) |
+
+Recipe: R6's (`configs/train/qwen35-2b-r7.yaml` extends `qwen35-2b-r6.yaml`) — Qwen3.5-2B bf16 with fp32 master weights, fp32
+pointer readout rank 64, full text backbone, `backbone_lr` 1e-5, `readout_lr` 3e-4, 5-second TBPTT chunks, 30-tick window,
+tick weights 0.25 / 2 / 2 / 1, seed 18, the same five data manifests (the non-robot one in its split-by-split layout). **Two
+recipe numbers differ, and a test pins that it is exactly these two** (plus the manifest path and the run name):
+`sampler.material_shares` existing **0.6** / error family **0.4** / new semantic family 0.0 (R6 0.5 / 0.5) and `max_steps`
+**304** (R6 233). Designed draws: expert 0.6 × 304 ≈ 182 (R5's level), DAgger 0.4 × 304 ≈ 122 (R6's level). **Realized**
+(`metrics.json` `summary.sampler.units` and `steps[].units`): **expert 195 (0.84 epoch of 233) and DAgger 109** (dagger-0 42,
+dagger-1 33, done-gate 34) — the seeded material coin came out 1.5 SD from its mean, so against R6 this run has **+84 expert
+draws and −13 DAgger draws** rather than "+71 and the same". Of the 43 episodes whose model raw `q_done` rose on a
+reference-False tick, **10** were drawn (3 + 7; R6 9). Non-robot 1,818 bundles, tokens 14.99 M (R6 11.55 M: 71 more steps).
+
+## 2. Reproducible data
+
+The training data list is R6's, with one change of **layout, not content**: the non-robot set is the split-by-split
+re-layout of A2. The robot manifests are unchanged.
+
+| dataset | what | manifest (sha256 of the manifest file) | version |
+| --- | --- | --- | --- |
+| robot train labels, gripper rule v2 (unchanged since R5) | the 400 R1 v0.2 episodes, `q_gripper` under rule v2; train 233 episodes | `artifacts/datasets/r1-robot/r1-rollout-labels-g2/manifest.json` `4d433bae6d22…` | `labels-rollout-v1+gripper-v2` |
+| DAgger cycle 0 (unchanged since R5) | R4's dev-condition model-driven records, 200 episodes | `artifacts/datasets/r5-dagger/dagger-0/manifest.json` `8b205ee13993…` | `gripper-v2`, `dagger-v0.1` cycle 0 |
+| DAgger cycle 1 — model loops (unchanged since R6) | R5's dev-condition model-driven records, 200 episodes | `artifacts/datasets/r6-dagger/dagger-1/manifest.json` `6351ec247d35…` | cycle 1 |
+| DAgger cycle 1 — done-gate collection (unchanged since R6) | 200 train-family episodes with the expert's `q_done` at the harness | `artifacts/datasets/r6-dagger/dagger-1-donegate/manifest.json` `6b44fc3e3492…` | cycle 1 |
+| **non-robot single requests, split by split (A2)** | the same 4,200 states as `r1/single` (`46e7e361719b…`; the run reports 1–3 wrote "2,000 records" — that is D1's pilot set; this one has 4,200 states, 2,620 of them `train`), regenerated with the same generator, config and seed and written one file per split; the one-file sha256 **`2ed780fd…` equals the old manifest's**, so the records are byte-identical and the old file was not opened | `artifacts/datasets/r1/single-by-split/manifest.json` `cfd632dd568f…` | `gen-single-v0.3.0`, `layout: by-split` |
+| closed-loop scenes (R7) | `ood_dev_new2` 100 new ood_dev seeds (base 1050100; E0/E1/E2 20/40/40; 41 origin groups, **0** shared with training); **ood_dev 200** = R4's 26 + R6's 74 + these 100 | `artifacts/reports/r7-seeds.json` (+ `r4-seeds.json`, `r6-seeds.json`); overlaps `r7-seeds-overlap.json`, `r7-seeds-crosscheck.json` | `cl0.1`, ids `-r7-<label>` |
+
+**Seal hygiene (Task R7 A1–A3).** From R2 to R6 the training loader hashed and parsed every file a manifest listed and only
+then dropped the records outside the requested split — every training run on the R1 robot corpora (33 sealed episode
+files) and on the non-robot `r1/single` (all splits in one `records.jsonl`) opened and parsed sealed records, and so did the
+evaluation-cell loader. The impact was nil: in the old code the split test came right after the parse and before tagging,
+serialization, `Item` creation and indexing, so a dropped record had no tokens and no index; R6 loaded exactly the
+train-split counts (3,453 = 833 + 2,620), and the new loader — which is tested never to open a sealed file — reproduces
+the decision cell's identity hash `6a3b69131243`. The loader now decides which files to open from the manifest before
+opening any, refuses entries that do not say their split, and cannot load the sealed split; the evaluation and analysis
+readers of episode directories follow the same rule (`robo_jev.data.sealed`). An old run cannot be resumed with the new
+loader: its non-robot manifest is refused, and on the re-layout the dataset identity and the sampler's record sources differ.
+The audit of every other path is in `.superpowers/sdd/task-r7-report.md` A3.
