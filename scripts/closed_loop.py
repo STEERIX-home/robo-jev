@@ -404,6 +404,17 @@ def print_verdict(verdict: dict[str, Any], file: Any = None) -> None:
         low, high = entry["ci"]
         return f"| {name} | {entry['pair']} | {entry['metric']} | {entry['value']:+.3f} [{low:+.3f}, {high:+.3f}] | {entry['holds_if']} | {'yes' if entry['holds'] else 'no'} |"
 
+    selection = verdict.get("selection")
+    if selection:
+        print(f"\n#### seed selection on {selection['condition']} (by {selection['metric']}, ties {selection['ties']})\n", file=file)
+        print("| seed group | seed | eligible | episodes | strict | done | false done |", file=file)
+        print("| --- | ---: | --- | ---: | ---: | ---: | ---: |", file=file)
+        for candidate in selection["candidates"]:
+            if not candidate["eligible"]:
+                print(f"| {candidate['label']} | {candidate['seed']} | no ({candidate['reason']}) | — | — | — | — |", file=file)
+                continue
+            print(f"| {candidate['label']} | {candidate['seed']} | yes | {candidate['episodes']} | {candidate['strict']} | {candidate['done']} | {candidate['false_done']} |", file=file)
+        print(f"- selected: **{selection['selected']}** (ranking {selection['ranking']}; decided by {selection['decided_by']})", file=file)
     blocks = [(verdict["primary"]["condition"] + " (primary)", verdict["primary"])]
     blocks += [(f"{name} (secondary)", block) for name, block in verdict["secondary"].items() if block.get("conditions")]
     for title, block in blocks:
@@ -435,6 +446,8 @@ def print_verdict(verdict: dict[str, Any], file: Any = None) -> None:
             low, high = entry["ci"]
             print(f"- stability {entry['name']} ({entry['pair']} {entry['metric']}): {entry['value']:+.3f} [{low:+.3f}, {high:+.3f}]" + (" (0 inside)" if entry["includes_zero"] else ""), file=file)
         print(f"- cloud: **{'recommend' if block['cloud'] else 'closed'}**" + (f" (failed: {block['failed']})" if block["failed"] else ""), file=file)
+    if verdict["verdict"].get("call"):
+        print(f"\n- registered call: **{verdict['verdict']['call']}** — {verdict['verdict']['call_text']}", file=file)
 
 
 def monitor_verdicts(registration: dict[str, Any], runs_root: Path) -> tuple[dict[str, str], dict[str, Any]]:
@@ -470,16 +483,47 @@ def monitor_verdicts(registration: dict[str, Any], runs_root: Path) -> tuple[dic
     return stopped, blocks
 
 
+def run_readings(registration: dict[str, Any], runs_root: Path) -> tuple[dict[str, str], dict[str, Any]]:
+    """R9: seed를 고르는 등록이면 `groups`마다 run의 `metrics.json`을 읽는다 → (고를 수 없는 묶음 → 이유, 묶음 → 기록(:func:`robo_jev.closed_loop.run_reading`)).
+
+    run이 없거나, status가 `completed`가 아니거나, step이 그 run의 `max_steps`에 닿지 않았으면 그 seed는 고를 수 없다(이유를 적는다). 등록이 감시를
+    **기록만** 한다고 한 묶음(`run_readings.log_only`)의 학습이 감시를 적용했다면 판정하지 않는다(ValueError) — 규칙을 조용히 바꾸지 않는다."""
+    from robo_jev.closed_loop import run_reading
+
+    if not registration.get("selection"):
+        return {}, {}
+    readings = registration.get("run_readings") or {}
+    log_only = set(readings.get("log_only") or ())
+    unavailable: dict[str, str] = {}
+    blocks: dict[str, Any] = {}
+    for group, entry in registration["groups"].items():
+        path = Path(runs_root) / entry["run"] / "metrics.json"
+        if not path.is_file():
+            unavailable[group], blocks[group] = f"no training run ({entry['run']}/metrics.json is missing)", None
+            continue
+        block = run_reading(json.loads(path.read_text(encoding="utf-8")), readings)
+        blocks[group] = {"run": entry["run"], **block}
+        if group in log_only and block["applied_monitor"] is not None:
+            raise ValueError(f"{group}: 등록은 감시를 기록만 한다고 했는데 학습이 감시 {block['applied_monitor']}를 적용했다 — 판정하지 않는다")
+        if block["status"] != "completed" or block["max_steps"] is None or int(block["step"] or 0) < int(block["max_steps"]):
+            unavailable[group] = f"the run did not complete (status {block['status']}, step {block['step']} of max_steps {block['max_steps']})"
+    return unavailable, blocks
+
+
 def cmd_verdict(args: argparse.Namespace) -> int:
-    """E1 (Task R7·R8): 사전 등록 규칙(`configs/eval/r7-registration.yaml`·`r8-registration.yaml`)을 폐루프 보고서에 적힌 그대로 적용한다.
-    R8 등록이면 seed 묶음마다 run의 head 적합 감시 판정을 먼저 읽는다(:func:`monitor_verdicts`)."""
+    """E1 (Task R7·R8·R9): 사전 등록 규칙(`configs/eval/r7-registration.yaml`·`r8-registration.yaml`·`r9-registration.yaml`)을 폐루프 보고서에 적힌 그대로
+    적용한다. R8 등록이면 seed 묶음마다 run의 head 적합 감시 판정을 먼저 읽고(:func:`monitor_verdicts`), R9 등록(seed 고르기)이면 run마다 완주 여부와
+    판정 옆의 기록을 읽는다(:func:`run_readings`)."""
     from robo_jev.closed_loop import apply_registration, load_registration
 
     report = json.loads(Path(args.report).read_text(encoding="utf-8"))
     registration = load_registration(args.registration)
     stopped, monitors = monitor_verdicts(registration, Path(args.runs_root))
-    verdict = apply_registration(report, registration, stopped=stopped)
+    unavailable, readings = run_readings(registration, Path(args.runs_root))
+    verdict = apply_registration(report, registration, stopped={**stopped, **unavailable})
     verdict.update({"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit(), "report": str(args.report), "monitor": monitors})
+    if readings:
+        verdict["runs"] = readings
     _write(Path(args.out), verdict)
     print_verdict(verdict)
     return 0
@@ -562,10 +606,10 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--out", required=True)
     report.set_defaults(func=cmd_report)
 
-    verdict = sub.add_parser("verdict", help="E1 (R7): 사전 등록 규칙을 폐루프 보고서에 적힌 그대로 적용한다 (클라우드 조건·원인 판정)")
+    verdict = sub.add_parser("verdict", help="E1 (R7·R8·R9): 사전 등록 규칙을 폐루프 보고서에 적힌 그대로 적용한다 (클라우드 조건·원인 판정·seed 감시·검증 집합의 seed 고르기)")
     verdict.add_argument("--report", required=True, help="`report`의 산출물 (주 집합과 seed 단위 쌍이 든 것)")
     verdict.add_argument("--registration", default=str(REPO / "configs/eval/r7-registration.yaml"))
-    verdict.add_argument("--runs-root", dest="runs_root", default=str(REPO), help="등록의 groups[].run이 가리키는 run 디렉터리의 뿌리 (R8; 기본: 저장소)")
+    verdict.add_argument("--runs-root", dest="runs_root", default=str(REPO), help="등록의 groups[].run이 가리키는 run 디렉터리의 뿌리 (R8·R9; 기본: 저장소)")
     verdict.add_argument("--out", required=True)
     verdict.set_defaults(func=cmd_verdict)
 

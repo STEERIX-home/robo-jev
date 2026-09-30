@@ -1,0 +1,124 @@
+# Task R9 사전 등록 — 어떤 R9 학습 step이나 숫자보다 **먼저** 적고 커밋한다 (이 파일이 든 커밋이 등록 시각이다).
+# 사람이 읽는 판은 `docs/reports/run-report-6.md` §0이고, 판정은 이 파일을 `robo_jev.closed_loop.apply_registration`이 폐루프 보고서
+# (`scripts/closed_loop.py report` 산출물)에 **그대로** 적용해 낸다(`scripts/closed_loop.py verdict --registration configs/eval/r9-registration.yaml`)
+# — 숫자를 본 뒤에 규칙이 흔들리지 않게 고르기와 판정을 코드로 고정한다.
+#
+# 조리법은 **바꾸지 않는다**: `configs/train/qwen35-2b-r8.yaml`(R5 조리법 + DAgger 사이클 1 재료, `max_steps` 233, 같은 일정). run 셋:
+#   r8s19  — R8 seed 19, 그대로(233 완주; `artifacts/runs/r8-t1-fp32-2b-s19`; 폐루프 기록 `artifacts/datasets/r8-closed-loop/r8s19/`).
+#   r9s18c — seed 18을 R8의 step 150 체크포인트(`artifacts/runs/r8-t1-fp32-2b-s18/checkpoint.pt`, status `stopped_head_not_fitting`, 재개 단위)에서
+#            **같은 일정(`max_steps` 233)**으로 이어 233까지. 재개한 run의 id는 체크포인트의 것(`r8-t1-fp32-2b-s18`)이라 새 run 디렉터리는
+#            `artifacts_dir`로 정한다: `artifacts/runs/r9-t1-fp32-2b-s18c/r8-t1-fp32-2b-s18/`. R8 디렉터리는 읽기만 한다.
+#   r9s17  — 같은 조리법을 seed 17로 처음부터 (`--seed 17`, run id `r9-t1-fp32-2b-s17`).
+# 두 새 run 모두 head 적합 감시는 **기록만** 한다: 학습은 `head_fit_monitor: null`로 돌아 멈추지 않고(질문별 손실은 그대로 기록된다), R8의 통계
+# (q_gripper · step 150 · 창 20 · 0.70)는 학습 뒤 `metrics.json`의 step 기록에서 다시 계산해 옆에 적기만 한다(`run_readings.monitor_log`) —
+# 멈추게 하지도, seed를 고르지도, 판정에 들어가지도 않는다. R8 리뷰가 그 에피소드 기준선을 이 결정에 약한 계기로 판정했다.
+#
+# seed 고르기(검증 집합): 셋 가운데 **dev_new2 100의 엄격 성공 수**(`done ∧ target_inside_zone`)가 가장 큰 seed를 고른다. 동점이면 dev_new2의 거짓 done이
+# 적은 쪽, 그다음 seed 번호가 작은 쪽. **ood_dev 200의 숫자는 고르는 데 쓰지 않는다** — `select_seed`는 dev_new2의 표만 읽고, `load_registration`은
+# 판정 집합(ood_dev200)과 그것을 이루는 조건(ood_dev·ood_dev_new·ood_dev_new2)을 고르는 조건으로 받지 않는다. run이 `completed`로 `max_steps`에
+# 닿지 않은 seed(없거나 죽었거나 끝나지 않은 run)는 고를 수 없다(이유를 적는다). 후보는 같은 seed 집합에서 돌았어야 한다(코드가 확인한다).
+#
+# 판정(홀드아웃): **고른 seed s만** ood_dev 200에서 R7의 (a)(b)(c)를 적용한다 — (a) 규칙 − s 엄격 성공의 하한 ≤ 0, (b) s − r5 거짓 done 율의 상한 < 0,
+# (c) s − r5 편당 중복 그리퍼 전환의 하한 ≤ 0 **그리고** s − r5 `q_stop` 포착률의 상한 ≥ 0. 넷이 모두 성립하면 `calls.pass`, 아니면 `calls.fail`.
+# (a)·(b) 옆에 불일치 seed 수·정확 McNemar p·부트스트랩 RNG seed 1–200의 하한·상한 분포를 적는다(판정을 바꾸지 않는다). dev_new2의 같은 조건은
+# 옆에 적기만 한다(고르는 데 쓴 집합이라 판정의 근거가 아니다).
+#
+# 분포 판독(서술 — 판정·선택에 쓰지 않는다): 셋 모두의 dev_new2·ood_dev 200 엄격 성공·거짓 done·그리퍼 중복·`q_stop` 포착(`distribution`), seed 사이의
+# 짝지은 차(`stability`), 그리고 run마다 기록 전용 감시와 그리퍼 head가 맞기 시작한 step(`run_readings`). 오프라인 판정 칸의 주 층 지시 섞기 여유는
+# `scripts/decision_cell_strata.py --runs r9`(같은 해시 `6a3b69131243`)에서 옮긴다.
+#
+# 짝짓기·구간: seed(`profile:seed`)로 짝지은 편 단위 퍼센타일 부트스트랩, 2,000회, RNG seed 20260921, 95 % (`EPISODE_BOOTSTRAP`) —
+# `paired_success(strict=True)`·`paired_false_done`·`paired_seed_ratio`. 0을 포함하는 구간은 발견이 아니다. 주 지표는 엄격 성공. 지연은 첫 틱과 나머지를 따로.
+version: r9-registration-v1
+task: r9
+written_at: "2026-09-30 KST (commit time is the registration time)"
+primary: ood_dev200
+secondary: [dev_new2]
+merge:
+  ood_dev200: [ood_dev, ood_dev_new, ood_dev_new2]
+bootstrap:
+  resamples: 2000
+  seed: 20260921
+  level: 0.95
+# 보고서 명령이 싣는 seed 단위 쌍 — 고른 seed가 무엇이든 판정·견고성이 읽을 쌍(s − r5, 규칙 − s)과 분포 판독의 seed 사이 쌍을 모두 싣는다.
+seed_pairs: ["r8s19:r5", "r9s18c:r5", "r9s17:r5", "rule:r8s19", "rule:r9s18c", "rule:r9s17", "r9s18c:r8s19", "r9s17:r8s19", "r9s18c:r9s17"]
+
+# seed 묶음 — `seed`는 동점 깨기에, `run`은 완주 여부와 판정 옆의 기록을 읽을 run 디렉터리(저장소 기준)다.
+groups:
+  r8s19: {seed: 19, run: artifacts/runs/r8-t1-fp32-2b-s19}
+  r9s18c: {seed: 18, run: artifacts/runs/r9-t1-fp32-2b-s18c/r8-t1-fp32-2b-s18}
+  r9s17: {seed: 17, run: artifacts/runs/r9-t1-fp32-2b-s17}
+
+# 검증 집합에서 seed 하나를 고른다 — 지표는 가장 큰 쪽, 동점 깨기는 작은 쪽이 앞선다(`false_done` = 거짓 done 편 수, `seed` = seed 번호).
+selection:
+  condition: dev_new2
+  candidates: [r8s19, r9s18c, r9s17]
+  metric: strict
+  ties: [false_done, seed]
+
+# 판정 — 고른 seed 하나에 대해, R7의 (a)(b)(c) 그대로. `{selected}`가 고른 seed의 이름표로 바뀐다.
+cloud:
+  a:
+    group: selected
+    what: "규칙 − 고른 seed 엄격 성공 — 규칙 판정기가 고른 seed를 확실히 앞서지는 않는다"
+    pair: "rule - {selected}"
+    source: paired
+    metric: strict
+    holds_if: lower_le_zero
+  b:
+    group: selected
+    what: "고른 seed − r5 거짓 done 율 — R6의 수리가 선다"
+    pair: "{selected} - r5"
+    source: paired
+    metric: false_done
+    holds_if: upper_lt_zero
+  c_duplicates:
+    group: selected
+    what: "회귀 관문 1 — 고른 seed − r5 편당 중복 그리퍼 전환의 구간이 전부 0 위가 아니다"
+    pair: "{selected} - r5"
+    source: seed_pairs
+    metric: gripper_duplicates
+    holds_if: lower_le_zero
+  c_q_stop:
+    group: selected
+    what: "회귀 관문 2 — 고른 seed − r5 q_stop 정지 사건 포착률의 구간이 전부 0 아래가 아니다"
+    pair: "{selected} - r5"
+    source: seed_pairs
+    metric: q_stop_caught
+    holds_if: upper_ge_zero
+
+# 판정의 등록 문장 (브리프 Stage A).
+calls:
+  pass: "여러 seed를 돌려 검증 집합으로 고르는 절차가 통한다 — 클라우드는 seed를 병렬로 돌리는 데 쓸 가치가 있다(공급자·계정·예산은 사용자 결정)"
+  fail: "고른 seed가 판정을 통과하지 못했다 — 다음 라운드는 학습 안정성(그리퍼 head의 평평한 구간, q_stop)이다"
+
+# (a)·(b) 옆에 적는 견고성 — 판정을 바꾸지 않는다: 불일치 seed 수, 정확 McNemar p, 부트스트랩 RNG seed 1–200의 하한·상한 분포.
+robustness:
+  - {condition: a, pair: "rule - {selected}", metric: strict}
+  - {condition: b, pair: "{selected} - r5", metric: false_done}
+
+# 분포 판독의 seed 사이 짝지은 차 — 판정 옆에 적기만 한다. 0을 포함하면 "seed 사이 차가 발견되지 않았다"이지 "같다"가 아니다.
+stability:
+  - {name: "r9s18c - r8s19 strict", pair: "r9s18c - r8s19", source: paired, metric: strict}
+  - {name: "r9s18c - r8s19 false_done", pair: "r9s18c - r8s19", source: paired, metric: false_done}
+  - {name: "r9s18c - r8s19 gripper_duplicates", pair: "r9s18c - r8s19", source: seed_pairs, metric: gripper_duplicates}
+  - {name: "r9s18c - r8s19 q_stop_caught", pair: "r9s18c - r8s19", source: seed_pairs, metric: q_stop_caught}
+  - {name: "r9s17 - r8s19 strict", pair: "r9s17 - r8s19", source: paired, metric: strict}
+  - {name: "r9s17 - r8s19 false_done", pair: "r9s17 - r8s19", source: paired, metric: false_done}
+  - {name: "r9s17 - r8s19 gripper_duplicates", pair: "r9s17 - r8s19", source: seed_pairs, metric: gripper_duplicates}
+  - {name: "r9s17 - r8s19 q_stop_caught", pair: "r9s17 - r8s19", source: seed_pairs, metric: q_stop_caught}
+  - {name: "r9s18c - r9s17 strict", pair: "r9s18c - r9s17", source: paired, metric: strict}
+  - {name: "r9s18c - r9s17 false_done", pair: "r9s18c - r9s17", source: paired, metric: false_done}
+  - {name: "r9s18c - r9s17 gripper_duplicates", pair: "r9s18c - r9s17", source: seed_pairs, metric: gripper_duplicates}
+  - {name: "r9s18c - r9s17 q_stop_caught", pair: "r9s18c - r9s17", source: seed_pairs, metric: q_stop_caught}
+
+# 판정 옆에 적는 run 기록 — 판정·선택에 쓰지 않는다.
+#   monitor_log   — R8의 head 적합 감시 통계를 step 기록에서 다시 계산한 값(기록 전용; 학습은 `head_fit_monitor: null`).
+#   gripper_onset — 그리퍼 head가 **지속적으로** 맞기 시작한 step: 학습 배치 탐침에서 `settled` 틱이 5개 이상인 step만 세어, 어떤 step부터 기록의
+#                   끝까지 그런 step마다 argmax 정답률이 0.5 이상인 가장 이른 step(`robo_jev.closed_loop.gripper_fit_onset`; R8의 곡선에서 seed 19 → 132,
+#                   seed 18(150까지) → 142).
+#   log_only      — 학습이 감시를 **적용하면 안 되는** 묶음(적용했다면 판정 명령이 판정하지 않는다). r8s19는 R8의 감시를 적용해 통과한 run 그대로다.
+run_readings:
+  monitor_log: {question: q_gripper, step: 150, window: 20, ratio: 0.70}
+  gripper_onset: {stratum: settled, min_accuracy: 0.5, min_ticks: 5}
+  log_only: [r9s18c, r9s17]

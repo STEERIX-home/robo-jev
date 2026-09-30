@@ -79,6 +79,7 @@ __all__ = [
     "failure_cause",
     "family_overlap",
     "gripper_event_metrics",
+    "gripper_fit_onset",
     "offline_gripper_transitions",
     "load_closed_loop_config",
     "load_registration",
@@ -90,8 +91,11 @@ __all__ = [
     "print_report",
     "quotas",
     "run_condition",
+    "run_reading",
+    "seed_distribution",
     "seed_metrics",
     "select_conditions",
+    "select_seed",
     "select_seeds",
 ]
 
@@ -1154,20 +1158,50 @@ _BOUNDS = {
 }
 #: `paired` 블록에서 지표 이름 → 쌍 이름의 꼬리 (:func:`closed_loop_report`).
 _PAIRED_SUFFIX = {"done": "", "strict": " (done ∧ inside)", "false_done": " (false done)"}
+#: seed를 고르는 등록(Task R9)에서 판정 조건의 쌍 이름 안에 두는 자리 표시 — 고른 seed의 이름표로 바뀐다 (:func:`select_seed`).
+SELECTED_TOKEN = "{selected}"
+#: 그런 등록에서 판정 조건의 `group` — "고른 seed 하나"다 (판정은 고른 seed에 대한 것이지 후보 전부에 대한 것이 아니다).
+SELECTED_GROUP = "selected"
+#: seed 고르기의 지표(가장 큰 쪽이 앞선다)와 동점 깨기(작은 쪽이 앞선다) — 이름이 곧 규칙이다.
+SELECTION_METRICS = ("strict",)
+SELECTION_TIES = ("false_done", "seed")
+#: 판정 옆에 적는 run 기록(Task R9 `run_readings`)의 키 — 기록 전용 감시, 그리퍼 적합 시작 step의 정의, 감시를 기록만 해야 하는 묶음.
+_RUN_READING_KEYS = ("monitor_log", "gripper_onset", "log_only")
 
 
 def load_registration(path: str | Path) -> dict[str, Any]:
-    """사전 등록 파일(`configs/eval/r7-registration.yaml`, `r8-registration.yaml`)을 읽고 검사한다 — 모르는 경계·출처·빈 조건은 거절한다.
+    """사전 등록 파일(`configs/eval/r7-registration.yaml`, `r8-registration.yaml`, `r9-registration.yaml`)을 읽고 검사한다 — 모르는 경계·출처·빈 조건은 거절한다.
 
     R8에서 더한 것(없으면 R7과 똑같이 읽힌다): `groups`(seed 묶음 — 조건마다 `group`이 그 이름이어야 한다; 클라우드는 여전히 **모든** 조건이
     성립해야 한다 = 모든 묶음이 통과), `monitor`(학습의 head 적합 감시 — 판정 명령이 run에서 읽어 대조한다), `stability`(판정 옆의 판독 목록),
-    그리고 `cause`는 있을 때만 검사·적용한다(R8은 원인 판정이 없다)."""
+    그리고 `cause`는 있을 때만 검사·적용한다(R8은 원인 판정이 없다).
+
+    R9에서 더한 것(없으면 R8과 똑같이 읽힌다): `selection`(**검증 집합에서 seed 하나를 고르고 그 seed만 판정한다** — 고르는 조건은 주 집합도, 주
+    집합을 이루는 조건도 될 수 없다; 판정 조건은 모두 `group: selected`이고 쌍에 `{selected}`가 있다), `calls`(통과·불통과의 등록 문장),
+    `run_readings`(판정·선택에 쓰지 않는 run 기록: 기록 전용 감시·그리퍼 적합 시작 step의 정의·감시를 기록만 해야 하는 묶음)."""
     path = Path(path)
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     for key in ("version", "primary", "bootstrap", "cloud"):
         if not raw.get(key):
             raise ValueError(f"{path}: {key}가 필요하다")
     groups = dict(raw.get("groups") or {})
+    selection = raw.get("selection")
+    if selection:
+        # 판정할 집합의 숫자로 고르지 않는다 — 고르는 조건은 주 집합이 아니고, 주 집합을 합쳐 만든 조건들도 아니다
+        forbidden = {str(raw["primary"]), *(str(part) for part in ((raw.get("merge") or {}).get(raw["primary"]) or ()))}
+        condition = selection.get("condition")
+        if not condition or str(condition) in forbidden:
+            raise ValueError(f"{path}: selection.condition은 판정 집합({sorted(forbidden)})이 아닌 조건이어야 한다 (받은 값: {condition!r}) — 판정할 집합의 숫자로 고르지 않는다")
+        candidates = list(selection.get("candidates") or [])
+        if len(candidates) < 2 or len(set(candidates)) != len(candidates) or any(name not in groups for name in candidates):
+            raise ValueError(f"{path}: selection.candidates는 groups({sorted(groups)}) 가운데 서로 다른 둘 이상이어야 한다 (받은 값: {candidates})")
+        if any(not isinstance(groups[name].get("seed"), int) or not groups[name].get("run") for name in candidates):
+            raise ValueError(f"{path}: selection.candidates의 묶음마다 groups에 정수 seed와 run이 필요하다 (동점 깨기와 run 상태를 읽는다)")
+        if selection.get("metric") not in SELECTION_METRICS:
+            raise ValueError(f"{path}: selection.metric은 {list(SELECTION_METRICS)} 중 하나다 (받은 값: {selection.get('metric')!r})")
+        ties = list(selection.get("ties") or [])
+        if len(set(ties)) != len(ties) or any(tie not in SELECTION_TIES for tie in ties):
+            raise ValueError(f"{path}: selection.ties는 {list(SELECTION_TIES)}의 겹치지 않는 순서다 (받은 값: {ties})")
     for name, entry in raw["cloud"].items():
         if entry.get("source") not in ("paired", "seed_pairs") or entry.get("holds_if") not in _BOUNDS or not entry.get("pair") or not entry.get("metric"):
             raise ValueError(f"{path}: cloud.{name}에는 pair·metric·source(paired|seed_pairs)·holds_if({sorted(_BOUNDS)})가 필요하다")
@@ -1175,8 +1209,23 @@ def load_registration(path: str | Path) -> dict[str, Any]:
             raise ValueError(f"{path}: cloud.{name}.metric: paired 블록의 지표는 {sorted(_PAIRED_SUFFIX)} 중 하나다")
         if entry["source"] == "seed_pairs" and entry["metric"] not in SEED_METRICS:
             raise ValueError(f"{path}: cloud.{name}.metric: seed 단위 지표는 {list(SEED_METRICS)} 중 하나다")
-        if groups and entry.get("group") not in groups:
+        if selection:
+            if entry.get("group") != SELECTED_GROUP or SELECTED_TOKEN not in str(entry["pair"]):
+                raise ValueError(f"{path}: cloud.{name}: seed를 고르는 등록에서는 group이 {SELECTED_GROUP!r}이고 pair에 {SELECTED_TOKEN!r}가 있어야 한다 — 판정은 고른 seed 하나에 대한 것이다")
+        elif groups and entry.get("group") not in groups:
             raise ValueError(f"{path}: cloud.{name}.group: groups({sorted(groups)}) 가운데 하나여야 한다 (받은 값: {entry.get('group')!r})")
+    calls = raw.get("calls")
+    if calls is not None and (not isinstance(calls, dict) or not all(isinstance(calls.get(key), str) and calls[key] for key in ("pass", "fail"))):
+        raise ValueError(f"{path}: calls에는 pass·fail 문장이 둘 다 필요하다")
+    readings = raw.get("run_readings")
+    if readings is not None:
+        unknown = sorted(set(readings) - set(_RUN_READING_KEYS))
+        monitor_log, onset = readings.get("monitor_log"), readings.get("gripper_onset")
+        if unknown or (monitor_log is not None and any(monitor_log.get(key) is None for key in ("question", "step", "window", "ratio"))) or (
+            onset is not None and any(onset.get(key) is None for key in ("stratum", "min_accuracy", "min_ticks"))
+        ) or any(name not in groups for name in (readings.get("log_only") or ())):
+            raise ValueError(f"{path}: run_readings는 {list(_RUN_READING_KEYS)}만 받는다 — monitor_log(question·step·window·ratio), "
+                             f"gripper_onset(stratum·min_accuracy·min_ticks), log_only(groups의 이름) (모르는 키: {unknown})")
     cause = raw.get("cause")
     if cause:
         for name, entry in cause["metrics"].items():
@@ -1194,7 +1243,8 @@ def load_registration(path: str | Path) -> dict[str, Any]:
         if not valid or not entry.get("pair") or not entry.get("name"):
             raise ValueError(f"{path}: stability[{position}]: name·pair·source(paired|seed_pairs)와 그 출처의 지표가 필요하다")
     return {**raw, "path": str(path), "secondary": list(raw.get("secondary") or []), "seed_pairs": list(raw.get("seed_pairs") or []),
-            "groups": groups, "stability": stability, "cause": cause or None}
+            "groups": groups, "stability": stability, "cause": cause or None, "selection": selection or None, "calls": calls,
+            "run_readings": readings}
 
 
 def _flip(low: float, high: float) -> list[float]:
@@ -1307,13 +1357,139 @@ def _apply_to_condition(report: dict[str, Any], condition: str, registration: di
             "cause": cause_out, "stability": stability}
 
 
+def select_seed(report: dict[str, Any], registration: dict[str, Any], *, unavailable: dict[str, str] | None = None) -> dict[str, Any]:
+    """등록한 규칙으로 **검증 집합에서 seed 하나를 고른다** (Task R9 — `selection`).
+
+    읽는 것은 보고서의 `tables[selection.condition]`(검증 집합의 정책별 표)뿐이다 — 판정 집합의 표·쌍은 열지 않는다(그리고 :func:`load_registration`이
+    판정 집합을 고르는 조건으로 받지 않는다). 후보마다 엄격 성공 수(`strict_done` = `done ∧ target_inside_zone`)가 가장 큰 쪽, 동점이면 `ties`의 순서로
+    — `false_done`은 거짓 done 편이 적은 쪽, `seed`는 seed 번호가 작은 쪽. `unavailable`(묶음 → 이유)은 고를 수 없는 후보다(run이 없거나 끝나지 않았다).
+    고를 수 있는 후보는 **같은 seed 집합**에서 돌았어야 한다 — 편 수가 다르거나 두 후보의 짝지은 블록이 센 공통 seed 수가 편 수와 다르면 거절한다."""
+    rule = registration["selection"]
+    condition = str(rule["condition"])
+    unavailable = dict(unavailable or {})
+    table = (report.get("tables") or {}).get(condition)
+    if table is None:
+        raise ValueError(f"보고서에 선택 조건 {condition!r}의 표가 없다 (있는 조건: {report.get('conditions')}) — `report --only …,{condition}`로 만든다")
+    rows: list[dict[str, Any]] = []
+    for label in rule["candidates"]:
+        seed = int(registration["groups"][label]["seed"])
+        if label in unavailable:
+            rows.append({"label": label, "seed": seed, "eligible": False, "reason": unavailable[label]})
+            continue
+        block = table.get(label)
+        if block is None:
+            raise ValueError(f"{condition}: 보고서의 표에 후보 {label!r}가 없다 — 그 seed의 폐루프가 필요하다(없다면 이유를 unavailable로 준다)")
+        rows.append({"label": label, "seed": seed, "eligible": True, "episodes": int(block["episodes"]), "strict": int(block["strict_done"]),
+                     "done": int(block["done"]), "false_done": len(block["false_done"])})
+    eligible = [row for row in rows if row["eligible"]]
+    if len({row["episodes"] for row in eligible}) > 1:
+        raise ValueError(f"{condition}: 후보마다 편 수가 다르다 {[(row['label'], row['episodes']) for row in eligible]} — 같은 seed 집합에서만 고른다")
+    for index, a in enumerate(eligible):
+        for b in eligible[index + 1 :]:
+            shared = _read_paired(report, condition, f"{a['label']} - {b['label']}", "strict")["seeds"]
+            if shared != a["episodes"]:
+                raise ValueError(f"{condition}: {a['label']}와 {b['label']}의 공통 seed가 {shared}편이다(편 수 {a['episodes']}) — 같은 seed 집합에서만 고른다")
+    ties = list(rule.get("ties") or [])
+
+    def key(row: dict[str, Any]) -> tuple[int, ...]:
+        return (-row["strict"], *(int(row[tie]) for tie in ties))
+
+    ranked = sorted(eligible, key=key)
+    decided_by = None
+    if len(ranked) == 1:
+        decided_by = "only_eligible"
+    elif len(ranked) > 1:
+        first, second = key(ranked[0]), key(ranked[1])
+        names = ["strict", *ties]
+        decided_by = next((name for name, x, y in zip(names, first, second) if x != y), None)
+    return {"condition": condition, "metric": str(rule["metric"]), "ties": ties, "candidates": rows, "ranking": [row["label"] for row in ranked],
+            "selected": ranked[0]["label"] if ranked else None, "decided_by": decided_by}
+
+
+def _materialize_selection(registration: dict[str, Any], selected: str | None) -> dict[str, Any]:
+    """고른 seed의 이름표를 판정 조건·견고성의 쌍 이름에 넣은 등록 사본 — 고른 것이 없으면(고를 수 있는 후보가 없다) 쌍은 그대로 둔다."""
+    out = copy.deepcopy(registration)
+    if selected is None:
+        return out
+    for entry in out["cloud"].values():
+        entry["pair"] = str(entry["pair"]).replace(SELECTED_TOKEN, selected)
+        entry["group"] = selected
+    for entry in out.get("robustness") or ():
+        entry["pair"] = str(entry["pair"]).replace(SELECTED_TOKEN, selected)
+    return out
+
+
+def gripper_fit_onset(steps: list[dict[str, Any]], *, stratum: str = "settled", min_accuracy: float = 0.5, min_ticks: int = 5) -> dict[str, Any]:
+    """학습 배치 탐침(`steps[].probes.q_gripper`)에서 그리퍼 head가 **지속적으로** 맞기 시작한 step (Task R9 등록 `run_readings.gripper_onset`).
+
+    `stratum`의 틱이 `min_ticks` 이상인 step만 센다. 셀 수 있는 어떤 step s부터 **기록의 끝까지** 셀 수 있는 모든 step에서 argmax 정답률이
+    `min_accuracy` 이상이면, 그런 s 가운데 가장 이른 것이 시작 step이다(뒤에서부터 걸어 처음으로 떨어지는 step 바로 다음). 끝의 step이 떨어지면 None —
+    기록이 끝날 때까지 지속된 적합이 없다. R8의 두 곡선에서 seed 19 → 132, seed 18(150까지) → 142."""
+    counted: list[tuple[int, float]] = []
+    for entry in steps:
+        block = ((entry.get("probes") or {}).get("q_gripper") or {}).get(stratum) or {}
+        n = int(block.get("n") or 0)
+        if n >= int(min_ticks):
+            counted.append((int(entry["step"]), int(block.get("correct") or 0) / n))
+    onset: int | None = None
+    for step, accuracy in reversed(counted):
+        if accuracy < float(min_accuracy):
+            break
+        onset = step
+    return {"onset_step": onset, "stratum": stratum, "min_accuracy": float(min_accuracy), "min_ticks": int(min_ticks), "steps_counted": len(counted),
+            "last_step": int(steps[-1]["step"]) if steps else None}
+
+
+def run_reading(metrics: dict[str, Any], readings: dict[str, Any] | None = None) -> dict[str, Any]:
+    """run 하나의 `metrics.json` → 판정 옆에 적는 기록 (Task R9 `run_readings`; 판정·선택에 쓰지 않는다): status·step·일정(`max_steps`)·seed·
+    이어 돈 checkpoint(`resume`)·학습이 **적용한** 감시·요약의 감시 판정, 그리고 등록한 **기록 전용 감시**(R8의 통계를 step 기록에서 다시 계산 —
+    멈추게 하지 않는다)와 그리퍼 적합 시작 step(:func:`gripper_fit_onset`)."""
+    from robo_jev.train import head_fit_monitor_result
+
+    readings = readings or {}
+    config = metrics.get("config") or {}
+    steps = list(metrics.get("steps") or [])
+    summary = metrics.get("summary") or {}
+    monitor_log, onset = readings.get("monitor_log"), readings.get("gripper_onset")
+    return {
+        "run_id": metrics.get("run_id"), "status": metrics.get("status"), "step": metrics.get("step"), "max_steps": config.get("max_steps"),
+        "seed": config.get("seed"), "resume": config.get("resume"), "rescheduled": summary.get("rescheduled"),
+        "applied_monitor": config.get("head_fit_monitor"), "summary_monitor": summary.get("head_fit_monitor"),
+        "monitor_log": head_fit_monitor_result(steps, {key: monitor_log[key] for key in ("question", "step", "window", "ratio")}) if monitor_log else None,
+        "gripper_onset": gripper_fit_onset(steps, stratum=str(onset["stratum"]), min_accuracy=float(onset["min_accuracy"]), min_ticks=int(onset["min_ticks"])) if onset else None,
+        "sampler_units": (summary.get("sampler") or {}).get("units"),
+    }
+
+
+def seed_distribution(report: dict[str, Any], labels: list[str], conditions: list[str]) -> dict[str, Any]:
+    """등록의 분포 판독(Task R9 — 판정에 쓰지 않는다): 조건마다 seed 묶음의 편 수·엄격 성공·done·거짓 done·중복 그리퍼 전환(편당 합)·`q_stop`
+    포착 / 정지 사건을 보고서의 표에서 그대로 옮긴다. 표에 없는 조건·이름표는 `available: False`."""
+    out: dict[str, Any] = {}
+    for condition in conditions:
+        table = (report.get("tables") or {}).get(condition)
+        out[condition] = {}
+        for label in labels:
+            block = (table or {}).get(label)
+            if block is None:
+                out[condition][label] = {"available": False}
+                continue
+            events, stop = block.get("gripper_events") or {}, block.get("stop_timing") or {}
+            out[condition][label] = {"available": True, "episodes": block["episodes"], "strict": block["strict_done"], "done": block["done"],
+                                     "false_done": len(block["false_done"]), "gripper_duplicates": events.get("duplicate"),
+                                     "q_stop_caught": stop.get("reacted"), "q_stop_onsets": stop.get("onsets")}
+    return out
+
+
 def apply_registration(report: dict[str, Any], registration: dict[str, Any], *, stopped: dict[str, str] | None = None) -> dict[str, Any]:
-    """사전 등록한 규칙(:func:`load_registration`)을 폐루프 보고서(:func:`closed_loop_report`의 JSON)에 **적힌 그대로** 적용한다 (Task R7 E1, R8).
+    """사전 등록한 규칙(:func:`load_registration`)을 폐루프 보고서(:func:`closed_loop_report`의 JSON)에 **적힌 그대로** 적용한다 (Task R7 E1, R8, R9).
 
     주 집합에서 클라우드 조건(`cloud`의 전부)과(등록돼 있으면) 원인 판정(`cause`)을 내고, 둘째 근거(`secondary`)의 같은 값은 옆에 적기만 한다 — 판정은
     주 집합만 정한다. 쌍은 보고서가 그 이름표 순서로 적은 것을 읽되 반대로 적혔으면 부호를 뒤집는다. 등록한 부트스트랩(재표집 수·RNG seed·수준)과 다른
     seed 단위 구간, 등록한 쌍이 없는 보고서는 거절한다 — 규칙이 읽을 수를 조용히 다른 것으로 바꾸지 않는다. `stopped`(묶음 → 이유)는 폐루프가 없는
-    seed(학습 감시가 멈췄거나 학습이 없다)다: 그 묶음의 조건은 보고서를 읽지 않고 불성립이다 — 이유를 주지 않았는데 쌍이 없으면 여전히 거절한다."""
+    seed(학습 감시가 멈췄거나 학습이 없거나 끝나지 않았다)다: 그 묶음의 조건은 보고서를 읽지 않고 불성립이다 — 이유를 주지 않았는데 쌍이 없으면 여전히 거절한다.
+
+    등록에 `selection`이 있으면(R9) 먼저 검증 집합에서 seed 하나를 고르고(:func:`select_seed` — `stopped`의 묶음은 고를 수 없다) 판정 조건의 `{selected}`에
+    그 이름표를 넣어 **고른 seed만** 판정한다; 고를 수 있는 후보가 없으면 조건 전부가 불성립이다. `calls`가 있으면 판정의 등록 문장을 옆에 싣는다."""
     from robo_jev.evaluate import EPISODE_BOOTSTRAP as registered_default
 
     if dict(registration["bootstrap"]) != dict(registered_default):
@@ -1324,20 +1500,39 @@ def apply_registration(report: dict[str, Any], registration: dict[str, Any], *, 
     primary = registration["primary"]
     if primary not in (report.get("conditions") or []):
         raise ValueError(f"보고서에 주 집합 {primary!r}가 없다 (있는 조건: {report.get('conditions')}) — `report --merge {primary}=…`로 만든다")
-    out = _apply_to_condition(report, primary, registration, stopped)
+    selection = None
+    effective_stopped = dict(stopped or {})
+    if registration.get("selection"):
+        selection = select_seed(report, registration, unavailable=stopped)
+        registration = _materialize_selection(registration, selection["selected"])
+        if selection["selected"] is None:
+            # 고를 수 있는 후보가 없다 — 판정할 seed가 없으므로 조건 전부가 보고서를 읽지 않고 불성립이다
+            effective_stopped[SELECTED_GROUP] = f"no eligible seed on {selection['condition']}: {[(row['label'], row.get('reason')) for row in selection['candidates']]}"
+    out = _apply_to_condition(report, primary, registration, effective_stopped)
     secondary: dict[str, Any] = {}
     for name in registration["secondary"]:
         if name not in (report.get("conditions") or []):
             secondary[name] = {"available": False, "reason": f"condition {name} is not in the report"}
             continue
-        secondary[name] = _apply_to_condition(report, name, registration, stopped)
+        secondary[name] = _apply_to_condition(report, name, registration, effective_stopped)
     cause = out["cause"]
-    return {
+    verdict: dict[str, Any] = {"cloud": out["cloud"], "failed": out["failed"], "groups": {name: block["passed"] for name, block in out["groups"].items()},
+                               "cause": cause["call"] if cause else None, "cause_text": cause["text"] if cause else None}
+    if selection is not None:
+        verdict["selected"] = selection["selected"]
+    calls = registration.get("calls")
+    if calls:
+        verdict["call"] = "pass" if out["cloud"] else "fail"
+        verdict["call_text"] = calls[verdict["call"]]
+    result = {
         "registration": {"version": registration["version"], "path": registration.get("path"), "written_at": registration.get("written_at")},
-        "bootstrap": dict(registration["bootstrap"]), "primary": out, "secondary": secondary, "stopped": dict(stopped or {}),
-        "verdict": {"cloud": out["cloud"], "failed": out["failed"], "groups": {name: block["passed"] for name, block in out["groups"].items()},
-                    "cause": cause["call"] if cause else None, "cause_text": cause["text"] if cause else None},
+        "bootstrap": dict(registration["bootstrap"]), "primary": out, "secondary": secondary, "stopped": dict(stopped or {}), "verdict": verdict,
     }
+    if selection is not None:
+        result["selection"] = selection
+        conditions = [primary, *(name for name in registration["secondary"] if name in (report.get("conditions") or []))]
+        result["distribution"] = seed_distribution(report, list(registration["selection"]["candidates"]), conditions)
+    return result
 
 
 def _f(value: Any, digits: int = 3) -> str:
