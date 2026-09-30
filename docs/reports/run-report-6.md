@@ -296,3 +296,55 @@ contain zero; `q_stop` catch 0 in every seed (all differences 0 [0, 0]). dev_new
 **0 of 24,505 over 100 ms**; first ticks p50 91.5–94.4 ms, **32 of 300** over 100 ms (max 298.6 ms); seed 18c non-first 43.6–44.4 / 56.4–57.7 /
 81.5–84.2 ms, **0 of 27,767** over 100 ms, first ticks 35 of 300 over (max 294.8 ms). The gate (p95 ≤ 80 ms, > 100 ms ≤ 5 %) passes on either
 reading.
+
+## 6. Measured cost, the G1 recommendation and the seed distribution
+
+| item | GPU-h | source |
+| --- | ---: | --- |
+| R2 … R8 (run reports 1–5) | ≈ 55.1 | `docs/reports/run-report-5.md` §6 |
+| **R9** (unit wall clocks: B `r9-t1-s18c` 1 h 32 m 32 s · chain `r9-rest` 6 h 01 m 14 s = D `r9s18c` 1 h 04 m 47 s + C seed 17 3 h 55 m 27 s + D `r9s17` 1 h 01 m 00 s · full test suite `r9-pytest` 10 m 01 s = 27,827 s) | **7.73** | `journalctl --user`, `artifacts/scratch/r9/*.log` |
+| total on the DGX Spark GB10 | **≈ 62.8** | — |
+
+CPU this round: the stand-in dry run of the report → verdict path (23 min, plus a first attempt stopped after ≈ 22 min to protect the
+resumed training's memory), the `r9s18c` preview report (10 min), the final strata, report and verdict (25 min), analyses in minutes. Cloud
+spend: 0. Disk: `/` had 178 GB free at the start and **128 GB at the end** (two 26.35 GB checkpoints with their optimizer state, 0.5 GB of
+loop records); nothing was deleted or slimmed, and R8's run directories are byte-identical.
+
+**G1, decided by the rule registered before the numbers (§0; applied by `scripts/closed_loop.py verdict`, `artifacts/reports/r9-verdict.json`).**
+The choice on dev_new2 took **seed 17** (strict 50 against 26 and 14). On ood_dev 200 it fails all four conditions: (a) `rule − r9s17` strict
+**+0.275 [+0.205, +0.340]** (61 vs 6 discordant, p = 1.5 × 10⁻¹², lower bound > 0 under all 200 RNG seeds); (b) false-done rate **+0.125 [+0.060,
++0.190]** over R5; (c₁) duplicates **+0.445 [+0.190, +0.730]**; (c₂) `q_stop` **−0.583 [−0.750, −0.379]**. **The registered call is "fail": the
+procedure (run several seeds, choose on the validation set) did not produce a seed that passes the holdout; the next round is training
+stability — the gripper head's flat phase and `q_stop`.** The cloud stays closed, and not on a knife-edge. Provider, account and first paid
+run remain the user's decisions in any case.
+
+**The seed distribution, from the numbers (descriptive).**
+1. **The choice did its job, and it was the whole story on the validation set only.** Seed 17 is the best of the three on both sets —
+   dev_new2 strict 50 / 26 / 14 and ood_dev 200 90 / 28 / 27, `r9s17 − r8s19` +0.310 [+0.230, +0.385] and `r9s17 − r9s18c` +0.315 [+0.255,
+   +0.380] on the holdout — so choosing on dev_new2 picked the seed that also ranks first on ood_dev 200. What it picked is still far from the
+   bar: 90 strict against the rule judge's 145 and R5's 132, because 55 of its 145 dones are false (49 after carrying a non-instructed object).
+2. **Each seed of this recipe fails in its own way.** Seed 19 picks the wrong target (first grasp on a non-instructed object in 139 of 200;
+   offline instruction margin +0.064); seed 18, run to the end, reads instructions well (+0.217; first grasp wrong in 6 of 200) but its gripper
+   never learned "close now" (offline initiate 1/43; 633 of 701 reference gripper transitions missing in the loop); seed 17 reads well (+0.196)
+   and closes the gripper (362 of 431 transitions executed) but declares done after moving the wrong object and fires extra gripper
+   transitions. Seeds 17 and 18 read instructions equally on the held-out cell (paired +0.021 [−0.048, +0.094]) and both better than seed 19
+   (+0.132 / +0.153, both exclude zero) — R8's weak seed 19 was the tail of the distribution, not its centre. None reaches R5 (+0.298).
+3. **Seed 18's boundary stop did not discard a seed that passes.** Run to step 233 on the same schedule it is statistically indistinguishable
+   from its stopped state on the offline cell (primary −0.013 [−0.044, +0.019], margin +0.009 [−0.024, +0.043], initiate −0.023 [−0.075, +0.000])
+   and in the loop it ties seed 19 on ood_dev 200 (27 vs 28 strict, −0.005 [−0.070, +0.060]) and is the weakest of the three on dev_new2 (14).
+   The gripper fit that began at step 142 continued on the settled ticks, but "close now" never came.
+4. **The gripper head's flat phase is the recipe's, not a seed's.** All three seeds sat at the constant-prior level for ≈ 100 steps and fit
+   late (onsets 132 / 139 / 142–152); R8's step-150 statistic read 0.592 / 0.644 / 0.723 — the seed it stopped was the latest to fit, and
+   whether a seed then learns "close now" (training-batch initiate 123/227 for seed 17, 34/151 and 19/184 for 19 and 18 over steps 151–233)
+   is what separated the loops. The realized draws split the same way after the fit (an observation, not a finding — the material
+   coin, episode order and candidate permutation are tied together within a seed): over steps 151–233 seed 17 drew 21 DAgger episodes, 8
+   of them from the initiate-heavy dagger-0, against 14 (4) for seed 18 and 11 (3) for seed 19; by step 150 the three mixes were close
+   (expert · DAgger 116 · 34 / 123 · 27 / 121 · 29).
+5. **`q_stop` is a consistent failure of this recipe**: no true stop tick fired after step 1 in any of the three trainings, 0 of 10 onsets
+   offline and 0 caught in the loop for every seed (67 / 20 / 67 onsets on ood_dev 200).
+
+**Recommendation for the next Spark round (from these numbers):** training stability of the auxiliary heads before any cloud run — the
+≈ 100-step flat phase of the gripper head (all three seeds) and "close now" (whether it is learned decides whether the loop can grasp),
+`q_stop` (never learned beyond its prior), and the false dones after a wrong-object grasp (seed 17's 55, 49 of them after the last grasp was on a
+non-instructed object). A seed-selection procedure is only worth scaling out once a seed can pass the holdout; three seeds showed that the
+spread is wide (strict 27–90 of 200) but its best is below R5's single seed.
