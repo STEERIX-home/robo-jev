@@ -104,6 +104,7 @@ and changes nothing registered.
 
 | run | steps | seed | checkpoint | contract digest | training | log-only monitor (R8's statistic: step 150, `q_gripper`, steps 131–150) | gripper fit onset (registered definition) |
 | --- | ---: | ---: | --- | --- | --- | --- | ---: |
+| **`r9s17`** (run id `r9-t1-fp32-2b-s17`) | **233 — completed** in one process | 17 | `artifacts/runs/r9-t1-fp32-2b-s17/checkpoint.pt` (model + optimizer) | `93fe26725a4c…` | inside the chain unit `r9-rest` (17:41:39 → 21:37:06 = **14,127 s = 3.92 GPU-h**; train 13,375.3 s, 57.40 s/step, p50 47.54, load 140.1 s), peak **56.05 GiB** allocated (60,185,186,816 B) / 57.68 GiB reserved, OOMs 0, host RSS 13.45 → 14.30 GiB; loss 2.672 → **0.304**, mean of the last 20 steps 0.365 | 0.3662 / 0.5688 = **0.644** — would have *passed* R8's monitor; stops nothing | **139** |
 | **`r9s18c`** (run id `r8-t1-fp32-2b-s18`, the checkpoint's) | **233 — completed on one schedule**: 1–150 by R8's unit, 151–233 resumed (`summary.rescheduled: null`) | 18 | `artifacts/runs/r9-t1-fp32-2b-s18c/r8-t1-fp32-2b-s18/checkpoint.pt` (model + optimizer, 26,350,502,421 B) | `93fe26725a4c…` | unit `r9-t1-s18c` wall 15:04:15 → 16:36:47 = **5,552 s = 1.54 GPU-h** (load 164.3 s; steps 151–233 5,155.0 s = 62.1 s/step), peak **56.05 GiB** allocated (60,185,186,816 B) / 57.66 GiB reserved, OOMs 0, host RSS 35.63 GiB after the load (the resume holds the checkpoint state on the host); loss 0.526 (150) → **0.149** (233), mean of the last 20 steps 0.287 | 0.3682 / 0.5094 = 0.723 — R8's own steps, unchanged; stops nothing | **152** (to step 150 only: 142, R8's reading) |
 
 **`r9s18c` — seed 18 run to the end.** The resume was the plain resume path (same `max_steps`, no reschedule) from R8's step-150 full
@@ -129,6 +130,34 @@ above its constant head. The main-decision head stayed fitted (`q_main` 0.04–0
 steps: expert **192** (0.82 epoch) · DAgger **41** (dagger-0 13 · dagger-1 15 · done-gate 13; expected ≈ 181 / 52 — the seeded material
 coin 1.7 SD below the DAgger mean, like seed 19's 1.8 SD); raw-false-done episodes drawn: dagger-1 3 of 22, done-gate 1 of 21; tokens
 11,758,944.
+
+**`r9s17` — seed 17 from scratch** (unit `r9-rest`, on commit `0278238`, `git.dirty: false`; `--seed 17` sets the candidate
+permutation seed too). **Step 1 drew the same units as R2's / R3a's seed-17 runs** (`ep-E0-400131` and the non-robot bundle starting
+`rules-0133-0`) and its loss is **2.6720494627952576** against their 2.6720505952835083 — 1.1 × 10⁻⁶ apart because R2 trained on the v1
+gripper labels (R8 saw the same for seed 19); step 2 is the first DAgger draw (`ep-E1-960163-r5-r5`), a bucket R2 did not have. Realized
+draws: expert **178** (0.76 epoch) · DAgger **55** (dagger-0 21 · dagger-1 14 · done-gate 20; expected ≈ 181 / 52 — on the mean, where seeds
+18 and 19 came out 1.7 and 1.8 SD below it); raw-false-done episodes drawn: dagger-1 1 of 22, done-gate 3 of 21; non-robot 1,436 records; tokens
+11,578,292. The same shape as the other two seeds — a flat gripper head for ≈ 100 steps (settled 0/606 in steps 41–60 and 0/649 in 101–120,
+with short-lived fits at steps 61–100 that collapsed again), then a late fit: settled 57/68 at step 139 and ≥ 0.5 on every counted step
+after it, so the **registered onset is 139** (seed 19 132, seed 18 152 over its full record). Unlike seeds 18 and 19, **seed 17 then learned
+"close now"** in the training batch: initiate 123/227 over steps 151–233 (76/94 in the last window; seed 18c 19/184, seed 19 34/151), with
+settled 622/622 in the last window and open 4,591/4,750 over steps 151–233. `q_stop` fired on 2 of 184 true ticks, both at step 1 (the untrained head), and on none after; it
+stays above its constant head (ratio 0.97–5.44). The main head fit early and ended looser than the other two (`q_main` 0.09 of its uniform
+baseline in steps 211–233; seeds 18c / 19 0.045 / 0.048).
+
+Side by side (training batch, window means; ratio = mean loss / mean constant-prior baseline):
+
+| window | seed 17: `q_gripper` ratio · settled · initiate | seed 18 (to 150: R8, then `r9s18c`) | seed 19 (R8) |
+| --- | --- | --- | --- |
+| 41–60 | 1.217 · 0/606 · 0/67 | 1.173 · 36/564 · 2/72 | 1.296 · 145/577 · 31/46 |
+| 101–120 | 1.025 · 0/649 · 0/77 | 1.048 · 50/729 · 2/39 | 0.965 · 1/642 · 0/33 |
+| 131–150 (R8's monitor window) | **0.644** · 441/721 · 21/57 | **0.723** · 266/593 · 0/32 | **0.592** · 571/704 · 9/60 |
+| 151–170 | 0.320 · 692/717 · 29/46 | 0.578 · 611/698 · 1/43 | 0.231 · 559/597 · 14/43 |
+| 191–210 | 0.163 · 561/561 · 18/51 | 0.413 · 627/688 · 12/31 | 0.102 · 721/722 · 6/28 |
+| 211–233 | 0.143 · 622/622 · **76/94** | 0.440 · 694/774 · 2/62 | 0.186 · 613/613 · 12/43 |
+
+(Every window's row for all three seeds: `artifacts/scratch/r9/c-facts-s{17,18c,19}.json`, printed side by side by
+`artifacts/scratch/r9/curves_side_by_side.py`.)
 
 ## 3. Resume verification (Stage B)
 
