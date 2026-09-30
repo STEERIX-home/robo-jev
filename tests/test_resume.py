@@ -376,6 +376,54 @@ def test_rescheduling_puts_the_first_resumed_step_on_the_new_schedule_not_the_ol
         assert trainer.rescheduled == {"max_steps": {"from": 10, "to": 20}}
 
 
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def test_a_run_the_head_fit_monitor_stopped_resumes_into_a_new_directory_on_the_same_schedule(tmp_path):
+    """Task R9 Stage B: R8 seed 18은 head 적합 감시가 멈춘 저장 단위(status `stopped_head_not_fitting`)다 — 재개 경로는 그 status를 **거절하지 않는다**.
+    감시를 끄고(`head_fit_monitor: null` — 재개에서 자유로운 키) `artifacts_dir`만 바꿔 이으면: run id는 checkpoint의 것으로 남고(`--run-id`는 무시된다),
+    파일은 **새 디렉터리에만** 쓰이며 멈춘 run의 checkpoint·metrics·config는 바이트 단위로 그대로이고, 이어 돈 step들은 감시 없이 처음부터 끝까지 돈 run과
+    비트 단위로 같다 — 같은 일정(step마다 lr)·sampler 커서(drawn)·뽑힌 단위·손실·최종 가중치. 멈춘 step 뒤의 첫 step(2 → 3)이 그 이음매다."""
+    from robo_jev.train import HEAD_FIT_STOPPED
+
+    monitor = {"question": "q_main", "step": 2, "window": 2, "ratio": 1e-9}  # 어떤 head도 '맞지 않음' → step 2에서 멈춘다
+    first_root, new_root, reference_root = tmp_path / "first", tmp_path / "new", tmp_path / "reference"
+    stopped_config = {**base_config(first_root), "max_steps": 4, "run_id": "stopped-at-2", "head_fit_monitor": monitor}
+    with Trainer(stopped_config) as trainer:
+        stopped = trainer.run()
+    assert stopped["status"] == HEAD_FIT_STOPPED and stopped["step"] == 2
+    original = first_root / "runs" / "stopped-at-2"
+    saved = load_checkpoint(original / "checkpoint.pt")
+    assert saved["status"] == HEAD_FIT_STOPPED and saved["step"] == 2 and saved["progress"] is None
+    before = {name: _file_sha256(original / name) for name in ("checkpoint.pt", "metrics.json", "config.yaml")}
+
+    with Trainer({**base_config(reference_root), "max_steps": 4, "run_id": "continuous-4", "head_fit_monitor": None}) as reference:
+        continuous = reference.run()
+    resumed_config = {**stopped_config, "head_fit_monitor": None, "artifacts_dir": str(new_root / "runs"), "run_id": "ignored-run-id"}
+    with Trainer(resumed_config, resume=original / "checkpoint.pt") as resumed:
+        assert resumed.run_id == "stopped-at-2" and resumed.step == 2 and resumed.status == "running"
+        assert resumed.run_dir == new_root / "runs" / "stopped-at-2"
+        finished = resumed.run()
+    assert finished["status"] == "completed" and finished["step"] == 4
+    assert {name: _file_sha256(original / name) for name in before} == before  # 멈춘 run의 디렉터리는 읽기만 했다
+    assert sorted(path.name for path in original.iterdir()) == ["checkpoint.pt", "config.yaml", "metrics.json"]
+
+    written = json.loads((new_root / "runs" / "stopped-at-2" / "metrics.json").read_text(encoding="utf-8"))
+    reference_metrics = json.loads((reference_root / "runs" / "continuous-4" / "metrics.json").read_text(encoding="utf-8"))
+    assert [step["step"] for step in written["steps"]] == [1, 2, 3, 4]
+    assert strip_timing(written["steps"]) == strip_timing(reference_metrics["steps"])  # 1–2는 checkpoint의 기록, 3–4는 이어 돈 계산
+    seam, reference_seam = written["steps"][2], reference_metrics["steps"][2]
+    assert seam["lr"] == reference_seam["lr"] and seam["sampler"]["drawn"] == reference_seam["sampler"]["drawn"] == 6
+    assert seam["units"] == reference_seam["units"] and seam["sampler"]["units"] == reference_seam["sampler"]["units"]
+    assert written["summary"]["head_fit_monitor"] is None and written["summary"]["rescheduled"] is None
+    assert written["config"]["head_fit_monitor"] is None and written["status"] == "completed"
+    end, end_reference = load_checkpoint(finished["checkpoint"]), load_checkpoint(continuous["checkpoint"])
+    assert optimizer_steps(end) == optimizer_steps(end_reference) == {4} and end["scheduler"]["last_epoch"] == 4
+    for name, tensor in end_reference["model"].items():
+        assert torch.equal(end["model"][name], tensor), name
+
+
 def test_a_run_cannot_be_resumed_from_a_model_only_checkpoint_but_its_weights_still_load_for_evaluation(tmp_path):
     """Task R8 A2 (체크포인트 슬림화): optimizer를 지운 model-only 파일로는 **재개가 거절된다** — 오류가 이유(optimizer·fp32 master가
     없어 같은 run이 되지 않는다)를 적는다. 같은 파일을 평가 경로(`load_readout_checkpoint`)는 싣고, 실린 가중치는 원본과 같다."""

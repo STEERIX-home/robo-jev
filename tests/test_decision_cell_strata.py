@@ -722,3 +722,22 @@ def test_the_r8_run_set_reads_r5_r6_r7_from_stored_reports_and_pairs_each_seed_w
         assert {label: report for label, report in runs.items() if label not in (module.R8_S18_LABEL, module.R8_S19_LABEL)} == stored
         r5 = list(module.R6_RUNS)[0]
         assert module.RUN_COMPARISONS[name] == [(module.R8_S18_LABEL, r5), (module.R8_S19_LABEL, r5), (module.R8_S18_LABEL, module.R8_S19_LABEL)]
+
+
+def test_the_r9_run_set_reads_r5_and_both_r8_rows_from_stored_reports_and_pairs_the_three_seeds():
+    """Task R9 D: R5·R8 seed 19·R8 seed 18의 멈춘 상태(step 150) 줄은 같은 칸(해시 6a3b69131243 / 9b484441b23b)에서 잰 저장 보고서를 그대로 읽고, 이은 seed 18과
+    seed 17 줄만 새 보고서다. 짝지은 비교: seed마다 − R5, seed 사이 셋(분포 판독), 그리고 이은 것 − 멈춘 상태(step 150 뒤의 83 step). 둘째 칸도 같은 모양이다."""
+    module = script()
+    r5 = list(module.R6_RUNS)[0]
+    for name, suffix, r8_runs, r5_report in (("r9", "reeval", module.R8_RUNS, module.R6_RUNS[r5]), ("r9dev", "dev", module.R8_DEV_RUNS, module.R6_DEV_RUNS[r5])):
+        runs = module.RUN_SETS[name]
+        assert runs[module.R9_S18C_LABEL] == f"r9-{suffix}-2b-t1-fp32-r9s18c.json" and runs[module.R9_S17_LABEL] == f"r9-{suffix}-2b-t1-fp32-r9s17.json"
+        assert runs[module.R8_S19_LABEL] == r8_runs[module.R8_S19_LABEL] == f"r8-{suffix}-2b-t1-fp32-r8s19.json"
+        assert runs[module.R8_S18_LABEL] == r8_runs[module.R8_S18_LABEL] and runs[r5] == r5_report
+        assert set(runs) == {r5, module.R8_S18_LABEL, module.R8_S19_LABEL, module.R9_S18C_LABEL, module.R9_S17_LABEL}
+        assert module.RUN_COMPARISONS[name] == [
+            (module.R9_S18C_LABEL, r5), (module.R9_S17_LABEL, r5), (module.R8_S19_LABEL, r5),
+            (module.R9_S18C_LABEL, module.R8_S19_LABEL), (module.R9_S17_LABEL, module.R8_S19_LABEL), (module.R9_S18C_LABEL, module.R9_S17_LABEL),
+            (module.R9_S18C_LABEL, module.R8_S18_LABEL),
+        ]
+    assert module.RUN_SETS["r8"] == module.R8_RUNS and module.RUN_SETS["r8dev"] == module.R8_DEV_RUNS  # 앞 라운드의 묶음은 그대로다

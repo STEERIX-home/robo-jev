@@ -815,3 +815,304 @@ def test_the_verdict_command_reads_each_seeds_monitor_and_refuses_one_that_is_no
     shutil.rmtree(tmp_path / "artifacts" / "runs" / "r8-t1-fp32-2b-s19")
     assert module.main(args) == 0  # 학습이 없던 seed도 멈춘 것으로 센다 (이유: run 없음)
     assert "no training run" in json.loads(out_path.read_text(encoding="utf-8"))["primary"]["groups"]["r8s19"]["stopped"]
+
+
+# --------------------------------------------------------------------------
+# Task R9 사전 등록 — 한 조리법의 seed 셋에서 검증 집합(dev_new2)으로 하나를 고르고 그 seed만 ood_dev 200에서 판정한다
+# (configs/eval/r9-registration.yaml)
+# --------------------------------------------------------------------------
+
+R9_REGISTRATION_PATH = REPO / "configs/eval/r9-registration.yaml"
+R9_SEEDS = ("r8s19", "r9s18c", "r9s17")
+#: 판정 집합의 편 수·검증 집합의 편 수 (R7·R8과 같은 장면), 그리고 판정 집합을 이루는 조건 하나(부분으로 고르는 등록의 거절 시험)
+R9_EPISODES = {"ood_dev200": 200, "dev_new2": 100, "ood_dev_new2": 100}
+
+
+def _r9_interval(low, high, *, seeds):
+    return {"margin": (low + high) / 2.0, "margin_ci": [low, high], "margin_includes_zero": low <= 0.0 <= high, "seeds": seeds, "a": 0.5, "b": 0.5}
+
+
+def _r9_report(*, dev=None, primary=None, judged=None, conditions=("ood_dev200", "dev_new2"), labels=R9_SEEDS, shared=None):
+    """R9 등록이 읽는 블록만 든 보고서. 조건마다 후보의 표(`strict_done`·`false_done`·`done`·그리퍼 중복·`q_stop`), 후보마다 판정의 쌍
+    (규칙 − s 엄격, s − r5 거짓 done, s − r5 중복·q_stop, 견고성), 그리고 후보 사이의 짝지은 블록(공통 seed 수 = 편 수; `shared`로 바꾼다).
+    `dev`·`primary`는 이름표 → (엄격 성공 수, 거짓 done 수) — 기본은 **판정 집합으로 고르면 r8s19가, 검증 집합으로 고르면 r9s18c가** 뽑히는 수다."""
+    dev = {"r8s19": (26, 25), "r9s18c": (61, 9), "r9s17": (55, 4), **(dev or {})}
+    primary = {"r8s19": (150, 2), "r9s18c": (40, 30), "r9s17": (35, 20), **(primary or {})}
+    judged = judged or {}
+
+    def block(condition):
+        counts = dev if condition == "dev_new2" else primary
+        episodes = R9_EPISODES[condition]
+        tables, paired, pairs = {}, {}, {}
+        for label in labels:
+            strict, false_done = counts[label]
+            tables[label] = {"episodes": episodes, "strict_done": strict, "done": strict + false_done, "false_done": [f"ep-{n}" for n in range(false_done)],
+                             "gripper_events": {"duplicate": 40 + strict % 7}, "stop_timing": {"reacted": strict % 5, "onsets": 30}}
+            v = {**PASSING, **judged.get(label, {})}
+            paired[f"rule - {label} (done ∧ inside)"] = _r9_interval(*v["a"], seeds=episodes)
+            paired[f"{label} - r5 (false done)"] = _r9_interval(*v["b"], seeds=episodes)
+            pairs[f"{label} - r5"] = {"metrics": {"gripper_duplicates": _ratio(*v["dup"]), "q_stop_caught": _ratio(*v["stop"])},
+                                      "robustness": {"false_done": _robust(3, 9), "strict": _robust(4, 30)}}
+            pairs[f"rule - {label}"] = {"metrics": {}, "robustness": {"strict": _robust(40, 11), "false_done": _robust(0, 3)}}
+        for index, a in enumerate(labels):
+            for b in labels[index + 1 :]:
+                seeds = (shared or {}).get((a, b), episodes)
+                paired[f"{a} - {b} (done ∧ inside)"] = _r9_interval(-0.1, 0.1, seeds=seeds)
+                paired[f"{a} - {b} (false done)"] = _r9_interval(-0.1, 0.1, seeds=seeds)
+        for a, b in (("r9s18c", "r8s19"), ("r9s17", "r8s19"), ("r9s18c", "r9s17")):
+            if a in labels and b in labels:
+                pairs[f"{a} - {b}"] = {"metrics": {"gripper_duplicates": _ratio(-0.3, 0.2), "q_stop_caught": _ratio(-0.1, 0.4)}, "robustness": {}}
+        tables["rule"] = {"episodes": episodes, "strict_done": 140, "done": 140, "false_done": [], "gripper_events": {"duplicate": 700}, "stop_timing": {"reacted": 30, "onsets": 43}}
+        return tables, paired, pairs
+
+    blocks = {name: block(name) for name in conditions}
+    return {"conditions": list(conditions), "tables": {name: blocks[name][0] for name in conditions}, "paired": {name: blocks[name][1] for name in conditions},
+            "seed_pairs": {name: blocks[name][2] for name in conditions}}
+
+
+def test_the_r9_registration_selects_on_dev_new2_and_judges_only_the_selected_seed_by_r7s_conditions():
+    """등록 파일 = 브리프 Stage A: 후보 셋(r8s19 그대로·r9s18c·r9s17)과 그 run 디렉터리, 고르기(dev_new2 엄격 성공 → 거짓 done 적은 쪽 → seed 번호 작은 쪽),
+    판정(고른 seed만, ood_dev200에서 R7의 (a)(b)(c) 그대로 — 쌍의 r7 자리에 `{selected}`), 통과·불통과의 등록 문장, 감시는 기록 전용, 보고서 명령이 실을
+    seed 쌍이 판정·견고성·분포 판독이 읽는 쌍을 **어느 seed가 뽑히든** 모두 담는다."""
+    from robo_jev.closed_loop import load_registration
+    from robo_jev.evaluate import EPISODE_BOOTSTRAP
+
+    registration = load_registration(R9_REGISTRATION_PATH)
+    assert registration["primary"] == "ood_dev200" and registration["secondary"] == ["dev_new2"]
+    assert registration["merge"] == {"ood_dev200": ["ood_dev", "ood_dev_new", "ood_dev_new2"]} and registration["bootstrap"] == EPISODE_BOOTSTRAP
+    assert registration["groups"] == {
+        "r8s19": {"seed": 19, "run": "artifacts/runs/r8-t1-fp32-2b-s19"},
+        "r9s18c": {"seed": 18, "run": "artifacts/runs/r9-t1-fp32-2b-s18c/r8-t1-fp32-2b-s18"},
+        "r9s17": {"seed": 17, "run": "artifacts/runs/r9-t1-fp32-2b-s17"},
+    }
+    assert registration["selection"] == {"condition": "dev_new2", "candidates": list(R9_SEEDS), "metric": "strict", "ties": ["false_done", "seed"]}
+    r7 = load_registration(REGISTRATION_PATH)["cloud"]
+    assert set(registration["cloud"]) == set(r7) == {"a", "b", "c_duplicates", "c_q_stop"}
+    for name, mine in registration["cloud"].items():
+        assert mine["group"] == "selected" and mine["pair"] == r7[name]["pair"].replace("r7", "{selected}")
+        assert (mine["metric"], mine["source"], mine["holds_if"]) == (r7[name]["metric"], r7[name]["source"], r7[name]["holds_if"])
+    assert registration["calls"]["pass"].startswith("여러 seed를 돌려 검증 집합으로 고르는 절차가 통한다") and "사용자 결정" in registration["calls"]["pass"]
+    assert "학습 안정성" in registration["calls"]["fail"] and "q_stop" in registration["calls"]["fail"]
+    assert registration.get("monitor") is None  # 감시는 멈추지 않는다 — 기록 전용 통계만
+    assert registration["run_readings"] == {"monitor_log": {"question": "q_gripper", "step": 150, "window": 20, "ratio": 0.70},
+                                            "gripper_onset": {"stratum": "settled", "min_accuracy": 0.5, "min_ticks": 5}, "log_only": ["r9s18c", "r9s17"]}
+    pairs = {tuple(pair.split(":")) for pair in registration["seed_pairs"]}
+    needed = {pair for s in R9_SEEDS for pair in ((s, "r5"), ("rule", s))} | {("r9s18c", "r8s19"), ("r9s17", "r8s19"), ("r9s18c", "r9s17")}
+    assert pairs == needed
+    read_by_stability = {tuple(entry["pair"].split(" - ")) for entry in registration["stability"] if entry["source"] == "seed_pairs"}
+    assert read_by_stability <= pairs and {entry["metric"] for entry in registration["stability"]} == {"strict", "false_done", "gripper_duplicates", "q_stop_caught"}
+    assert [(entry["condition"], entry["pair"], entry["metric"]) for entry in registration["robustness"]] == [("a", "rule - {selected}", "strict"), ("b", "{selected} - r5", "false_done")]
+    training = yaml.safe_load((REPO / "configs/train/qwen35-2b-r8.yaml").read_text(encoding="utf-8"))
+    assert training["max_steps"] == 233  # 조리법은 R8의 것 그대로 — 두 새 run 모두 같은 일정
+
+
+def test_the_seed_with_the_most_dev_new2_strict_successes_is_selected_and_ties_go_to_fewer_false_dones_then_the_smaller_seed():
+    from robo_jev.closed_loop import load_registration, select_seed
+
+    registration = load_registration(R9_REGISTRATION_PATH)
+    plain = select_seed(_r9_report(), registration)
+    assert plain["selected"] == "r9s18c" and plain["ranking"] == ["r9s18c", "r9s17", "r8s19"] and plain["decided_by"] == "strict"
+    assert [(row["label"], row["strict"], row["false_done"], row["episodes"]) for row in plain["candidates"]] == [("r8s19", 26, 25, 100), ("r9s18c", 61, 9, 100), ("r9s17", 55, 4, 100)]
+    tie_on_strict = select_seed(_r9_report(dev={"r9s18c": (55, 9), "r9s17": (55, 4)}), registration)
+    assert tie_on_strict["selected"] == "r9s17" and tie_on_strict["decided_by"] == "false_done"
+    full_tie = select_seed(_r9_report(dev={"r8s19": (55, 4), "r9s18c": (55, 4), "r9s17": (55, 4)}), registration)
+    assert full_tie["selected"] == "r9s17" and full_tie["ranking"] == ["r9s17", "r9s18c", "r8s19"] and full_tie["decided_by"] == "seed"
+
+
+def test_the_selection_never_reads_the_judged_set_and_a_registration_that_would_is_refused(tmp_path):
+    """고르기는 dev_new2의 표만 읽는다 — 판정 집합(ood_dev200)의 표·쌍을 무엇으로 바꾸거나 지워도 같은 seed가 뽑힌다(기본 수는 판정 집합으로 고르면
+    r8s19가 뽑히게 짜여 있다). 그리고 판정 집합이나 그것을 이루는 조건으로 고르겠다는 등록은 읽히지 않는다."""
+    from robo_jev.closed_loop import load_registration, select_seed
+
+    registration = load_registration(R9_REGISTRATION_PATH)
+    report = _r9_report()
+    chosen = select_seed(report, registration)
+    assert chosen["selected"] == "r9s18c"
+    report["tables"]["ood_dev200"] = {}
+    report["paired"]["ood_dev200"] = {}
+    report["seed_pairs"]["ood_dev200"] = {}
+    assert select_seed(report, registration) == chosen
+    raw = yaml.safe_load(R9_REGISTRATION_PATH.read_text(encoding="utf-8"))
+    for condition in ("ood_dev200", "ood_dev", "ood_dev_new", "ood_dev_new2"):
+        path = tmp_path / f"select-on-{condition}.yaml"
+        path.write_text(yaml.safe_dump({**raw, "selection": {**raw["selection"], "condition": condition}}, allow_unicode=True), encoding="utf-8")
+        with pytest.raises(ValueError, match="판정할 집합의 숫자로 고르지 않는다"):
+            load_registration(path)
+    bad_cloud = copy.deepcopy(raw)
+    bad_cloud["cloud"]["a"]["pair"] = "rule - r9s17"  # 고른 seed 자리 없이 한 seed를 못 박은 조건
+    path = tmp_path / "fixed-seed.yaml"
+    path.write_text(yaml.safe_dump(bad_cloud, allow_unicode=True), encoding="utf-8")
+    with pytest.raises(ValueError, match="고른 seed 하나"):
+        load_registration(path)
+
+
+def test_only_the_selected_seed_is_judged_on_ood_dev200_and_the_registered_sentence_follows_the_verdict():
+    """(a)(b)(c)는 고른 seed의 쌍만 읽는다 — 다른 후보가 무엇이든 판정을 바꾸지 않는다; 넷이 모두 성립하면 등록한 통과 문장, 아니면 불통과 문장.
+    견고성도 고른 seed의 쌍이고, dev_new2의 같은 조건은 옆에 적기만 한다."""
+    from robo_jev.closed_loop import apply_registration, load_registration
+
+    registration = load_registration(R9_REGISTRATION_PATH)
+    failing = {"a": (0.2, 0.4), "b": (0.01, 0.2), "dup": (0.5, 2.0), "stop": (-0.8, -0.3)}
+    passing = apply_registration(_r9_report(judged={"r8s19": failing, "r9s17": failing}), registration)
+    assert passing["verdict"]["selected"] == "r9s18c" and passing["selection"]["selected"] == "r9s18c"
+    conditions = passing["primary"]["conditions"]
+    assert [conditions[name]["pair"] for name in ("a", "b", "c_duplicates", "c_q_stop")] == ["rule - r9s18c", "r9s18c - r5", "r9s18c - r5", "r9s18c - r5"]
+    assert all(conditions[name]["holds"] for name in conditions) and all(entry["group"] == "r9s18c" for entry in conditions.values())
+    assert passing["verdict"]["cloud"] is True and passing["verdict"]["groups"] == {"r9s18c": True}
+    assert passing["verdict"]["call"] == "pass" and passing["verdict"]["call_text"] == registration["calls"]["pass"]
+    assert passing["primary"]["robustness"]["a"]["pair"] == "rule - r9s18c" and passing["primary"]["robustness"]["a"]["discordant"] == {"a_only": 40, "b_only": 11}
+    assert passing["secondary"]["dev_new2"]["conditions"]["a"]["pair"] == "rule - r9s18c"
+    failed = apply_registration(_r9_report(judged={"r9s18c": {"a": (0.001, 0.2)}}), registration)
+    assert failed["verdict"]["cloud"] is False and failed["verdict"]["failed"] == ["a"] and failed["verdict"]["call"] == "fail"
+    assert failed["verdict"]["call_text"] == registration["calls"]["fail"]
+    # 분포 판독: 셋 모두의 수를 표에서 옮기고(판정에 들어가지 않는다) seed 사이 쌍은 stability에 적는다
+    distribution = passing["distribution"]
+    assert set(distribution) == {"ood_dev200", "dev_new2"} and set(distribution["dev_new2"]) == set(R9_SEEDS)
+    assert distribution["dev_new2"]["r9s17"] == {"available": True, "episodes": 100, "strict": 55, "done": 59, "false_done": 4, "gripper_duplicates": 46, "q_stop_caught": 0, "q_stop_onsets": 30}
+    stability = {entry["name"]: entry for entry in passing["primary"]["stability"]}
+    assert stability["r9s18c - r9s17 gripper_duplicates"]["ci"] == [-0.3, 0.2] and stability["r9s18c - r9s17 gripper_duplicates"]["includes_zero"] is True
+    assert stability["r9s17 - r8s19 strict"]["available"] is True
+
+
+def test_a_seed_whose_run_did_not_complete_cannot_be_selected_and_without_an_eligible_seed_every_condition_fails():
+    from robo_jev.closed_loop import apply_registration, load_registration, select_seed
+
+    registration = load_registration(R9_REGISTRATION_PATH)
+    report = _r9_report(labels=("r8s19", "r9s17"))  # r9s18c의 폐루프가 없다
+    unavailable = {"r9s18c": "the run did not complete (status interrupted, step 190 of max_steps 233)"}
+    chosen = select_seed(report, registration, unavailable=unavailable)
+    assert chosen["selected"] == "r9s17" and chosen["decided_by"] == "strict"
+    assert chosen["candidates"][1] == {"label": "r9s18c", "seed": 18, "eligible": False, "reason": unavailable["r9s18c"]}
+    out = apply_registration(report, registration, stopped=unavailable)
+    assert out["verdict"]["selected"] == "r9s17" and out["primary"]["conditions"]["a"]["pair"] == "rule - r9s17"
+    assert {entry["name"] for entry in out["primary"]["stability"] if not entry["available"]} == {
+        f"{pair} {metric}" for pair in ("r9s18c - r8s19", "r9s18c - r9s17") for metric in ("strict", "false_done", "gripper_duplicates", "q_stop_caught")}
+    with pytest.raises(ValueError, match="r9s18c"):
+        select_seed(report, registration)  # 이유 없이 후보의 폐루프가 없으면 거절한다 — 조용히 건너뛰지 않는다
+    nobody = {label: "no training run" for label in R9_SEEDS}
+    empty = apply_registration(_r9_report(), registration, stopped=nobody)
+    assert empty["verdict"]["selected"] is None and empty["verdict"]["cloud"] is False and empty["verdict"]["call"] == "fail"
+    assert all(entry["holds"] is False and "no eligible seed" in entry["stopped"] for entry in empty["primary"]["conditions"].values())
+
+
+def test_the_selection_refuses_candidates_that_did_not_run_the_same_scenes():
+    from robo_jev.closed_loop import load_registration, select_seed
+
+    registration = load_registration(R9_REGISTRATION_PATH)
+    report = _r9_report(shared={("r8s19", "r9s17"): 99})
+    with pytest.raises(ValueError, match="공통 seed"):
+        select_seed(report, registration)
+    report = _r9_report()
+    report["tables"]["dev_new2"]["r9s17"]["episodes"] = 99
+    with pytest.raises(ValueError, match="편 수가 다르다"):
+        select_seed(report, registration)
+
+
+def _probe_step(step, correct, n, *, loss=0.3, baseline=0.5):
+    settled = {"n": n, "correct": correct} if n else None
+    return {"step": step, "probes": {"q_gripper": ({"settled": settled} if settled else {})},
+            "loss_by_question": {"q_gripper": {"loss": loss, "baseline": baseline}}}
+
+
+def test_the_gripper_fit_onset_is_the_first_counted_step_after_the_last_failing_one():
+    """등록한 정의: `settled` 틱이 5개 이상인 step만 세고, 그런 step마다 argmax 정답률 ≥ 0.5가 기록의 끝까지 이어지는 가장 이른 step. 틱이 적은 step은
+    세지 않으며(3/3도, 0/3도), 한 번 맞았다가 다시 떨어지면 떨어진 뒤로 밀린다; 끝의 셀 수 있는 step이 떨어지면 None."""
+    from robo_jev.closed_loop import gripper_fit_onset
+
+    steps = [_probe_step(1, 0, 30), _probe_step(2, 20, 30), _probe_step(3, 1, 30), _probe_step(4, 0, 3), _probe_step(5, 16, 30),
+             _probe_step(6, 3, 3), _probe_step(7, 0, 0), _probe_step(8, 30, 31)]
+    onset = gripper_fit_onset(steps)
+    assert onset["onset_step"] == 5 and onset["steps_counted"] == 5 and onset["last_step"] == 8  # step 2의 짧은 적합은 step 3에서 무너졌다
+    assert gripper_fit_onset(steps, min_ticks=1)["onset_step"] == 5  # 4(0/3)가 세어지면 그 뒤인 5
+    assert gripper_fit_onset([*steps, _probe_step(9, 2, 30)])["onset_step"] is None  # 기록의 끝에서 떨어졌다
+    assert gripper_fit_onset([*steps, _probe_step(9, 2, 4)])["onset_step"] == 5  # 틱 4개짜리 step은 세지 않는다
+    assert gripper_fit_onset([])["onset_step"] is None
+
+
+def test_the_r8_curves_read_their_published_onsets_and_monitor_values_from_the_run_records():
+    """등록의 정의와 기록 전용 감시를 R8의 두 run(숫자가 이미 공개된)에 적용하면 R8 보고서의 값이 나온다 — seed 19 시작 132·감시 0.592(fits),
+    seed 18(step 150까지) 시작 142·감시 0.723(not_fitting)."""
+    from robo_jev.closed_loop import load_registration, run_reading
+
+    readings = load_registration(R9_REGISTRATION_PATH)["run_readings"]
+    runs = REPO / "artifacts" / "runs"
+    if not (runs / "r8-t1-fp32-2b-s19" / "metrics.json").is_file():
+        pytest.fail("R8 run records are missing — artifacts/runs/r8-t1-fp32-2b-s{18,19}/metrics.json")
+    s19 = run_reading(json.loads((runs / "r8-t1-fp32-2b-s19" / "metrics.json").read_text(encoding="utf-8")), readings)
+    s18 = run_reading(json.loads((runs / "r8-t1-fp32-2b-s18" / "metrics.json").read_text(encoding="utf-8")), readings)
+    assert s19["gripper_onset"]["onset_step"] == 132 and s18["gripper_onset"]["onset_step"] == 142
+    assert s19["monitor_log"]["verdict"] == "fits" and round(s19["monitor_log"]["ratio_to_baseline"], 3) == 0.592
+    assert s18["monitor_log"]["verdict"] == "not_fitting" and round(s18["monitor_log"]["ratio_to_baseline"], 3) == 0.723
+    assert (s19["status"], s19["step"], s19["max_steps"], s19["seed"]) == ("completed", 233, 233, 19)
+    assert (s18["status"], s18["step"], s18["applied_monitor"]["ratio"]) == ("stopped_head_not_fitting", 150, 0.7)
+
+
+def test_the_verdict_command_reads_each_runs_completion_and_refuses_a_log_only_run_that_applied_a_monitor(tmp_path, capsys):
+    """`verdict`(R9 등록): 묶음마다 run의 `metrics.json`에서 완주 여부를 읽는다 — `completed`로 `max_steps`에 닿지 않은 seed는 고를 수 없다. 기록 전용 감시와
+    그리퍼 시작 step이 판정 옆 `runs`에 남고, 감시를 기록만 해야 하는 묶음의 학습이 감시를 적용했으면 판정하지 않는다."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("closed_loop_script", REPO / "scripts" / "closed_loop.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    def write_run(relative: str, *, status="completed", step=233, monitor=None, seed=17):
+        run = tmp_path / relative
+        run.mkdir(parents=True, exist_ok=True)
+        steps = [_probe_step(n, 25 if n >= 130 else 0, 30, loss=0.2 if n >= 130 else 0.6, baseline=0.5) for n in range(1, step + 1)]
+        payload = {"run_id": run.name, "status": status, "step": step, "config": {"max_steps": 233, "seed": seed, "head_fit_monitor": monitor, "resume": None},
+                   "steps": steps, "summary": {"head_fit_monitor": None, "rescheduled": None, "sampler": {"units": {"robot/existing": 190}}}}
+        (run / "metrics.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    write_run("artifacts/runs/r8-t1-fp32-2b-s19", seed=19, monitor={"question": "q_gripper", "step": 150, "window": 20, "ratio": 0.7})
+    write_run("artifacts/runs/r9-t1-fp32-2b-s18c/r8-t1-fp32-2b-s18", seed=18, status="interrupted", step=190)
+    write_run("artifacts/runs/r9-t1-fp32-2b-s17", seed=17)
+    report_path, out_path = tmp_path / "report.json", tmp_path / "verdict.json"
+    report_path.write_text(json.dumps(_r9_report(labels=("r8s19", "r9s17"))), encoding="utf-8")
+    args = ["verdict", "--report", str(report_path), "--registration", str(R9_REGISTRATION_PATH), "--runs-root", str(tmp_path), "--out", str(out_path)]
+    assert module.main(args) == 0
+    written = json.loads(out_path.read_text(encoding="utf-8"))
+    assert written["selection"]["selected"] == "r9s17" and written["verdict"]["selected"] == "r9s17"
+    assert "did not complete" in written["selection"]["candidates"][1]["reason"] and "190" in written["selection"]["candidates"][1]["reason"]
+    assert written["runs"]["r9s17"]["gripper_onset"]["onset_step"] == 130 and written["runs"]["r9s17"]["monitor_log"]["verdict"] == "fits"  # 창 131–150 = 0.2 / 0.5
+    assert written["runs"]["r9s17"]["applied_monitor"] is None and written["runs"]["r8s19"]["applied_monitor"]["ratio"] == 0.7
+    printed = capsys.readouterr().out
+    assert "seed selection on dev_new2" in printed and "selected: **r9s17**" in printed and "registered call: **pass**" in printed
+    write_run("artifacts/runs/r9-t1-fp32-2b-s17", seed=17, monitor={"question": "q_gripper", "step": 150, "window": 20, "ratio": 0.7})
+    with pytest.raises(ValueError, match="기록만"):
+        module.main(args)
+
+
+def test_choosing_on_a_part_of_the_judged_set_is_refused_even_when_the_registration_does_not_declare_merge(tmp_path):
+    """R9 리뷰 1 M1: `load_registration`은 등록 자신의 `merge`로만 판정 집합의 부분을 안다 — `merge`를 빼고 `ood_dev_new2`로 고르는 등록은 읽힌다.
+    그래서 고르기는 **보고서가 실제로 합친 것**(`report["merge"][primary]`)도 본다: 판정 집합을 이룬 조건으로는 고르지 않는다(거절). 합치지 않은 보고서의
+    다른 조건(dev_new2)으로는 그대로 고른다."""
+    from robo_jev.closed_loop import apply_registration, load_registration, select_seed
+
+    raw = yaml.safe_load(R9_REGISTRATION_PATH.read_text(encoding="utf-8"))
+    no_merge = {key: value for key, value in raw.items() if key != "merge"}
+    path = tmp_path / "no-merge-select-on-part.yaml"
+    path.write_text(yaml.safe_dump({**no_merge, "selection": {**raw["selection"], "condition": "ood_dev_new2"}}, allow_unicode=True), encoding="utf-8")
+    registration = load_registration(path)  # 등록만으로는 부분인지 알 수 없다
+    report = _r9_report(conditions=("ood_dev200", "dev_new2", "ood_dev_new2"))
+    report["merge"] = {"ood_dev200": ["ood_dev", "ood_dev_new", "ood_dev_new2"]}
+    with pytest.raises(ValueError, match="판정할 집합의 숫자로 고르지 않는다"):
+        select_seed(report, registration)
+    with pytest.raises(ValueError, match="판정할 집합의 숫자로 고르지 않는다"):
+        apply_registration(report, registration)
+    fine = load_registration(R9_REGISTRATION_PATH)  # 등록된 R9 규칙(dev_new2)은 합친 기록이 있는 보고서에서도 그대로 고른다
+    assert select_seed(report, fine)["selected"] == "r9s18c"
+
+
+def test_a_seed_choosing_registration_refuses_robustness_pairs_that_do_not_name_the_selected_seed(tmp_path):
+    """R9 리뷰 1 M1: 견고성(McNemar·RNG seed)은 판정 조건 옆의 것이라 고른 seed의 쌍이어야 한다 — 한 seed를 못 박은 견고성 쌍은 등록이 받지 않는다."""
+    from robo_jev.closed_loop import load_registration
+
+    raw = yaml.safe_load(R9_REGISTRATION_PATH.read_text(encoding="utf-8"))
+    fixed = copy.deepcopy(raw)
+    fixed["robustness"][0]["pair"] = "rule - r8s19"
+    path = tmp_path / "fixed-robustness.yaml"
+    path.write_text(yaml.safe_dump(fixed, allow_unicode=True), encoding="utf-8")
+    with pytest.raises(ValueError, match="robustness"):
+        load_registration(path)
+    assert [entry["pair"] for entry in load_registration(R9_REGISTRATION_PATH)["robustness"]] == ["rule - {selected}", "{selected} - r5"]

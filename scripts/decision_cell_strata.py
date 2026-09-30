@@ -160,6 +160,23 @@ RUN_COMPARISONS = {
     "r8": [(R8_S18_LABEL, _R5_LABEL), (R8_S19_LABEL, _R5_LABEL), (R8_S18_LABEL, R8_S19_LABEL)],
     "r8dev": [(R8_S18_LABEL, _R5_LABEL), (R8_S19_LABEL, _R5_LABEL), (R8_S18_LABEL, R8_S19_LABEL)],
 }
+#: Task R9의 run 셋 — **같은 조리법**(`qwen35-2b-r8.yaml`)의 seed 셋: R8 seed 19(저장된 보고서), seed 18을 R8의 step 150 체크포인트에서 같은 일정으로
+#: 233까지 이은 것, seed 17을 처음부터. R5 줄과 R8 seed 18의 멈춘 상태(step 150) 줄은 저장된 보고서를 그대로 읽는다(GPU를 다시 쓰지 않는다) — 멈춘
+#: 상태와 이은 것의 짝(`r9s18c − r8s18@150`)이 "step 150 뒤의 83 step이 한 것"이다. 같은 평가 집합(`r6-decision-cell.yaml` 해시 `6a3b69131243…`,
+#: 둘째 칸 `r6-dev-cell.yaml` `9b484441b23b…`). 짝지은 비교: seed마다 − R5, seed 사이 셋, 이은 것 − 멈춘 상태.
+R9_S18C_LABEL = "R9 seed 18 continued (R8 step 150 → 233, same schedule)"
+R9_S17_LABEL = "R9 seed 17 (R5 recipe + cycle-1 DAgger, 233)"
+R9_RUNS = {_R5_LABEL: R6_RUNS[_R5_LABEL], R8_S18_LABEL: R8_RUNS[R8_S18_LABEL], R8_S19_LABEL: R8_RUNS[R8_S19_LABEL],
+           R9_S18C_LABEL: "r9-reeval-2b-t1-fp32-r9s18c.json", R9_S17_LABEL: "r9-reeval-2b-t1-fp32-r9s17.json"}
+R9_DEV_RUNS = {_R5_LABEL: R6_DEV_RUNS[_R5_LABEL], R8_S18_LABEL: R8_DEV_RUNS[R8_S18_LABEL], R8_S19_LABEL: R8_DEV_RUNS[R8_S19_LABEL],
+               R9_S18C_LABEL: "r9-dev-2b-t1-fp32-r9s18c.json", R9_S17_LABEL: "r9-dev-2b-t1-fp32-r9s17.json"}
+RUN_SETS.update({"r9": R9_RUNS, "r9dev": R9_DEV_RUNS})
+_R9_COMPARISONS = [
+    (R9_S18C_LABEL, _R5_LABEL), (R9_S17_LABEL, _R5_LABEL), (R8_S19_LABEL, _R5_LABEL),
+    (R9_S18C_LABEL, R8_S19_LABEL), (R9_S17_LABEL, R8_S19_LABEL), (R9_S18C_LABEL, R9_S17_LABEL),
+    (R9_S18C_LABEL, R8_S18_LABEL),
+]
+RUN_COMPARISONS.update({"r9": list(_R9_COMPARISONS), "r9dev": list(_R9_COMPARISONS)})
 
 #: `q_gripper`의 층 (Task R5 B1) — R4 C0 표의 분류 그대로 (`robo_jev.data.gripper_labels.GRIPPER_LABEL_CLASSES`) + 전체.
 GRIPPER_QUESTION = "q_gripper"
