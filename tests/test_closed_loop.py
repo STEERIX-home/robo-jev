@@ -824,8 +824,8 @@ def test_the_verdict_command_reads_each_seeds_monitor_and_refuses_one_that_is_no
 
 R9_REGISTRATION_PATH = REPO / "configs/eval/r9-registration.yaml"
 R9_SEEDS = ("r8s19", "r9s18c", "r9s17")
-#: 판정 집합의 편 수·검증 집합의 편 수 (R7·R8과 같은 장면)
-R9_EPISODES = {"ood_dev200": 200, "dev_new2": 100}
+#: 판정 집합의 편 수·검증 집합의 편 수 (R7·R8과 같은 장면), 그리고 판정 집합을 이루는 조건 하나(부분으로 고르는 등록의 거절 시험)
+R9_EPISODES = {"ood_dev200": 200, "dev_new2": 100, "ood_dev_new2": 100}
 
 
 def _r9_interval(low, high, *, seeds):
@@ -1081,3 +1081,38 @@ def test_the_verdict_command_reads_each_runs_completion_and_refuses_a_log_only_r
     write_run("artifacts/runs/r9-t1-fp32-2b-s17", seed=17, monitor={"question": "q_gripper", "step": 150, "window": 20, "ratio": 0.7})
     with pytest.raises(ValueError, match="기록만"):
         module.main(args)
+
+
+def test_choosing_on_a_part_of_the_judged_set_is_refused_even_when_the_registration_does_not_declare_merge(tmp_path):
+    """R9 리뷰 1 M1: `load_registration`은 등록 자신의 `merge`로만 판정 집합의 부분을 안다 — `merge`를 빼고 `ood_dev_new2`로 고르는 등록은 읽힌다.
+    그래서 고르기는 **보고서가 실제로 합친 것**(`report["merge"][primary]`)도 본다: 판정 집합을 이룬 조건으로는 고르지 않는다(거절). 합치지 않은 보고서의
+    다른 조건(dev_new2)으로는 그대로 고른다."""
+    from robo_jev.closed_loop import apply_registration, load_registration, select_seed
+
+    raw = yaml.safe_load(R9_REGISTRATION_PATH.read_text(encoding="utf-8"))
+    no_merge = {key: value for key, value in raw.items() if key != "merge"}
+    path = tmp_path / "no-merge-select-on-part.yaml"
+    path.write_text(yaml.safe_dump({**no_merge, "selection": {**raw["selection"], "condition": "ood_dev_new2"}}, allow_unicode=True), encoding="utf-8")
+    registration = load_registration(path)  # 등록만으로는 부분인지 알 수 없다
+    report = _r9_report(conditions=("ood_dev200", "dev_new2", "ood_dev_new2"))
+    report["merge"] = {"ood_dev200": ["ood_dev", "ood_dev_new", "ood_dev_new2"]}
+    with pytest.raises(ValueError, match="판정할 집합의 숫자로 고르지 않는다"):
+        select_seed(report, registration)
+    with pytest.raises(ValueError, match="판정할 집합의 숫자로 고르지 않는다"):
+        apply_registration(report, registration)
+    fine = load_registration(R9_REGISTRATION_PATH)  # 등록된 R9 규칙(dev_new2)은 합친 기록이 있는 보고서에서도 그대로 고른다
+    assert select_seed(report, fine)["selected"] == "r9s18c"
+
+
+def test_a_seed_choosing_registration_refuses_robustness_pairs_that_do_not_name_the_selected_seed(tmp_path):
+    """R9 리뷰 1 M1: 견고성(McNemar·RNG seed)은 판정 조건 옆의 것이라 고른 seed의 쌍이어야 한다 — 한 seed를 못 박은 견고성 쌍은 등록이 받지 않는다."""
+    from robo_jev.closed_loop import load_registration
+
+    raw = yaml.safe_load(R9_REGISTRATION_PATH.read_text(encoding="utf-8"))
+    fixed = copy.deepcopy(raw)
+    fixed["robustness"][0]["pair"] = "rule - r8s19"
+    path = tmp_path / "fixed-robustness.yaml"
+    path.write_text(yaml.safe_dump(fixed, allow_unicode=True), encoding="utf-8")
+    with pytest.raises(ValueError, match="robustness"):
+        load_registration(path)
+    assert [entry["pair"] for entry in load_registration(R9_REGISTRATION_PATH)["robustness"]] == ["rule - {selected}", "{selected} - r5"]

@@ -1214,6 +1214,11 @@ def load_registration(path: str | Path) -> dict[str, Any]:
                 raise ValueError(f"{path}: cloud.{name}: seed를 고르는 등록에서는 group이 {SELECTED_GROUP!r}이고 pair에 {SELECTED_TOKEN!r}가 있어야 한다 — 판정은 고른 seed 하나에 대한 것이다")
         elif groups and entry.get("group") not in groups:
             raise ValueError(f"{path}: cloud.{name}.group: groups({sorted(groups)}) 가운데 하나여야 한다 (받은 값: {entry.get('group')!r})")
+    if selection:
+        # 견고성(McNemar·RNG seed)은 판정 조건 옆의 판독이라 고른 seed의 쌍이어야 한다 — 한 seed를 못 박은 견고성 쌍은 받지 않는다 (R9 리뷰 1 M1)
+        fixed = [entry.get("pair") for entry in raw.get("robustness") or () if SELECTED_TOKEN not in str(entry.get("pair"))]
+        if fixed:
+            raise ValueError(f"{path}: seed를 고르는 등록의 robustness 쌍에는 {SELECTED_TOKEN!r}가 있어야 한다 (받은 값: {fixed}) — 판정한 seed의 견고성이다")
     calls = raw.get("calls")
     if calls is not None and (not isinstance(calls, dict) or not all(isinstance(calls.get(key), str) and calls[key] for key in ("pass", "fail"))):
         raise ValueError(f"{path}: calls에는 pass·fail 문장이 둘 다 필요하다")
@@ -1361,12 +1366,20 @@ def select_seed(report: dict[str, Any], registration: dict[str, Any], *, unavail
     """등록한 규칙으로 **검증 집합에서 seed 하나를 고른다** (Task R9 — `selection`).
 
     읽는 것은 보고서의 `tables[selection.condition]`(검증 집합의 정책별 표)뿐이다 — 판정 집합의 표·쌍은 열지 않는다(그리고 :func:`load_registration`이
-    판정 집합을 고르는 조건으로 받지 않는다). 후보마다 엄격 성공 수(`strict_done` = `done ∧ target_inside_zone`)가 가장 큰 쪽, 동점이면 `ties`의 순서로
-    — `false_done`은 거짓 done 편이 적은 쪽, `seed`는 seed 번호가 작은 쪽. `unavailable`(묶음 → 이유)은 고를 수 없는 후보다(run이 없거나 끝나지 않았다).
+    판정 집합을 고르는 조건으로 받지 않는다; 등록이 `merge`를 적지 않았어도 보고서가 판정 집합으로 합친 조건이면 여기서 거절한다).
+    후보마다 엄격 성공 수(`strict_done` = `done ∧ target_inside_zone`)가 가장 큰 쪽, 동점이면 `ties`의 순서로 — `false_done`은 거짓 done 편이 적은 쪽,
+    `seed`는 seed 번호가 작은 쪽. `unavailable`(묶음 → 이유)은 고를 수 없는 후보다(run이 없거나 끝나지 않았다).
     고를 수 있는 후보는 **같은 seed 집합**에서 돌았어야 한다 — 편 수가 다르거나 두 후보의 짝지은 블록이 센 공통 seed 수가 편 수와 다르면 거절한다."""
     rule = registration["selection"]
     condition = str(rule["condition"])
     unavailable = dict(unavailable or {})
+    # 판정 집합의 숫자로 고르지 않는다 — 등록이 적은 판정 집합의 부분(`merge`)뿐 아니라 **보고서가 실제로 합친 것**(`report["merge"][primary]`)도 본다:
+    # `merge`를 적지 않은 등록도 판정 집합을 이룬 조건으로는 고를 수 없다 (R9 리뷰 1 M1)
+    primary = str(registration["primary"])
+    judged = {primary, *(str(part) for part in ((report.get("merge") or {}).get(primary) or ())),
+              *(str(part) for part in ((registration.get("merge") or {}).get(primary) or ()))}
+    if condition in judged:
+        raise ValueError(f"선택 조건 {condition!r}가 판정 집합 {primary!r}을 이루는 조건이다({sorted(judged)}; 보고서의 merge 기록) — 판정할 집합의 숫자로 고르지 않는다")
     table = (report.get("tables") or {}).get(condition)
     if table is None:
         raise ValueError(f"보고서에 선택 조건 {condition!r}의 표가 없다 (있는 조건: {report.get('conditions')}) — `report --only …,{condition}`로 만든다")
