@@ -99,3 +99,55 @@ primary. Latency reports each episode's first tick separately.
 **Order and budget (brief).** A (this commit) → B (≈ 1.3 GPU-h) → D for `r9s18c` → C (≈ 4.1 GPU-h) → D for `r9s17` → E; GPU ≈ 7.5 h.
 Running D for `r9s18c` before C follows the brief's priority order (A → B → D(`r9s18c` loop) → C → D(`r9s17`) → offline cells → rest)
 and changes nothing registered.
+
+## 1. Trained weights (Stages B and C)
+
+| run | steps | seed | checkpoint | contract digest | training | log-only monitor (R8's statistic: step 150, `q_gripper`, steps 131–150) | gripper fit onset (registered definition) |
+| --- | ---: | ---: | --- | --- | --- | --- | ---: |
+| **`r9s18c`** (run id `r8-t1-fp32-2b-s18`, the checkpoint's) | **233 — completed on one schedule**: 1–150 by R8's unit, 151–233 resumed (`summary.rescheduled: null`) | 18 | `artifacts/runs/r9-t1-fp32-2b-s18c/r8-t1-fp32-2b-s18/checkpoint.pt` (model + optimizer, 26,350,502,421 B) | `93fe26725a4c…` | unit `r9-t1-s18c` wall 15:04:15 → 16:36:47 = **5,552 s = 1.54 GPU-h** (load 164.3 s; steps 151–233 5,155.0 s = 62.1 s/step), peak **56.05 GiB** allocated (60,185,186,816 B) / 57.66 GiB reserved, OOMs 0, host RSS 35.63 GiB after the load (the resume holds the checkpoint state on the host); loss 0.526 (150) → **0.149** (233), mean of the last 20 steps 0.287 | 0.3682 / 0.5094 = 0.723 — R8's own steps, unchanged; stops nothing | **152** (to step 150 only: 142, R8's reading) |
+
+**`r9s18c` — seed 18 run to the end.** The resume was the plain resume path (same `max_steps`, no reschedule) from R8's step-150 full
+checkpoint, written to a new directory; R8's run directories were read only — size, mtime and sha256 of their files were recorded
+before the launch and are identical after it (`artifacts/scratch/r9/r8-runs-{before,after}.txt`; checkpoint sha256 `ff2a682bc4ee…`).
+The per-question curve after step 150 (`metrics.json`, window means; ratio = mean loss / mean constant-prior baseline):
+
+| window | `q_gripper` loss / baseline (ratio) | settled | initiate ("close now") | open | `q_stop` ratio (true ticks fired) | `q_main` ratio |
+| --- | --- | ---: | ---: | ---: | --- | ---: |
+| 131–150 (R8's, before the stop) | 0.368 / 0.509 (0.723) | 266/593 = 0.449 | 0/32 | 1,205/1,233 | 3.48 (0/39) | 0.031 |
+| 151–170 | 0.306 / 0.530 (0.578) | 611/698 = 0.875 | 1/43 | 1,375/1,472 | 5.74 (0/2) | 0.051 |
+| 171–190 | 0.261 / 0.563 (0.463) | 525/607 = 0.865 | 4/48 | 1,077/1,130 | 1.35 (0/12) | 0.070 |
+| 191–210 | 0.233 / 0.563 (0.413) | 627/688 = 0.911 | 12/31 | 960/1,134 | 2.06 (0/24) | 0.043 |
+| 211–233 | 0.235 / 0.535 (0.440) | 694/774 = 0.897 | 2/62 | 1,339/1,488 | 1.41 (0/35) | 0.045 |
+
+**The gripper fit that began at step 142 continued** — the head stayed fitted on the settled ticks for all 83 resumed steps (0.865–0.911
+per window; ratio to the constant head 0.41–0.58), and the registered onset over the full record is step **152**: the first resumed
+step's batch (`ep-E2-420242`) read settled 14/52, so the durable run of ≥ 0.5 steps starts at 152 (through step 150 alone the same
+definition gives 142). It fitted less cleanly than seed 19 did at the end (seed 19's last 23 steps: settled 613/613, ratio 0.10–0.29;
+here 0.90 and 0.44), "close now" stayed weak (initiate 19/184 over steps 151–233), and some `open` ticks were answered `closed` in the
+last windows (open 0.847–0.900). `q_stop` never fired on a true tick (0 of 73 in the resumed steps; 0 of 209 over the run) and stayed
+above its constant head. The main-decision head stayed fitted (`q_main` 0.04–0.07 of its uniform baseline). Realized draws over the 233
+steps: expert **192** (0.82 epoch) · DAgger **41** (dagger-0 13 · dagger-1 15 · done-gate 13; expected ≈ 181 / 52 — the seeded material
+coin 1.7 SD below the DAgger mean, like seed 19's 1.8 SD); raw-false-done episodes drawn: dagger-1 3 of 22, done-gate 1 of 21; tokens
+11,758,944.
+
+## 3. Resume verification (Stage B)
+
+**The resume path accepts a monitor-stopped unit, and no trainer change was made.** `robo_jev.checkpoint.load_checkpoint` and
+`Trainer._load` do not read `status`; a CPU test committed with §0 stops a tiny run with the monitor, resumes it with
+`head_fit_monitor: null` into another `artifacts_dir` and matches an uninterrupted run bit for bit, with the stopped run's files
+byte-identical. On the GPU, unit `r9-t1-s18c` (on the registration commit `9437d57`, `git.dirty: false`) resumed
+`artifacts/runs/r8-t1-fp32-2b-s18/checkpoint.pt` with the command `scripts/adapt_readout.py --config configs/train/qwen35-2b-r8.yaml
+--mode t1 --steps 233 --seed 18 --set checkpoint_every=50 --set 'checkpoint_keep_steps=[]' --set head_fit_monitor=null --set
+resume=artifacts/runs/r8-t1-fp32-2b-s18/checkpoint.pt --set artifacts_dir=artifacts/runs/r9-t1-fp32-2b-s18c --run-id
+r8-t1-fp32-2b-s18 --no-eval`. The trainer's own checks passed on launch (`check_contract` on the digest; `resume_config_differences` —
+the keys that differ are the resume-free `resume`, `artifacts_dir` and `head_fit_monitor`, and the path keys `model_config` and
+`dataset_manifests[].path`, which now point into the R9 worktree and are compared by content; the identity block — data, tokenizer,
+serializer, question set, model — equals R8's). This is the same check R5 applied to its plain resume; the GPU resume gate (`p1_acceptance.py --gate t1`) was
+not re-run — the licence is R2 A1's verdict, as in R5.
+
+**The seam at step 150 → 151** (`metrics.json`): steps 1–150 of the new record are R8's history byte for byte (every field, including
+step seconds); the learning rates continue on the one cosine schedule — backbone 3.0948e-6 → **3.0293e-6**, readout 9.284e-5 → 9.088e-5,
+exactly seed 19's values at the same steps; the sampler cursor continues — `drawn` 300 → 302 (one robot episode and one non-robot bundle
+per step), robot/existing 123 → 124, robot/error_family 27 → 27, non-robot records 876 → 882 — with no unit repeated or skipped; the
+optimizer reached step 233 and the run ended `completed`; the loss reads 0.526 (150) → 0.511 (151) → 0.218 (152), gradient norm 24.16 →
+24.04 → 8.88.
