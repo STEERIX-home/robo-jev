@@ -159,6 +159,19 @@ Side by side (training batch, window means; ratio = mean loss / mean constant-pr
 (Every window's row for all three seeds: `artifacts/scratch/r9/c-facts-s{17,18c,19}.json`, printed side by side by
 `artifacts/scratch/r9/curves_side_by_side.py`.)
 
+## 2. Reproducible data
+
+The training data list is R8's, unchanged (five manifests, `splits: [train]`): robot train labels with gripper rule v2
+(`artifacts/datasets/r1-robot/r1-rollout-labels-g2/manifest.json` `4d433bae6d22…`, 233 train episodes), DAgger-0
+(`r5-dagger/dagger-0` `8b205ee13993…`), DAgger-1 (`r6-dagger/dagger-1` `6351ec247d35…`), the done-gate collection
+(`r6-dagger/dagger-1-donegate` `6b44fc3e3492…`) — one `error_family` bucket — and the non-robot split-by-split set
+(`r1/single-by-split` `cfd632dd568f…`); items loaded 3,453 = 833 stream + 2,620 single in both new runs; tokenizer `0997f410c57a…`, serializer
+`ts0.6`. No ood_dev-family record is in any training manifest, and no sealed file was opened by training, evaluation or analysis code
+(manifest-first loaders; the closed-loop configs refuse `ood_test`). **No new dataset was built.** R9 writes only closed-loop records
+(`artifacts/datasets/r9-closed-loop/{r9s18c,r9s17}/{ood_dev,ood_dev_new,ood_dev_new2,dev_new2}/`, id tag `r9`), which no training reads. The
+closed-loop scenes are R7's: `ood_dev200` = `r4-seeds.json` 26 + `r6-seeds.json` 74 + `r7-seeds.json` 100; `dev_new2` = `r6-seeds.json` 100.
+R8's run directories were read, never written (size, mtime and sha256 before and after, §1). No checkpoint was slimmed.
+
 ## 3. Resume verification (Stage B)
 
 **The resume path accepts a monitor-stopped unit, and no trainer change was made.** `robo_jev.checkpoint.load_checkpoint` and
@@ -180,3 +193,106 @@ exactly seed 19's values at the same steps; the sampler cursor continues — `dr
 per step), robot/existing 123 → 124, robot/error_family 27 → 27, non-robot records 876 → 882 — with no unit repeated or skipped; the
 optimizer reached step 233 and the run ended `completed`; the loss reads 0.526 (150) → 0.511 (151) → 0.218 (152), gradient norm 24.16 →
 24.04 → 8.88.
+
+## 4. Per-question quality (offline; the decision cell `ood_dev` 26 episodes / 3,162 ticks, hash `6a3b69131243`; the `dev` cell 42 / 4,168, `9b484441b23b`)
+
+Same serving loader and cells as run reports 2–5 (`artifacts/reports/r9-{reeval,dev}-2b-t1-fp32-r9s{18c,17}.json`, strata
+`artifacts/reports/r9-{decision,dev}-cell-strata.json` from `scripts/decision_cell_strata.py --runs r9` / `r9dev`; R5 and R8's rows are their
+stored reports). Contract digest `93fe26725a4c…` in all four new reports.
+
+| checkpoint (decision cell) | primary stratum (235) | **instruction-shuffle margin** [95 %] | state-shuffle margin | `grasp` (97): model / instr. margin | LOO (26) excluding 0 (worst) | whole `q_main` | `q_gripper` v2 initiate (43) / settled / open / whole | `q_done` post_release_other | `q_stop` onsets / 10 | goal-change immediate |
+| --- | ---: | --- | ---: | --- | --- | ---: | --- | ---: | ---: | ---: |
+| **seed 17 — `r9s17` (233)** | 0.830 | **+0.196 [+0.133, +0.253]** | +0.183 | 0.825 / +0.454 [+0.273, +0.636] | 26/26 (+0.175) | 0.987 | **0.209** / 0.994 / 0.987 / 0.978 | 0.952 | **0** | 0.778 |
+| **seed 18 — `r9s18c` (150 → 233)** | 0.843 | **+0.217 [+0.148, +0.287]** | +0.174 | 0.887 / +0.536 [+0.358, +0.722] | 26/26 (+0.157) | 0.985 | **0.023** / 0.929 / 0.901 / 0.898 | 1.000 | **0** | 0.844 |
+| **seed 19 — `r8s19` (233, R8)** | 0.749 | **+0.064 [+0.020, +0.104]** | +0.055 | 0.577 / +0.113 [+0.014, +0.206] | 26/26 (+0.041) | 0.981 | **0.372** / 0.994 / 0.962 / 0.964 | 0.984 | **0** | 0.667 |
+| seed 18 stopped at step 150 (R8, for the pair below) | 0.855 | +0.209 [+0.156, +0.258] | +0.187 | 0.835 / +0.505 | 26/26 | 0.986 | 0.047 / 0.886 / 0.936 / 0.905 | 0.742 | 0 | 0.822 |
+| R5 (seed 18, R5 recipe) | 0.902 | +0.298 [+0.232, +0.354] | +0.298 | 0.948 / +0.670 | 26/26 | 0.992 | 0.674 / 0.996 / 0.981 / 0.982 | 0.984 | 5 | 0.911 |
+
+Paired by episode (registered bootstrap): **`r9s18c − r8s19`** primary +0.094 [+0.026, +0.158], instruction margin **+0.153 [+0.090, +0.220]**,
+initiate `closed` −0.349 [−0.460, −0.222]; **`r9s17 − r8s19`** primary +0.081 [+0.033, +0.130], instruction margin **+0.132 [+0.083, +0.178]**,
+initiate −0.163 [−0.333, +0.000] (0 inside); **`r9s18c − r9s17`** primary +0.013 [−0.054, +0.078], instruction margin +0.021 [−0.048, +0.094]
+(both 0 inside), initiate −0.186 [−0.349, −0.026]; each seed − R5: instruction margin −0.102 [−0.158, −0.039] (17), −0.081 [−0.121, −0.034]
+(18c), −0.234 [−0.285, −0.180] (19). **Continued − stopped (seed 18, step 233 − step 150)**: primary −0.013 [−0.044, +0.019], instruction
+margin +0.009 [−0.024, +0.043], initiate −0.023 [−0.075, +0.000] — all three contain zero: the 83 extra steps changed nothing that this cell
+measures. The `dev` cell (42 episodes, a replication; 19 of 21 origin groups are training material) repeats the pattern: instruction margin
++0.192 [+0.141, +0.246] (17), +0.254 [+0.185, +0.317] (18c), +0.116 [+0.067, +0.172] (19); initiate 0.267 / 0.033 / 0.417; `q_stop` 0 of 14 in
+all three (R5 9 / 14); all 42 leave-one-out refits exclude zero for every seed; `r9s18c − r9s17` instruction margin +0.062 [+0.016, +0.106].
+
+**Reading.** On the held-out cell **seeds 17 and 18 read instructions about equally** (+0.196 / +0.217, paired difference 0 inside) and
+**both clearly better than seed 19** (+0.132 / +0.153 over it, both exclude zero): R8's seed 19 was the weak one of the three, not the recipe's
+level. None of the three reaches R5 (seed 18, R5 recipe, +0.298). The gripper's "close now" ticks separate the seeds the other way on this
+cell — seed 18 0.023, seed 17 0.209, seed 19 0.372 (R5 0.674) — and `q_stop` catches none of the ten stop onsets in any seed.
+
+## 5. Closed loop, the registered choice and the verdict (Stage D)
+
+Same serving path, harness, controller and expert as run reports 1–5 (`ModelPolicy`, `fused` + compile). `artifacts/reports/r9-closed-loop.json`
+(`closed_loop.py report --merge ood_dev200=ood_dev,ood_dev_new,ood_dev_new2 --only ood_dev200,dev_new2 --seed-pairs <the registration's nine
+pairs>`; label order expert · rule · mechanical · r8s19 · r9s18c · r9s17 · r6 · r5), records `artifacts/datasets/r9-closed-loop/r9s{18c,17}/`,
+verdict `artifacts/reports/r9-verdict.json` (`closed_loop.py verdict --registration configs/eval/r9-registration.yaml`); the report → verdict
+path had been run end to end on stand-in rows first (`artifacts/scratch/r9/dryrun/`: it reproduced R7's published `rule − r6` +0.115 [+0.035,
++0.195] and `r7 − r6` duplicates +2.290 [+0.545, +4.110] through the new code).
+
+| policy | ood_dev 200: `done` / **strict** (false done) | dev_new2 100: `done` / **strict** (false done) | failures main / aux / geom (ood) | first grasp on a non-instructed object (ood · dev) | gripper transitions: reference / executed / missing / duplicate (ood) | `q_stop` onsets caught (ood · dev) | wrong-action / unsafe ticks per acted tick (ood) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| expert | 0.910 / **182** (0) | 0.900 / **90** (0) | 2 / 0 / 16 | 0 · — | 509 / 495 / 14 / 33 | 65/65 · 41/41 | — |
+| rule judge | 0.725 / **145** (0) | 0.670 / **67** (0) | 2 / 51 / 2 | 0 · — | 395 / 384 / 11 / 759 | 31/43 · 25/30 | 0.006 / 0.001 |
+| model R5 (seed 18, R5 recipe) | 0.810 / **132** (30) | 0.790 / **68** (11) | 17 / 13 / 8 | 1 · 0 | 514 / 404 / 110 / 64 | 21/36 · 13/31 | 0.041 / 0.007 |
+| **seed 17 — `r9s17`** | **0.725 / 90 (55)** | **0.740 / 50 (24)** | 33 / 22 / 0 | 41 · 2 | 431 / 362 / 69 / 153 | **0/67 · 0/22** | 0.228 / 0.078 |
+| **seed 18 — `r9s18c`** | **0.180 / 27 (9)** | **0.170 / 14 (3)** | 41 / **123** / 0 | 6 · 0 | 701 / 68 / **633** / 73 | **0/20 · 0/5** | 0.050 / 0.019 |
+| **seed 19 — `r8s19` (R8)** | **0.420 / 28 (56)** | **0.510 / 26 (25)** | **91** / 25 / 0 | **139** · 33 | 336 / 188 / 148 / 91 | **0/67 · 0/31** | 0.565 / 0.177 |
+
+(First-grasp counts: the first tick whose `commitment` is a `grasp` on an object other than that tick's instructed target,
+`artifacts/scratch/r9/target_selection.py` → `target-selection.json`; it reproduces R8's published 139 / 200 for seed 19 and 1 for R5.)
+
+**The registered choice (dev_new2 only).** Strict successes on dev_new2: `r9s17` **50**, `r8s19` 26, `r9s18c` 14 — all three runs completed
+at `max_steps` 233 and ran the same 100 scenes (the code checked the shared seed count) — so **seed 17 (`r9s17`) was chosen, decided by the
+first key (strict)**; no tie-break was needed. Beside it, not part of the choice: on dev_new2 `r9s17 − r8s19` strict +0.240 [+0.130, +0.350] and
+`r9s18c − r9s17` −0.360 [−0.470, −0.260] (both exclude zero).
+
+**The registered verdict (ood_dev 200, the chosen seed only):**
+
+| condition | pair | difference [95 %] | holds if | holds? |
+| --- | --- | --- | --- | --- |
+| (a) strict success | `rule − r9s17` | **+0.275 [+0.205, +0.340]** | lower ≤ 0 | **no** |
+| (b) false-done rate | `r9s17 − r5` | **+0.125 [+0.060, +0.190]** | upper < 0 | **no** |
+| (c₁) duplicate gripper transitions per episode | `r9s17 − r5` | **+0.445 [+0.190, +0.730]** | lower ≤ 0 | **no** |
+| (c₂) `q_stop` onsets caught | `r9s17 − r5` | **−0.583 [−0.750, −0.379]** | upper ≥ 0 | **no** |
+
+Beside (a): discordant seeds 61 (rule only) vs 6 (seed 17 only), exact McNemar p = 1.5 × 10⁻¹², the lower bound above zero under all 200
+alternative bootstrap RNG seeds. Beside (b): 36 vs 11, p = 3.5 × 10⁻⁴, the upper bound above zero under all 200. **All four conditions fail →
+the registered call: "the chosen seed did not pass — the next round is training stability (the gripper head's flat phase, `q_stop`)".** The
+cloud stays closed, and not on a knife-edge. On dev_new2 (the set the seed was chosen on, beside only) the chosen seed fails (a) +0.170
+[+0.090, +0.250], (b) +0.130 [+0.060, +0.210] and (c₂) −0.419 [−0.625, −0.235] and holds (c₁) +0.160 [+0.000, +0.320].
+
+**Where the chosen seed fails.** Seed 17 declares done as often as the rule judge (ood_dev 200 `done` 145 vs 145: `rule − r9s17` `done`
++0.000 [−0.080, +0.075]) but **55 of its 145 dones are false** (27.5 % of the episodes; R5 30, rule 0): in 49 of the 55 the last grasp
+before the done tick was on an object other than the instructed one — it moves the wrong object into the zone and declares done (seed 19's
+failure, milder: its first grasp is on a non-instructed object in 41 of 200 episodes against seed 19's 139). Its gripper works in the loop
+(362 of 431 reference transitions executed; seed 18c 68 of 701) but fires extra transitions (153 duplicates; R5 64), and `q_stop` catches none of
+the 67 stop onsets. Per seed against R5 (ood_dev 200): wrong-action ticks +0.187 [+0.136, +0.242], unsafe ticks +0.070 [+0.037, +0.110],
+gripper-streak episodes +0.240 [+0.150, +0.325]; the aux-failure share +0.045 [−0.005, +0.095] contains zero.
+
+**Distribution readout (three seeds of one recipe; descriptive, not used to choose or judge).**
+
+| | seed 17 (`r9s17`) | seed 18 (`r9s18c`) | seed 19 (`r8s19`) |
+| --- | ---: | ---: | ---: |
+| dev_new2 strict / false done | **50** / 24 | 14 / 3 | 26 / 25 |
+| ood_dev 200 strict / false done | **90** / 55 | 27 / 9 | 28 / 56 |
+| ood_dev 200 duplicate gripper transitions / missing | 153 / 69 | 73 / **633** | 91 / 148 |
+| `q_stop` onsets caught (ood · dev) | 0/67 · 0/22 | 0/20 · 0/5 | 0/67 · 0/31 |
+| main failure class (ood) | wrong object → false done (main 33, aux 22) | gripper never closes (aux 123, main 41) | target selection (main 91, aux 25) |
+| offline instruction-shuffle margin (decision cell) | +0.196 [+0.133, +0.253] | +0.217 [+0.148, +0.287] | +0.064 [+0.020, +0.104] |
+| offline `q_gripper` initiate / settled | 0.209 / 0.994 | 0.023 / 0.929 | 0.372 / 0.994 |
+| gripper fit onset (training batch, registered) | 139 | 152 (142 to step 150) | 132 |
+| R8's step-150 statistic (log only) | 0.644 (would pass) | 0.723 (stopped in R8) | 0.592 (passed) |
+
+Seed-paired differences on ood_dev 200 (registered bootstrap): strict `r9s17 − r8s19` **+0.310 [+0.230, +0.385]**, `r9s18c − r9s17` **−0.315
+[−0.380, −0.255]**, `r9s18c − r8s19` −0.005 [−0.070, +0.060] (0 inside); false done `r9s18c − r8s19` −0.235 [−0.305, −0.165], `r9s18c − r9s17`
+−0.230 [−0.295, −0.165], `r9s17 − r8s19` −0.005 [−0.085, +0.080] (0 inside); duplicates `r9s18c − r9s17` −0.400 [−0.740, −0.090], the other two
+contain zero; `q_stop` catch 0 in every seed (all differences 0 [0, 0]). dev_new2 repeats every sign that is a finding except duplicates
+(`r9s18c − r9s17` −0.160 [−0.390, +0.100]); there `r9s18c − r8s19` strict is −0.120 [−0.230, −0.020].
+
+**Latency** (`latency.model_ms` excludes each episode's first tick): seed 17 non-first ticks p50 / p95 / p99 43.2–43.6 / 54.8–56.6 / 77.1–81.6 ms,
+**0 of 24,505 over 100 ms**; first ticks p50 91.5–94.4 ms, **32 of 300** over 100 ms (max 298.6 ms); seed 18c non-first 43.6–44.4 / 56.4–57.7 /
+81.5–84.2 ms, **0 of 27,767** over 100 ms, first ticks 35 of 300 over (max 294.8 ms). The gate (p95 ≤ 80 ms, > 100 ms ≤ 5 %) passes on either
+reading.
