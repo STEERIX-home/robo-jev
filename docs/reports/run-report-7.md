@@ -210,8 +210,8 @@ label-rule difference, not a behaviour difference. r9s17GS is the same 200 episo
 learned "close now" — goes from 27 to 133 strict with 106 seeds gained and none lost (the rule changed its gripper answer on 2,139 of 20,773
 ticks; at the grasp point it had said `open` on 46 % of the ticks). r6 — whose head closed early (`closed` on 82 % of the not-yet-at-the-grasp-
 point ticks) and said `open` during transport on 21 % — gains 17 net. r5 (125 vs 132) and r9s17 (92 vs 90), whose heads worked, do not move
-(r5's −0.035 has zero at the interval's edge; on dev_new2 r5G − r5 is **−0.080 [−0.150, −0.010]**, so the delegated rule is not neutral for r5:
-r5's own timing is part of how it was trained and DAgger-collected). (2) **It exposes the semantic failures it does not cause.** r8s19 now
+(r5's −0.035 has zero at the interval's edge; on dev_new2 r5G − r5 is **−0.080 [−0.150, −0.010]**, so the delegated rule is not neutral for r5 —
+one explanation, not tested here, is that r5's own timing is part of how it was trained and DAgger-collected). (2) **It exposes the semantic failures it does not cause.** r8s19 now
 completes grasps (missing share −0.310) — of the wrong object: its first grasp commitment is on a non-instructed object in **139 of 200**
 episodes in both arms, and its false dones nearly double (56 → 104, 102 of them after a grasp commitment on a non-target). r6G's extra
 completions bring 16 more false dones. (3) **The rule judge's "gripper threshold" failures were a classifier artifact, not gripper failures.**
@@ -259,8 +259,8 @@ exploratory** dev_new2 runs were made after seeing these numbers (r6G and r9s18c
 | r9s17 | identical episodes (its `q_stop` never fired) | 0/59 → 0/59 | 0 | 0 | 0 | 0 → 0 |
 
 Dropping the semantic stop cost nothing measurable in forbidden contacts or reflex events on these scenes (9 → 9 for the rule judge, 5 → 6
-for r5), and for r5 it **helped**: r5's `q_stop` fired on 209 ticks in r5G while catching 28 of 44 onsets — false alarms that stall the arm
-(r5GS gains 10 seeds, 7 of them `geometric` failures in r5G). The `unsafe` rise is the metric's definition (an acted tick whose stop label is
+for r5), and for r5 it **helped**: r5's `q_stop` fired on 209 ticks in r5G while catching 28 of 44 onsets, and r5GS gains 10 seeds, 7 of them
+`geometric` (stalled) failures in r5G — consistent with false alarms holding the arm, though R10 did not trace each one. The `unsafe` rise is the metric's definition (an acted tick whose stop label is
 true), not a contact. **Caution**: these scenes have few protected contacts (forbidden onsets 9–31 per 200 episodes, all policies), the
 force reflex is the executor's, and GS was registered as descriptive — this is evidence for a later decision on `q_stop`, not a finding that
 the semantic stop is unnecessary.
@@ -283,3 +283,48 @@ non-first ticks p95 54.5–57.4 ms over all 25 GPU condition runs (160,342 ticks
 conditions (4 of 8,560 — the only conditions that ran while the four CPU policy units were up, 10:20–10:31), **0** in the other 151,782;
 first ticks 2–28 per condition over 100 ms (26–100 first ticks each, max 295.4 ms). The gate (p95 ≤ 80 ms, > 100 ms ≤ 5 %) passes everywhere.
 
+## 5. Measured cost
+
+| unit (systemd, `Started` → end) | what | wall |
+| --- | --- | ---: |
+| `r10-smoke` | GPU smoke: r5G, one ood_dev episode, 20 ticks (output in scratch, not in any table) | 0 h 00 m 38 s |
+| `r10-c-models` | the registered GPU chain: r5G · r9s17G · r9s18cG · r8s19G · r6G · r5GS · r9s17GS on ood_dev 200 (19:20–25:18 each), r5G · r9s17G on dev_new2 (11:41 · 10:30) | 2 h 53 m 14 s |
+| `r10-x-models` | **unregistered, exploratory**: r6G and r9s18cG on dev_new2 (12:45 · 15:13) | 0 h 27 m 58 s |
+| `r10-pytest` | full suite, GPU visible, no other GPU job | 0 h 10 m 18 s |
+| **GPU total** | | **12,728 s = 3.54 GPU-h** (registered runs 2.90 h; brief ≈ 3.3 h) |
+
+CPU units (`r10c-*`, CUDA hidden, MemoryMax, `choom`, Nice 10): ruleG 10 m 20 s, expertG 11 m 25 s, ruleGS 6 m 34 s, mechanicalG 10 m 52 s (all on
+ood_dev 200 and, for ruleG / expertG, dev_new2; run concurrently with the GPU chain's first model), a preview of the primary pair (5 m 17 s), an
+early CPU-only test pass (7 m 48 s; 1 environment failure with CUDA hidden — `test_stream_runner_loads_the_checkpoint_before_compiling_so_lora_keys_survive`
+needs CUDA — and 1 skip), the preliminary report (32 m 30 s) and the final report (33 m 03 s; it reproduces every preliminary number — 1,185 paired blocks, 16 seed-pair blocks and the effect block identical — and adds the two exploratory dev_new2 rows). Stage A's rule agreement check: 65 s. Cloud spend 0. Disk: 128 →
+126 GB free (closed-loop records ≈ 3 GB). The five checkpoints are unchanged in size and mtime (`artifacts/scratch/r10/checkpoints-stat-{before,after}.txt`).
+Cumulative GPU on the DGX Spark ≈ 66.3 h.
+
+## 6. What the round says, and what it does not
+
+1. **Registered call: with execution delegated, the rule judge is still ahead of r5 — the bottleneck is semantic judgment** (`ruleG − r5G`
+   +0.095 [+0.030, +0.160], 34 vs 15, p = 0.009, robust under all 200 RNG seeds). The rule judge's lead over r5G is false dones (0 vs 24 seeds,
+   −0.120 [−0.165, −0.080]) and main decisions (−0.110 [−0.155, −0.065]); the false dones are mostly stale goals (18 of r5G's 24 carried an
+   earlier instruction's target). **No contract-change proposal was written** (registered: only if (a) holds).
+2. **The gripper's timing is an execution matter in a narrower sense than the hypothesis.** Handing it to the expert's geometric rule repairs
+   a model whose gripper head failed — r9s18c 27 → 133 (P1 holds), r6 122 → 139 — and leaves models whose head worked where they were (r5,
+   r9s17) or slightly worse (r5 on dev_new2 −0.080 [−0.150, −0.010]). So the R4–R9 instability of the gripper head *can* be engineered away at
+   serving time, and it was what ruined r9s18c; but it is not what separates the best model from the rule judge.
+3. **A correction to R4–R9's reading of the rule judge**: its 51 "gripper" failures on ood_dev 200 were label disagreements on early `closed`
+   commands that the executor's close readiness held (2,280 of 2,489 such ticks); under G none of them recovers and they are execution stalls.
+   The label-based failure classifier over-attributes failures to `semantic_aux` (gripper) for any policy that closes early.
+4. **Delegation exposes semantic failures rather than causing them**: r8s19 completes the wrong task (false dones 56 → 104, first grasp on a
+   non-instructed object 139 / 200 in both arms; P2 holds), r6G's extra completions bring 16 more false dones.
+5. **`q_stop` (GS, descriptive)**: dropping the semantic stop raised r5 by +0.045 [+0.015, +0.080] (in r5G its `q_stop` made 209 stop ticks for
+   28 of 44 onsets caught; 7 of the 10 seeds gained were stalls) and changed nothing measurable for the rule judge or r9s17 on these scenes (forbidden-contact
+   onsets 9 → 9 and 5 → 6, reflex events within noise). This is evidence for a later `q_stop` decision, not a finding that the semantic stop is
+   unnecessary — the scenes have few protected contacts.
+6. **Post hoc, not judged**: r6G and r9s18cG are within the interval of the rule judge on ood_dev 200 (+0.025 [−0.045, +0.090], +0.055 [−0.015,
+   +0.120]); the exploratory dev_new2 runs, made after seeing those numbers, read r6G 74 (rule judge 67: `ruleG − r6G` −0.070 [−0.150, 0.000]) and r9s18cG 61 (+0.060 [−0.030, +0.150]). Selection on the judged set is exactly what the registration avoided; a fair test of "the best
+   delegated model" needs a choice made on dev_new2 and judged on fresh holdout scenes.
+
+**Recommendation for the next round (from these numbers):** keep the gripper delegation available as an execution-side safety net (it is
+already exactly the label's source, so it costs nothing in agreement and removes the gripper head's failure mode), and point training at the
+semantic failures that remain under it — false done after a non-target grasp (stale goals) and target selection, which DAgger cycles 0–1 have
+not fixed — before any cloud spend. Whether to make the delegation part of the contract (a harness change, h0.10, which re-digests every
+checkpoint) is the user's decision; R10 did not register evidence that it closes the gap to the rule judge.
