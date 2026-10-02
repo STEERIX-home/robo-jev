@@ -103,8 +103,10 @@ a finding. Strict success is primary. Latency reports each episode's first tick 
 
 R10 trains nothing and writes no checkpoint. The five checkpoints are read as they are by the serving loader
 (`robo_jev.harness.model_policy.load_serving_judge`: contract digest `93fe26725a4c…` checked against this checkout before `compile`;
-`fused` + dense compile, fp32 readout — the same path as run reports 1–6). Size and mtime before the first R10 load
-(`artifacts/scratch/r10/checkpoints-stat-before.txt`) and after the last (`…-after.txt`) are identical:
+`fused` + dense compile, fp32 readout — the same path as run reports 1–6). Size and mtime recorded during the GPU chain
+(`artifacts/scratch/r10/checkpoints-stat-before.txt`, written at 10:49:41 — after the first two model loads, not before the first one)
+and after the last load (`…-after.txt`, 14:17:27) are identical, and every mtime predates R10 (2026-09-29/30), so no R10 process wrote
+a checkpoint:
 
 | label | checkpoint | kind | size (B) | mtime |
 | --- | --- | --- | ---: | --- |
@@ -139,16 +141,27 @@ stored dev_new2 episode `ep-E1-990376-r9-r9s17` through `run_condition` with its
 Same serving path, harness (`h0.9`), controller (`c0.6`) and expert (`e0.4`) as run reports 1–6. Report
 `artifacts/reports/r10-closed-loop.json` (`closed_loop.py report --merge ood_dev200=ood_dev,ood_dev_new,ood_dev_new2 --only ood_dev200,dev_new2
 --seed-pairs <the registration's eleven> --effects r9s18cG:r9s18c:r8s19G:r8s19`; native rows from the stored run files of R4–R9, the R10 rows
-from `artifacts/reports/r10-run-*.json`), verdict `artifacts/reports/r10-verdict.json` (`closed_loop.py verdict --registration
-configs/eval/r10-registration.yaml`), tables printed by `artifacts/scratch/r10/tables.py`, failure and target-selection counts by
+from the registered `artifacts/reports/r10-run-*.json` — the two exploratory dev_new2 run files are not inputs), verdict
+`artifacts/reports/r10-verdict.json` (`closed_loop.py verdict --registration configs/eval/r10-registration.yaml`; both rebuilt from the
+registered runs only in fix round 1, §5), the exploratory dev_new2 runs in their own labelled report `artifacts/reports/r10-exploratory.json`
+(their native rows and the rule judge beside; feeds nothing registered), tables printed by `artifacts/scratch/r10/tables.py`, failure and target-selection counts by
 `artifacts/scratch/r10/failures.py`, per-seed flips by `flips.py`, the expert identity check by `identity_check.py`, the false-done mechanism by
 R9's `artifacts/scratch/r9/fix1/false_done_mechanism.py` — all reading records through the manifest-first reader.
 
 **The wrapper did what it was registered to do.** The expert wrapped in G (`expertG`) produced **the same episodes as the unwrapped expert on all
 300 scenes** (`artifacts/scratch/r10/identity-check.json`): on the 274 scenes whose stored expert records carry label rule v2 (R6/R7) the records
-are identical apart from the wrapper's own fields, the id label and the wall clock; on R4's 26 the trajectories are identical and only the
-labels differ (v1 vs v2). The rule changed the wrapped expert's gripper answer on **0** of 32,372 delegated ticks. Strict 182 / 90 = the
-unwrapped expert's 182 / 90, every seed-paired difference 0 [0, 0].
+are identical apart from the wrapper's own fields, the id label and the wall clock; on R4's 26 the trajectories are identical and what
+differs is the label rule (v1 vs v2: the tick labels and the label-rule mark), the generator version (`gen-robot-v0.2` → `v0.3`) and the
+expert-config digest (R5 added the label-rule keys) — `artifacts/scratch/r10/fix1/generator-versions.json`. The rule changed the wrapped
+expert's gripper answer on **0** of 32,372 delegated ticks. Strict 182 / 90 = the unwrapped expert's 182 / 90, every seed-paired difference
+0 [0, 0].
+
+**What the wrapped model sees.** Its contract input, which the wrapper leaves as it is: the request, including the commitment projection
+(`serialize.py` `_commitment_line`) and the executed-command history (`exec_history … gripper=…`, `state.exec.gripper` / `gripper_wait`) —
+under G that history carries the gripper the harness adopted from the rule on earlier ticks. The wrapper adds nothing to that input, and
+the model never receives the rule's or the expert's answer for the current tick: the wrapper calls the model first, with the generator's own
+objects, and replaces `q_gripper` afterwards. (§0's "never sees the commitment" means the harness commitment argument, which `ModelPolicy`
+ignores; the projection in the request is part of every model input by contract.)
 
 ### The registered verdict (ood_dev 200)
 
@@ -163,9 +176,11 @@ p = 0.118 — it would hold there). **Registered predictions (beside):** P1 `r9s
 `(r9s18cG − r9s18c) − (r8s19G − r8s19)` **+0.485 [+0.410, +0.565] — holds** (r8s19's own effect +0.045). Per the registration, **no contract-change
 proposal is written** (the results do not support moving `q_gripper` to the execution layer as the way past the rule judge).
 
-**How to read the gap.** Natively the same pair read `rule − r5` **+0.065 [0.000, +0.130]** — zero at the interval's edge, so not a finding.
-Delegation did not close it: it moved the rule judge by −0.005 and r5 by −0.035 [−0.075, 0.000], and the delegated pair excludes zero. What the
-rule judge is ahead on is seed-paired below — false dones and main decisions, not the gripper.
+**How to read the gap.** Natively the same pair read `rule − r5` **+0.065 [0.000, +0.130]** — zero at the interval's edge, so no
+difference was found there; with execution delegated the pair excludes zero (+0.095 [+0.030, +0.160]). That is not evidence that delegation
+opened (or failed to close) a gap: neither policy's own delegation effect is a finding — rule judge −0.005 [−0.015, 0.000], r5 −0.035
+[−0.075, 0.000], zero at the edge of both — so the native and delegated readings differ by less than these 200 seeds resolve. What the rule
+judge is ahead on under G is seed-paired below — false dones and main decisions, not the gripper.
 
 ### By policy and arm (ood_dev 200; `done` · **strict** [95 %] · false done · failures main / aux / geometric · gripper reference / executed / missing / duplicate · `q_stop` caught / onsets · stop ticks by `q_stop` / reflex · forbidden-contact onsets · unsafe · `stall_exhausted`)
 
@@ -193,6 +208,18 @@ rule judge is ahead on is seed-paired below — false dones and main decisions, 
 † R4's 26 expert records carry label rule v1 (§2); with v2 labels the same trajectories show two more reference transitions — the
 label-rule difference, not a behaviour difference. r9s17GS is the same 200 episodes as r9s17G because r9s17's `q_stop` never reached 0.5.
 
+**Why reference gripper transitions still go missing under G.** The delegated `q_gripper` is the reference's own rule on every tick, yet
+r5G misses 100 of 503 reference transitions (ruleG 13 / 396; even expertG misses 14 of its own 511). The `missing` column counts *adopted*
+transitions (`adopted.gripper`, matched within ±10 ticks), and the harness applies the gripper answer only on a tick that keeps the main
+decision: on a switch tick it discards all four auxiliary answers and keeps the current gripper (docs/08 §5.4), and stop and gate ticks do
+the same. Traced per transition (fix round 1, `artifacts/scratch/r10/fix1/probe.json`), r5G's 100 are: **52** transitions (50 of them closes)
+that the harness never adopted within the window — on 280 of the 318 window ticks where the delegated answer was the target state, r5's own
+`q_main` was switching candidates (stops 13, gates 6, other ticks 19), and in 23 of the 52 the episode ended within 10 ticks of the
+reference transition; **43** opens that followed those same never-executed closes and found the gripper already open; **5** with a
+transition in the window that the matcher had paired with a neighbouring reference transition. ruleG's 13 are 8 never adopted (switch 5,
+own `q_stop` 2, stall escape 1) + 5 such opens. So under G the column measures how r5's other answers gate adoption, not gripper
+disagreement — which is zero by construction (§0's reading rule).
+
 ### The delegation effect per policy, seed-paired with native (ood_dev 200)
 
 | policy | strict native → G | `policyG − policy` strict [95 %] | discordant (G only vs native only) | false done native → G (difference) | gripper missing share · duplicates per episode (G − native) |
@@ -206,21 +233,27 @@ label-rule difference, not a behaviour difference. r9s17GS is the same 200 episo
 | expert | 182 → 182 | 0 [0, 0] | 0 vs 0 | 0 → 0 | 0 · 0 |
 | mechanical | 0 → 0 | 0 [0, 0] | — | — | — |
 
-**Reading.** (1) **Delegation repairs a broken gripper head completely and does nothing for a working one.** r9s18c — the seed whose head never
-learned "close now" — goes from 27 to 133 strict with 106 seeds gained and none lost (the rule changed its gripper answer on 2,139 of 20,773
-ticks; at the grasp point it had said `open` on 46 % of the ticks). r6 — whose head closed early (`closed` on 82 % of the not-yet-at-the-grasp-
-point ticks) and said `open` during transport on 21 % — gains 17 net. r5 (125 vs 132) and r9s17 (92 vs 90), whose heads worked, do not move
-(r5's −0.035 has zero at the interval's edge; on dev_new2 r5G − r5 is **−0.080 [−0.150, −0.010]**, so the delegated rule is not neutral for r5 —
-one explanation, not tested here, is that r5's own timing is part of how it was trained and DAgger-collected). (2) **It exposes the semantic failures it does not cause.** r8s19 now
+**Reading.** (1) **Delegation repairs a broken gripper head; for the working ones no gain was found, and on dev_new2 r5 lost.** r9s18c — the
+seed whose head never learned "close now" — goes from 27 to 133 strict with 106 seeds gained and none lost (the rule changed its gripper answer
+on 2,139 of 20,773 ticks; at the grasp point it had said `open` on 46 % of the ticks). r6 — whose head closed early (`closed` on 82 % of the
+not-yet-at-the-grasp-point ticks) and said `open` during transport on 21 % — gains 17 net. For r5 (125 vs 132) and r9s17 (92 vs 90), whose
+heads worked, no difference was found on ood_dev 200 (r5 −0.035 [−0.075, 0.000], zero at the edge; r9s17 +0.010 [−0.015, +0.040]) — which is
+not the same as "unchanged" —, and on dev_new2 r5 fell: r5G − r5 **−0.080 [−0.150, −0.010]** (r9s17 0.000 [−0.050, +0.050]). So the delegated
+rule is not neutral for r5 — one explanation, not tested here, is that r5's own timing is part of how it was trained and DAgger-collected.
+(2) **It exposes the semantic failures it does not cause.** r8s19 now
 completes grasps (missing share −0.310) — of the wrong object: its first grasp commitment is on a non-instructed object in **139 of 200**
 episodes in both arms, and its false dones nearly double (56 → 104, 102 of them after a grasp commitment on a non-target). r6G's extra
 completions bring 16 more false dones. (3) **The rule judge's "gripper threshold" failures were a classifier artifact, not gripper failures.**
 Natively the rule judge commanded `closed` with the gripper open on 2,489 ticks; on the next tick the executor reported `gripper_wait:
 readiness` (the close held) on 2,280 of them and closed on 209 — the real grasps. The label-based classifier counted those held early
 closes as ≥ 3-tick disagreements and filed 51 failures as `semantic_aux` (gripper). Under G (gripper commands = the label's source) none of the
-51 seeds recovers: 46 are filed `geometric`, 5 `semantic_aux` on `q_path`, and the rule judge loses one more seed (`E2:920145`). R4–R9's reading
-that "the rule judge's main failures were its own gripper threshold (rj0.5)" is therefore withdrawn: its 55 failures are execution stalls
-(`stall_exhausted` 51) with correct targets and no false done. The same artifact sits in the models' native `semantic_aux` counts wherever they
+51 seeds recovers: 46 are filed `geometric`, 5 `semantic_aux` on `q_path`, and the rule judge loses one more seed (`E2:920145`). (8 of the 51
+are R4 ood_dev seeds whose native labels follow rule v1 — §2 —, so on those 8 the reclassification also crosses label rules v1 → v2.) On
+dev_new2 the same holds for the 29 of its 30 native auxiliary failures that carry a gripper streak (the 30th, `E2:1000377`, is a `q_path`
+streak): under G 27 are filed `geometric`, 3 `semantic_aux` on `q_path`, none recovers (67 → 67). R4–R9's reading that "the rule judge's main
+failures were its own gripper threshold (rj0.5)" is therefore withdrawn: its 55 native failures on ood_dev 200 are execution stalls and
+timeouts (49 `stall_exhausted`, 6 `max_ms`; under G 56 = 51 + 5), its first grasp commitment is on the instructed object in all 200 episodes,
+and it has no false done. The same artifact sits in the models' native `semantic_aux` counts wherever they
 closed early (r6 most) — part of why the aux failure shares drop under G, where the gripper streaks they were filed under cannot occur (r6
 0.190 → 0.065, r9s18c 0.615 → 0.110, rule 0.255 → 0.025, all excluding zero).
 
@@ -236,19 +269,21 @@ closed early (r6 most) — part of why the aux failure shares drop under G, wher
 | r8s19G | 37 | 104 (102; 25) | 139 | 52 | 7 (path 5) | 0 | 0.563 |
 
 Seed-paired against the primary model, `ruleG − r5G` on ood_dev 200: false done **−0.120 [−0.165, −0.080]** (0 vs 24 seeds), main-decision
-failures −0.110 [−0.155, −0.065], wrong-action ticks −0.037 [−0.055, −0.022], unsafe ticks −0.007 [−0.018, 0.000], gripper duplicates
+failures −0.110 [−0.155, −0.065], wrong-action ticks −0.037 [−0.055, −0.022], unsafe ticks −0.007 [−0.018, −0.000] (upper bound −0.0003,
+zero excluded), gripper duplicates
 −0.155 [−0.250, −0.070] — the rule judge's lead over r5G is false dones and main decisions, not the gripper. The false dones are mostly
 **stale goals**: of r5G's 24, 19 follow a last grasp commitment on a non-target and 18 of those objects had been an earlier instruction's target
 (R9 found the same for R5, 22 of 24). Second evidence `ruleG − r9s17G` +0.260 [+0.195, +0.330] (dev_new2 +0.170 [+0.090, +0.250]).
 
-**Beside, not judged (post hoc).** Under G two of the five models are within the interval of the rule judge on ood_dev 200 — r6G 139
+**Beside, not judged (post hoc).** Under G, for two of the five models no difference from the rule judge was found on ood_dev 200 — r6G 139
 (`ruleG − r6G` +0.025 [−0.045, +0.090]) and r9s18cG 133 (`ruleG − r9s18cG` +0.055 [−0.015, +0.120]; `r5G − r6G` −0.070 [−0.135, −0.010],
 `r5G − r9s18cG` −0.040 [−0.105, +0.025]) — and in the GS arm `ruleGS − r5GS` reads +0.055 [−0.005, +0.120]. None of these is the registered
 comparison: r6 and r9s18c were not the primary model, and picking the best of five (or the better arm) after seeing the holdout is selection on
-the judged set — what R9's registration forbids — so these are observations, not findings. They say two things the verdict does not: the gap is
-not a property of every checkpoint (r6G and r9s18cG are not distinguishable from the rule judge here, with their own semantic failures — false
-dones 28 and 14, main-decision failures 18 and 31), and part of r5G's gap is its own semantic `q_stop` (GS, below). Two **unregistered,
-exploratory** dev_new2 runs were made after seeing these numbers (r6G and r9s18cG; table below).
+the judged set — what R9's registration forbids — so these are observations, not findings. Read with the zero rule they do not show that
+r6G or r9s18cG matches the rule judge — only that these 200 seeds do not separate them, and both keep their own semantic failures (false dones
+28 and 14, main-decision failures 18 and 31); and r5 gains from dropping its own semantic `q_stop` (GS, below: +0.045 [+0.015, +0.080]),
+after which no difference from the rule judge was found either (`ruleGS − r5GS` above). Two **unregistered, exploratory** dev_new2 runs were
+made after seeing these numbers (r6G and r9s18cG; table below; `artifacts/reports/r10-exploratory.json`).
 
 ### GS — the value of dropping the semantic stop (ood_dev 200, `policyGS − policyG`)
 
@@ -258,10 +293,12 @@ exploratory** dev_new2 runs were made after seeing these numbers (r6G and r9s18c
 | rule | 144 → 145: +0.005 [−0.010, +0.025] (0 inside) | 29/41 → 0/38 | +0.003 [+0.001, +0.006] | 0 [0, 0] | +0.010 [−0.010, +0.030] (0 inside) | 63 → 0 |
 | r9s17 | identical episodes (its `q_stop` never fired) | 0/59 → 0/59 | 0 | 0 | 0 | 0 → 0 |
 
-Dropping the semantic stop cost nothing measurable in forbidden contacts or reflex events on these scenes (9 → 9 for the rule judge, 5 → 6
-for r5), and for r5 it **helped**: r5's `q_stop` fired on 209 ticks in r5G while catching 28 of 44 onsets, and r5GS gains 10 seeds, 7 of them
-`geometric` (stalled) failures in r5G — consistent with false alarms holding the arm, though R10 did not trace each one. The `unsafe` rise is the metric's definition (an acted tick whose stop label is
-true), not a contact. **Caution**: these scenes have few protected contacts (forbidden onsets 9–31 per 200 episodes, all policies), the
+No increase in forbidden contacts or reflex events was found on these scenes when the semantic stop was dropped (onsets 9 → 9 for the rule
+judge, 5 → 6 for r5; the intervals contain zero), and for r5 it **helped**: r5's `q_stop` fired on 209 ticks in r5G while catching 28 of 44
+onsets, and r5GS gains 10 seeds and loses 1. Traced per seed (fix round 1, `artifacts/scratch/r10/fix1/probe.json`): in r5G all ten gained
+seeds had ended `stall_exhausted` after 9–14 stop ticks of r5's own `q_stop` each, and every one of those 130 ticks carries a false `q_stop`
+label (r5G failure classes 7 geometric, 2 main-decision, 1 auxiliary) — consistent with false alarms holding the arm until the stall
+monitor ended the episode. The `unsafe` rise is the metric's definition (an acted tick whose stop label is true), not a contact. **Caution**: these scenes have few protected contacts (forbidden onsets 9–31 per 200 episodes, all policies), the
 force reflex is the executor's, and GS was registered as descriptive — this is evidence for a later decision on `q_stop`, not a finding that
 the semantic stop is unnecessary.
 
@@ -276,12 +313,15 @@ the semantic stop is unnecessary.
 | r6 (exploratory, unregistered) | 69 → 74 | +0.050 [−0.050, +0.150] | 3 → 15 (+0.120 [+0.050, +0.190]) |
 | r9s18c (exploratory, unregistered) | 14 → 61 | +0.470 [+0.370, +0.570] | 3 → 5 (+0.020 [−0.030, +0.080]) |
 
-`ruleG − r5G` on dev_new2 +0.070 [−0.010, +0.150] (beside the verdict), `ruleG − r9s17G` +0.170 [+0.090, +0.250].
+`ruleG − r5G` on dev_new2 +0.070 [−0.010, +0.150] (beside the verdict), `ruleG − r9s17G` +0.170 [+0.090, +0.250]. The two exploratory rows
+come from `artifacts/reports/r10-exploratory.json` (marked `"registered": false`), not from the registered report or the verdict.
 
 **Latency** (`latency.model_ms` excludes each episode's first tick; the wrapper adds no model time — the rule is a few arithmetic operations):
 non-first ticks p95 54.5–57.4 ms over all 25 GPU condition runs (160,342 ticks); **4 ticks over 100 ms**, all in r5G's ood_dev / ood_dev_new
-conditions (4 of 8,560 — the only conditions that ran while the four CPU policy units were up, 10:20–10:31), **0** in the other 151,782;
-first ticks 2–28 per condition over 100 ms (26–100 first ticks each, max 295.4 ms). The gate (p95 ≤ 80 ms, > 100 ms ≤ 5 %) passes everywhere.
+conditions (1 of 2,449 and 3 of 6,111), which ran while the four CPU policy units were up (10:20–10:31; r5G's ood_dev_new2 began at 10:31:38
+and overlapped the last of them, expertG, by ≈ 5 s); **0** in the other 151,782, including the conditions that overlapped later CPU units
+(the preview, the early CPU test pass, the preliminary report) or the out-of-unit analyses of §5; first ticks 2–28 per condition over 100 ms
+(26–100 first ticks each, max 295.4 ms). The gate (p95 ≤ 80 ms, > 100 ms ≤ 5 %) passes everywhere.
 
 ## 5. Measured cost
 
@@ -296,9 +336,26 @@ first ticks 2–28 per condition over 100 ms (26–100 first ticks each, max 295
 CPU units (`r10c-*`, CUDA hidden, MemoryMax, `choom`, Nice 10): ruleG 10 m 20 s, expertG 11 m 25 s, ruleGS 6 m 34 s, mechanicalG 10 m 52 s (all on
 ood_dev 200 and, for ruleG / expertG, dev_new2; run concurrently with the GPU chain's first model), a preview of the primary pair (5 m 17 s), an
 early CPU-only test pass (7 m 48 s; 1 environment failure with CUDA hidden — `test_stream_runner_loads_the_checkpoint_before_compiling_so_lora_keys_survive`
-needs CUDA — and 1 skip), the preliminary report (32 m 30 s) and the final report (33 m 03 s; it reproduces every preliminary number — 1,185 paired blocks, 16 seed-pair blocks and the effect block identical — and adds the two exploratory dev_new2 rows). Stage A's rule agreement check: 65 s. Cloud spend 0. Disk: 128 →
-126 GB free (closed-loop records ≈ 3 GB). The five checkpoints are unchanged in size and mtime (`artifacts/scratch/r10/checkpoints-stat-{before,after}.txt`).
-Cumulative GPU on the DGX Spark ≈ 66.3 h.
+needs CUDA — and 1 skip), the preliminary report (32 m 30 s) and the first final report (33 m 03 s; it reproduced every preliminary number —
+1,185 paired blocks, 16 seed-pair blocks and the effect block identical — but also took the two exploratory dev_new2 run files as inputs, so
+nine dev_new2 slots of its verdict artifact — P1 and eight stability readings for r6 / r9s18c — were filled from them, unlabelled). Stage A's
+rule agreement check: 65 s. Cloud spend 0. Disk: 128 → 126 GB free (closed-loop records ≈ 3 GB). The five checkpoints are unchanged in size
+and mtime (`artifacts/scratch/r10/checkpoints-stat-{before,after}.txt`, §1). Cumulative GPU on the DGX Spark ≈ 66.3 h.
+
+**Fix round 1 (review 1; CPU only, GPU 0).** `r10c-fix1-reports` (31 m 39 s, MemoryMax 40G, peak 23.2 GB) rebuilt `r10-closed-loop.json` and
+`r10-verdict.json` from the registered runs only — identical to the preliminary pass apart from time stamps, the git hash and the report path
+(`artifacts/scratch/r10/fix1/compare.json`), primary block and call unchanged, the nine dev_new2 slots "not available" again — and wrote the
+exploratory artifact `artifacts/reports/r10-exploratory.json`; the replaced files are kept in `artifacts/scratch/r10/fix1/replaced/`.
+`r10c-fix1-probe` (34 s; gripper transitions, GS seeds, the rule judge's auxiliary failures), `r10c-fix1-footprint` (26 s),
+`r10c-fix1-genver`, `r10c-fix1-latency` (≈ 1 s each) and `r10c-fix1-tests` (`tests/test_delegation.py` + `tests/test_closed_loop.py`, CUDA
+hidden: 74 passed in 22 s) checked the facts used above.
+
+**Not every CPU job ran as a unit (review 1 I5).** While the GPU chain was up (10:23–12:33), 17 short analysis calls — 21 Python processes,
+1–28 s each: `failures.py`, `flips.py`, `identity_check.py`, R9's false-done script, an inline scan, a one-record trace and a one-test pytest
+run — read stored records from the session's shell without a unit, MemoryMax or `choom` (only `nice -n 10` and CUDA hidden), against
+HANDOFF §5's rule; three of them overlapped a 26 GB checkpoint load (11:02 r9s18cG, 11:27 r8s19G, 12:33 r9s17GS). Re-run in a unit with the
+same arguments, the two largest peak at 2.30 and 1.90 GiB RSS; the kernel log for the day has no `NVRM` or OOM line. The commands as run are
+in `artifacts/scratch/r10/fix1/out-of-unit-commands.md`; HANDOFF §5 records the lapse.
 
 ## 6. What the round says, and what it does not
 
@@ -307,24 +364,30 @@ Cumulative GPU on the DGX Spark ≈ 66.3 h.
    −0.120 [−0.165, −0.080]) and main decisions (−0.110 [−0.155, −0.065]); the false dones are mostly stale goals (18 of r5G's 24 carried an
    earlier instruction's target). **No contract-change proposal was written** (registered: only if (a) holds).
 2. **The gripper's timing is an execution matter in a narrower sense than the hypothesis.** Handing it to the expert's geometric rule repairs
-   a model whose gripper head failed — r9s18c 27 → 133 (P1 holds), r6 122 → 139 — and leaves models whose head worked where they were (r5,
-   r9s17) or slightly worse (r5 on dev_new2 −0.080 [−0.150, −0.010]). So the R4–R9 instability of the gripper head *can* be engineered away at
-   serving time, and it was what ruined r9s18c; but it is not what separates the best model from the rule judge.
-3. **A correction to R4–R9's reading of the rule judge**: its 51 "gripper" failures on ood_dev 200 were label disagreements on early `closed`
-   commands that the executor's close readiness held (2,280 of 2,489 such ticks); under G none of them recovers and they are execution stalls.
-   The label-based failure classifier over-attributes failures to `semantic_aux` (gripper) for any policy that closes early.
+   a model whose gripper head failed — r9s18c 27 → 133 (P1 holds), r6 122 → 139. For the models whose head worked no difference was found on
+   ood_dev 200 (r5 −0.035 [−0.075, 0.000], r9s17 +0.010 [−0.015, +0.040]), and r5 fell on dev_new2 (−0.080 [−0.150, −0.010]). So the
+   R4–R9 instability of the gripper head *can* be engineered away at serving time, and it was what ruined r9s18c; but it is not what separates
+   the best model from the rule judge.
+3. **A correction to R4–R9's reading of the rule judge**: its 51 "gripper" failures on ood_dev 200 (and 29 of its 30 auxiliary failures on
+   dev_new2) were label disagreements on early `closed` commands that the executor's close readiness held (2,280 of 2,489 such ticks on
+   ood_dev 200); under G none of them recovers and they are execution stalls. The label-based failure classifier over-attributes failures to
+   `semantic_aux` (gripper) for any policy that closes early. R4's dev 100 failures were not re-run; the correction reaches them by analogy.
 4. **Delegation exposes semantic failures rather than causing them**: r8s19 completes the wrong task (false dones 56 → 104, first grasp on a
    non-instructed object 139 / 200 in both arms; P2 holds), r6G's extra completions bring 16 more false dones.
 5. **`q_stop` (GS, descriptive)**: dropping the semantic stop raised r5 by +0.045 [+0.015, +0.080] (in r5G its `q_stop` made 209 stop ticks for
-   28 of 44 onsets caught; 7 of the 10 seeds gained were stalls) and changed nothing measurable for the rule judge or r9s17 on these scenes (forbidden-contact
-   onsets 9 → 9 and 5 → 6, reflex events within noise). This is evidence for a later `q_stop` decision, not a finding that the semantic stop is
-   unnecessary — the scenes have few protected contacts.
-6. **Post hoc, not judged**: r6G and r9s18cG are within the interval of the rule judge on ood_dev 200 (+0.025 [−0.045, +0.090], +0.055 [−0.015,
-   +0.120]); the exploratory dev_new2 runs, made after seeing those numbers, read r6G 74 (rule judge 67: `ruleG − r6G` −0.070 [−0.150, 0.000]) and r9s18cG 61 (+0.060 [−0.030, +0.150]). Selection on the judged set is exactly what the registration avoided; a fair test of "the best
-   delegated model" needs a choice made on dev_new2 and judged on fresh holdout scenes.
+   28 of 44 onsets caught; all 10 seeds gained had ended `stall_exhausted` in r5G after 9–14 false-alarm stop ticks each). For the rule judge
+   no difference was found (+0.005 [−0.010, +0.025]) and r9s17's episodes were identical (its `q_stop` never reached 0.5); no increase in
+   forbidden-contact onsets (9 → 9, 5 → 6) or reflex events was found. This is evidence for a later `q_stop` decision, not a finding that the
+   semantic stop is unnecessary — the scenes have few protected contacts.
+6. **Post hoc, not judged**: for r6G and r9s18cG no difference from the rule judge was found on ood_dev 200 (+0.025 [−0.045, +0.090], +0.055
+   [−0.015, +0.120]); the exploratory dev_new2 runs, made after seeing those numbers, read r6G 74 (rule judge 67: `ruleG − r6G` −0.070 [−0.150,
+   0.000]) and r9s18cG 61 (+0.060 [−0.030, +0.150]) (`artifacts/reports/r10-exploratory.json`). Selection on the judged set is exactly what the
+   registration avoided; a fair test of "the best delegated model" needs a choice made on dev_new2 and judged on fresh holdout scenes.
 
-**Recommendation for the next round (from these numbers):** keep the gripper delegation available as an execution-side safety net (it is
-already exactly the label's source, so it costs nothing in agreement and removes the gripper head's failure mode), and point training at the
-semantic failures that remain under it — false done after a non-target grasp (stale goals) and target selection, which DAgger cycles 0–1 have
-not fixed — before any cloud spend. Whether to make the delegation part of the contract (a harness change, h0.10, which re-digests every
-checkpoint) is the user's decision; R10 did not register evidence that it closes the gap to the rule judge.
+**Recommendation for the next round (from these numbers):** keep the gripper delegation available as an execution-side safety net for a
+checkpoint whose gripper head failed (it is exactly the label's source and removes that failure mode — r9s18c 27 → 133), but not as a free
+default: for r5, whose head worked, no gain was found on ood_dev 200 and it cost 8 seeds net on dev_new2 (11 lost, 3 gained; −0.080
+[−0.150, −0.010]). Point
+training at the semantic failures that remain under it — false done after a non-target grasp (stale goals) and target selection, which DAgger
+cycles 0–1 have not fixed — before any cloud spend. Whether to make the delegation part of the contract (a harness change, h0.10, which
+re-digests every checkpoint) is the user's decision; R10 did not register evidence that it closes the gap to the rule judge.
