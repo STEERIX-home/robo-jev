@@ -353,8 +353,22 @@ class TimedEnvironment:
 
 def build_policy(
     kind: str, *, generator: dict[str, Any], checkpoint: str | Path | None = None, model_id: str = "Qwen/Qwen3.5-2B", compile_dense: bool = True,
+    delegate: str | None = None,
 ) -> dict[str, Any]:
-    """정책 묶음 ``{"kind", "policy", "expert", "describe"}`` — `expert`는 참조·라벨의 원천(정책이 expert면 같은 객체)."""
+    """정책 묶음 ``{"kind", "policy", "expert", "describe"}`` — `expert`는 참조·라벨의 원천(정책이 expert면 같은 객체).
+
+    `delegate`(Task R10 — `G` | `GS`)를 주면 그 정책을 실행 쪽 위임 감싸개(:class:`robo_jev.delegation.DelegatedExecutionPolicy`)로 감싼
+    묶음이다(`arm` 키가 붙는다). 주지 않으면 감싸지 않은 묶음 그대로다."""
+    bundle = _build_policy(kind, generator=generator, checkpoint=checkpoint, model_id=model_id, compile_dense=compile_dense)
+    if delegate is None:
+        return bundle
+    from robo_jev.delegation import delegate_bundle
+    from robo_jev.sim.expert import load_expert_config
+
+    return delegate_bundle(bundle, arm=delegate, expert_config=load_expert_config(config_paths(generator)["expert_config"]))
+
+
+def _build_policy(kind: str, *, generator: dict[str, Any], checkpoint: str | Path | None, model_id: str, compile_dense: bool) -> dict[str, Any]:
     from robo_jev.sim.expert import Expert, load_expert_config
 
     if kind not in POLICY_KINDS:
@@ -412,17 +426,23 @@ def run_condition(
     """정책 하나를 seed 목록 전부에 돌려 에피소드를 쓰고(레코드 + manifest + 틱 지연 sidecar) 편별 요약을 돌려준다.
 
     에피소드 id에는 `-<id_tag>-<label>`이 붙는다 (R4의 기록은 `-r4-…`; R5의 run은 `--id-tag r5`) — 같은 seed를 다른 라운드가 돌아도
-    파일·manifest의 열쇠가 겹치지 않는다."""
+    파일·manifest의 열쇠가 겹치지 않는다.
+
+    정책이 위임 감싸개(Task R10, :class:`robo_jev.delegation.DelegatedExecutionPolicy`)면 편마다 감싼 정책의 raw 답·실행 규칙의 판단·갈래를 레코드에
+    붙이고(`attach`) manifest의 `closed_loop.arm`에 갈래를 적는다. 감싸지 않은 정책의 레코드는 그대로다(시험이 R9 기록 한 편을 바이트 단위로 재현한다)."""
     from robo_jev.sim.environment import Environment
 
     if getattr(bundle["policy"], "collection_only", False):
         # done 게이트 수집 정책(Task R6 A3)은 종료를 expert에게 맡기므로 성공률이 뜻을 잃는다 — 평가 run에 들어오면 멈춘다
         raise ValueError(f"{getattr(bundle['policy'], 'name', 'policy')}: 수집 전용 정책은 평가에 쓰지 않는다 (robo_jev.data.done_gate)")
+    from robo_jev.delegation import DelegatedExecutionPolicy
+
     generator = config["generator"]
     paths = config_paths(generator)
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     policy, expert = bundle["policy"], bundle["expert"]
+    delegated = isinstance(policy, DelegatedExecutionPolicy)
     suffix = f"-{id_tag}-{label}"
     envs: dict[str, TimedEnvironment] = {}
     episodes: list[dict[str, Any]] = []
@@ -443,12 +463,16 @@ def run_condition(
                     policy.reset()
                 expert.act_ms, expert.labels_ms = [], []
                 record = generate_episode(profile, seed, policy=policy, expert=expert, config=generator, env=env, max_ticks=max_ticks, id_suffix=suffix)
+                if delegated:
+                    # 위임 감싸개(Task R10): 감싼 정책의 raw 답·실행 규칙의 판단·갈래를 기록에 붙인다 — 하네스가 받은 답은 `model_output`
+                    policy.attach(record)
                 validate_record(record)
                 write_episode(record, out)
                 rows = list(getattr(policy, "timing", []) or [])
                 summary = episode_summary(record)
                 ticks = len(record["ticks"])
-                reference = [a + b for a, b in zip(expert.act_ms, expert.labels_ms)] if bundle["kind"] != "expert" else [0.0] * ticks
+                # 참조 답은 정책이 참조 전문가 자신이 아닐 때만 따로 계산된다 (생성기의 `policy is expert`) — 전문가를 감싼 위임 묶음도 따로 센다
+                reference = [a + b for a, b in zip(expert.act_ms, expert.labels_ms)] if policy is not expert else [0.0] * ticks
                 intervals = list(env.intervals_ms)
                 for index in range(ticks):
                     row = {"episode_id": record["episode_id"], "condition": condition, "index": index, "t": record["ticks"][index]["t"],
@@ -474,6 +498,8 @@ def run_condition(
     wall = time.perf_counter() - started
     manifest = build_manifest(out, generator, batch_wall_s=wall)
     manifest["closed_loop"] = {"version": CLOSED_LOOP_VERSION, "policy": bundle["describe"], "condition": condition, "label": label, "id_tag": id_tag, "episodes": len(episodes)}
+    if delegated:
+        manifest["closed_loop"]["arm"] = policy.arm
     (out / "manifest.json").write_bytes((json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
     latency = {
         "obs_to_command_ms": _quantiles(obs_to_command), "obs_to_command_net_of_reference_ms": _quantiles(obs_to_command_net),
@@ -793,13 +819,16 @@ def paired_false_done(rows_a: list[dict[str, Any]], rows_b: list[dict[str, Any]]
 
 
 #: seed(편) 하나에서 읽는 (분자, 분모) — 두 정책을 **같은 seed**로 짝지어 합친 비율의 차를 낸다 (Task R6 수정 라운드 1, 리뷰 1 I-3).
-#: 이름이 붙은 "퇴행"은 이 짝지은 구간이 0을 제외할 때만 발견이다.
-SEED_METRICS = ("gripper_streak", "gripper_duplicates", "q_stop_caught", "unsafe", "wrong_action", "aux_failure", "main_failure")
+#: 이름이 붙은 "퇴행"은 이 짝지은 구간이 0을 제외할 때만 발견이다. 뒤의 셋은 Task R10이 더했다(위임 갈래의 그리퍼 누락과 GS의 안전 판독):
+#: 참조 그리퍼 전환 가운데 누락 몫, 편당 금지 물체 접촉 시작 수, 편당 반사 사건 틱 수.
+SEED_METRICS = ("gripper_streak", "gripper_duplicates", "q_stop_caught", "unsafe", "wrong_action", "aux_failure", "main_failure",
+                "gripper_missing", "forbidden_contacts", "reflex_ticks")
 
 
 def seed_metrics(record: dict[str, Any], row: dict[str, Any] | None = None) -> dict[str, tuple[float, float]]:
     """편 하나의 (분자, 분모): 그리퍼 연속 불일치 편(0/1), 중복 그리퍼 전환 수(편당), `q_stop`이 잡은 정지 사건 / 정지 사건,
-    안전 위반 틱 / 행동한 틱(`selective_metrics_from_stored`와 같은 정의), 오행동 틱 / 행동한 틱(`_decision_ticks`), 실패 원인 aux·main(0/1)."""
+    안전 위반 틱 / 행동한 틱(`selective_metrics_from_stored`와 같은 정의), 오행동 틱 / 행동한 틱(`_decision_ticks`), 실패 원인 aux·main(0/1),
+    그리고 (R10) 누락된 참조 그리퍼 전환 / 참조 전환(`gripper_event_metrics`), 금지 물체 접촉 시작 수(편당, `stop_vs_reflex`), 반사 사건 틱 수(편당)."""
     row = row or episode_summary(record)
     per = per_record_rows([record])
     stop = stop_timing(per["stop"], [record]) if per["stop"] else {"reacted": 0, "onsets": 0}
@@ -807,14 +836,18 @@ def seed_metrics(record: dict[str, Any], row: dict[str, Any] | None = None) -> d
     acted = round(float(selective["coverage"] or 0.0) * selective["n"]) if selective["n"] else 0
     unsafe = round(float(selective["unsafe_action_rate"] or 0.0) * acted) if acted else 0
     decisions = row["decisions"]
+    events = gripper_event_metrics([record])
     return {
         "gripper_streak": (1.0 if decisions["aux_streak"]["q_gripper"] >= AUX_DISAGREEMENT_STREAK else 0.0, 1.0),
-        "gripper_duplicates": (float(gripper_event_metrics([record])["duplicate"]), 1.0),
+        "gripper_duplicates": (float(events["duplicate"]), 1.0),
         "q_stop_caught": (float(stop["reacted"]), float(stop["onsets"])),
         "unsafe": (float(unsafe), float(acted)),
         "wrong_action": (float(decisions["wrong_action"]), float(decisions["acted"])),
         "aux_failure": (1.0 if row["failure_cause"] == "semantic_aux" else 0.0, 1.0),
         "main_failure": (1.0 if row["failure_cause"] == "semantic_main" else 0.0, 1.0),
+        "gripper_missing": (float(events["missing"]), float(events["reference_transitions"])),
+        "forbidden_contacts": (float(stop_vs_reflex([record])["forbidden_contact_onsets"]), 1.0),
+        "reflex_ticks": (float(row["reflex_ticks"]), 1.0),
     }
 
 
@@ -905,6 +938,38 @@ def paired_robustness(
             "lower_bound": summary(lows), "upper_bound": summary(highs),
         },
     }
+
+
+def paired_effect_difference(
+    rows_a: list[dict[str, Any]], rows_a0: list[dict[str, Any]], rows_b: list[dict[str, Any]], rows_b0: list[dict[str, Any]], *, metric: str,
+    resamples: int = EPISODE_BOOTSTRAP["resamples"], seed: int = EPISODE_BOOTSTRAP["seed"], level: float = EPISODE_BOOTSTRAP["level"],
+) -> dict[str, Any] | None:
+    """두 **효과**의 차 (a − a₀) − (b − b₀)를 seed로 짝지은 부트스트랩 구간으로 (Task R10 — "위임이 r9s18c를 r8s19보다 더 올린다"의 등록 예측).
+
+    네 정책이 모두 돈 seed만 쓴다. seed마다 0/1 지표(`metric`: strict · done · false_done, :func:`paired_robustness`와 같은 정의)로
+    d = (a − a₀) − (b − b₀)를 내고, 그 평균의 구간을 seed 복원추출(등록값 재표집 수·RNG seed·수준)로 낸다. `a_effect`·`b_effect`는 두 효과
+    자체의 점 추정이다. 구간이 0을 포함하면 두 효과의 차는 발견이 아니다."""
+    if metric not in EFFECT_METRICS:
+        raise ValueError(f"metric: {list(EFFECT_METRICS)} 중 하나여야 한다 (받은 값: {metric!r})")
+    tables = [{row["key"]: _indicator(row, metric) for row in rows} for rows in (rows_a, rows_a0, rows_b, rows_b0)]
+    keys = sorted(set(tables[0]) & set(tables[1]) & set(tables[2]) & set(tables[3]))
+    if not keys:
+        return None
+    a, a0, b, b0 = tables
+    effect_a = {key: a[key] - a0[key] for key in keys}
+    effect_b = {key: b[key] - b0[key] for key in keys}
+    difference = {key: effect_a[key] - effect_b[key] for key in keys}
+    rng = random.Random(int(seed))
+    draws: list[float] = []
+    for _ in range(int(resamples)):
+        drawn = [keys[rng.randrange(len(keys))] for _ in keys]
+        draws.append(sum(difference[key] for key in drawn) / len(drawn))
+    draws.sort()
+    low, high = (1.0 - level) / 2.0, 1.0 - (1.0 - level) / 2.0
+    interval = [_quantile(draws, low), _quantile(draws, high)]
+    return {"metric": metric, "seeds": len(keys), "a_effect": sum(effect_a.values()) / len(keys), "b_effect": sum(effect_b.values()) / len(keys),
+            "difference": sum(difference.values()) / len(keys), "ci": interval, "includes_zero": bool(interval[0] <= 0.0 <= interval[1]),
+            "resamples": int(resamples), "seed": int(seed), "level": level}
 
 
 def condition_metrics(records: list[dict[str, Any]], rows: list[dict[str, Any]] | None = None) -> dict[str, Any]:
@@ -1057,9 +1122,12 @@ def _offline_columns(paths: list[Path]) -> dict[str, Any]:
 
 def closed_loop_report(
     run_paths: list[Path], *, offline: list[Path] | None = None, merge: dict[str, list[str]] | None = None, only: list[str] | None = None,
-    seed_pairs: list[tuple[str, str]] | None = None, alternative_seeds: Any = range(1, 201),
+    seed_pairs: list[tuple[str, str]] | None = None, alternative_seeds: Any = range(1, 201), effects: list[tuple[str, str, str, str]] | None = None,
 ) -> dict[str, Any]:
     """run 요약 JSON들(`scripts/closed_loop.py run --report`) → 정책 × 조건 지표, 짝지은 성공률 차이, 오프라인 값 나란히.
+
+    `effects`(Task R10 — 이름표 넷 (a, a₀, b, b₀))면 조건마다 두 효과의 차 (a − a₀) − (b − b₀)의 seed 짝 구간(:func:`paired_effect_difference`,
+    지표 :data:`EFFECT_METRICS`)을 `effects[조건]["(a - a0) - (b - b0)"]`에 싣는다 — 네 이름표가 모두 그 조건을 돌았을 때만.
 
     `merge`(Task R6 D2)는 새 조건 이름 → 합칠 조건들이다(예: ``{"ood_dev100": ["ood_dev", "ood_dev_new"]}`` — R4의 ood_dev 26 seed와 새로
     뽑은 74 seed). 합칠 조건을 **전부** 가진 정책만 그 표에 들고(없는 정책은 `merge_missing`에 이름이 남는다), 같은 seed가 두 조건에
@@ -1140,9 +1208,19 @@ def closed_loop_report(
                 "robustness": {metric: paired_robustness(rows_by[(a, condition)], rows_by[(b, condition)], metric=metric, alternative_seeds=alternative_seeds)
                                for metric in ("strict", "false_done")},
             }
-    return {"version": CLOSED_LOOP_VERSION, "runs": {label: {"path": run["path"], "paths": run.get("paths", [run["path"]]), "policy": run["policy"], "gpu": run["gpu"]} for label, run in runs.items()},
-            "conditions": conditions, "tables": tables, "paired": pairs, "offline": _offline_columns(offline or []), "layers": list(LAYERS),
-            "merge": {name: list(parts) for name, parts in (merge or {}).items()}, "merge_missing": merge_missing, "seed_pairs": seeded}
+    out = {"version": CLOSED_LOOP_VERSION, "runs": {label: {"path": run["path"], "paths": run.get("paths", [run["path"]]), "policy": run["policy"], "gpu": run["gpu"]} for label, run in runs.items()},
+           "conditions": conditions, "tables": tables, "paired": pairs, "offline": _offline_columns(offline or []), "layers": list(LAYERS),
+           "merge": {name: list(parts) for name, parts in (merge or {}).items()}, "merge_missing": merge_missing, "seed_pairs": seeded}
+    if effects:
+        blocks: dict[str, dict[str, Any]] = {}
+        for condition in conditions:
+            for a, a0, b, b0 in effects:
+                if not all((label, condition) in rows_by for label in (a, a0, b, b0)):
+                    continue
+                rows = [rows_by[(label, condition)] for label in (a, a0, b, b0)]
+                blocks.setdefault(condition, {})[f"({a} - {a0}) - ({b} - {b0})"] = {metric: paired_effect_difference(*rows, metric=metric) for metric in EFFECT_METRICS}
+        out["effects"] = blocks
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -1158,6 +1236,8 @@ _BOUNDS = {
 }
 #: `paired` 블록에서 지표 이름 → 쌍 이름의 꼬리 (:func:`closed_loop_report`).
 _PAIRED_SUFFIX = {"done": "", "strict": " (done ∧ inside)", "false_done": " (false done)"}
+#: `effects` 블록(Task R10 — 두 위임 효과의 차, :func:`paired_effect_difference`)의 지표: seed 단위 0/1 지표 셋.
+EFFECT_METRICS = ("strict", "done", "false_done")
 #: seed를 고르는 등록(Task R9)에서 판정 조건의 쌍 이름 안에 두는 자리 표시 — 고른 seed의 이름표로 바뀐다 (:func:`select_seed`).
 SELECTED_TOKEN = "{selected}"
 #: 그런 등록에서 판정 조건의 `group` — "고른 seed 하나"다 (판정은 고른 seed에 대한 것이지 후보 전부에 대한 것이 아니다).
@@ -1178,12 +1258,24 @@ def load_registration(path: str | Path) -> dict[str, Any]:
 
     R9에서 더한 것(없으면 R8과 똑같이 읽힌다): `selection`(**검증 집합에서 seed 하나를 고르고 그 seed만 판정한다** — 고르는 조건은 주 집합도, 주
     집합을 이루는 조건도 될 수 없다; 판정 조건은 모두 `group: selected`이고 쌍에 `{selected}`가 있다), `calls`(통과·불통과의 등록 문장),
-    `run_readings`(판정·선택에 쓰지 않는 run 기록: 기록 전용 감시·그리퍼 적합 시작 step의 정의·감시를 기록만 해야 하는 묶음)."""
+    `run_readings`(판정·선택에 쓰지 않는 run 기록: 기록 전용 감시·그리퍼 적합 시작 step의 정의·감시를 기록만 해야 하는 묶음).
+
+    R10에서 더한 것(없으면 R9와 똑같이 읽힌다): `decision`(등록한 조건들이 **무엇을** 정하는가의 이름 — 없으면 `cloud`; R10은 `delegation`),
+    판정 조건 묶음을 `cloud` 대신 `conditions`로 적을 수 있다(둘 중 하나만 — 코드 안에서는 같은 자리다), `predictions`(판정 옆에 적는 **등록한
+    예측** — 이름·쌍·출처(paired | seed_pairs | effects)·지표·`holds_if`; 성립 여부를 적되 판정을 바꾸지 않는다; `effects`는 보고서의
+    `effects` 블록 — 두 위임 효과의 차 (a₁ − a₀) − (b₁ − b₀)를 seed로 짝지은 구간)."""
     path = Path(path)
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    for key in ("version", "primary", "bootstrap", "cloud"):
+    for key in ("version", "primary", "bootstrap"):
         if not raw.get(key):
             raise ValueError(f"{path}: {key}가 필요하다")
+    if bool(raw.get("cloud")) == bool(raw.get("conditions")):
+        raise ValueError(f"{path}: 판정 조건 묶음은 cloud 또는 conditions 가운데 **하나**에 적는다 (둘 다 없거나 둘 다 있다)")
+    if raw.get("conditions"):
+        raw = {**raw, "cloud": raw["conditions"]}  # 코드 안에서는 같은 자리다 — `decision`이 그 조건들이 정하는 것의 이름을 든다
+    decision = raw.get("decision", "cloud")
+    if not isinstance(decision, str) or not decision:
+        raise ValueError(f"{path}: decision은 비지 않은 이름이어야 한다 (받은 값: {decision!r})")
     groups = dict(raw.get("groups") or {})
     selection = raw.get("selection")
     if selection:
@@ -1247,9 +1339,16 @@ def load_registration(path: str | Path) -> dict[str, Any]:
         valid = (source == "paired" and metric in _PAIRED_SUFFIX) or (source == "seed_pairs" and metric in SEED_METRICS)
         if not valid or not entry.get("pair") or not entry.get("name"):
             raise ValueError(f"{path}: stability[{position}]: name·pair·source(paired|seed_pairs)와 그 출처의 지표가 필요하다")
+    predictions = list(raw.get("predictions") or [])
+    for position, entry in enumerate(predictions):
+        source, metric = entry.get("source"), entry.get("metric")
+        valid = ((source == "paired" and metric in _PAIRED_SUFFIX) or (source == "seed_pairs" and metric in SEED_METRICS)
+                 or (source == "effects" and metric in EFFECT_METRICS))
+        if not valid or not entry.get("pair") or not entry.get("name") or entry.get("holds_if") not in _BOUNDS:
+            raise ValueError(f"{path}: predictions[{position}]: name·pair·source(paired|seed_pairs|effects)와 그 출처의 지표, holds_if({sorted(_BOUNDS)})가 필요하다")
     return {**raw, "path": str(path), "secondary": list(raw.get("secondary") or []), "seed_pairs": list(raw.get("seed_pairs") or []),
             "groups": groups, "stability": stability, "cause": cause or None, "selection": selection or None, "calls": calls,
-            "run_readings": readings}
+            "run_readings": readings, "decision": decision, "predictions": predictions}
 
 
 def _flip(low: float, high: float) -> list[float]:
@@ -1285,6 +1384,28 @@ def _read_seed_pair(report: dict[str, Any], condition: str, pair: str, metric: s
             raise ValueError(f"{condition}: seed_pairs[{pair!r}][{metric!r}]의 bootstrap {key}={block.get(key)!r}가 등록값 {bootstrap[key]!r}과 다르다")
     return {"value": block["difference"], "ci": list(block["ci"]), "read_as": pair, "seeds": block.get("seeds"), "a": block.get("a"), "b": block.get("b"),
             "a_totals": block.get("a_totals"), "b_totals": block.get("b_totals"), "skipped_resamples": block.get("skipped_resamples")}
+
+
+def _read_effect(report: dict[str, Any], condition: str, pair: str, metric: str, bootstrap: dict[str, Any]) -> dict[str, Any]:
+    """`effects[조건][쌍][지표]`(:func:`paired_effect_difference`) — 부트스트랩이 등록값과 다르면 거절한다."""
+    blocks = (report.get("effects") or {}).get(condition) or {}
+    if pair not in blocks:
+        raise ValueError(f"{condition}: 보고서의 effects에 {pair!r}가 없다 — `report --effects a:a0:b:b0`에 그 넷을 넣어야 한다")
+    block = blocks[pair].get(metric)
+    if not block or block.get("ci") is None:
+        raise ValueError(f"{condition}: effects[{pair!r}]에 지표 {metric!r}의 구간이 없다")
+    for key in ("resamples", "seed", "level"):
+        if block.get(key) != bootstrap[key]:
+            raise ValueError(f"{condition}: effects[{pair!r}][{metric!r}]의 bootstrap {key}={block.get(key)!r}가 등록값 {bootstrap[key]!r}과 다르다")
+    return {"value": block["difference"], "ci": list(block["ci"]), "read_as": pair, "seeds": block.get("seeds"), "a": block.get("a_effect"), "b": block.get("b_effect")}
+
+
+def _read_any(report: dict[str, Any], condition: str, entry: dict[str, Any], bootstrap: dict[str, Any]) -> dict[str, Any]:
+    if entry["source"] == "paired":
+        return _read_paired(report, condition, entry["pair"], entry["metric"])
+    if entry["source"] == "effects":
+        return _read_effect(report, condition, entry["pair"], entry["metric"], bootstrap)
+    return _read_seed_pair(report, condition, entry["pair"], entry["metric"], bootstrap)
 
 
 def _apply_to_condition(report: dict[str, Any], condition: str, registration: dict[str, Any], stopped: dict[str, str] | None = None) -> dict[str, Any]:
@@ -1358,8 +1479,22 @@ def _apply_to_condition(report: dict[str, Any], condition: str, registration: di
             block["failed"].append(name)
     for block in groups.values():
         block["passed"] = not block["failed"]
-    return {"condition": condition, "conditions": conditions, "cloud": not failed, "failed": failed, "groups": groups, "robustness": robustness,
-            "cause": cause_out, "stability": stability}
+    out = {"condition": condition, "conditions": conditions, "cloud": not failed, "failed": failed, "groups": groups, "robustness": robustness,
+           "cause": cause_out, "stability": stability}
+    if registration.get("predictions"):
+        # 등록한 예측(R10): 성립 여부를 옆에 적는다 — 판정(`failed`)에는 들지 않는다. 읽을 수가 없으면 없다고 적는다
+        predictions: list[dict[str, Any]] = []
+        for entry in registration["predictions"]:
+            base = {"name": entry["name"], "pair": entry["pair"], "source": entry["source"], "metric": entry["metric"], "holds_if": entry["holds_if"]}
+            try:
+                read = _read_any(report, condition, entry, bootstrap)
+            except ValueError as exc:
+                predictions.append({**base, "available": False, "reason": str(exc)})
+                continue
+            low, high = read["ci"]
+            predictions.append({**base, **read, "available": True, "holds": bool(_BOUNDS[entry["holds_if"]](low, high)), "includes_zero": bool(low <= 0.0 <= high)})
+        out["predictions"] = predictions
+    return out
 
 
 def select_seed(report: dict[str, Any], registration: dict[str, Any], *, unavailable: dict[str, str] | None = None) -> dict[str, Any]:
@@ -1502,7 +1637,10 @@ def apply_registration(report: dict[str, Any], registration: dict[str, Any], *, 
     seed(학습 감시가 멈췄거나 학습이 없거나 끝나지 않았다)다: 그 묶음의 조건은 보고서를 읽지 않고 불성립이다 — 이유를 주지 않았는데 쌍이 없으면 여전히 거절한다.
 
     등록에 `selection`이 있으면(R9) 먼저 검증 집합에서 seed 하나를 고르고(:func:`select_seed` — `stopped`의 묶음은 고를 수 없다) 판정 조건의 `{selected}`에
-    그 이름표를 넣어 **고른 seed만** 판정한다; 고를 수 있는 후보가 없으면 조건 전부가 불성립이다. `calls`가 있으면 판정의 등록 문장을 옆에 싣는다."""
+    그 이름표를 넣어 **고른 seed만** 판정한다; 고를 수 있는 후보가 없으면 조건 전부가 불성립이다. `calls`가 있으면 판정의 등록 문장을 옆에 싣는다.
+
+    등록의 `decision`이 `cloud`가 아니면(R10 `delegation`) 판정은 `verdict.cloud` 대신 `verdict.decision`(그 이름)·`verdict.holds`(조건이 모두
+    성립하는가)로 적힌다 — 같은 규칙이고 이름만 판정의 뜻을 따른다. `predictions`가 있으면 집합마다 그 성립 여부를 옆에 싣는다(판정을 바꾸지 않는다)."""
     from robo_jev.evaluate import EPISODE_BOOTSTRAP as registered_default
 
     if dict(registration["bootstrap"]) != dict(registered_default):
@@ -1529,7 +1667,10 @@ def apply_registration(report: dict[str, Any], registration: dict[str, Any], *, 
             continue
         secondary[name] = _apply_to_condition(report, name, registration, effective_stopped)
     cause = out["cause"]
-    verdict: dict[str, Any] = {"cloud": out["cloud"], "failed": out["failed"], "groups": {name: block["passed"] for name, block in out["groups"].items()},
+    decision = str(registration.get("decision") or "cloud")
+    # 등록한 조건들이 정하는 것의 이름(R7–R9: 클라우드; R10: 위임) — 클라우드가 아닌 판정은 `cloud` 대신 `decision`·`holds`로 적는다
+    head = {"cloud": out["cloud"]} if decision == "cloud" else {"decision": decision, "holds": out["cloud"]}
+    verdict: dict[str, Any] = {**head, "failed": out["failed"], "groups": {name: block["passed"] for name, block in out["groups"].items()},
                                "cause": cause["call"] if cause else None, "cause_text": cause["text"] if cause else None}
     if selection is not None:
         verdict["selected"] = selection["selected"]
