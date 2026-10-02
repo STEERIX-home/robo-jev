@@ -11,6 +11,9 @@
     uv run python scripts/closed_loop.py run --policy model --checkpoint … --label s18 --condition dev,ood_dev --out …
     # B3·C: 정책·조건별 지표와 seed로 짝지은 구간
     uv run python scripts/closed_loop.py report --runs artifacts/reports/r4-run-*.json --out artifacts/reports/r4-closed-loop.json
+    # R10: 실행 쪽 위임 갈래 — q_gripper를 실행 쪽 규칙(전문가 _gripper)으로(G), 거기에 q_stop 언제나 거짓(GS); 이름표에 갈래가 붙는다(r5 → r5G)
+    uv run python scripts/closed_loop.py run --policy model --checkpoint … --label r5 --delegate G --id-tag r10 \\
+        --condition ood_dev,ood_dev_new,ood_dev_new2 --seeds artifacts/reports/r4-seeds.json artifacts/reports/r6-seeds.json artifacts/reports/r7-seeds.json …
 
 GPU 규칙: 울타리 0.6(`robo_jev.gpu`), 적재 전 여유 검사, 한 번에 하나(`systemd-run --user --unit=r4-<step> … choom -n 1000`).
 """
@@ -341,6 +344,21 @@ def cmd_overlap(args: argparse.Namespace) -> int:
     return 0
 
 
+def read_seed_files(paths: list[str]) -> dict[str, Any]:
+    """`seeds` 산출물 하나 이상 → 조건을 합친 하나 (Task R10: 한 프로세스가 R4·R6·R7의 seed 파일을 함께 돌아 모델 적재를 한 번만 한다).
+    같은 조건 이름이 두 파일에 있으면 거절한다 — 어느 파일의 seed인지 알 수 없다. 파일 하나면 그 내용 그대로다."""
+    loaded = [(path, json.loads(Path(path).read_text(encoding="utf-8"))) for path in paths]
+    if len(loaded) == 1:
+        return loaded[0][1]
+    merged: dict[str, Any] = {"conditions": {}, "seed_files": [str(path) for path, _ in loaded]}
+    for path, payload in loaded:
+        for name, block in (payload.get("conditions") or {}).items():
+            if name in merged["conditions"]:
+                raise ValueError(f"{path}: 조건 {name!r}가 다른 seed 파일에도 있다 — 조건 이름은 파일 사이에서 겹치면 안 된다")
+            merged["conditions"][name] = block
+    return merged
+
+
 def cmd_run(args: argparse.Namespace) -> int:
     from robo_jev.closed_loop import build_policy, load_closed_loop_config, run_condition, select_conditions
 
@@ -353,9 +371,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         require_free(LOAD_MIN_FREE_BYTES, what="closed-loop serving load")
         _log(f"gpu guard {guard} · memory at start {memory_report()}")
     config = load_closed_loop_config(args.config)
-    seeds = json.loads(Path(args.seeds).read_text(encoding="utf-8")) if args.seeds else select_conditions(config, manifest=Path(args.manifest))
-    bundle = build_policy(args.policy, generator=config["generator"], checkpoint=args.checkpoint, model_id=args.model, compile_dense=not args.no_compile)
-    label = args.label or args.policy
+    seeds = read_seed_files(args.seeds) if args.seeds else select_conditions(config, manifest=Path(args.manifest))
+    bundle = build_policy(args.policy, generator=config["generator"], checkpoint=args.checkpoint, model_id=args.model, compile_dense=not args.no_compile,
+                          delegate=args.delegate)
+    # 위임 갈래(Task R10)는 이름표에 붙는다: r5 → r5G, rule → ruleGS — 에피소드 id·디렉터리·보고서의 열쇠가 감싸지 않은 run과 겹치지 않는다
+    label = (args.label or args.policy) + (args.delegate or "")
     out_root = Path(args.out)
     runs: dict[str, Any] = {}
     for condition in [name.strip() for name in args.condition.split(",") if name.strip()]:
@@ -368,8 +388,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         _log(f"{label} × {condition}: done {runs[condition]['summary']['done']}/{runs[condition]['summary']['episodes']} · wall {runs[condition]['summary']['wall_seconds']:.1f} s")
     payload = {
         "script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit(), "policy": bundle["describe"], "label": label,
-        "checkpoint": args.checkpoint, "seeds_config": str(args.config), "seeds_file": args.seeds, "id_tag": args.id_tag, "conditions": runs,
+        "checkpoint": args.checkpoint, "seeds_config": str(args.config), "seeds_file": (args.seeds[0] if args.seeds and len(args.seeds) == 1 else args.seeds),
+        "id_tag": args.id_tag, "conditions": runs,
     }
+    if args.delegate:
+        payload["arm"] = args.delegate
     if args.policy == "model":
         payload["gpu"] = {"guard": guard, "memory_at_end": memory_report()}
     _write(Path(args.report), payload)
@@ -385,7 +408,11 @@ def cmd_report(args: argparse.Namespace) -> int:
     merge = {pair.split("=", 1)[0]: [part for part in pair.split("=", 1)[1].split(",") if part] for pair in (args.merge or [])}
     only = [name for name in args.only.split(",") if name] if args.only else None
     seed_pairs = [tuple(pair.split(":", 1)) for pair in (args.seed_pairs or [])]
-    report = closed_loop_report(paths, offline=[Path(item) for item in (args.offline or [])], merge=merge or None, only=only, seed_pairs=seed_pairs or None)
+    effects = [tuple(item.split(":")) for item in (args.effects or [])]
+    if any(len(item) != 4 for item in effects):
+        raise SystemExit(f"--effects: A:A0:B:B0 꼴이어야 한다 (받은 값: {args.effects})")
+    report = closed_loop_report(paths, offline=[Path(item) for item in (args.offline or [])], merge=merge or None, only=only, seed_pairs=seed_pairs or None,
+                                effects=effects or None)
     report.update({"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit()})
     _write(Path(args.out), report)
     from robo_jev.closed_loop import print_report
@@ -445,7 +472,19 @@ def print_verdict(verdict: dict[str, Any], file: Any = None) -> None:
                 continue
             low, high = entry["ci"]
             print(f"- stability {entry['name']} ({entry['pair']} {entry['metric']}): {entry['value']:+.3f} [{low:+.3f}, {high:+.3f}]" + (" (0 inside)" if entry["includes_zero"] else ""), file=file)
-        print(f"- cloud: **{'recommend' if block['cloud'] else 'closed'}**" + (f" (failed: {block['failed']})" if block["failed"] else ""), file=file)
+        for entry in block.get("predictions") or ():
+            if not entry.get("available"):
+                print(f"- registered prediction {entry['name']} ({entry['pair']}): not available — {entry.get('reason')}", file=file)
+                continue
+            low, high = entry["ci"]
+            print(f"- registered prediction {entry['name']} ({entry['pair']} {entry['metric']}): {entry['value']:+.3f} [{low:+.3f}, {high:+.3f}], "
+                  f"holds if {entry['holds_if']} → **{'yes' if entry['holds'] else 'no'}**", file=file)
+        decision = verdict["verdict"].get("decision")
+        if decision is None:
+            print(f"- cloud: **{'recommend' if block['cloud'] else 'closed'}**" + (f" (failed: {block['failed']})" if block["failed"] else ""), file=file)
+        else:
+            # R10: 등록한 조건들이 정하는 것은 클라우드가 아니다 — 그 이름과 성립 여부만 적는다
+            print(f"- {decision}: registered conditions **{'all hold' if block['cloud'] else 'do not all hold'}**" + (f" (failed: {block['failed']})" if block["failed"] else ""), file=file)
     if verdict["verdict"].get("call"):
         print(f"\n- registered call: **{verdict['verdict']['call']}** — {verdict['verdict']['call_text']}", file=file)
 
@@ -585,7 +624,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--condition", default="dev,ood_dev")
     run.add_argument("--config", default=str(DEFAULT_SEEDS_CONFIG))
     run.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
-    run.add_argument("--seeds", default=None, help="`seeds` 명령의 산출물 (없으면 다시 고른다 — 결정적이다)")
+    run.add_argument("--seeds", nargs="+", default=None,
+                     help="`seeds` 명령의 산출물 하나 이상 (조건을 합친다 — 같은 조건 이름이 둘이면 거절; 없으면 다시 고른다 — 결정적이다)")
+    run.add_argument("--delegate", default=None, choices=["G", "GS"],
+                     help="R10 위임 갈래: G = q_gripper를 실행 쪽 규칙(전문가 _gripper)으로, GS = G + q_stop 언제나 거짓; 이름표에 갈래가 붙는다(r5 → r5G)")
     run.add_argument("--out", required=True, help="에피소드를 쓸 디렉터리 (조건마다 하위 디렉터리)")
     run.add_argument("--report", required=True, help="run 요약 JSON (`report` 명령의 입력)")
     run.add_argument("--limit", type=int, default=None, help="조건마다 앞 N편만 (검사용)")
@@ -603,6 +645,8 @@ def build_parser() -> argparse.ArgumentParser:
     report.add_argument("--only", default=None, help="보고할 조건 (쉼표로; 합친 이름도 된다)")
     report.add_argument("--seed-pairs", dest="seed_pairs", nargs="*", default=None, metavar="A:B",
                         help="이 쌍마다 seed 단위 짝지은 지표(그리퍼 연속·중복·q_stop·안전·오행동·실패 원인)와 엄격 성공·거짓 done의 견고성(다른 부트스트랩 seed 1~200)")
+    report.add_argument("--effects", nargs="*", default=None, metavar="A:A0:B:B0",
+                        help="R10: 두 효과의 차 (A − A0) − (B − B0)의 seed 짝 구간 (엄격·done·거짓 done)")
     report.add_argument("--out", required=True)
     report.set_defaults(func=cmd_report)
 

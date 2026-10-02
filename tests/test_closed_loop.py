@@ -462,6 +462,22 @@ def test_seed_metrics_read_the_gripper_streak_the_wrong_action_and_the_stop_catc
     assert metrics["q_stop_caught"] == (1.0, 1.0) and metrics["aux_failure"][1] == 1.0 and metrics["gripper_duplicates"][1] == 1.0
 
 
+def test_seed_metrics_count_missing_gripper_transitions_forbidden_contacts_and_reflex_ticks():
+    """R10이 더한 셋: 누락된 참조 그리퍼 전환 / 참조 전환, 편당 금지 물체(goal.forbidden_contact)와의 접촉 시작 수(다른 물체와의 접촉은 세지 않는다),
+    편당 반사 사건이 실린 틱 수."""
+    from robo_jev.closed_loop import SEED_METRICS, seed_metrics
+
+    ticks = [{"gripper_label": ["open"], "gripper": "open"}] * 2 + [{"gripper_label": ["closed"], "gripper": "open"}] * 12  # 닫으라는 전환 하나 — 끝까지 열림 → 누락
+    closed = {"gripper_label": ["closed"], "gripper": "open"}  # 참조는 그대로 닫힘 — 둘째 전환을 만들지 않는다
+    ticks += [{**closed, "events": [{"kind": "contact_onset", "object": "o9"}]}, {**closed, "events": [{"kind": "contact_onset", "object": "o2"}]}]
+    ticks += [{**closed, "events": [{"kind": "reflex_stop"}], "stop": True}, {**closed, "events": [{"kind": "reflex_slip"}, {"kind": "contact_onset", "object": "o9"}]}]
+    metrics = seed_metrics(_record(ticks, done=False))
+    assert metrics["gripper_missing"] == (1.0, 1.0) and metrics["forbidden_contacts"] == (2.0, 1.0) and metrics["reflex_ticks"] == (2.0, 1.0)
+    quiet = seed_metrics(_record([{"gripper_label": ["open"], "gripper": "open"}] * 3, done=True))
+    assert quiet["gripper_missing"] == (0.0, 0.0) and quiet["forbidden_contacts"] == (0.0, 1.0) and quiet["reflex_ticks"] == (0.0, 1.0)
+    assert set(metrics) == set(SEED_METRICS) and SEED_METRICS[-3:] == ("gripper_missing", "forbidden_contacts", "reflex_ticks")
+
+
 def test_paired_robustness_counts_discordant_seeds_the_exact_mcnemar_p_and_other_bootstrap_seeds():
     from robo_jev.closed_loop import paired_robustness
 
@@ -1116,3 +1132,142 @@ def test_a_seed_choosing_registration_refuses_robustness_pairs_that_do_not_name_
     with pytest.raises(ValueError, match="robustness"):
         load_registration(path)
     assert [entry["pair"] for entry in load_registration(R9_REGISTRATION_PATH)["robustness"]] == ["rule - {selected}", "{selected} - r5"]
+
+
+# --------------------------------------------------------------------------
+# Task R10 — 판정의 이름(decision), `conditions` 묶음, 등록한 예측(predictions), 두 효과의 차(effects)
+# --------------------------------------------------------------------------
+
+
+def _delegation_registration(tmp_path, **changes):
+    """R10 꼴의 작은 등록 — 클라우드가 아닌 판정(`decision: delegation`), 조건 묶음은 `conditions`, 예측 둘(쌍 하나·효과의 차 하나)."""
+    raw = {
+        "version": "test-delegation", "decision": "delegation", "primary": "ood_dev200", "secondary": ["dev_new2"],
+        "bootstrap": {"resamples": 2000, "seed": 20260921, "level": 0.95}, "seed_pairs": ["ruleG:r5G"],
+        "conditions": {"a": {"what": "규칙_G − r5_G 엄격", "pair": "ruleG - r5G", "source": "paired", "metric": "strict", "holds_if": "lower_le_zero"}},
+        "calls": {"pass": "실행을 맡기면 r5는 규칙 판정기보다 확실히 뒤지지 않는다", "fail": "실행을 맡겨도 규칙 판정기가 앞선다"},
+        "robustness": [{"condition": "a", "pair": "ruleG - r5G", "metric": "strict"}],
+        "predictions": [
+            {"name": "r9s18c rises", "pair": "r9s18cG - r9s18c", "source": "paired", "metric": "strict", "holds_if": "lower_gt_zero"},
+            {"name": "r8s19 rises less", "pair": "(r9s18cG - r9s18c) - (r8s19G - r8s19)", "source": "effects", "metric": "strict", "holds_if": "lower_gt_zero"},
+        ],
+    }
+    raw.update(changes)
+    raw = {key: value for key, value in raw.items() if value is not None}
+    path = tmp_path / "delegation.yaml"
+    path.write_text(yaml.safe_dump(raw, allow_unicode=True), encoding="utf-8")
+    return path
+
+
+def _delegation_report(*, a=(-0.05, 0.10), rise=(0.20, 0.40), effect=(0.05, 0.30), condition="ood_dev200"):
+    def effect_block(low, high):
+        return {"strict": {"metric": "strict", "seeds": 200, "a_effect": 0.3, "b_effect": 0.1, "difference": (low + high) / 2.0, "ci": [low, high],
+                           "includes_zero": low <= 0.0 <= high, "resamples": 2000, "seed": 20260921, "level": 0.95}}
+
+    names = [condition, "dev_new2"]
+    return {
+        "conditions": names,
+        "paired": {name: {"ruleG - r5G (done ∧ inside)": _interval(*a), "r9s18cG - r9s18c (done ∧ inside)": _interval(*rise)} for name in names},
+        "seed_pairs": {name: {"ruleG - r5G": {"metrics": {}, "robustness": {"strict": _robust(30, 25)}}} for name in names},
+        "effects": {name: {"(r9s18cG - r9s18c) - (r8s19G - r8s19)": effect_block(*effect)} for name in names},
+    }
+
+
+def test_paired_effect_difference_is_the_seed_paired_difference_of_two_effects():
+    """(a − a₀) − (b − b₀): a가 모든 seed에서 +1, b가 절반에서 +1이면 차 0.5이고 구간이 0을 제외한다; 네 정책이 모두 돈 seed만 쓴다; 등록 부트스트랩."""
+    from robo_jev.closed_loop import paired_effect_difference
+
+    def rows(values, *, inside=True):
+        return [{"key": f"E0:{index}", "done": bool(value), "done_inside": bool(value) and inside} for index, value in enumerate(values)]
+
+    out = paired_effect_difference(rows([1] * 10), rows([0] * 10), rows([1] * 10), rows([0] * 5 + [1] * 5), metric="strict")
+    assert (out["seeds"], out["a_effect"], out["b_effect"], out["difference"]) == (10, 1.0, 0.5, 0.5)
+    assert 0.0 < out["ci"][0] <= 0.5 <= out["ci"][1] <= 1.0 and out["includes_zero"] is False
+    assert (out["resamples"], out["seed"], out["level"]) == (2000, 20260921, 0.95)
+    common = paired_effect_difference(rows([1] * 10), rows([0] * 5), rows([1] * 10), rows([0] * 5 + [1] * 5), metric="strict")
+    assert common["seeds"] == 5 and common["difference"] == 0.0 and common["ci"] == [0.0, 0.0] and common["includes_zero"] is True
+    false_done = paired_effect_difference(rows([1] * 4, inside=False), rows([0] * 4), rows([0] * 4), rows([0] * 4), metric="false_done")
+    assert false_done["difference"] == 1.0 and false_done["a_effect"] == 1.0
+    with pytest.raises(ValueError, match="metric"):
+        paired_effect_difference(rows([1]), rows([0]), rows([1]), rows([0]), metric="duplicates")
+    assert paired_effect_difference(rows([1]), [], rows([1]), rows([0]), metric="strict") is None
+
+
+def test_the_report_carries_the_effect_difference_of_the_four_labels_it_is_given(short_runs, tmp_path):
+    """`closed_loop_report(..., effects=[(a, a0, b, b0)])`: 네 이름표가 모두 돈 조건에만 `effects[조건]["(a - a0) - (b - b0)"]`가 엄격·done·거짓 done으로
+    실리고, 그 값이 같은 seed의 표에서 손으로 센 것과 같다; 청하지 않으면 블록이 없다."""
+    paths = []
+    for label, kind in (("expert", "expert"), ("rule", "rule"), ("mech", "mechanical"), ("expert2", "expert")):
+        path = tmp_path / f"run-{label}.json"
+        path.write_text(json.dumps({"label": label, "policy": {"kind": kind}, "conditions": {"dev": short_runs["runs"][kind]}}, default=str), encoding="utf-8")
+        paths.append(path)
+    report = closed_loop_report(paths, effects=[("expert", "rule", "expert2", "mech"), ("expert", "rule", "absent", "mech")])
+    block = report["effects"]["dev"]
+    assert list(block) == ["(expert - rule) - (expert2 - mech)"] and set(block["(expert - rule) - (expert2 - mech)"]) == {"strict", "done", "false_done"}
+    done = {label: [int(row["done"]) for row in short_runs["runs"][kind]["episodes"]] for label, kind in (("expert", "expert"), ("rule", "rule"), ("mech", "mechanical"))}
+    expected = sum((e - r) - (e - m) for e, r, m in zip(done["expert"], done["rule"], done["mech"])) / 2
+    assert block["(expert - rule) - (expert2 - mech)"]["done"]["difference"] == pytest.approx(expected) and block["(expert - rule) - (expert2 - mech)"]["done"]["seeds"] == 2
+    assert "effects" not in closed_loop_report(paths)
+
+
+def test_a_registration_names_its_decision_and_may_write_its_conditions_as_conditions_but_not_both(tmp_path):
+    """R10: `decision`(무엇을 정하는가의 이름, 없으면 cloud)·`conditions`(= cloud 자리) — 둘 다 있거나 둘 다 없으면 거절; 예측은 출처·지표·경계가 있어야 한다;
+    R7 등록은 그대로 cloud로 읽힌다."""
+    from robo_jev.closed_loop import load_registration
+
+    registration = load_registration(_delegation_registration(tmp_path))
+    assert registration["decision"] == "delegation" and registration["cloud"] == registration["conditions"] and set(registration["cloud"]) == {"a"}
+    assert [entry["source"] for entry in registration["predictions"]] == ["paired", "effects"]
+    assert load_registration(REGISTRATION_PATH)["decision"] == "cloud" and load_registration(REGISTRATION_PATH)["predictions"] == []
+    both = load_registration(REGISTRATION_PATH)["cloud"]
+    with pytest.raises(ValueError, match="cloud 또는 conditions"):
+        load_registration(_delegation_registration(tmp_path, cloud=both))
+    with pytest.raises(ValueError, match="cloud 또는 conditions"):
+        load_registration(_delegation_registration(tmp_path, conditions=None))
+    with pytest.raises(ValueError, match="predictions"):
+        load_registration(_delegation_registration(tmp_path, predictions=[{"name": "x", "pair": "a - b", "source": "effects", "metric": "gripper_duplicates", "holds_if": "lower_gt_zero"}]))
+    with pytest.raises(ValueError, match="predictions"):
+        load_registration(_delegation_registration(tmp_path, predictions=[{"name": "x", "pair": "a - b", "source": "paired", "metric": "strict"}]))
+    with pytest.raises(ValueError, match="decision"):
+        load_registration(_delegation_registration(tmp_path, decision=3))
+
+
+def test_a_non_cloud_decision_is_written_as_its_name_and_holds_and_the_registered_predictions_sit_beside_it(tmp_path):
+    """`decision: delegation`이면 판정은 `verdict.decision`·`verdict.holds`(cloud 키 없음)와 등록 문장; 예측은 집합마다 성립 여부가 적히되 판정을 바꾸지
+    않는다(예측이 틀려도 같은 판정); 읽을 수 없는 예측은 없다고 적는다; 견고성은 그대로 옆에."""
+    from robo_jev.closed_loop import apply_registration, load_registration
+
+    registration = load_registration(_delegation_registration(tmp_path))
+    held = apply_registration(_delegation_report(), registration)
+    assert "cloud" not in held["verdict"] and held["verdict"]["decision"] == "delegation" and held["verdict"]["holds"] is True
+    assert held["verdict"]["call"] == "pass" and held["verdict"]["call_text"] == "실행을 맡기면 r5는 규칙 판정기보다 확실히 뒤지지 않는다"
+    predictions = {entry["name"]: entry for entry in held["primary"]["predictions"]}
+    assert predictions["r9s18c rises"]["holds"] is True and predictions["r8s19 rises less"]["holds"] is True
+    assert predictions["r8s19 rises less"]["ci"] == [0.05, 0.30] and predictions["r8s19 rises less"]["a"] == 0.3
+    assert held["primary"]["robustness"]["a"]["discordant"] == {"a_only": 30, "b_only": 25}
+    wrong = apply_registration(_delegation_report(rise=(-0.1, 0.2), effect=(-0.2, 0.1)), registration)
+    assert wrong["verdict"]["holds"] is True and [entry["holds"] for entry in wrong["primary"]["predictions"]] == [False, False]
+    fails = apply_registration(_delegation_report(a=(0.01, 0.2)), registration)
+    assert fails["verdict"]["holds"] is False and fails["verdict"]["failed"] == ["a"] and fails["verdict"]["call_text"] == "실행을 맡겨도 규칙 판정기가 앞선다"
+    missing = _delegation_report()
+    del missing["effects"]
+    out = apply_registration(missing, registration)
+    assert out["verdict"]["holds"] is True and out["primary"]["predictions"][1]["available"] is False and "effects" in out["primary"]["predictions"][1]["reason"]
+    assert "predictions" not in apply_registration(_verdict_report(), load_registration(REGISTRATION_PATH))["primary"]
+
+
+def test_the_verdict_command_prints_the_decisions_name_and_the_registered_predictions(tmp_path, capsys):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("closed_loop_script_r10v", REPO / "scripts" / "closed_loop.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    report_path, out_path = tmp_path / "report.json", tmp_path / "verdict.json"
+    report_path.write_text(json.dumps(_delegation_report(a=(0.02, 0.2))), encoding="utf-8")
+    assert module.main(["verdict", "--report", str(report_path), "--registration", str(_delegation_registration(tmp_path)), "--out", str(out_path)]) == 0
+    written = json.loads(out_path.read_text(encoding="utf-8"))
+    assert written["verdict"]["decision"] == "delegation" and written["verdict"]["holds"] is False
+    printed = capsys.readouterr().out
+    assert "- delegation: registered conditions **do not all hold** (failed: ['a'])" in printed and "cloud:" not in printed
+    assert "- registered prediction r8s19 rises less ((r9s18cG - r9s18c) - (r8s19G - r8s19) strict): +0.175 [+0.050, +0.300], holds if lower_gt_zero → **yes**" in printed
+    assert "registered call: **fail** — 실행을 맡겨도 규칙 판정기가 앞선다" in printed
