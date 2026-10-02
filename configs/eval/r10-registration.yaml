@@ -1,0 +1,143 @@
+# Task R10 사전 등록 — 어떤 R10 폐루프 숫자보다 **먼저** 적고 커밋한다 (이 파일이 든 커밋이 등록 시각이다). 학습은 없다.
+# 사람이 읽는 판은 `docs/reports/run-report-7.md` §0이고, 판정은 이 파일을 `robo_jev.closed_loop.apply_registration`이 폐루프 보고서
+# (`scripts/closed_loop.py report` 산출물)에 **그대로** 적용해 낸다(`scripts/closed_loop.py verdict --registration configs/eval/r10-registration.yaml`)
+# — 숫자를 본 뒤에 규칙이 흔들리지 않게 규칙을 코드로 고정한다.
+#
+# 무엇을 재는가: 그리퍼 닫기 시점(과 정지)을 실행 쪽 규칙에 맡기면(위임) 모델이 의미 판단만으로 규칙 판정기를 넘는가. 기존 체크포인트·기존
+# 정책을 **정책 감싸개**(`robo_jev.delegation.DelegatedExecutionPolicy`, dx0.1)로 감싸 폐루프에서 잰다 — 하네스·컨트롤러·직렬화·expert·
+# `contracts.py`는 그대로(계약 digest `93fe26725a4c…`).
+#   갈래 G  — 감싼 정책의 답 그대로, `q_gripper`만 실행 쪽 규칙(`ExecutionGripperRule` xg0.1 = 전문가 e0.4의 `_gripper`를 지금 commitment와
+#             관측 상태만으로 계산한 것; R4~R9 폐루프 기록 419,245틱에서 전문가의 기록된 판단과 같다 — `artifacts/reports/r10-a1-rule-agreement.json`).
+#   갈래 GS — G + `q_stop` 언제나 거짓(0.0) — 정지는 실행기의 힘 반사뿐.
+# 이름표 = 정책 이름표 + 갈래(`r5G`, `ruleG`, `r9s17GS` …), 에피소드 id 꼬리 `-r10-<이름표>`, 기록 `artifacts/datasets/r10-closed-loop/<이름표>/<조건>/`.
+#
+# 정책(체크포인트는 그대로 — 슬림한 model-only 파일도, 옵티마이저가 든 파일도 평가 경로가 받는다):
+#   r5     artifacts/runs/r5-t1-fp32-2b-s18/checkpoint.pt (R5 조리법 seed 18, model-only)  — R10 전에 정해진 지금까지의 최선 run(ood_dev 200 엄격 132)
+#   r6     artifacts/runs/r6-t1-fp32-2b-s18/checkpoint.pt (model-only)
+#   r9s17  artifacts/runs/r9-t1-fp32-2b-s17/checkpoint.pt                                  — R9가 고른 seed; 둘째 근거
+#   r9s18c artifacts/runs/r9-t1-fp32-2b-s18c/r8-t1-fp32-2b-s18/checkpoint.pt               — 그리퍼를 닫지 않던 seed(참조 전환 701 중 633 누락)
+#   r8s19  artifacts/runs/r8-t1-fp32-2b-s19/checkpoint.pt                                  — 대상 고르기에 실패한 seed(첫 파지 commitment 139/200)
+#   rule · expert · mechanical — CPU 정책 그대로(rj0.5 · e0.4 · mech0.1). 전문가를 감싼 G는 감싸지 않은 전문가와 **같은 편**이어야 한다(실행 규칙
+#   = 전문가의 그리퍼 규칙; Stage A 시험이 한 편을 바이트 단위로 고정) — 다르면 다른 숫자를 읽기 전에 감싸개의 결함으로 적는다.
+# 감싸지 않은(native) 값은 **새로 돌리지 않는다**: 같은 seed의 기존 기록 — expert·rule·mechanical·r5·r6는 R4·R6·R7의 run 파일(`r4-run-*`·`r5-run-r5-ood_dev`·
+# `r6-run-*`·`r7-run-*`), r8s19는 R8, r9s17·r9s18c는 R9의 run 파일(R9 `final-reports.sh`가 읽은 그 목록).
+#
+# 장면: 주 집합 **ood_dev200** = R4의 ood_dev 26(`artifacts/reports/r4-seeds.json`) + R6의 ood_dev_new 74(`r6-seeds.json`) + R7의 ood_dev_new2 100
+# (`r7-seeds.json`) — R7~R9와 같은 200편(학습 재료와 origin group 0 공유). 둘째 근거 **dev_new2** 100(`r6-seeds.json`) — r5G·r9s17G·ruleG·expertG만;
+# 판정 옆에 적기만 한다. `ood_test`는 봉인이다(폐루프 설정이 거절한다).
+#
+# 돌리는 것과 순서(브리프의 우선순위): r5G·ruleG(주 비교) → r9s17G → r9s18cG·r8s19G·r6G → GS(r5GS·r9s17GS·ruleGS) → dev_new2(r5G·r9s17G·ruleG·expertG)
+# → 나머지(expertG·mechanicalG on ood_dev200). GPU 작업은 한 유닛 안에서 차례로(울타리 0.6·`require_free`·`choom`); CPU 정책은 MemoryMax·`choom` 유닛.
+# 못 돈 것은 판정에서 "없음"으로 적는다 — 주 비교의 두 run이 없으면 판정하지 않는다.
+#
+# 짝짓기·구간: seed(`profile:seed`)로 짝지은 편 단위 퍼센타일 부트스트랩, 2,000회, RNG seed 20260921, 95 % (`EPISODE_BOOTSTRAP`) —
+# `paired_success(strict=True)`·`paired_false_done`·`paired_seed_ratio`·`paired_effect_difference`. 0을 포함하는 구간은 발견이 아니다. 주 지표는
+# 엄격 성공(`done ∧ target_inside_zone`). 지연은 첫 틱과 나머지를 따로.
+#
+# 읽는 법(등록): G에서 그리퍼 전환의 실행·누락은 **구조상** 참조에 가깝다 — 실행 규칙과 참조 라벨이 같은 전문가 규칙이기 때문이다. 그것은 위임이
+# 작동했다는 확인이지 모델의 능력이 아니다. G에서 남는 실패(주 결정 · 부가(경로·속도·힘) · 기하, 거짓 done, 대상 고르기)가 모델의 의미 판단이다.
+version: r10-registration-v1
+task: r10
+written_at: "2026-10-02 KST (commit time is the registration time)"
+decision: delegation
+primary: ood_dev200
+secondary: [dev_new2]
+merge:
+  ood_dev200: [ood_dev, ood_dev_new, ood_dev_new2]
+bootstrap:
+  resamples: 2000
+  seed: 20260921
+  level: 0.95
+# 보고서 명령이 싣는 seed 단위 쌍(`--seed-pairs`): 판정의 견고성(규칙_G − r5_G), 위임의 효과(정책_G − 정책), GS − G(의미 정지를 버린 값).
+seed_pairs: ["ruleG:r5G", "r5G:r5", "r6G:r6", "r9s17G:r9s17", "r9s18cG:r9s18c", "r8s19G:r8s19", "ruleG:rule", "expertG:expert",
+             "r5GS:r5G", "r9s17GS:r9s17G", "ruleGS:ruleG"]
+# 보고서 명령이 싣는 효과의 차(`--effects a:a0:b:b0`) — 등록한 예측 P2가 읽는다.
+effects: ["r9s18cG:r9s18c:r8s19G:r8s19"]
+
+# 판정 — 주 비교 하나(브리프 Stage B). 갈래 G에서 **규칙 판정기_G − r5_G** 엄격 성공(ood_dev 200, seed로 짝지은 구간).
+conditions:
+  a:
+    what: "규칙_G − r5_G 엄격 성공 — 실행을 맡기면 규칙 판정기가 r5를 확실히 앞서지는 않는다"
+    pair: "ruleG - r5G"
+    source: paired
+    metric: strict
+    holds_if: lower_le_zero   # 구간 하한 ≤ 0
+
+# 판정의 등록 문장 (브리프 Stage B 그대로).
+calls:
+  pass: "실행을 맡기면 모델(r5)은 규칙 판정기보다 확실히 뒤지지 않는다 — 권고: 계약 변경 검토(모델 = 의미 판단; 그리퍼 시점은 실행 층), 결정은 사용자"
+  fail: "실행을 맡겨도 규칙 판정기가 앞선다 — 병목은 의미 판단"
+
+# (a) 옆에 적는 견고성 — 판정을 바꾸지 않는다: 불일치 seed 수, 정확 McNemar p, 부트스트랩 RNG seed 1–200의 하한·상한 분포.
+robustness:
+  - {condition: a, pair: "ruleG - r5G", metric: strict}
+
+# 등록한 예측(브리프: "r9s18c(그리퍼를 닫지 않던 seed)는 크게 오르고, r8s19(대상 선택 실패)는 덜 오른다") — 성립 여부를 판정 옆에 적되 판정을 바꾸지 않는다.
+# "크게"는 절대 문턱 없이 r8s19와의 상대로 잰다: P1 = 오른다(0 제외), P2 = r8s19보다 더 오른다(두 효과의 차가 0 제외).
+predictions:
+  - name: "P1 r9s18c rises under G"
+    pair: "r9s18cG - r9s18c"
+    source: paired
+    metric: strict
+    holds_if: lower_gt_zero
+  - name: "P2 r8s19 rises less than r9s18c"
+    pair: "(r9s18cG - r9s18c) - (r8s19G - r8s19)"
+    source: effects
+    metric: strict
+    holds_if: lower_gt_zero
+
+# 판정 옆의 서술 판독(코드의 이름은 `stability`) — 판정·예측에 쓰지 않는다. 0을 포함하면 "차가 발견되지 않았다"이지 "같다"가 아니다.
+#   위임의 효과(정책_G − 정책): 엄격 성공(여덟 정책), 거짓 done(다섯 모델 + 규칙), 그리퍼 누락·중복(편당, seed 단위).
+#   GS − G(의미 정지를 버린 값): 엄격 성공, 안전 위반 틱(`unsafe` — 정지 라벨이 참인 틱에 행동하면 위반이라 GS에서는 **구조상** 오른다), 금지 물체 접촉
+#   시작(편당), 반사 사건 틱(편당), `q_stop` 포착(GS는 구조상 0).
+#   둘째 근거: 규칙_G − r9s17_G 엄격 성공.
+stability:
+  - {name: "delegation effect r5 strict", pair: "r5G - r5", source: paired, metric: strict}
+  - {name: "delegation effect r6 strict", pair: "r6G - r6", source: paired, metric: strict}
+  - {name: "delegation effect r9s17 strict", pair: "r9s17G - r9s17", source: paired, metric: strict}
+  - {name: "delegation effect r9s18c strict", pair: "r9s18cG - r9s18c", source: paired, metric: strict}
+  - {name: "delegation effect r8s19 strict", pair: "r8s19G - r8s19", source: paired, metric: strict}
+  - {name: "delegation effect rule strict", pair: "ruleG - rule", source: paired, metric: strict}
+  - {name: "delegation effect expert strict (identity check)", pair: "expertG - expert", source: paired, metric: strict}
+  - {name: "delegation effect mechanical strict", pair: "mechanicalG - mechanical", source: paired, metric: strict}
+  - {name: "delegation effect r5 false done", pair: "r5G - r5", source: paired, metric: false_done}
+  - {name: "delegation effect r6 false done", pair: "r6G - r6", source: paired, metric: false_done}
+  - {name: "delegation effect r9s17 false done", pair: "r9s17G - r9s17", source: paired, metric: false_done}
+  - {name: "delegation effect r9s18c false done", pair: "r9s18cG - r9s18c", source: paired, metric: false_done}
+  - {name: "delegation effect r8s19 false done", pair: "r8s19G - r8s19", source: paired, metric: false_done}
+  - {name: "delegation effect rule false done", pair: "ruleG - rule", source: paired, metric: false_done}
+  - {name: "delegation effect r5 gripper missing", pair: "r5G - r5", source: seed_pairs, metric: gripper_missing}
+  - {name: "delegation effect r6 gripper missing", pair: "r6G - r6", source: seed_pairs, metric: gripper_missing}
+  - {name: "delegation effect r9s17 gripper missing", pair: "r9s17G - r9s17", source: seed_pairs, metric: gripper_missing}
+  - {name: "delegation effect r9s18c gripper missing", pair: "r9s18cG - r9s18c", source: seed_pairs, metric: gripper_missing}
+  - {name: "delegation effect r8s19 gripper missing", pair: "r8s19G - r8s19", source: seed_pairs, metric: gripper_missing}
+  - {name: "delegation effect rule gripper missing", pair: "ruleG - rule", source: seed_pairs, metric: gripper_missing}
+  - {name: "delegation effect r5 gripper duplicates", pair: "r5G - r5", source: seed_pairs, metric: gripper_duplicates}
+  - {name: "delegation effect r6 gripper duplicates", pair: "r6G - r6", source: seed_pairs, metric: gripper_duplicates}
+  - {name: "delegation effect r9s17 gripper duplicates", pair: "r9s17G - r9s17", source: seed_pairs, metric: gripper_duplicates}
+  - {name: "delegation effect r9s18c gripper duplicates", pair: "r9s18cG - r9s18c", source: seed_pairs, metric: gripper_duplicates}
+  - {name: "delegation effect r8s19 gripper duplicates", pair: "r8s19G - r8s19", source: seed_pairs, metric: gripper_duplicates}
+  - {name: "delegation effect rule gripper duplicates", pair: "ruleG - rule", source: seed_pairs, metric: gripper_duplicates}
+  - {name: "GS r5 strict", pair: "r5GS - r5G", source: paired, metric: strict}
+  - {name: "GS r9s17 strict", pair: "r9s17GS - r9s17G", source: paired, metric: strict}
+  - {name: "GS rule strict", pair: "ruleGS - ruleG", source: paired, metric: strict}
+  - {name: "GS r5 unsafe", pair: "r5GS - r5G", source: seed_pairs, metric: unsafe}
+  - {name: "GS r9s17 unsafe", pair: "r9s17GS - r9s17G", source: seed_pairs, metric: unsafe}
+  - {name: "GS rule unsafe", pair: "ruleGS - ruleG", source: seed_pairs, metric: unsafe}
+  - {name: "GS r5 forbidden contacts", pair: "r5GS - r5G", source: seed_pairs, metric: forbidden_contacts}
+  - {name: "GS r9s17 forbidden contacts", pair: "r9s17GS - r9s17G", source: seed_pairs, metric: forbidden_contacts}
+  - {name: "GS rule forbidden contacts", pair: "ruleGS - ruleG", source: seed_pairs, metric: forbidden_contacts}
+  - {name: "GS r5 reflex ticks", pair: "r5GS - r5G", source: seed_pairs, metric: reflex_ticks}
+  - {name: "GS r9s17 reflex ticks", pair: "r9s17GS - r9s17G", source: seed_pairs, metric: reflex_ticks}
+  - {name: "GS rule reflex ticks", pair: "ruleGS - ruleG", source: seed_pairs, metric: reflex_ticks}
+  - {name: "GS r5 q_stop caught", pair: "r5GS - r5G", source: seed_pairs, metric: q_stop_caught}
+  - {name: "GS r9s17 q_stop caught", pair: "r9s17GS - r9s17G", source: seed_pairs, metric: q_stop_caught}
+  - {name: "GS rule q_stop caught", pair: "ruleGS - ruleG", source: seed_pairs, metric: q_stop_caught}
+  - {name: "second evidence rule_G - r9s17_G strict", pair: "ruleG - r9s17G", source: paired, metric: strict}
+
+# 문서의 등록(판정을 바꾸지 않는다): (a)가 성립하면 docs/08에 "제안: q_gripper를 실행 층으로" 절을 **제안으로만** 쓴다(적용하지 않는다 — 계약
+# 변경은 사용자 결정; q_gripper만 다룬다 — GS의 값은 q_stop에 대한 다음 결정의 근거로 옆에 적을 뿐 R10은 q_stop 제안을 쓰지 않는다). (a)가 성립하지
+# 않으면 제안 절을 쓰지 않고, run report가 결과가 그것을 지지하지 않는다고 적는다.
+documents:
+  proposal_if: a
+  proposal_scope: q_gripper

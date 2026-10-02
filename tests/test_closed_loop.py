@@ -1271,3 +1271,39 @@ def test_the_verdict_command_prints_the_decisions_name_and_the_registered_predic
     assert "- delegation: registered conditions **do not all hold** (failed: ['a'])" in printed and "cloud:" not in printed
     assert "- registered prediction r8s19 rises less ((r9s18cG - r9s18c) - (r8s19G - r8s19) strict): +0.175 [+0.050, +0.300], holds if lower_gt_zero → **yes**" in printed
     assert "registered call: **fail** — 실행을 맡겨도 규칙 판정기가 앞선다" in printed
+
+
+R10_REGISTRATION_PATH = REPO / "configs/eval/r10-registration.yaml"
+
+
+def test_the_r10_registration_is_the_briefs_primary_comparison_on_ood_dev200_and_its_predictions():
+    """R10 등록 파일이 브리프 그대로인가 — 판정의 이름 delegation, 주 집합 ood_dev200(R4 26 + R6 74 + R7 100)·둘째 dev_new2, 등록 부트스트랩, 조건 하나
+    (규칙_G − r5_G 엄격, 하한 ≤ 0)와 두 등록 문장, 그 견고성, 예측 둘(r9s18c가 오른다; r8s19는 r9s18c보다 덜 오른다 — 효과의 차), 서술 판독이 읽는
+    seed 쌍이 모두 `seed_pairs`에 있고, 효과의 차가 `effects`에 있다; 제안 절은 (a)가 성립할 때만, q_gripper만."""
+    from robo_jev.closed_loop import load_registration
+    from robo_jev.evaluate import EPISODE_BOOTSTRAP
+
+    registration = load_registration(R10_REGISTRATION_PATH)
+    assert registration["decision"] == "delegation" and registration["primary"] == "ood_dev200" and registration["secondary"] == ["dev_new2"]
+    assert registration["merge"] == {"ood_dev200": ["ood_dev", "ood_dev_new", "ood_dev_new2"]} and registration["bootstrap"] == EPISODE_BOOTSTRAP
+    assert list(registration["cloud"]) == ["a"] and registration["cloud"] == registration["conditions"]
+    a = registration["cloud"]["a"]
+    assert (a["pair"], a["source"], a["metric"], a["holds_if"]) == ("ruleG - r5G", "paired", "strict", "lower_le_zero")
+    assert registration["calls"]["pass"].startswith("실행을 맡기면 모델(r5)은 규칙 판정기보다 확실히 뒤지지 않는다")
+    assert registration["calls"]["fail"] == "실행을 맡겨도 규칙 판정기가 앞선다 — 병목은 의미 판단"
+    assert registration["robustness"] == [{"condition": "a", "pair": "ruleG - r5G", "metric": "strict"}]
+    predictions = {entry["name"]: entry for entry in registration["predictions"]}
+    assert (predictions["P1 r9s18c rises under G"]["pair"], predictions["P1 r9s18c rises under G"]["holds_if"]) == ("r9s18cG - r9s18c", "lower_gt_zero")
+    p2 = predictions["P2 r8s19 rises less than r9s18c"]
+    assert (p2["pair"], p2["source"], p2["metric"], p2["holds_if"]) == ("(r9s18cG - r9s18c) - (r8s19G - r8s19)", "effects", "strict", "lower_gt_zero")
+    a0, b0 = "r9s18cG:r9s18c", "r8s19G:r8s19"
+    assert registration["effects"] == [f"{a0}:{b0}"]
+    pairs = {pair.replace(":", " - ") for pair in registration["seed_pairs"]}
+    assert {entry["pair"] for entry in registration["stability"] if entry["source"] == "seed_pairs"} <= pairs and "ruleG - r5G" in pairs
+    effects = {f"({a} - {a_}) - ({b} - {b_})" for a, a_, b, b_ in (item.split(":") for item in registration["effects"])}
+    assert {entry["pair"] for entry in registration["predictions"] if entry["source"] == "effects"} <= effects
+    for policy in ("r5", "r6", "r9s17", "r9s18c", "r8s19", "rule", "expert", "mechanical"):
+        assert any(entry["pair"] == f"{policy}G - {policy}" and entry["metric"] == "strict" for entry in registration["stability"]), policy
+    for policy in ("r5", "r9s17", "rule"):
+        assert {entry["metric"] for entry in registration["stability"] if entry["pair"] == f"{policy}GS - {policy}G"} >= {"strict", "unsafe", "forbidden_contacts", "reflex_ticks"}
+    assert registration["documents"] == {"proposal_if": "a", "proposal_scope": "q_gripper"}
