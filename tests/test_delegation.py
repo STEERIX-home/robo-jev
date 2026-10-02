@@ -254,6 +254,11 @@ def test_the_rule_reads_the_commitment_and_the_observed_state_but_not_the_goal_o
     uncommitted["request"]["commitment"] = None
     assert rule.decide(uncommitted, None)["reason"] == "no_commitment"
     assert not any(isinstance(value, Expert) for value in vars(rule).values())
+    # 감싸개는 시뮬레이터 관측 원본을 규칙에 넘기지 않는다 — 관측이 달라도 하네스가 받는 그리퍼 답과 규칙의 판단이 같다
+    wrapper = DelegatedExecutionPolicy(Fixed(), arm="G", rule=rule)
+    first = wrapper.act(tick, None, {"objects": [{"id": "o1", "pos_mm": [0, 0, 0]}]})["q_gripper"]
+    second = wrapper.act(tick, None, {"objects": [], "anything": "else"})["q_gripper"]
+    assert first == second == rule.answer(tick, None) and wrapper.raw[0]["rule"] == wrapper.raw[1]["rule"] == before
 
 
 # --------------------------------------------------------------------------
