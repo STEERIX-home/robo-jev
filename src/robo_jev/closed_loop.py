@@ -83,7 +83,9 @@ __all__ = [
     "offline_gripper_transitions",
     "load_closed_loop_config",
     "load_registration",
+    "materialize_selection",
     "paired_false_done",
+    "paired_ratio_robustness",
     "paired_robustness",
     "paired_seed_ratio",
     "paired_success",
@@ -94,6 +96,7 @@ __all__ = [
     "run_reading",
     "seed_distribution",
     "seed_metrics",
+    "seed_overlap",
     "select_conditions",
     "select_seed",
     "select_seeds",
@@ -167,6 +170,9 @@ def select_seeds(
     계획만 짓는다(:func:`build_plan` — 물리 없음). 다른 split에 떨어진 seed는 세기만 하고 **적지 않는다**(봉인 `ood_test` 포함).
     `quota`(프로파일 → 편 수)를 주면 비중 대신 그 몫이다 — 주지 않은 프로파일은 0이고 합은 `count`와 같아야 한다(Task R6 A3:
     지시가 바뀌는 E1·E2만 100편씩). seed 번호는 생성기의 일정 그대로다(프로파일 순환에서 빠지는 것이 아니라 건너뛸 뿐이다).
+
+    생성기가 계획을 지을 수 없는 seed(거절 표집 한도 — 예: 외란 시각을 못 잡는 E2 seed, RuntimeError)는 장면이 아니어서 어떤 정책도 돌 수 없다:
+    이유와 함께 `unbuildable`에 적고 건너뛴다(Task R11 Stage A — 1120100~ 걸음에서 처음 만났다). 계획이 분할을 정하므로 어느 분할로도 세지 않는다.
     """
     profiles = [str(name) for name in generator["profiles"]]
     weights = [int(value) for value in (generator.get("profile_weights") or [1] * len(profiles))]
@@ -185,13 +191,19 @@ def select_seeds(
     taken: dict[str, int] = {name: 0 for name in profiles}
     scanned = 0
     other_splits: Counter = Counter()
+    unbuildable: list[dict[str, Any]] = []
     for profile, seed in schedule:
         if all(taken[name] >= quota[name] for name in profiles):
             break
         if taken[profile] >= quota[profile]:
             continue
         scanned += 1
-        plan = build_plan(sim_settings, int(seed), profile)
+        try:
+            plan = build_plan(sim_settings, int(seed), profile)
+        except RuntimeError as error:
+            # 계획을 지을 수 없는 seed — 장면이 아니다(생성기의 거절 표집 한도). 이유와 함께 적고 건너뛴다; 분할을 모르니 어느 분할로도 세지 않는다
+            unbuildable.append({"profile": profile, "seed": int(seed), "error": str(error)})
+            continue
         group = origin_group(profile, plan)
         tags = plan_tags(plan)
         assigned = policy.assign(group, tags)
@@ -205,7 +217,7 @@ def select_seeds(
         })  # fmt: skip
     short = {name: quota[name] - taken[name] for name in profiles if taken[name] < quota[name]}
     return {"split": split, "count": count, "quota": quota, "by_profile": dict(taken), "shortfall": short, "scanned": scanned,
-            "skipped_other_splits": dict(sorted(other_splits.items())), "seeds": chosen}
+            "skipped_other_splits": dict(sorted(other_splits.items())), "unbuildable": unbuildable, "seeds": chosen}
 
 
 def select_conditions(config: dict[str, Any], *, manifest: str | Path | None = None) -> dict[str, Any]:
@@ -265,6 +277,48 @@ def family_overlap(seeds: dict[str, Any], materials: dict[str, str | Path]) -> d
         everything = set().union(*groups_of.values()) if groups_of else set()
         out[condition] = {"origin_groups": len(groups), "families": len({_family_of(group) for group in groups}), "seeds": len(chosen),
                           "by_material": {name: overlap(material) for name, material in groups_of.items()}, "any_material": overlap(everything)}
+    return out
+
+
+#: 봉인 분할 — 겹침 보고서는 이 분할의 편을 세기만 하고 그 seed를 보지 않는다 (Task R11).
+_SEALED_SPLITS = ("ood_test",)
+
+
+def seed_overlap(seeds: dict[str, Any], *, earlier: dict[str, str | Path], manifests: dict[str, str | Path]) -> dict[str, Any]:
+    """조건마다 장면 seed가 **이전 평가 집합**과 **데이터셋**에 이미 있는가 (Task R11 Stage A — 새 홀드아웃의 겹침 보고서 seed 쪽).
+
+    열쇠는 (프로파일, seed)다 — 같은 seed라도 프로파일이 다르면 다른 장면이다(생성기가 프로파일마다 seed 구간을 벌린다). `earlier`는 이름 →
+    `seeds` 명령의 산출물이고 그 **조건마다** 공유 seed 수와 공유 origin group 수(서술 — 같은 ood_dev 계열 풀에서 뽑으므로 0일 필요가 없다)를 센다.
+    `manifests`는 이름 → 데이터셋 manifest이고 `files`의 편 항목(메타데이터의 `profile`·`seed`)을 분할과 무관하게 대조한다 — 단 봉인 분할의
+    편은 seed를 보지 않고 수만 센다(`sealed_entries_not_read`). 레코드 파일은 열지 않는다."""
+    loaded = {name: json.loads(Path(path).read_text(encoding="utf-8")) for name, path in earlier.items()}
+    material: dict[str, dict[str, Any]] = {}
+    for name, path in manifests.items():
+        entries = (json.loads(Path(path).read_text(encoding="utf-8")).get("files") or {}).items()
+        episodes = [entry for key, entry in entries if str(key).startswith("episodes/") and isinstance(entry, dict)]
+        sealed = [entry for entry in episodes if str(entry.get("split")) in _SEALED_SPLITS]
+        # 봉인 편은 여기서 걸러 낸다 — 그 seed는 집합에 들어가지 않는다
+        keys = {(str(entry["profile"]), int(entry["seed"])) for entry in episodes if str(entry.get("split")) not in _SEALED_SPLITS}
+        material[name] = {"keys": keys, "compared": len(episodes) - len(sealed), "sealed": len(sealed)}
+    out: dict[str, Any] = {}
+    for condition, block in (seeds.get("conditions") or {}).items():
+        chosen = list(block.get("seeds") or [])
+        mine = {(str(item["profile"]), int(item["seed"])) for item in chosen}
+        groups = {str(item["origin_group"]) for item in chosen}
+        sets: dict[str, int] = {}
+        shared_groups: dict[str, dict[str, int]] = {}
+        for name, payload in loaded.items():
+            for other, other_block in (payload.get("conditions") or {}).items():
+                theirs = list(other_block.get("seeds") or [])
+                sets[f"{name}:{other}"] = len(mine & {(str(item["profile"]), int(item["seed"])) for item in theirs})
+                their_groups = {str(item["origin_group"]) for item in theirs}
+                shared_groups[f"{name}:{other}"] = {"shared_groups": len(groups & their_groups), "their_groups": len(their_groups)}
+        out[condition] = {
+            "seeds": len(mine), "earlier_sets": sets,
+            "manifests": {name: {"shared_seeds": len(mine & entry["keys"]), "entries_compared": entry["compared"], "sealed_entries_not_read": entry["sealed"]}
+                          for name, entry in material.items()},
+            "origin_groups_shared_with_earlier_sets": shared_groups,
+        }
     return out
 
 
@@ -940,6 +994,56 @@ def paired_robustness(
     }
 
 
+def paired_ratio_robustness(
+    a: dict[str, tuple[float, float]], b: dict[str, tuple[float, float]], *, metric: str, alternative_seeds: Any = range(1, 201),
+) -> dict[str, Any]:
+    """seed마다 (분자, 분모)인 지표(:data:`SEED_METRICS` — 예: 편당 금지 접촉 시작 수)의 짝지은 차가 **얼마나 굳은가** (Task R11 — 판정 (s) 옆):
+    seed 값(분자 / 분모)이 a 쪽이 큰 seed 수·b 쪽이 큰 seed 수(한쪽 분모가 0인 seed는 `undefined`로 따로), 그 불일치 seed의 정확 양측 **부호 검정**
+    (0/1 지표면 정확 McNemar와 같은 계산 — 키 이름 `mcnemar_exact_p`를 같이 쓴다), 등록 부트스트랩(:func:`paired_seed_ratio`, seed 20260921·2,000회)의
+    구간, 다른 부트스트랩 RNG seed들에서 구간이 0을 포함한 횟수와 하한·상한의 분포. 판정은 등록된 절차가 내린다 — 이 블록은 그 옆에 적는 민감도다
+    (:func:`paired_robustness`와 같은 꼴; 0/1 지표의 견고성은 그쪽이 낸다)."""
+    if metric not in SEED_METRICS:
+        raise ValueError(f"metric: seed 단위 지표 {list(SEED_METRICS)} 중 하나여야 한다 (받은 값: {metric!r})")
+    keys = sorted(set(a) & set(b))
+    a_higher = b_higher = undefined = 0
+    for key in keys:
+        (num_a, den_a), (num_b, den_b) = a[key], b[key]
+        if not den_a or not den_b:
+            undefined += 1  # 한쪽 분모가 0 — seed 값이 정의되지 않는다(부호 검정에서 뺀다)
+            continue
+        value_a, value_b = float(num_a) / float(den_a), float(num_b) / float(den_b)
+        a_higher += int(value_a > value_b)
+        b_higher += int(value_b > value_a)
+    discordant = a_higher + b_higher
+    tail = sum(math.comb(discordant, index) for index in range(min(a_higher, b_higher) + 1)) / (2 ** discordant) if discordant else 1.0
+    registered = paired_seed_ratio(a, b) or {}
+    lows: list[float] = []
+    highs: list[float] = []
+    for alternative in alternative_seeds:
+        out = paired_seed_ratio(a, b, seed=int(alternative)) or {}
+        if out.get("ci"):
+            lows.append(out["ci"][0])
+            highs.append(out["ci"][1])
+
+    def summary(values: list[float]) -> dict[str, Any]:
+        ordered = sorted(values)
+        return {"min": ordered[0], "median": _quantile(ordered, 0.5), "max": ordered[-1]} if ordered else {}
+
+    return {
+        "metric": metric, "seeds": len(keys), "a": registered.get("a"), "b": registered.get("b"),
+        "discordant": {"a_higher": a_higher, "b_higher": b_higher, "undefined": undefined}, "mcnemar_exact_p": min(1.0, 2.0 * tail),
+        "test": "exact two-sided sign test on the seeds whose per-seed values differ (the exact McNemar test when the metric is 0/1)",
+        "registered": {"margin": registered.get("difference"), "margin_ci": registered.get("ci"), "seed": registered.get("seed"), "resamples": registered.get("resamples")},
+        "alternative_seeds": {
+            "seeds": [min(alternative_seeds), max(alternative_seeds)] if len(lows) else None, "count": len(lows),
+            "intervals_containing_zero": sum(1 for low, high in zip(lows, highs) if low <= 0.0 <= high),
+            "lower_bound_at_or_below_zero": sum(1 for low in lows if low <= 0.0), "lower_bound_above_zero": sum(1 for low in lows if low > 0.0),
+            "upper_bound_at_or_above_zero": sum(1 for high in highs if high >= 0.0),
+            "lower_bound": summary(lows), "upper_bound": summary(highs),
+        },
+    }
+
+
 def paired_effect_difference(
     rows_a: list[dict[str, Any]], rows_a0: list[dict[str, Any]], rows_b: list[dict[str, Any]], rows_b0: list[dict[str, Any]], *, metric: str,
     resamples: int = EPISODE_BOOTSTRAP["resamples"], seed: int = EPISODE_BOOTSTRAP["seed"], level: float = EPISODE_BOOTSTRAP["level"],
@@ -1123,8 +1227,12 @@ def _offline_columns(paths: list[Path]) -> dict[str, Any]:
 def closed_loop_report(
     run_paths: list[Path], *, offline: list[Path] | None = None, merge: dict[str, list[str]] | None = None, only: list[str] | None = None,
     seed_pairs: list[tuple[str, str]] | None = None, alternative_seeds: Any = range(1, 201), effects: list[tuple[str, str, str, str]] | None = None,
+    robustness_metrics: tuple[str, ...] | list[str] = (),
 ) -> dict[str, Any]:
     """run 요약 JSON들(`scripts/closed_loop.py run --report`) → 정책 × 조건 지표, 짝지은 성공률 차이, 오프라인 값 나란히.
+
+    `robustness_metrics`(Task R11 — seed 단위 지표 이름들, 예: `forbidden_contacts`)면 seed 쌍마다 그 지표의 견고성(:func:`paired_ratio_robustness` —
+    seed 값이 큰 쪽의 수·부호 검정·다른 RNG seed)을 `seed_pairs[조건][쌍]["robustness"]`에 더한다. 주지 않으면 견고성은 엄격·거짓 done 둘 그대로다.
 
     `effects`(Task R10 — 이름표 넷 (a, a₀, b, b₀))면 조건마다 두 효과의 차 (a − a₀) − (b − b₀)의 seed 짝 구간(:func:`paired_effect_difference`,
     지표 :data:`EFFECT_METRICS`)을 `effects[조건]["(a - a0) - (b - b0)"]`에 싣는다 — 네 이름표가 모두 그 조건을 돌았을 때만.
@@ -1134,6 +1242,9 @@ def closed_loop_report(
     있으면 거절한다. `only`는 보고할 조건 목록이다(주지 않으면 전부). `seed_pairs`(이름표 쌍 a, b)면 조건마다 그 쌍의 **seed 단위 짝지은 지표**
     (:data:`SEED_METRICS`, :func:`paired_seed_ratio`)와 엄격 성공·거짓 done의 **견고성**(:func:`paired_robustness`, 다른 부트스트랩 seed
     `alternative_seeds`)을 `seed_pairs`에 싣는다 (Task R6 수정 라운드 1)."""
+    unknown_metrics = [metric for metric in robustness_metrics if metric not in SEED_METRICS]
+    if unknown_metrics:
+        raise ValueError(f"robustness_metrics: seed 단위 지표 {list(SEED_METRICS)} 중에서만 고른다 (받은 값: {unknown_metrics}) — 엄격·거짓 done의 견고성은 언제나 실린다")
     runs: dict[str, dict[str, Any]] = {}
     for path in run_paths:
         payload = json.loads(Path(path).read_text(encoding="utf-8"))
@@ -1203,10 +1314,15 @@ def closed_loop_report(
                 continue
             metrics_a = {row["key"]: seed_metrics(record, row) for record, row in zip(records_by[(a, condition)], rows_by[(a, condition)])}
             metrics_b = {row["key"]: seed_metrics(record, row) for record, row in zip(records_by[(b, condition)], rows_by[(b, condition)])}
+            robustness = {metric: paired_robustness(rows_by[(a, condition)], rows_by[(b, condition)], metric=metric, alternative_seeds=alternative_seeds)
+                          for metric in ("strict", "false_done")}
+            for metric in robustness_metrics:
+                # R11: 판정 (s)처럼 세는 지표의 견고성 — seed 값이 큰 쪽의 수·부호 검정·다른 부트스트랩 RNG seed
+                robustness[metric] = paired_ratio_robustness({k: v[metric] for k, v in metrics_a.items()}, {k: v[metric] for k, v in metrics_b.items()},
+                                                             metric=metric, alternative_seeds=alternative_seeds)
             seeded.setdefault(condition, {})[f"{a} - {b}"] = {
                 "metrics": {name: paired_seed_ratio({k: v[name] for k, v in metrics_a.items()}, {k: v[name] for k, v in metrics_b.items()}) for name in SEED_METRICS},
-                "robustness": {metric: paired_robustness(rows_by[(a, condition)], rows_by[(b, condition)], metric=metric, alternative_seeds=alternative_seeds)
-                               for metric in ("strict", "false_done")},
+                "robustness": robustness,
             }
     out = {"version": CLOSED_LOOP_VERSION, "runs": {label: {"path": run["path"], "paths": run.get("paths", [run["path"]]), "policy": run["policy"], "gpu": run["gpu"]} for label, run in runs.items()},
            "conditions": conditions, "tables": tables, "paired": pairs, "offline": _offline_columns(offline or []), "layers": list(LAYERS),
@@ -1242,11 +1358,39 @@ EFFECT_METRICS = ("strict", "done", "false_done")
 SELECTED_TOKEN = "{selected}"
 #: 그런 등록에서 판정 조건의 `group` — "고른 seed 하나"다 (판정은 고른 seed에 대한 것이지 후보 전부에 대한 것이 아니다).
 SELECTED_GROUP = "selected"
-#: seed 고르기의 지표(가장 큰 쪽이 앞선다)와 동점 깨기(작은 쪽이 앞선다) — 이름이 곧 규칙이다.
+#: seed 고르기의 지표(가장 큰 쪽이 앞선다)와 동점 깨기(작은 쪽이 앞선다) — 이름이 곧 규칙이다. R11이 더한 둘: `arm`(등록한 `arm_order`에서
+#: 앞인 갈래가 앞선다)·`checkpoint`(체크포인트 이름의 오름차순 — 코드 포인트 순).
 SELECTION_METRICS = ("strict",)
-SELECTION_TIES = ("false_done", "seed")
+SELECTION_TIES = ("false_done", "seed", "arm", "checkpoint")
+#: 구성의 갈래 → 이름표 꼬리 (Task R11 — 구성 = 체크포인트 × 갈래: `r6` + G → `r6G`; R10의 `scripts/closed_loop.py run --delegate`가 붙이는 꼬리와 같다).
+ARM_SUFFIX = {"native": "", "G": "G", "GS": "GS"}
+#: 고르는 등록의 쌍 이름 안에서 고른 구성의 갈래 꼬리로 바뀌는 자리 표시 — `rule{arm}`은 같은 갈래의 규칙 판정기다(G면 `ruleG`, native면 `rule`).
+ARM_TOKEN = "{arm}"
 #: 판정 옆에 적는 run 기록(Task R9 `run_readings`)의 키 — 기록 전용 감시, 그리퍼 적합 시작 step의 정의, 감시를 기록만 해야 하는 묶음.
 _RUN_READING_KEYS = ("monitor_log", "gripper_onset", "log_only")
+
+
+def _registration_pairs(raw: dict[str, Any]) -> list[str]:
+    """등록이 적은 쌍 이름 전부 — 판정 조건(`cloud`)·견고성·서술 판독·예측의 `pair`와 보고서 명령이 싣는 seed 쌍(`a:b`)."""
+    texts = [str(entry.get("pair", "")) for entry in (raw.get("cloud") or {}).values()]
+    for key in ("robustness", "stability", "predictions"):
+        texts += [str(entry.get("pair", "")) for entry in raw.get(key) or ()]
+    return texts + [str(pair) for pair in raw.get("seed_pairs") or ()]
+
+
+def _check_configurations(path: Path, groups: dict[str, Any], candidates: list[str]) -> None:
+    """구성(체크포인트 × 갈래)으로 고르는 등록(Task R11)의 후보 검사 — 묶음마다 `checkpoint`와 `arm`(:data:`ARM_SUFFIX`의 이름)이 있고, 이름표가
+    체크포인트 + 갈래 꼬리여야 한다(`r6` + G = `r6G`, native는 꼬리 없음) — 그래야 `rule{arm}`이 고른 구성과 같은 갈래의 규칙 판정기를 가리킨다."""
+    for name in candidates:
+        group = groups[name]
+        checkpoint, arm = group.get("checkpoint"), group.get("arm")
+        if not isinstance(checkpoint, str) or not checkpoint:
+            raise ValueError(f"{path}: groups.{name}.checkpoint가 필요하다 — 구성(체크포인트 × 갈래)으로 고르는 등록이다")
+        if arm not in ARM_SUFFIX:
+            raise ValueError(f"{path}: groups.{name}.arm은 {sorted(ARM_SUFFIX)} 중 하나여야 한다 (받은 값: {arm!r})")
+        if name != checkpoint + ARM_SUFFIX[arm]:
+            raise ValueError(f"{path}: groups.{name}: 이름표는 체크포인트 + 갈래 꼬리({checkpoint + ARM_SUFFIX[arm]!r})여야 한다 — "
+                             f"`rule{ARM_TOKEN}`이 같은 갈래의 규칙 판정기를 가리키게")
 
 
 def load_registration(path: str | Path) -> dict[str, Any]:
@@ -1263,7 +1407,12 @@ def load_registration(path: str | Path) -> dict[str, Any]:
     R10에서 더한 것(없으면 R9와 똑같이 읽힌다): `decision`(등록한 조건들이 **무엇을** 정하는가의 이름 — 없으면 `cloud`; R10은 `delegation`),
     판정 조건 묶음을 `cloud` 대신 `conditions`로 적을 수 있다(둘 중 하나만 — 코드 안에서는 같은 자리다), `predictions`(판정 옆에 적는 **등록한
     예측** — 이름·쌍·출처(paired | seed_pairs | effects)·지표·`holds_if`; 성립 여부를 적되 판정을 바꾸지 않는다; `effects`는 보고서의
-    `effects` 블록 — 두 위임 효과의 차 (a₁ − a₀) − (b₁ − b₀)를 seed로 짝지은 구간)."""
+    `effects` 블록 — 두 위임 효과의 차 (a₁ − a₀) − (b₁ − b₀)를 seed로 짝지은 구간).
+
+    R11에서 더한 것(없으면 R10과 똑같이 읽힌다): 고르는 후보가 seed가 아니라 **구성**(체크포인트 × 갈래)일 수 있다 — 묶음에 `checkpoint`·`arm`(native·G·GS)이
+    있고 이름표 = 체크포인트 + 갈래 꼬리; 동점 깨기 `arm`(`selection.arm_order`의 앞이 앞선다)·`checkpoint`(이름 오름차순); 쌍 이름의 `{arm}`은 고른 구성의
+    갈래 꼬리로 바뀐다(`rule{arm}` = 같은 갈래의 규칙 판정기). `seed` 동점 깨기를 쓸 때만 정수 seed가 필요하다(R9 그대로). `selection.excluded`(조건 이름 목록)는
+    고르는 데 쓰지 않는 홀드아웃 — 그 조건과 그것을 합쳐 만든 조건(`merge`)으로 고르는 등록은 판정 집합처럼 거절한다."""
     path = Path(path)
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     for key in ("version", "primary", "bootstrap"):
@@ -1279,21 +1428,35 @@ def load_registration(path: str | Path) -> dict[str, Any]:
     groups = dict(raw.get("groups") or {})
     selection = raw.get("selection")
     if selection:
-        # 판정할 집합의 숫자로 고르지 않는다 — 고르는 조건은 주 집합이 아니고, 주 집합을 합쳐 만든 조건들도 아니다
-        forbidden = {str(raw["primary"]), *(str(part) for part in ((raw.get("merge") or {}).get(raw["primary"]) or ()))}
+        excluded = selection.get("excluded")
+        if excluded is not None and (not isinstance(excluded, list) or not all(isinstance(name, str) and name for name in excluded)):
+            raise ValueError(f"{path}: selection.excluded는 조건 이름의 목록이어야 한다 (받은 값: {excluded!r})")
+        # 판정할 집합의 숫자로 고르지 않는다 — 고르는 조건은 주 집합이 아니고, 주 집합을 합쳐 만든 조건들도 아니며, 등록이 고르는 데 쓰지 않는다고
+        # 적은 홀드아웃(`excluded` — R11: 옛 판정 집합 ood_dev200)과 그것을 합쳐 만든 조건들도 아니다
+        merge = raw.get("merge") or {}
+        held_out = [str(raw["primary"]), *(str(name) for name in (excluded or ()))]
+        forbidden = {*held_out, *(str(part) for name in held_out for part in (merge.get(name) or ()))}
         condition = selection.get("condition")
         if not condition or str(condition) in forbidden:
             raise ValueError(f"{path}: selection.condition은 판정 집합({sorted(forbidden)})이 아닌 조건이어야 한다 (받은 값: {condition!r}) — 판정할 집합의 숫자로 고르지 않는다")
         candidates = list(selection.get("candidates") or [])
         if len(candidates) < 2 or len(set(candidates)) != len(candidates) or any(name not in groups for name in candidates):
             raise ValueError(f"{path}: selection.candidates는 groups({sorted(groups)}) 가운데 서로 다른 둘 이상이어야 한다 (받은 값: {candidates})")
-        if any(not isinstance(groups[name].get("seed"), int) or not groups[name].get("run") for name in candidates):
-            raise ValueError(f"{path}: selection.candidates의 묶음마다 groups에 정수 seed와 run이 필요하다 (동점 깨기와 run 상태를 읽는다)")
-        if selection.get("metric") not in SELECTION_METRICS:
-            raise ValueError(f"{path}: selection.metric은 {list(SELECTION_METRICS)} 중 하나다 (받은 값: {selection.get('metric')!r})")
         ties = list(selection.get("ties") or [])
         if len(set(ties)) != len(ties) or any(tie not in SELECTION_TIES for tie in ties):
             raise ValueError(f"{path}: selection.ties는 {list(SELECTION_TIES)}의 겹치지 않는 순서다 (받은 값: {ties})")
+        if any(not groups[name].get("run") for name in candidates):
+            raise ValueError(f"{path}: selection.candidates의 묶음마다 groups에 run이 필요하다 (run 상태를 읽는다)")
+        if "seed" in ties and any(not isinstance(groups[name].get("seed"), int) for name in candidates):
+            raise ValueError(f"{path}: selection.candidates의 묶음마다 groups에 정수 seed와 run이 필요하다 (동점 깨기와 run 상태를 읽는다)")
+        if any(ARM_TOKEN in text for text in _registration_pairs(raw)) or "arm" in ties or "checkpoint" in ties:
+            _check_configurations(path, groups, candidates)
+        if "arm" in ties:
+            order = selection.get("arm_order")
+            if not isinstance(order, list) or len(set(order)) != len(order) or not {groups[name]["arm"] for name in candidates} <= set(order):
+                raise ValueError(f"{path}: selection.arm_order는 후보의 갈래를 모두 담은 겹치지 않는 목록이어야 한다 (받은 값: {order!r}) — 갈래 동점 깨기의 순서다")
+        if selection.get("metric") not in SELECTION_METRICS:
+            raise ValueError(f"{path}: selection.metric은 {list(SELECTION_METRICS)} 중 하나다 (받은 값: {selection.get('metric')!r})")
     for name, entry in raw["cloud"].items():
         if entry.get("source") not in ("paired", "seed_pairs") or entry.get("holds_if") not in _BOUNDS or not entry.get("pair") or not entry.get("metric"):
             raise ValueError(f"{path}: cloud.{name}에는 pair·metric·source(paired|seed_pairs)·holds_if({sorted(_BOUNDS)})가 필요하다")
@@ -1503,31 +1666,42 @@ def select_seed(report: dict[str, Any], registration: dict[str, Any], *, unavail
     읽는 것은 보고서의 `tables[selection.condition]`(검증 집합의 정책별 표)뿐이다 — 판정 집합의 표·쌍은 열지 않는다(그리고 :func:`load_registration`이
     판정 집합을 고르는 조건으로 받지 않는다; 등록이 `merge`를 적지 않았어도 보고서가 판정 집합으로 합친 조건이면 여기서 거절한다).
     후보마다 엄격 성공 수(`strict_done` = `done ∧ target_inside_zone`)가 가장 큰 쪽, 동점이면 `ties`의 순서로 — `false_done`은 거짓 done 편이 적은 쪽,
-    `seed`는 seed 번호가 작은 쪽. `unavailable`(묶음 → 이유)은 고를 수 없는 후보다(run이 없거나 끝나지 않았다).
+    `seed`는 seed 번호가 작은 쪽, `arm`(R11)은 등록한 `arm_order`에서 앞인 갈래, `checkpoint`(R11)는 체크포인트 이름의 오름차순. `unavailable`(묶음 → 이유)은
+    고를 수 없는 후보다(run이 없거나 끝나지 않았다). 후보가 구성(체크포인트 × 갈래, R11)이면 행에 체크포인트·갈래가 실린다.
     고를 수 있는 후보는 **같은 seed 집합**에서 돌았어야 한다 — 편 수가 다르거나 두 후보의 짝지은 블록이 센 공통 seed 수가 편 수와 다르면 거절한다."""
     rule = registration["selection"]
     condition = str(rule["condition"])
     unavailable = dict(unavailable or {})
     # 판정 집합의 숫자로 고르지 않는다 — 등록이 적은 판정 집합의 부분(`merge`)뿐 아니라 **보고서가 실제로 합친 것**(`report["merge"][primary]`)도 본다:
-    # `merge`를 적지 않은 등록도 판정 집합을 이룬 조건으로는 고를 수 없다 (R9 리뷰 1 M1)
+    # `merge`를 적지 않은 등록도 판정 집합을 이룬 조건으로는 고를 수 없다 (R9 리뷰 1 M1). 등록이 고르는 데 쓰지 않는다고 적은 홀드아웃(`excluded`,
+    # R11: 옛 ood_dev200)과 그 부분도 같다.
     primary = str(registration["primary"])
-    judged = {primary, *(str(part) for part in ((report.get("merge") or {}).get(primary) or ())),
-              *(str(part) for part in ((registration.get("merge") or {}).get(primary) or ()))}
+    held_out = [primary, *(str(name) for name in (rule.get("excluded") or ()))]
+    report_merge, registered_merge = report.get("merge") or {}, registration.get("merge") or {}
+    judged = {*held_out, *(str(part) for name in held_out for part in (report_merge.get(name) or ())),
+              *(str(part) for name in held_out for part in (registered_merge.get(name) or ()))}
     if condition in judged:
-        raise ValueError(f"선택 조건 {condition!r}가 판정 집합 {primary!r}을 이루는 조건이다({sorted(judged)}; 보고서의 merge 기록) — 판정할 집합의 숫자로 고르지 않는다")
+        raise ValueError(f"선택 조건 {condition!r}가 판정 집합 {primary!r}이나 고르는 데 쓰지 않는 홀드아웃을 이루는 조건이다({sorted(judged)}; 보고서·등록의 merge 기록) "
+                         "— 판정할 집합의 숫자로 고르지 않는다")
     table = (report.get("tables") or {}).get(condition)
     if table is None:
         raise ValueError(f"보고서에 선택 조건 {condition!r}의 표가 없다 (있는 조건: {report.get('conditions')}) — `report --only …,{condition}`로 만든다")
     rows: list[dict[str, Any]] = []
     for label in rule["candidates"]:
-        seed = int(registration["groups"][label]["seed"])
+        group = registration["groups"][label]
+        identity: dict[str, Any] = {"label": label}
+        if group.get("seed") is not None:
+            identity["seed"] = int(group["seed"])
+        if group.get("checkpoint") is not None:
+            # 구성(R11): 체크포인트 × 갈래
+            identity.update({"checkpoint": str(group["checkpoint"]), "arm": str(group.get("arm"))})
         if label in unavailable:
-            rows.append({"label": label, "seed": seed, "eligible": False, "reason": unavailable[label]})
+            rows.append({**identity, "eligible": False, "reason": unavailable[label]})
             continue
         block = table.get(label)
         if block is None:
             raise ValueError(f"{condition}: 보고서의 표에 후보 {label!r}가 없다 — 그 seed의 폐루프가 필요하다(없다면 이유를 unavailable로 준다)")
-        rows.append({"label": label, "seed": seed, "eligible": True, "episodes": int(block["episodes"]), "strict": int(block["strict_done"]),
+        rows.append({**identity, "eligible": True, "episodes": int(block["episodes"]), "strict": int(block["strict_done"]),
                      "done": int(block["done"]), "false_done": len(block["false_done"])})
     eligible = [row for row in rows if row["eligible"]]
     if len({row["episodes"] for row in eligible}) > 1:
@@ -1538,9 +1712,18 @@ def select_seed(report: dict[str, Any], registration: dict[str, Any], *, unavail
             if shared != a["episodes"]:
                 raise ValueError(f"{condition}: {a['label']}와 {b['label']}의 공통 seed가 {shared}편이다(편 수 {a['episodes']}) — 같은 seed 집합에서만 고른다")
     ties = list(rule.get("ties") or [])
+    arm_order = [str(arm) for arm in (rule.get("arm_order") or ())]
 
-    def key(row: dict[str, Any]) -> tuple[int, ...]:
-        return (-row["strict"], *(int(row[tie]) for tie in ties))
+    def tie_value(row: dict[str, Any], tie: str) -> int | str:
+        # 작은 쪽이 앞선다: 거짓 done 수·seed 번호, 등록한 갈래 순서의 자리, 체크포인트 이름(코드 포인트 순)
+        if tie == "arm":
+            return arm_order.index(row["arm"])
+        if tie == "checkpoint":
+            return str(row["checkpoint"])
+        return int(row[tie])
+
+    def key(row: dict[str, Any]) -> tuple[int | str, ...]:
+        return (-row["strict"], *(tie_value(row, tie) for tie in ties))
 
     ranked = sorted(eligible, key=key)
     decided_by = None
@@ -1550,21 +1733,40 @@ def select_seed(report: dict[str, Any], registration: dict[str, Any], *, unavail
         first, second = key(ranked[0]), key(ranked[1])
         names = ["strict", *ties]
         decided_by = next((name for name, x, y in zip(names, first, second) if x != y), None)
-    return {"condition": condition, "metric": str(rule["metric"]), "ties": ties, "candidates": rows, "ranking": [row["label"] for row in ranked],
-            "selected": ranked[0]["label"] if ranked else None, "decided_by": decided_by}
+    out = {"condition": condition, "metric": str(rule["metric"]), "ties": ties, "candidates": rows, "ranking": [row["label"] for row in ranked],
+           "selected": ranked[0]["label"] if ranked else None, "decided_by": decided_by}
+    if arm_order:
+        out["arm_order"] = arm_order
+    return out
 
 
-def _materialize_selection(registration: dict[str, Any], selected: str | None) -> dict[str, Any]:
-    """고른 seed의 이름표를 판정 조건·견고성의 쌍 이름에 넣은 등록 사본 — 고른 것이 없으면(고를 수 있는 후보가 없다) 쌍은 그대로 둔다."""
+def materialize_selection(registration: dict[str, Any], selected: str | None) -> dict[str, Any]:
+    """고른 묶음(seed — R9, 구성 — R11)의 이름표를 판정 조건·견고성·서술 판독·예측의 쌍 이름과 보고서 명령이 싣는 seed 쌍(`a:b`)에 넣은 등록 사본 —
+    `{selected}`는 고른 이름표로, `{arm}`은 고른 구성의 갈래 꼬리(:data:`ARM_SUFFIX`; `rule{arm}` → G면 `ruleG`, native면 `rule`)로 바뀐다. 자리 표시가 없는
+    쌍(R9의 seed 사이 서술 판독)은 그대로다. 고른 것이 없으면(고를 수 있는 후보가 없다) 쌍은 그대로 둔다."""
     out = copy.deepcopy(registration)
     if selected is None:
         return out
+    group = (out.get("groups") or {}).get(selected) or {}
+    suffix = ARM_SUFFIX.get(str(group["arm"])) if group.get("arm") is not None else None
+
+    def fill(text: str) -> str:
+        filled = str(text).replace(SELECTED_TOKEN, selected)
+        if ARM_TOKEN in filled:
+            if suffix is None:
+                raise ValueError(f"{text!r}: 고른 묶음 {selected!r}에 갈래(arm)가 없어 {ARM_TOKEN!r}를 채울 수 없다")
+            filled = filled.replace(ARM_TOKEN, suffix)
+        return filled
+
     for entry in out["cloud"].values():
-        entry["pair"] = str(entry["pair"]).replace(SELECTED_TOKEN, selected)
+        entry["pair"] = fill(entry["pair"])
         entry["group"] = selected
-    for entry in out.get("robustness") or ():
-        entry["pair"] = str(entry["pair"]).replace(SELECTED_TOKEN, selected)
+    for key in ("robustness", "stability", "predictions"):
+        for entry in out.get(key) or ():
+            entry["pair"] = fill(entry["pair"])
+    out["seed_pairs"] = [fill(pair) for pair in out.get("seed_pairs") or ()]
     return out
+
 
 
 def gripper_fit_onset(steps: list[dict[str, Any]], *, stratum: str = "settled", min_accuracy: float = 0.5, min_ticks: int = 5) -> dict[str, Any]:
@@ -1655,7 +1857,7 @@ def apply_registration(report: dict[str, Any], registration: dict[str, Any], *, 
     effective_stopped = dict(stopped or {})
     if registration.get("selection"):
         selection = select_seed(report, registration, unavailable=stopped)
-        registration = _materialize_selection(registration, selection["selected"])
+        registration = materialize_selection(registration, selection["selected"])
         if selection["selected"] is None:
             # 고를 수 있는 후보가 없다 — 판정할 seed가 없으므로 조건 전부가 보고서를 읽지 않고 불성립이다
             effective_stopped[SELECTED_GROUP] = f"no eligible seed on {selection['condition']}: {[(row['label'], row.get('reason')) for row in selection['candidates']]}"

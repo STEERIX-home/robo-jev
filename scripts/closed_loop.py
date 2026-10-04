@@ -324,23 +324,39 @@ def cmd_seeds(args: argparse.Namespace) -> int:
     payload = {"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit(), "config": str(args.config), **conditions}
     _write(Path(args.out), payload)
     for name, block in conditions["conditions"].items():
-        print(f"{name}: {len(block['seeds'])} seeds · profiles {block['by_profile']} · scanned {block['scanned']} · families in r1 {block['families_in_r1']}/{len(block['families'])}")
+        print(f"{name}: {len(block['seeds'])} seeds · profiles {block['by_profile']} · scanned {block['scanned']} · families in r1 {block['families_in_r1']}/{len(block['families'])}"
+              f" · unbuildable plans skipped {len(block.get('unbuildable') or [])}")
     return 0
 
 
 def cmd_overlap(args: argparse.Namespace) -> int:
-    """D1 (Task R6): 조건의 장면 계열이 학습 재료(train 분할)의 계열과 겹치는 수 — "본 적 없는 seed·대부분 학습한 계열"의 숫자."""
-    from robo_jev.closed_loop import family_overlap
+    """D1 (Task R6): 조건의 장면 계열이 학습 재료(train 분할)의 계열과 겹치는 수 — "본 적 없는 seed·대부분 학습한 계열"의 숫자.
+
+    Task R11: `--earlier`(이전 평가 집합의 seed 파일)나 `--seed-manifest`(seed만 대조할 manifest)를 주면 seed 쪽 겹침
+    (:func:`robo_jev.closed_loop.seed_overlap` — 재료 manifest도 seed로 대조한다; 봉인 편은 세기만)을 `seed_overlap`에 더한다. 주지 않으면 옛 출력 그대로다."""
+    from robo_jev.closed_loop import family_overlap, seed_overlap
 
     seeds = json.loads(Path(args.seeds).read_text(encoding="utf-8"))
     materials = {pair.split("=", 1)[0]: pair.split("=", 1)[1] for pair in args.material}
     payload = {"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit(), "seeds": args.seeds, "materials": materials,
                "conditions": family_overlap(seeds, materials)}
+    earlier = {pair.split("=", 1)[0]: pair.split("=", 1)[1] for pair in (args.earlier or [])}
+    extra = {pair.split("=", 1)[0]: pair.split("=", 1)[1] for pair in (args.seed_manifest or [])}
+    if earlier or extra:
+        # 재료 manifest(학습 재료)도 seed로 대조한다 — 이름이 겹치면 어느 파일인지 알 수 없으므로 거절한다
+        clash = sorted(set(materials) & set(extra))
+        if clash:
+            raise SystemExit(f"--seed-manifest의 이름 {clash}이 --material과 겹친다")
+        payload.update({"earlier": earlier, "seed_manifests": extra, "seed_overlap": seed_overlap(seeds, earlier=earlier, manifests={**materials, **extra})})
     _write(Path(args.out), payload)
     for name, block in payload["conditions"].items():
         any_ = block["any_material"]
         print(f"{name}: {block['seeds']} seeds · origin groups {block['origin_groups']} (shared with training material {any_['origin_groups']}, seeds {any_['seeds']}) · "
               f"families {block['families']} (shared {any_['families']}, seeds {any_['seeds_by_family']})")
+    for name, block in (payload.get("seed_overlap") or {}).items():
+        sets = " · ".join(f"{key} {value}" for key, value in block["earlier_sets"].items())
+        datasets = " · ".join(f"{key} {value['shared_seeds']}/{value['entries_compared']}" for key, value in block["manifests"].items())
+        print(f"{name}: seed overlap with earlier sets: {sets} · with datasets (shared/compared): {datasets}")
     return 0
 
 
@@ -412,13 +428,39 @@ def cmd_report(args: argparse.Namespace) -> int:
     if any(len(item) != 4 for item in effects):
         raise SystemExit(f"--effects: A:A0:B:B0 꼴이어야 한다 (받은 값: {args.effects})")
     report = closed_loop_report(paths, offline=[Path(item) for item in (args.offline or [])], merge=merge or None, only=only, seed_pairs=seed_pairs or None,
-                                effects=effects or None)
+                                effects=effects or None, robustness_metrics=tuple(args.robustness_metrics or ()))
     report.update({"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit()})
     _write(Path(args.out), report)
     from robo_jev.closed_loop import print_report
 
     print_report(report)
     return 0
+
+
+def print_selection(selection: dict[str, Any], file: Any = None) -> None:
+    """검증 집합에서 고른 결과의 표 — seed 묶음(R9)이면 seed 열, 구성(체크포인트 × 갈래, R11)이면 체크포인트·갈래 열."""
+    file = file or sys.stdout
+    if any("checkpoint" in candidate for candidate in selection["candidates"]):
+        order = f", arm order {selection['arm_order']}" if selection.get("arm_order") else ""
+        print(f"\n#### configuration selection on {selection['condition']} (by {selection['metric']}, ties {selection['ties']}{order})\n", file=file)
+        print("| configuration | checkpoint | arm | eligible | episodes | strict | done | false done |", file=file)
+        print("| --- | --- | --- | --- | ---: | ---: | ---: | ---: |", file=file)
+        for candidate in selection["candidates"]:
+            head = f"| {candidate['label']} | {candidate.get('checkpoint')} | {candidate.get('arm')} |"
+            if not candidate["eligible"]:
+                print(f"{head} no ({candidate['reason']}) | — | — | — | — |", file=file)
+                continue
+            print(f"{head} yes | {candidate['episodes']} | {candidate['strict']} | {candidate['done']} | {candidate['false_done']} |", file=file)
+    else:
+        print(f"\n#### seed selection on {selection['condition']} (by {selection['metric']}, ties {selection['ties']})\n", file=file)
+        print("| seed group | seed | eligible | episodes | strict | done | false done |", file=file)
+        print("| --- | ---: | --- | ---: | ---: | ---: | ---: |", file=file)
+        for candidate in selection["candidates"]:
+            if not candidate["eligible"]:
+                print(f"| {candidate['label']} | {candidate['seed']} | no ({candidate['reason']}) | — | — | — | — |", file=file)
+                continue
+            print(f"| {candidate['label']} | {candidate['seed']} | yes | {candidate['episodes']} | {candidate['strict']} | {candidate['done']} | {candidate['false_done']} |", file=file)
+    print(f"- selected: **{selection['selected']}** (ranking {selection['ranking']}; decided by {selection['decided_by']})", file=file)
 
 
 def print_verdict(verdict: dict[str, Any], file: Any = None) -> None:
@@ -433,15 +475,7 @@ def print_verdict(verdict: dict[str, Any], file: Any = None) -> None:
 
     selection = verdict.get("selection")
     if selection:
-        print(f"\n#### seed selection on {selection['condition']} (by {selection['metric']}, ties {selection['ties']})\n", file=file)
-        print("| seed group | seed | eligible | episodes | strict | done | false done |", file=file)
-        print("| --- | ---: | --- | ---: | ---: | ---: | ---: |", file=file)
-        for candidate in selection["candidates"]:
-            if not candidate["eligible"]:
-                print(f"| {candidate['label']} | {candidate['seed']} | no ({candidate['reason']}) | — | — | — | — |", file=file)
-                continue
-            print(f"| {candidate['label']} | {candidate['seed']} | yes | {candidate['episodes']} | {candidate['strict']} | {candidate['done']} | {candidate['false_done']} |", file=file)
-        print(f"- selected: **{selection['selected']}** (ranking {selection['ranking']}; decided by {selection['decided_by']})", file=file)
+        print_selection(selection, file=file)
     blocks = [(verdict["primary"]["condition"] + " (primary)", verdict["primary"])]
     blocks += [(f"{name} (secondary)", block) for name, block in verdict["secondary"].items() if block.get("conditions")]
     for title, block in blocks:
@@ -454,8 +488,13 @@ def print_verdict(verdict: dict[str, Any], file: Any = None) -> None:
             if entry.get("available") is False:
                 continue
             alt = entry["alternative_seeds"]
-            print(f"- robustness ({name}, {entry['pair']} {entry['metric']}): discordant {entry['discordant']['a_only']} vs {entry['discordant']['b_only']}, "
-                  f"exact McNemar p {entry['mcnemar_exact_p']:.3f}; RNG seeds {alt.get('seeds')}: lower ≤ 0 in {alt.get('lower_bound_at_or_below_zero')} of {alt.get('count')}, "
+            discordant = entry["discordant"]
+            if "a_only" in discordant:  # 0/1 지표 — 정확 McNemar
+                counts = f"discordant {discordant['a_only']} vs {discordant['b_only']}, exact McNemar p {entry['mcnemar_exact_p']:.3f}"
+            else:  # 세는 지표(R11 (s)) — seed 값이 큰 쪽의 수와 정확 부호 검정
+                undefined = f" ({discordant['undefined']} undefined)" if discordant.get("undefined") else ""
+                counts = f"seeds where a > b vs b > a {discordant['a_higher']} vs {discordant['b_higher']}{undefined}, exact sign-test p {entry['mcnemar_exact_p']:.3f}"
+            print(f"- robustness ({name}, {entry['pair']} {entry['metric']}): {counts}; RNG seeds {alt.get('seeds')}: lower ≤ 0 in {alt.get('lower_bound_at_or_below_zero')} of {alt.get('count')}, "
                   f"upper ≥ 0 in {alt.get('upper_bound_at_or_above_zero')} of {alt.get('count')}", file=file)
         cause = block.get("cause")
         if cause:
@@ -549,6 +588,32 @@ def run_readings(registration: dict[str, Any], runs_root: Path) -> tuple[dict[st
     return unavailable, blocks
 
 
+def cmd_select(args: argparse.Namespace) -> int:
+    """R11: 사전 등록의 **고르기만** 적용한다 — 판정 집합의 run 전에 무엇을 돌릴지 코드가 정한다(:func:`robo_jev.closed_loop.select_seed`; 후보의 학습 run이
+    끝났는지는 :func:`run_readings`). 고른 이름표로 채운 판정 쌍·seed 쌍(`report --seed-pairs`)과 seed 단위 견고성 지표(`report --robustness-metrics`)를 함께
+    적는다 — 최종 보고서 명령이 그대로 쓴다. `verdict`는 같은 규칙으로 다시 고르고(같은 dev 표에서 같은 답) 판정한다."""
+    from robo_jev.closed_loop import SEED_METRICS, load_registration, materialize_selection, select_seed
+
+    report = json.loads(Path(args.report).read_text(encoding="utf-8"))
+    registration = load_registration(args.registration)
+    if not registration.get("selection"):
+        raise SystemExit(f"{args.registration}: selection이 없다 — 고를 것이 없는 등록이다")
+    unavailable, readings = run_readings(registration, Path(args.runs_root))
+    selection = select_seed(report, registration, unavailable=unavailable)
+    filled = materialize_selection(registration, selection["selected"])
+    robustness = [{"condition": entry["condition"], "pair": entry["pair"], "metric": entry["metric"]} for entry in filled.get("robustness") or ()]
+    payload = {
+        "script": SCRIPT_VERSION, "generated_at": _now(), "git": _git_commit(), "report": str(args.report),
+        "registration": {"version": registration["version"], "path": registration.get("path"), "written_at": registration.get("written_at")},
+        "selection": selection, "runs": readings,
+        "materialized": {"seed_pairs": filled["seed_pairs"], "conditions": {name: entry["pair"] for name, entry in filled["cloud"].items()}, "robustness": robustness,
+                         "robustness_seed_metrics": sorted({entry["metric"] for entry in robustness if entry["metric"] in SEED_METRICS})},
+    }
+    _write(Path(args.out), payload)
+    print_selection(selection)
+    return 0
+
+
 def cmd_verdict(args: argparse.Namespace) -> int:
     """E1 (Task R7·R8·R9): 사전 등록 규칙(`configs/eval/r7-registration.yaml`·`r8-registration.yaml`·`r9-registration.yaml`)을 폐루프 보고서에 적힌 그대로
     적용한다. R8 등록이면 seed 묶음마다 run의 head 적합 감시 판정을 먼저 읽고(:func:`monitor_verdicts`), R9 등록(seed 고르기)이면 run마다 완주 여부와
@@ -612,6 +677,10 @@ def build_parser() -> argparse.ArgumentParser:
     overlap = sub.add_parser("overlap", help="R6 D1: 조건의 장면 계열과 학습 재료(train 분할)의 계열 겹침")
     overlap.add_argument("--seeds", required=True)
     overlap.add_argument("--material", action="append", required=True, metavar="NAME=MANIFEST")
+    overlap.add_argument("--earlier", action="append", default=None, metavar="NAME=SEEDS.json",
+                         help="R11: 이전 평가 집합의 seed 파일 — 조건마다 공유 (프로파일, seed) 수와 공유 origin group 수")
+    overlap.add_argument("--seed-manifest", dest="seed_manifest", action="append", default=None, metavar="NAME=MANIFEST",
+                         help="R11: seed만 대조할 데이터셋 manifest(예: r1 전체 분할; 봉인 편은 세기만)")
     overlap.add_argument("--out", required=True)
     overlap.set_defaults(func=cmd_overlap)
 
@@ -647,8 +716,17 @@ def build_parser() -> argparse.ArgumentParser:
                         help="이 쌍마다 seed 단위 짝지은 지표(그리퍼 연속·중복·q_stop·안전·오행동·실패 원인)와 엄격 성공·거짓 done의 견고성(다른 부트스트랩 seed 1~200)")
     report.add_argument("--effects", nargs="*", default=None, metavar="A:A0:B:B0",
                         help="R10: 두 효과의 차 (A − A0) − (B − B0)의 seed 짝 구간 (엄격·done·거짓 done)")
+    report.add_argument("--robustness-metrics", dest="robustness_metrics", nargs="*", default=None, metavar="METRIC",
+                        help="R11: seed 쌍마다 이 seed 단위 지표(예: forbidden_contacts)의 견고성도 — seed 값이 큰 쪽의 수·정확 부호 검정·다른 부트스트랩 seed 1~200")
     report.add_argument("--out", required=True)
     report.set_defaults(func=cmd_report)
+
+    select = sub.add_parser("select", help="R11: 사전 등록의 고르기만 적용한다 (검증 집합의 표 → 고른 구성, 채운 쌍, 견고성 지표)")
+    select.add_argument("--report", required=True, help="`report`의 산출물 (등록의 selection.condition 표가 든 것)")
+    select.add_argument("--registration", required=True)
+    select.add_argument("--runs-root", dest="runs_root", default=str(REPO), help="등록의 groups[].run이 가리키는 run 디렉터리의 뿌리 (기본: 저장소)")
+    select.add_argument("--out", required=True)
+    select.set_defaults(func=cmd_select)
 
     verdict = sub.add_parser("verdict", help="E1 (R7·R8·R9): 사전 등록 규칙을 폐루프 보고서에 적힌 그대로 적용한다 (클라우드 조건·원인 판정·seed 감시·검증 집합의 seed 고르기)")
     verdict.add_argument("--report", required=True, help="`report`의 산출물 (주 집합과 seed 단위 쌍이 든 것)")
