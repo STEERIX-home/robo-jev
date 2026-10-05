@@ -85,3 +85,125 @@ primary. Latency reports each episode's first tick separately.
 **Documents (registered).** If the verdict passes, the documents name the next decisions only — whether to put delegation G into the
 contract (a harness change, h0.10, which re-digests every checkpoint) is the user's decision, and a round on semantic judgment; if it
 fails, the next round (DAgger aimed at stale-goal false dones) is written from the numbers only.
+
+## 1. Weights (no training)
+
+R11 trains nothing and writes no checkpoint. The five checkpoints are read as they are by the serving loader
+(`robo_jev.harness.model_policy.load_serving_judge`: contract digest `93fe26725a4c…` checked against this checkout before `compile`;
+`fused` + dense compile, fp32 readout — the path of run reports 1–7). Only two were loaded in R11 — r8s19 (for r8s19G on dev_new2;
+load 41.7 s) and r6 (for r6G on ood_fresh; load 26.2 s); both run files record contract `93fe26725a4c`, serializer `ts0.6`, fence 0.6 and a
+peak allocation of 4.14–4.15 GiB. Size and mtime were recorded **before any load** (`artifacts/scratch/r11/checkpoints-stat-before.txt`,
+08:15:02) and after the last report (`…-after.txt`, 09:10:47); they are identical, and every mtime predates R11:
+
+| label | checkpoint | kind | size (B) | mtime |
+| --- | --- | --- | ---: | --- |
+| r5 | `artifacts/runs/r5-t1-fp32-2b-s18/checkpoint.pt` | model-only (slimmed in R8 A2) | 3,765,327,925 | 2026-09-29 17:09:25 |
+| r6 | `artifacts/runs/r6-t1-fp32-2b-s18/checkpoint.pt` | model-only (slimmed in R8 A2) | 3,765,449,845 | 2026-09-29 17:10:12 |
+| r9s17 | `artifacts/runs/r9-t1-fp32-2b-s17/checkpoint.pt` | model + optimizer | 26,350,501,141 | 2026-09-30 21:36:57 |
+| r9s18c | `artifacts/runs/r9-t1-fp32-2b-s18c/r8-t1-fp32-2b-s18/checkpoint.pt` | model + optimizer | 26,350,502,421 | 2026-09-30 16:36:25 |
+| r8s19 | `artifacts/runs/r8-t1-fp32-2b-s19/checkpoint.pt` | model + optimizer | 26,350,500,437 | 2026-09-30 00:02:24 |
+
+## 2. Reproducible data
+
+No dataset was built. R11 writes closed-loop records only (`artifacts/datasets/r11-closed-loop/<label>/<condition>/`, id tag `r11`,
+791 MB), which no training reads. All five new directories carry one version set — harness `h0.9`, controller `c0.6`, expert `e0.4`, rule
+judge `rj0.5`, generator `gen-robot-v0.3`, generator-config digest `c297ada2e90a` (R10's expertG digest) — and every run file records git
+`8164947` (the registration commit). Scenes:
+
+* **dev_new2** (validation, 100) — R6's seeds (`artifacts/reports/r6-seeds.json`); nine candidates from stored runs (the registration's
+  `selection_sources`), r8s19G new, run with R10's dev_new2 command (`--config configs/eval/r7-closed-loop.yaml`, which only supplies the
+  generator config).
+* **ood_fresh** (the judged set, 200) — `configs/eval/r11-closed-loop.yaml`, `artifacts/reports/r11-seeds.json` (Stage A: base 1100100,
+  E0 40 / E1 80 / E2 80, 0 seeds shared with any earlier set or dataset, 0 origin groups shared with training material; one seed, E2
+  1120536, cannot be built by the scene generator and was skipped and listed by the selector).
+* **ood_dev200** (the old holdout, the registration's secondary set) — the stored R4/R6/R7/R10 records of the same four policies.
+
+The sealed split is not opened: the closed-loop configs refuse `ood_test`, the selector only counts sealed seeds, the overlap report counts
+sealed manifest entries without reading their seeds, and every analysis read records through the manifest-first reader.
+
+## 3. Resume
+
+Not applicable — no training. R11 changed no runner, wrapper or record-writing code; the byte-identity tests of R10 (an R9 record replayed
+byte for byte; the expert wrapped in G reproducing R6's expert record) pass in the full suite.
+
+## 4. The choice, the registered verdict and the descriptive readings (Stage C)
+
+**Runs, in the registered order, all after the registration commit (08:14:41).** GPU unit `r11-c-dev-r8s19G` (r8s19G on dev_new2,
+08:15:06 → 08:25:54) → CPU unit `r11c-c-select` (the dev_new2 report `artifacts/reports/r11-selection-report.json` from the registered
+sources, and `select` → `artifacts/reports/r11-selection.json`, 08:26:06 → 08:27:16) → CPU units `r11c-c-fresh-{ruleG,rule,expert}` on
+ood_fresh (08:27:26 → 08:33:58, in parallel, with the GPU idle) → GPU unit `r11-c-fresh-r6G` (08:34:07 → 08:58:02, no CPU unit running) →
+CPU unit `r11c-c-final` (`artifacts/scratch/r11/final-reports.sh`: `report --merge ood_dev200=… --only dev_new2,ood_fresh,ood_dev200
+--seed-pairs ruleG:r6G r6G:ruleG --robustness-metrics forbidden_contacts` → `artifacts/reports/r11-closed-loop.json`; `verdict
+--registration configs/eval/r11-registration.yaml` → `artifacts/reports/r11-verdict.json`; 08:58:14 → 09:10:47). The verdict re-chose r6G
+from the final report's dev_new2 table, identical to `select`'s choice (the chain asserts it).
+
+### The choice (dev_new2 100, the registered rule applied by code)
+
+| configuration | checkpoint · arm | source | `done` | **strict** | false done |
+| --- | --- | --- | ---: | ---: | ---: |
+| **r6G** | r6 · G | R10 exploratory run | 89 | **74** | 15 |
+| r6 | r6 · native | R6 run | 72 | 69 | 3 |
+| r5 | r5 · native | R6 run | 79 | 68 | 11 |
+| r9s18cG | r9s18c · G | R10 exploratory run | 66 | 61 | 5 |
+| r5G | r5 · G | R10 registered run | 71 | 60 | 11 |
+| r9s17G | r9s17 · G | R10 registered run | 74 | 50 | 24 |
+| r9s17 | r9s17 · native | R9 run | 74 | 50 | 24 |
+| **r8s19G** | r8s19 · G | **R11 run (new)** | 73 | 36 | 37 |
+| r8s19 | r8s19 · native | R8 run | 51 | 26 | 25 |
+| r9s18c | r9s18c · native | R9 run | 17 | 14 | 3 |
+
+All ten eligible (the five training runs completed at 233/233). **Chosen: r6G**, decided by the first key (74 vs 69); no tie rule was
+needed. The new run r8s19G (36 strict; main / aux / geometric failures 12 / 15 / 0; forbidden-contact onsets 12; unsafe 0.100) does not
+change the order. Beside, on the same scenes: the rule judge 67 (native and G), the expert 90.
+
+### The registered verdict (ood_fresh 200)
+
+| condition | pair | difference [95 %] | discordant · exact test | RNG seeds 1–200 | holds if | holds? |
+| --- | --- | --- | --- | --- | --- | --- |
+| (a) strict success | `ruleG − r6G` | **+0.080 [+0.020, +0.135]** (0.805 vs 0.725; 161 vs 145) | 28 vs 12 · McNemar p = 0.017 | lower ≤ 0 in 0 of 200 (min +0.015) | lower ≤ 0 | **no** |
+| (s) forbidden-contact onsets / episode | `r6G − ruleG` | **+0.035 [+0.010, +0.065]** (0.065 vs 0.030; 13 vs 6 onsets) | seeds higher 6 vs 0 · sign test p = 0.031 | lower ≤ 0 in 0 of 200 (min +0.010) | lower ≤ 0 | **no** |
+
+**Registered call: fail — "불통과 — R10의 사후 근접은 되풀이되지 않았다(또는 안전에서 떨어졌다)"** (`failed: ['a', 's']` — both parts
+of the sentence apply: the rule judge in the same arm is ahead on strict success, and the chosen configuration makes more forbidden
+contacts). Per the registration the documents write the next round from the numbers only.
+
+**The old holdout, beside (secondary `ood_dev200`; same records R10 read).** (a) `ruleG − r6G` +0.025 [−0.045, +0.090] (26 vs 21,
+p = 0.56) — R10's post hoc reading, reproduced; (s) `r6G − ruleG` **+0.080 [+0.020, +0.160]** (25 vs 9 onsets; seeds higher 9 vs 1,
+p = 0.021; lower > 0 under all 200 RNG seeds) — so on the old holdout the configuration would also have failed the safety condition; R10's
+post hoc comparison looked at strict success only.
+
+### Descriptive readings (not used to judge)
+
+| policy | strict: ood_fresh · ood_dev200 | false done (last grasp on a non-target; of those, an earlier instruction's target) | main / aux / geometric failures | first grasp commitment on a non-instructed object | `q_stop` caught / onsets | forbidden-contact onsets | unsafe ticks / acted |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| **r6G** (chosen) | **145** · 139 | **28 (25; 19)** · 28 (26; 18) | 15 / 11 / 1 · 18 / 13 / 2 | 17 · 12 | 1/52 · 1/82 | **13** · 25 | 0.0356 · 0.0417 |
+| ruleG (same arm) | **161** · 144 | 1 (0; 0) · 0 | 0 / 2 / 36 · 1 / 5 / 50 | 0 · 0 | 29/36 · 29/41 | **6** · 9 | 0.0002 · 0.0005 |
+| rule (native) | 162 · 145 | 1 (0; 0) · 0 | 0 / 37 / 0 · 2 / 51 / 2 | 0 · 0 | 34/41 · 31/43 | 6 · 9 | 0.0002 · 0.0005 |
+| expert | 189 · 182 | 1 (0; 0) · 0 | 1 / 0 / 9 · 2 / 0 / 16 | 0 · 0 | 48/48 · 65/65 | 6 · 23 | 0 · 0 |
+
+(Stale-goal false dones by R9's `false_done_mechanism.py`, `artifacts/scratch/r11/false-done-mechanism.json`; first-grasp and failure
+counts by `artifacts/scratch/r11/failures.py`; tables by `artifacts/scratch/r11/tables.py` → `c-tables.md`.)
+
+* **One false done is shared by every policy, the expert included**: E1:1110410 — the first instruction is completed (target o3 observed
+  inside zoneR at the done tick and at the last tick), but the scene's second instruction is scheduled at exactly 9,700 ms, the instant the
+  0.3 s done tail ends, so the episode's outcome is scored against the new target (o0) and `target_inside_zone` is false
+  (`artifacts/scratch/r11/probe/`). All four policies end that episode at the same tick, so it cancels in every seed-paired comparison;
+  it is a scene-timing edge of the generator, not a policy decision (R4–R10 never met it; nothing was changed).
+* **Seed-paired, `r6G − ruleG` on ood_fresh** (`seed_pairs`): false dones **+0.135 [+0.090, +0.185]** (27 vs 0 seeds), main-decision
+  failures +0.075 [+0.040, +0.115], wrong-action ticks +0.061 [+0.039, +0.085], unsafe ticks +0.035 [+0.016, +0.058], `q_stop` catch
+  −0.786 [−0.923, −0.639], gripper duplicates +0.130 [+0.065, +0.210], missing reference gripper transitions +0.068 [+0.009, +0.135];
+  reflex-event ticks −0.010 [−0.160, +0.100] (no difference found). Beside: `rule − r6G` strict +0.085 [+0.025, +0.145], `expert − r6G`
+  +0.220 [+0.165, +0.280], `ruleG − rule` −0.005 [−0.015, 0.000] (no difference found).
+* **Two samples of the same configuration.** Every policy scored higher on ood_fresh than on ood_dev200 — the expert +7, both rule-judge
+  arms +17, r6G +6 — so the fresh draw is easier on average and r6G gained least: the strict gap to `ruleG` went from +0.025 (old) to
+  +0.080 (fresh). r6G's false dones are the same in number and kind on both (28; mostly stale goals: 19 and 18 had been an earlier
+  instruction's target), its main-decision failures 15 vs 18, its `q_stop` catches 1 stop onset in either set; its forbidden-contact onsets
+  are 13 vs 25 and the rule judge's 6 vs 9.
+* On dev_new2 (the choice set — not evidence): `ruleG − r6G` −0.070 [−0.150, 0.000] (11 vs 4, as R10's exploratory run read it) and
+  forbidden contacts 3 vs 1 (+0.020 [0.000, +0.050]) — the validation set did not show the safety difference (too few protected contacts
+  in 100 scenes).
+
+**Latency** (`latency.model_ms` excludes each episode's first tick; no CPU unit ran during either GPU run): r6G on ood_fresh non-first
+ticks p50 / p95 / p99 **43.7 / 56.1 / 80.7 ms**, 0 of 19,418 over 100 ms, observation → command p95 62.1 ms; first ticks p50 93.5, max
+277.2 ms, 18 of 200 over 100 ms. r8s19G on dev_new2: 43.5 / 56.3 / 81.9 ms, 0 of 8,092; first ticks 21 of 100 over 100 ms (max 275.6 ms).
+The gate (p95 ≤ 80 ms, > 100 ms ≤ 5 %) passes.
