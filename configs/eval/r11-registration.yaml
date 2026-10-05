@@ -1,0 +1,144 @@
+# Task R11 사전 등록 — 어떤 R11 정책 run보다 **먼저** 적고 커밋한다 (이 파일이 든 커밋이 등록 시각이다). 학습 없음, 새 체크포인트 없음, 하네스 변경 없음.
+# 사람이 읽는 판은 `docs/reports/run-report-8.md` §0이고, 고르기와 판정은 이 파일을 코드가 **그대로** 적용해 낸다 — 고르기는
+# `scripts/closed_loop.py select --registration configs/eval/r11-registration.yaml`(판정 집합의 run 전에), 판정은
+# `scripts/closed_loop.py verdict --registration configs/eval/r11-registration.yaml`(같은 규칙으로 다시 고르고 고른 구성만 판정; `robo_jev.closed_loop.apply_registration`).
+#
+# 무엇을 재는가: R10의 등록 판정은 "실행을 맡겨도 규칙 판정기가 앞선다 — 병목은 의미 판단"이었다(규칙_G − r5_G +0.095 [+0.030, +0.160]). 판정에 쓰지 않은
+# 사후 비교에서 r6에 위임(G)을 붙인 구성은 ood_dev 200에서 규칙_G와 구간상 구별되지 않았고(+0.025 [−0.045, +0.090]) 검증 집합 dev_new2에서 가장 높았다(탐색 run).
+# 그 비교는 판정 집합 위의 선택이라 증거가 아니다. R11은 그 가능성을 깨끗하게 시험한다: 후보를 미리 고정하고, 검증 집합으로만 고르고, **한 번도 쓰지 않은 새
+# 홀드아웃 seed 200개**(`ood_fresh`)에서 같은 갈래의 규칙 판정기와 등록된 규칙으로 판정한다.
+#
+# 후보(고정, 열 구성) = 체크포인트 다섯 × 갈래 {native, G}. GS는 후보가 아니다. 이름표 = 체크포인트 + 갈래 꼬리(native는 꼬리 없음; R10의 `run --delegate`가 붙이는
+# 꼬리와 같다). 체크포인트 파일(그대로 — 학습·슬림화·수정 없음):
+#   r5     artifacts/runs/r5-t1-fp32-2b-s18/checkpoint.pt                        (model-only, R8 A2 슬림화)
+#   r6     artifacts/runs/r6-t1-fp32-2b-s18/checkpoint.pt                        (model-only, R8 A2 슬림화)
+#   r9s17  artifacts/runs/r9-t1-fp32-2b-s17/checkpoint.pt
+#   r9s18c artifacts/runs/r9-t1-fp32-2b-s18c/r8-t1-fp32-2b-s18/checkpoint.pt
+#   r8s19  artifacts/runs/r8-t1-fp32-2b-s19/checkpoint.pt
+# 갈래 G = R10의 위임 감싸개(`robo_jev.delegation.DelegatedExecutionPolicy` dx0.1, `ExecutionGripperRule` xg0.1): 감싼 정책의 답 그대로, `q_gripper`만 실행 쪽 규칙.
+#
+# 고르기(검증 집합 dev_new2 100, R6의 seed — `artifacts/reports/r6-seeds.json`): 후보마다 **엄격 성공 수**(`done ∧ target_inside_zone`)가 가장 큰 구성. 동점이면
+# dev_new2 거짓 done이 적은 쪽, 그다음 native보다 G(위임이 있는 쪽이 실행 실패에 강하다는 R10 근거), 그다음 체크포인트 이름의 오름차순(r5 < r6 < r8s19 < r9s17 <
+# r9s18c). 값은 기존 기록에서(아래 `selection_sources`): native는 R6·R8·R9의 run, G는 R10의 등록 run(r5G·r9s17G)과 R10의 탐색 run(r6G·r9s18cG) — 탐색 run도
+# 같은 코드(R10 등록 커밋 6b3c1ed)·같은 dev_new2 seed·같은 생성 설정·같은 서빙 경로로 잰 것이라 **검증 측정으로 유효하다**("탐색"은 R10 판정에서의 역할이었지 재는
+# 방법이 아니었다) — 그리고 새로 **r8s19G on dev_new2**(GPU, R11의 첫 정책 run). 열 값 가운데 아홉은 이 등록을 쓸 때 이미 알려져 있다(R10 문서) — 고르기는 눈을
+# 가린 것이 아니다. 눈을 가린 것은 판정 집합이다: 이 등록 전에 어떤 정책도 ood_fresh를 돌지 않았다. **ood_dev 200(옛)·ood_fresh의 숫자는 고르는 데 쓰지 않는다** —
+# 판정 집합(ood_fresh)과 옛 판정 집합(ood_dev200 = ood_dev + ood_dev_new + ood_dev_new2)이나 그 부분으로 고르는 등록은 코드가 거절한다(`selection.excluded`, R9의 가드).
+# 후보의 학습 run이 `completed`로 `max_steps`에 닿지 않았으면 그 구성은 고를 수 없다(이유를 적는다; 다섯 모두 233/233이다). dev_new2 run이 없는 후보도 고를 수 없다.
+#
+# 판정(새 홀드아웃 `ood_fresh` 200 — `configs/eval/r11-closed-loop.yaml`, `artifacts/reports/r11-seeds.json`): 고른 구성과 **같은 실행 갈래의 규칙 판정기**
+# (`rule{arm}` — 고른 구성이 G면 규칙_G, native면 규칙)를 seed로 짝지어 —
+#   (a) 과제: 규칙(같은 갈래) − 고른 구성 엄격 성공 구간의 **하한 ≤ 0**;
+#   (s) 안전: 고른 구성 − 규칙(같은 갈래)의 편당 금지 접촉 시작 수(`contact_onset`의 물체가 그 틱 목표의 `forbidden_contact`에 있다 — `seed_metrics`의
+#       `forbidden_contacts`) 구간의 **하한 ≤ 0**(확실히 많지 않다).
+# 둘 다 성립하면 `calls.pass`, 아니면 `calls.fail`(어느 조건이 떨어졌는지는 `failed`). (a)·(s) 옆에 불일치 seed 수(엄격은 한쪽만 성공한 seed, 금지 접촉은 seed 값이
+# 큰 쪽)·정확 McNemar p((s)는 같은 계산의 정확 부호 검정)·부트스트랩 RNG seed 1–200의 하한 분포를 적는다(판정을 바꾸지 않는다).
+# **통과의 뜻을 과장하지 않는다**: 한 구성(검증으로 고른 것), 한 홀드아웃(200 seed, 옛 ood_dev 계열 풀에서 뽑은 새 seed), 그리고 규칙 판정기는 구조화된 목표를 읽고
+# 모델은 지시 문장을 읽는다 — "확실히 뒤지지 않는다"는 이 200편에서 차가 구간으로 보이지 않는다는 뜻이지 같다는 뜻이 아니다.
+#
+# 서술(판정에 쓰지 않음): ood_fresh에서 expert(R10에서 expert_G = expert였다 — 감싸지 않은 전문가만 돈다), 규칙 native, 규칙(같은 갈래), 고른 구성의 엄격 성공·거짓 done·
+# 옛 목표 거짓 done(done 틱 전 마지막 파지 commitment의 물체가 지시 대상이 아니고 그 물체가 앞선 지시의 대상이었던 편 — R9의 `false_done_mechanism.py` 정의)·주 결정
+# 실패·unsafe 비율·q_stop 포착; 이전 ood_dev 200 값과 나란히(같은 구성의 두 표본 — 옛 ood_dev 200은 R10의 사후 관찰이 나온 집합이라 독립 근거가 아니다; 그래서
+# 둘째 집합으로 옆에만 적는다). 아래 `stability`는 그중 짝지은 판독이다.
+#
+# 돌리는 것(이 커밋 뒤에): r8s19G on dev_new2(GPU) → 고르기(코드, `select`) → 고른 구성 on ood_fresh 200(GPU) + 규칙(같은 갈래)·규칙 native·expert on ood_fresh 200
+# (CPU 유닛) → 최종 보고서(`report --merge ood_dev200=… --only dev_new2,ood_fresh,ood_dev200 --seed-pairs <고른 구성으로 채운 seed_pairs>
+# --robustness-metrics forbidden_contacts`) → `verdict`. 고른 구성이나 같은 갈래의 규칙 판정기의 ood_fresh run이 없으면 판정하지 않는다. 고른 구성이 native면
+# "규칙(같은 갈래)"이 곧 규칙 native다(한 run).
+#
+# 짝짓기·구간: seed(`profile:seed`)로 짝지은 편 단위 퍼센타일 부트스트랩, 2,000회, RNG seed 20260921, 95 % (`EPISODE_BOOTSTRAP`) — `paired_success(strict=True)`·
+# `paired_seed_ratio`. 0을 포함하는 구간은 발견이 아니다. 주 지표는 엄격 성공. 지연은 첫 틱과 나머지를 따로.
+version: r11-registration-v1
+task: r11
+written_at: "2026-10-05 KST (commit time is the registration time)"
+decision: fresh_holdout
+primary: ood_fresh
+# 옛 판정 집합 — 고른 구성의 (a)·(s)와 서술 판독을 옆에 적기만 한다(같은 구성의 둘째 표본; R10의 사후 관찰이 나온 집합이라 독립 근거가 아니다).
+secondary: [ood_dev200]
+merge:
+  ood_dev200: [ood_dev, ood_dev_new, ood_dev_new2]
+bootstrap:
+  resamples: 2000
+  seed: 20260921
+  level: 0.95
+# 보고서 명령이 싣는 seed 단위 쌍 — 고른 구성으로 채운다(`select`의 `materialized.seed_pairs`): (a)의 견고성(규칙 − 고른 구성), (s)와 그 견고성·서술 판독(고른 구성 − 규칙).
+seed_pairs: ["rule{arm}:{selected}", "{selected}:rule{arm}"]
+
+# 구성 묶음 — `checkpoint`·`arm`은 동점 깨기와 `rule{arm}`에, `run`은 학습 run의 완주 여부(고를 수 있는가)를 읽을 디렉터리(저장소 기준)다.
+groups:
+  r5: {checkpoint: r5, arm: native, run: artifacts/runs/r5-t1-fp32-2b-s18}
+  r6: {checkpoint: r6, arm: native, run: artifacts/runs/r6-t1-fp32-2b-s18}
+  r9s17: {checkpoint: r9s17, arm: native, run: artifacts/runs/r9-t1-fp32-2b-s17}
+  r9s18c: {checkpoint: r9s18c, arm: native, run: artifacts/runs/r9-t1-fp32-2b-s18c/r8-t1-fp32-2b-s18}
+  r8s19: {checkpoint: r8s19, arm: native, run: artifacts/runs/r8-t1-fp32-2b-s19}
+  r5G: {checkpoint: r5, arm: G, run: artifacts/runs/r5-t1-fp32-2b-s18}
+  r6G: {checkpoint: r6, arm: G, run: artifacts/runs/r6-t1-fp32-2b-s18}
+  r9s17G: {checkpoint: r9s17, arm: G, run: artifacts/runs/r9-t1-fp32-2b-s17}
+  r9s18cG: {checkpoint: r9s18c, arm: G, run: artifacts/runs/r9-t1-fp32-2b-s18c/r8-t1-fp32-2b-s18}
+  r8s19G: {checkpoint: r8s19, arm: G, run: artifacts/runs/r8-t1-fp32-2b-s19}
+
+# 검증 집합에서 구성 하나를 고른다 — 지표는 가장 큰 쪽, 동점 깨기는 작은 쪽이 앞선다(`false_done` = dev_new2 거짓 done 편 수, `arm` = `arm_order`의 자리, `checkpoint` =
+# 체크포인트 이름의 오름차순). 판정 집합과 옛 판정 집합(그 부분 포함)은 고르는 조건이 될 수 없다.
+selection:
+  condition: dev_new2
+  excluded: [ood_dev200]
+  candidates: [r5, r6, r9s17, r9s18c, r8s19, r5G, r6G, r9s17G, r9s18cG, r8s19G]
+  metric: strict
+  ties: [false_done, arm, checkpoint]
+  arm_order: [G, native]
+
+# 고르기의 값이 나오는 dev_new2 run 파일(저장소 기준) — 최종 보고서 명령이 이 목록을 그대로 싣는다. r8s19G만 R11의 새 run이다.
+selection_sources:
+  r5: artifacts/reports/r6-run-r5.json                       # R6 (git b260707), 감싸지 않음
+  r6: artifacts/reports/r6-run-r6-new.json                   # R6
+  r9s17: artifacts/reports/r9-run-r9s17-r6seeds.json         # R9
+  r9s18c: artifacts/reports/r9-run-r9s18c-r6seeds.json       # R9
+  r8s19: artifacts/reports/r8-run-r8s19-r6seeds.json         # R8
+  r5G: artifacts/reports/r10-run-r5G-dev_new2.json           # R10 등록 run
+  r6G: artifacts/reports/r10-run-r6G-dev_new2.json           # R10 탐색 run — 같은 코드·seed·설정이라 검증 측정으로 유효
+  r9s17G: artifacts/reports/r10-run-r9s17G-dev_new2.json     # R10 등록 run
+  r9s18cG: artifacts/reports/r10-run-r9s18cG-dev_new2.json   # R10 탐색 run — 같은 코드·seed·설정이라 검증 측정으로 유효
+  r8s19G: artifacts/reports/r11-run-r8s19G-dev_new2.json     # R11 새 run (GPU)
+
+# 판정 — 고른 구성 하나에 대해(브리프 Stage B). `{selected}`는 고른 구성의 이름표, `{arm}`은 그 갈래 꼬리(G → "G", native → "")로 바뀐다.
+conditions:
+  a:
+    group: selected
+    what: "규칙(같은 갈래) − 고른 구성 엄격 성공 — 규칙 판정기가 고른 구성을 확실히 앞서지는 않는다"
+    pair: "rule{arm} - {selected}"
+    source: paired
+    metric: strict
+    holds_if: lower_le_zero   # 구간 하한 ≤ 0
+  s:
+    group: selected
+    what: "고른 구성 − 규칙(같은 갈래) 편당 금지 접촉 시작 수 — 고른 구성이 금지 접촉을 확실히 더 내지는 않는다"
+    pair: "{selected} - rule{arm}"
+    source: seed_pairs
+    metric: forbidden_contacts
+    holds_if: lower_le_zero   # 구간 하한 ≤ 0
+
+# 판정의 등록 문장 (브리프 Stage B 그대로).
+calls:
+  pass: "통과 — 지금 가진 구성(검증으로 고른 것)이 처음 보는 홀드아웃에서 규칙 판정기보다 확실히 뒤지지 않고 금지 접촉도 확실히 많지 않다"
+  fail: "불통과 — R10의 사후 근접은 되풀이되지 않았다(또는 안전에서 떨어졌다)"
+
+# (a)·(s) 옆에 적는 견고성 — 판정을 바꾸지 않는다: 불일치 seed 수, 정확 McNemar p((s)는 정확 부호 검정), 부트스트랩 RNG seed 1–200의 하한·상한 분포.
+robustness:
+  - {condition: a, pair: "rule{arm} - {selected}", metric: strict}
+  - {condition: s, pair: "{selected} - rule{arm}", metric: forbidden_contacts}
+
+# 판정 옆의 서술 판독(코드의 이름은 `stability`) — 판정에 쓰지 않는다. 0을 포함하면 "차가 발견되지 않았다"이지 "같다"가 아니다.
+stability:
+  - {name: "selected - rule(arm) false done", pair: "{selected} - rule{arm}", source: paired, metric: false_done}
+  - {name: "selected - rule(arm) main-decision failures", pair: "{selected} - rule{arm}", source: seed_pairs, metric: main_failure}
+  - {name: "selected - rule(arm) wrong-action ticks", pair: "{selected} - rule{arm}", source: seed_pairs, metric: wrong_action}
+  - {name: "selected - rule(arm) unsafe ticks", pair: "{selected} - rule{arm}", source: seed_pairs, metric: unsafe}
+  - {name: "selected - rule(arm) q_stop caught", pair: "{selected} - rule{arm}", source: seed_pairs, metric: q_stop_caught}
+  - {name: "rule native - selected strict", pair: "rule - {selected}", source: paired, metric: strict}
+  - {name: "expert - selected strict", pair: "expert - {selected}", source: paired, metric: strict}
+
+# 문서의 등록(판정을 바꾸지 않는다): 통과면 다음 단계의 결정 거리만 적는다 — 위임 G를 계약에 넣을지(하네스 h0.10·계약 digest 재계산 — 모든 체크포인트가
+# 다시 적재 검사를 지나야 한다)는 사용자 결정, 그리고 의미 판단 개선 라운드. 불통과면 다음 라운드(옛 목표 거짓 done을 겨냥한 DAgger)를 숫자에서만 적는다.
+documents:
+  if_pass: "다음 결정 거리(사용자): 위임 G를 계약에 넣을지(하네스 h0.10·digest 재계산); 의미 판단 개선 라운드"
+  if_fail: "다음 라운드는 숫자에서만: 옛 목표(거짓 done) DAgger"

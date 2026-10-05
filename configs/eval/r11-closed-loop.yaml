@@ -1,0 +1,21 @@
+# Task R11 Stage A — 폐루프 **새 홀드아웃** `ood_fresh` 200 (브리프 Stage A). R7의 `r7-closed-loop.yaml`과 같은 생성 설정
+# (`configs/data/r1_robot.yaml`)·분할 규칙·프로파일 혼합(E0/E1/E2 = 20/40/40)이고 seed 구간만 **1100100~**이다(E0 1100100~ · E1 1110100~ ·
+# E2 1120100~; 선택기의 일정은 순환 [E0, E1, E2, E1, E2]를 `per_profile_max`번 도므로 E0은 최대 4,000, E1·E2는 최대 8,000 seed까지 — E1의 걸음은
+# 1118099에서 끝나 E2의 시작 아래다; R11 리뷰 1 M3). 이전의 모든 걸음 — r1 400100~ · DAgger 사이클 1(done 게이트 수집) 600100~ · R4 900100~ ·
+# R5 950100~ · R6 980100~(dev_new2·ood_dev_new 두 걸음, E2가 최대 1008099) · R7 1050100~(E2가 최대 1078099) — 과 구간이 겹치지 않는다(시험이 구간을 대조한다; 겹침
+# 보고서가 실제 seed의 교집합 0을 적는다). 1100100은 공식(`seeds.base + (사이클 + 1) × dagger_cycle_offset`)상 DAgger 사이클 6의 자리지만 그 사이클은
+# 수집된 적이 없고(수집한 것은 사이클 1의 done 게이트 600100~뿐), 분할은 장면 계열이 정하므로 그 자리에서 언젠가 train seed를 걷더라도 이 ood_dev
+# seed와 같은 (프로파일, seed)나 같은 origin group이 학습 재료가 될 수 없다.
+# 판정 집합이다 — **어떤 정책 run보다 먼저 사전 등록**(`configs/eval/r11-registration.yaml`)을 커밋하고, 고르는 데는 쓰지 않는다(고르기는 dev_new2).
+# ood_dev 계열은 어떤 학습 재료에도 없다(겹침 보고서 `artifacts/reports/r11-seeds-overlap.json`).
+# `ood_test`에 떨어진 seed는 **만들지도 적지도 않는다**(봉인; 선택기가 세기만 한다).
+version: r11-closed-loop-v0.1
+generator_config: configs/data/r1_robot.yaml
+seeds:
+  base: 1100100
+scan:
+  per_profile_max: 4000
+conditions:
+  ood_fresh:
+    split: ood_dev
+    count: 200
