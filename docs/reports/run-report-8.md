@@ -207,3 +207,61 @@ counts by `artifacts/scratch/r11/failures.py`; tables by `artifacts/scratch/r11/
 ticks p50 / p95 / p99 **43.7 / 56.1 / 80.7 ms**, 0 of 19,418 over 100 ms, observation → command p95 62.1 ms; first ticks p50 93.5, max
 277.2 ms, 18 of 200 over 100 ms. r8s19G on dev_new2: 43.5 / 56.3 / 81.9 ms, 0 of 8,092; first ticks 21 of 100 over 100 ms (max 275.6 ms).
 The gate (p95 ≤ 80 ms, > 100 ms ≤ 5 %) passes.
+
+## 5. Measured cost
+
+| unit (systemd, `Started` → end) | what | wall |
+| --- | --- | ---: |
+| `r11-c-dev-r8s19G` | GPU: r8s19G on dev_new2 (100), the only new validation run | 0 h 10 m 48 s |
+| `r11-c-fresh-r6G` | GPU: the chosen configuration r6G on ood_fresh (200) | 0 h 23 m 55 s |
+| `r11-pytest` | full suite (fence 0.6 + `require_free(36 GiB)` checked first; GPU visible, no other GPU job) | 0 h 10 m 12 s |
+| **GPU total** | | **2,695 s = 0.75 GPU-h** (brief ≈ 1 h) |
+
+CPU units (`r11c-*`, CUDA hidden, MemoryMax, `choom`, Nice 10): the seed walk (25 s; a first attempt stopped after 8 s on the unbuildable
+seed, §2), the overlap report, the seed re-check from the Stage A commit (25 s), the regression check of R7–R10's verdicts (4 s, plus the
+same R7 verdict with `main`'s code), the choice (`r11c-c-select`, 1 m 10 s), ruleG / rule / expert on ood_fresh (6 m 05 s, 6 m 05 s,
+6 m 32 s, in parallel, GPU idle), the final report and verdict (`r11c-c-final`, 12 m 33 s, MemoryMax 40G — it overlapped the test unit,
+which is not a measurement), three probes (13 s, 3 s, 1 s) and the development test runs (`r11c-pt-*`, 2–40 s each). Disk 126 → 125 GB
+free (closed-loop records 791 MB). Cumulative GPU on the DGX Spark ≈ 67.0 h. Cloud spend 0.
+
+**Every CPU job that read records ran as a unit (HANDOFF §5; R9 and R10 broke this rule).** Outside units, from the session shell, only
+report and metadata files were read: before the first unit (07:46–07:57, no GPU job up) the run-summary JSONs, `r10-exploratory.json`,
+the `files` metadata of five dataset manifests (r1, g2, dagger-0, dagger-1, the done-gate collection) and `stat`s of stored episode
+directories; later, the selection, verdict, table and probe outputs (JSON / markdown) and the run-summary rows behind
+`artifacts/scratch/r11/probe/discordant.json`. No episode record was opened outside a unit.
+
+## 6. What the round says, and what it does not
+
+1. **Registered call: fail — "불통과 — R10의 사후 근접은 되풀이되지 않았다(또는 안전에서 떨어졌다)", on both conditions.** The configuration
+   chosen on validation (r6G, 74 of 100 on dev_new2, the highest of ten) trails the rule judge in the same arm on 200 fresh holdout scenes
+   — `ruleG − r6G` strict **+0.080 [+0.020, +0.135]** (161 vs 145; 28 vs 12 discordant, p = 0.017; the lower bound stays above zero under all
+   200 alternative bootstrap seeds) — and makes more forbidden contacts — `r6G − ruleG` **+0.035 [+0.010, +0.065]** per episode (13 vs 6 onsets;
+   6 vs 0 seeds, sign test p = 0.031; likewise robust). R10's post hoc closeness (+0.025 [−0.045, +0.090] on ood_dev 200) did not repeat.
+2. **The old holdout would have failed the safety condition too.** On the same records R10 read, `r6G − ruleG` forbidden contacts is +0.080
+   [+0.020, +0.160] (25 vs 9; 9 vs 1 seeds). R10's post hoc comparison looked at strict success only; the safety condition the user added
+   for R11 separates the two on both holdouts.
+3. **Where the gap is (descriptive) — semantic judgment, as R10 said.** The 28 seeds only the rule judge solved are r6G stalls after
+   main-decision (9) or auxiliary (9) disagreements and r6G false dones (10; 2 of them on an earlier instruction's target); the 12 seeds only
+   r6G solved are all rule-judge execution stalls (`geometric`). Of r6G's 55 failures, 54 are semantic: 28 false dones (19 after a last
+   grasp on an earlier instruction's target, 6 on another non-target, 3 other — one of them the shared edge below), 15 main-decision and 11
+   auxiliary failures; of the rule judge's 39, 36 are geometric stalls or timeouts. r6G's false dones are the same in number and kind on both
+   holdouts (28 and 28; 19 and 18 stale-goal), and 17 of its 19 stale-goal false dones fall on scenes the rule judge did not finish either.
+   The gap is in the instruction-change profiles (E1 65 vs 72, E2 40 vs 49; E0 40 vs 40).
+4. **Safety**: r6's `q_stop` catches 1 of 52 stop onsets (the rule judge 29 of 36) and its unsafe-tick rate is 0.036 (0.0002); arm G
+   delegates only the gripper, so the stop is still the model's. Whether the missing stops cause the extra forbidden contacts was not tested.
+5. **The fresh draw was easier for every policy** (expert 189 vs 182, both rule-judge arms 161–162 vs 144–145, r6G 145 vs 139): the
+   gap widened because r6G gained least, not because r6G fell.
+6. **A scene-timing edge of the generator**: in E1:1110410 the second instruction is scheduled at the instant the done tail ends, so a
+   completed first instruction is scored against the new target — a "false done" for every policy, the expert included. It cancels in every
+   seed-paired comparison and changed nothing here; the harness and generator were not touched (a fix would be a generator change for a
+   later round).
+7. **What the round does not say.** Only the chosen configuration ran on the fresh holdout, so the other nine are not ranked there; the
+   choice used dev_new2 values of which nine were known in advance (the choice was not blind, the judged set was); one holdout of 200; and
+   the rule judge reads the structured goal while the model reads the instruction text. It does not say delegation is useless — R10 showed
+   it repairs a collapsed gripper head — only that the best configuration we have does not match the rule judge on unseen scenes.
+
+**Next round (registered: on a fail, written from the numbers only) — DAgger aimed at stale-goal false dones,** with what the numbers say
+about its reach: false dones are r6G's largest single failure class (28 of 200; 19 stale-goal) and DAgger cycles 0–1 did not remove them,
+but only 2 of the 28 seeds the rule judge won are stale-goal false dones — r6G's stalls after main-decision or auxiliary disagreements (18
+of the 28) and its forbidden contacts (13 vs 6; `q_stop` 1 of 52) are of the same size. No contract-change proposal (delegation G into the
+harness) is supported by this round, and nothing here argues for cloud spend.
