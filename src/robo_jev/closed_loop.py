@@ -1437,8 +1437,11 @@ def load_registration(path: str | Path) -> dict[str, Any]:
         held_out = [str(raw["primary"]), *(str(name) for name in (excluded or ()))]
         forbidden = {*held_out, *(str(part) for name in held_out for part in (merge.get(name) or ()))}
         condition = selection.get("condition")
-        if not condition or str(condition) in forbidden:
-            raise ValueError(f"{path}: selection.condition은 판정 집합({sorted(forbidden)})이 아닌 조건이어야 한다 (받은 값: {condition!r}) — 판정할 집합의 숫자로 고르지 않는다")
+        # 고르는 조건이 판정·제외 집합을 **담은** 합친 조건이어도 거절한다 (R11 리뷰 1 M9 — R9부터의 틈: 그 자체·그 부분만 보았다)
+        parts = {str(part) for part in (merge.get(str(condition)) or ())} if condition else set()
+        if not condition or str(condition) in forbidden or parts & forbidden:
+            raise ValueError(f"{path}: selection.condition은 판정 집합({sorted(forbidden)})이 아니고 그것을 담지도 않는 조건이어야 한다 (받은 값: {condition!r}"
+                             + (f", 합친 부분 {sorted(parts)}" if parts else "") + ") — 판정할 집합의 숫자로 고르지 않는다")
         candidates = list(selection.get("candidates") or [])
         if len(candidates) < 2 or len(set(candidates)) != len(candidates) or any(name not in groups for name in candidates):
             raise ValueError(f"{path}: selection.candidates는 groups({sorted(groups)}) 가운데 서로 다른 둘 이상이어야 한다 (받은 값: {candidates})")
@@ -1680,9 +1683,11 @@ def select_seed(report: dict[str, Any], registration: dict[str, Any], *, unavail
     report_merge, registered_merge = report.get("merge") or {}, registration.get("merge") or {}
     judged = {*held_out, *(str(part) for name in held_out for part in (report_merge.get(name) or ())),
               *(str(part) for name in held_out for part in (registered_merge.get(name) or ()))}
-    if condition in judged:
-        raise ValueError(f"선택 조건 {condition!r}가 판정 집합 {primary!r}이나 고르는 데 쓰지 않는 홀드아웃을 이루는 조건이다({sorted(judged)}; 보고서·등록의 merge 기록) "
-                         "— 판정할 집합의 숫자로 고르지 않는다")
+    # 고르는 조건을 이루는 부분(보고서·등록의 merge 기록)이 판정·제외 집합과 겹쳐도 거절한다 (R11 리뷰 1 M9)
+    parts = {str(part) for part in (report_merge.get(condition) or ())} | {str(part) for part in (registered_merge.get(condition) or ())}
+    if condition in judged or parts & judged:
+        raise ValueError(f"선택 조건 {condition!r}가 판정 집합 {primary!r}이나 고르는 데 쓰지 않는 홀드아웃을 이루거나 담는 조건이다({sorted(judged)}"
+                         + (f"; 합친 부분 {sorted(parts)}" if parts else "") + "; 보고서·등록의 merge 기록) — 판정할 집합의 숫자로 고르지 않는다")
     table = (report.get("tables") or {}).get(condition)
     if table is None:
         raise ValueError(f"보고서에 선택 조건 {condition!r}의 표가 없다 (있는 조건: {report.get('conditions')}) — `report --only …,{condition}`로 만든다")

@@ -665,18 +665,29 @@ def test_the_verdict_command_writes_the_applied_rule_and_prints_the_table(tmp_pa
     assert "cloud: **closed** (failed: ['c_duplicates'])" in printed and "ood_dev200 (primary)" in printed and "dev_new2 (secondary)" in printed
 
 
+def _walk_ranges(config: dict, base: int) -> set[tuple[int, int]]:
+    """seed 걸음 하나가 프로파일마다 닿을 수 있는 구간 [시작, 끝) — 선택기의 일정은 `per_profile_max × 순환 길이`편이고 순환
+    [E0, E1, E2, E1, E2]에서 E1·E2는 두 번씩이라 E0 4,000 · E1·E2 8,000 seed까지 걷는다(R11 리뷰 1 M3; 옛 시험은 모두 4,000으로 셌다)."""
+    from robo_jev.data.robot_episodes import profile_cycle
+
+    generator = config["generator"]
+    cycle = profile_cycle(generator)
+    offset = int(generator["seeds"]["profile_offset"])
+    order = list(dict.fromkeys(cycle))
+    return {(base + index * offset, base + index * offset + cycle.count(name) * config["scan"]["per_profile_max"]) for index, name in enumerate(order)}
+
+
 def test_the_r7_seed_walk_is_r6s_generator_and_mix_on_a_range_no_earlier_walk_or_dagger_collection_touches():
     """Task R7 B1: 새 ood_dev 100 — R6와 같은 생성 설정·프로파일 혼합, seed base 1050100. 프로파일마다 걷는 구간(base + 프로파일 × 10,000,
-    최대 4,000 seed)이 r1 · DAgger 사이클 0~5 · R4 · R5 · R6의 구간과 겹치지 않는다."""
+    순환 안의 횟수 × 4,000 seed — E0 4,000 · E1·E2 8,000; R11 리뷰 1 M3)이 r1 · DAgger 사이클 0~5 · R4 · R5 · R6의 구간과 겹치지 않는다."""
     r7 = load_closed_loop_config(REPO / "configs/eval/r7-closed-loop.yaml")
     r6 = load_closed_loop_config(REPO / "configs/eval/r6-closed-loop.yaml")
     assert r7["conditions"] == {"ood_dev_new2": {"split": "ood_dev", "count": 100}} and r7["seeds"]["base"] == 1050100
     assert r7["generator"] == r6["generator"] and r7["generator_config_path"] == r6["generator_config_path"]
     assert r7["generator"]["profile_weights"] == [20, 40, 40] and r7["scan"] == r6["scan"] == {"per_profile_max": 4000}
-    offset = int(r7["generator"]["seeds"]["profile_offset"])
 
     def ranges(base: int) -> set[tuple[int, int]]:
-        return {(base + index * offset, base + index * offset + r7["scan"]["per_profile_max"]) for index in range(len(r7["generator"]["profiles"]))}
+        return _walk_ranges(r7, base)
 
     def disjoint(a: set[tuple[int, int]], b: set[tuple[int, int]]) -> bool:
         return all(high_a <= low_b or high_b <= low_a for low_a, high_a in a for low_b, high_b in b)
@@ -1316,8 +1327,9 @@ def test_the_r10_registration_is_the_briefs_primary_comparison_on_ood_dev200_and
 
 def test_the_r11_seed_walk_is_r7s_generator_and_mix_for_ood_fresh_200_on_a_range_no_earlier_walk_touches():
     """Task R11 Stage A: 새 홀드아웃 `ood_fresh` = ood_dev 분할 200편 — R7과 같은 생성 설정·분할 규칙·프로파일 혼합(20/40/40), seed base 1100100.
-    프로파일마다 걷는 구간(base + 프로파일 × 10,000, 최대 4,000 seed)이 r1 · DAgger 사이클 0~5 · R4 · R5 · R6 · R7의 구간과 겹치지 않는다
-    (1100100은 공식상 DAgger 사이클 6의 자리지만 그 사이클은 수집된 적이 없다 — 실제 seed의 교집합은 겹침 보고서가 센다)."""
+    프로파일마다 걷는 구간(base + 프로파일 × 10,000, 순환 안의 횟수 × 4,000 seed — E0 4,000 · E1·E2 8,000; R11 리뷰 1 M3)이 r1 · DAgger 사이클 0~5 ·
+    R4 · R5 · R6 · R7의 구간과, 그리고 자기 프로파일끼리 겹치지 않는다(1100100은 공식상 DAgger 사이클 6의 자리지만 그 사이클은 수집된 적이 없다 — 실제
+    seed의 교집합은 겹침 보고서가 센다)."""
     r11 = load_closed_loop_config(REPO / "configs/eval/r11-closed-loop.yaml")
     r7 = load_closed_loop_config(REPO / "configs/eval/r7-closed-loop.yaml")
     assert r11["conditions"] == {"ood_fresh": {"split": "ood_dev", "count": 200}} and r11["seeds"]["base"] == 1100100
@@ -1327,12 +1339,14 @@ def test_the_r11_seed_walk_is_r7s_generator_and_mix_for_ood_fresh_200_on_a_range
     assert offset == 10000
 
     def ranges(base: int) -> set[tuple[int, int]]:
-        return {(base + index * offset, base + index * offset + r11["scan"]["per_profile_max"]) for index in range(len(r11["generator"]["profiles"]))}
+        return _walk_ranges(r11, base)
 
     def disjoint(a: set[tuple[int, int]], b: set[tuple[int, int]]) -> bool:
         return all(high_a <= low_b or high_b <= low_a for low_a, high_a in a for low_b, high_b in b)
 
     mine = ranges(1100100)
+    assert sorted(mine) == [(1100100, 1104100), (1110100, 1118100), (1120100, 1128100)]  # E1의 걸음은 E2의 시작 아래에서 끝난다
+    assert all(disjoint({a}, {b}) for a in mine for b in mine if a != b)
     earlier = {"r1": 400100, "R4": 900100, "R5": 950100, "R6": 980100, "R7": 1050100}
     cycle_base = int(r11["generator"]["seeds"]["base"])
     cycle_offset = int(r11["generator"]["seeds"]["dagger_cycle_offset"])
@@ -1340,8 +1354,9 @@ def test_the_r11_seed_walk_is_r7s_generator_and_mix_for_ood_fresh_200_on_a_range
     assert earlier["dagger cycle 1"] == 600100 and earlier["r1"] == cycle_base
     for name, base in earlier.items():
         assert disjoint(mine, ranges(base)), name
-    # R6의 두 걸음(dev_new2·ood_dev_new)은 980100에서 시작해 최대 1004100까지 — R11의 구간 아래다
-    assert min(low for low, _ in mine) > 1004100
+    # R6의 두 걸음(dev_new2·ood_dev_new)은 980100에서 시작해 E2가 최대 1008100까지, R7의 E2는 최대 1078100까지 — R11의 구간 아래다
+    assert max(high for _, high in ranges(980100)) == 1008100 and max(high for _, high in ranges(1050100)) == 1078100
+    assert min(low for low, _ in mine) > 1078100
 
 
 def test_seed_overlap_counts_shared_profile_seed_pairs_with_earlier_sets_and_manifests_and_never_reads_sealed_entries(tmp_path):
@@ -1765,3 +1780,28 @@ def test_the_r11_registration_selects_a_configuration_on_dev_new2_and_judges_it_
     assert registration["documents"]["if_fail"].endswith("옛 목표(거짓 done) DAgger") and "h0.10" in registration["documents"]["if_pass"]
     scenes = load_closed_loop_config(REPO / "configs/eval/r11-closed-loop.yaml")
     assert scenes["conditions"] == {registration["primary"]: {"split": "ood_dev", "count": 200}}  # 판정 집합은 R11의 새 seed 걸음이다
+
+
+def test_a_merged_selection_condition_that_contains_the_judged_set_or_an_excluded_holdout_is_refused(tmp_path):
+    """R11 리뷰 1 M9 (R9부터의 틈): 고르는 조건이 판정 집합·제외한 홀드아웃 **자체이거나 그 부분**일 때만 거절하던 가드가, 그것을 **담은** 합친 조건
+    (`merge`의 새 이름)으로 고르는 등록을 지나보냈다. 이제 고르는 조건을 이루는 부분이 판정 집합·제외한 홀드아웃이나 그 부분과 겹치면 등록이 읽히지 않고,
+    등록을 우회해도 보고서의 merge 기록으로 고르기가 거절한다. 그런 것과 겹치지 않는 합친 검증 조건은 그대로 받는다."""
+    from robo_jev.closed_loop import load_registration, select_seed
+
+    old = ["ood_dev", "ood_dev_new", "ood_dev_new2"]
+    for parts in (["dev_new2", "ood_fresh"], ["dev_new2", "ood_dev_new2"], ["dev_new2", "ood_dev200"]):
+        path = _configuration_registration(tmp_path, selection={"condition": "mixed"}, merge={"ood_dev200": old, "mixed": parts})
+        with pytest.raises(ValueError, match="판정할 집합의 숫자로 고르지 않는다"):
+            load_registration(path)
+    fine = load_registration(_configuration_registration(tmp_path, selection={"condition": "dev_all"}, merge={"ood_dev200": old, "dev_all": ["dev_new", "dev_new2"]}))
+    assert fine["selection"]["condition"] == "dev_all"
+    bypass = copy.deepcopy(load_registration(_configuration_registration(tmp_path)))
+    bypass["selection"]["condition"] = "mixed"
+    report = _configuration_report()
+    report["merge"]["mixed"] = ["dev_new2", "ood_fresh"]
+    report["tables"]["mixed"] = report["tables"]["dev_new2"]
+    with pytest.raises(ValueError, match="판정할 집합의 숫자로 고르지 않는다"):
+        select_seed(report, bypass)
+    report["merge"]["mixed"] = ["dev_new", "dev_new2"]  # 판정·제외 집합과 겹치지 않는 합친 조건이면 고른다 (짝 블록은 dev_new2의 것을 그대로 쓴다)
+    report["paired"]["mixed"] = report["paired"]["dev_new2"]
+    assert select_seed(report, bypass)["selected"] == "r6G"

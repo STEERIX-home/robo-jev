@@ -115,7 +115,12 @@ judge `rj0.5`, generator `gen-robot-v0.3`, generator-config digest `c297ada2e90a
   generator config).
 * **ood_fresh** (the judged set, 200) — `configs/eval/r11-closed-loop.yaml`, `artifacts/reports/r11-seeds.json` (Stage A: base 1100100,
   E0 40 / E1 80 / E2 80, 0 seeds shared with any earlier set or dataset, 0 origin groups shared with training material; one seed, E2
-  1120536, cannot be built by the scene generator and was skipped and listed by the selector).
+  1120536, cannot be built by the scene generator and was skipped and listed by the selector). 43 of its 59 origin groups (177 of the 200
+  seeds) also appear in the old ood_dev 200 — the same ood_dev family pool, by design; 16 groups (23 seeds) are new. Beyond the overlap
+  report (fix round 1, review M8; `artifacts/scratch/r11/fix1/verify.json`): the D1 manifests (batch-0, d1, d1-rollout-labels), the r1
+  v0.1 manifests (r1-v0.1, r1-rollout-labels-v0.1) and every stored closed-loop record directory — 94 manifests — share 0 (profile, seed)
+  pairs with ood_fresh; d1 and d1-rollout-labels each share one train-split origin-group name, and none of the five checkpoints trained on
+  D1.
 * **ood_dev200** (the old holdout, the registration's secondary set) — the stored R4/R6/R7/R10 records of the same four policies.
 
 The sealed split is not opened: the closed-loop configs refuse `ood_test`, the selector only counts sealed seeds, the overlap report counts
@@ -163,6 +168,11 @@ change the order. Beside, on the same scenes: the rule judge 67 (native and G), 
 | (a) strict success | `ruleG − r6G` | **+0.080 [+0.020, +0.135]** (0.805 vs 0.725; 161 vs 145) | 28 vs 12 · McNemar p = 0.017 | lower ≤ 0 in 0 of 200 (min +0.015) | lower ≤ 0 | **no** |
 | (s) forbidden-contact onsets / episode | `r6G − ruleG` | **+0.035 [+0.010, +0.065]** (0.065 vs 0.030; 13 vs 6 onsets) | seeds higher 6 vs 0 · sign test p = 0.031 | lower ≤ 0 in 0 of 200 (min +0.010) | lower ≤ 0 | **no** |
 
+*How (s) counts (fix round 1, review M2):* `stop_vs_reflex` adds an onset when a `contact_onset` event's object is in the forbidden set
+accumulated over the episode up to that tick; §0's wording ("that tick's goal `forbidden_contact`") is narrower. On R11's records the two
+definitions give the same counts — ood_fresh 13 vs 6, ood_dev 200 25 vs 9, 0 seeds differ for any of the four policies
+(`artifacts/scratch/r11/fix1/verify.json`).
+
 **Registered call: fail — "불통과 — R10의 사후 근접은 되풀이되지 않았다(또는 안전에서 떨어졌다)"** (`failed: ['a', 's']` — both parts
 of the sentence apply: the rule judge in the same arm is ahead on strict success, and the chosen configuration makes more forbidden
 contacts). Per the registration the documents write the next round from the numbers only.
@@ -194,16 +204,22 @@ counts by `artifacts/scratch/r11/failures.py`; tables by `artifacts/scratch/r11/
   −0.786 [−0.923, −0.639], gripper duplicates +0.130 [+0.065, +0.210], missing reference gripper transitions +0.068 [+0.009, +0.135];
   reflex-event ticks −0.010 [−0.160, +0.100] (no difference found). Beside: `rule − r6G` strict +0.085 [+0.025, +0.145], `expert − r6G`
   +0.220 [+0.165, +0.280], `ruleG − rule` −0.005 [−0.015, 0.000] (no difference found).
-* **Two samples of the same configuration.** Every policy scored higher on ood_fresh than on ood_dev200 — the expert +7, both rule-judge
-  arms +17, r6G +6 — so the fresh draw is easier on average and r6G gained least: the strict gap to `ruleG` went from +0.025 (old) to
-  +0.080 (fresh). r6G's false dones are the same in number and kind on both (28; mostly stale goals: 19 and 18 had been an earlier
-  instruction's target), its main-decision failures 15 vs 18, its `q_stop` catches 1 stop onset in either set; its forbidden-contact onsets
-  are 13 vs 25 and the rule judge's 6 vs 9.
-* On dev_new2 (the choice set — not evidence): `ruleG − r6G` −0.070 [−0.150, 0.000] (11 vs 4, as R10's exploratory run read it) and
+* **Two samples of the same configuration** (rewritten in fix round 1, review I2 — the first version read point estimates as a finding).
+  The two sets have different seeds, so the comparison is unpaired; each set bootstrapped separately (2,000 resamples, RNG seed 20260921;
+  `artifacts/scratch/r11/fix1/verify.json`), strict ood_fresh − ood_dev 200 is: expert +0.035 [−0.015, +0.085] (189 vs 182) and r6G
+  +0.030 [−0.060, +0.120] (145 vs 139) — no difference found —; the rule judge +0.085 [+0.005, +0.165] (162 vs 145) and ruleG +0.085
+  [+0.005, +0.165] (161 vs 144) — borderline: the lower bound is at or below zero under 84 and 105 of 200 alternative RNG seeds
+  (`fix1/i2-sensitivity.json`), and the review's draw order puts ruleG's at +0.000. The `ruleG − r6G` gap went from +0.025 to +0.080, a
+  change of +0.055 [−0.030, +0.150] — no difference found. So "the fresh draw was easier for every policy" and "the gap widened" are not
+  findings. r6G's false dones are the same in number and kind on both (28; 19 and 18 after a stale goal), its main-decision failures 15
+  vs 18, its `q_stop` catches 1 stop onset in either set; its forbidden-contact onsets are 13 vs 25 and the rule judge's 6 vs 9.
+* On dev_new2 (the choice set — not evidence): `ruleG − r6G` −0.070 [−0.150, 0.000] (4 vs 11 rule-judge-only vs r6G-only seeds, the order
+  used everywhere here — fix round 1, M5; as R10's exploratory run read it) and
   forbidden contacts 3 vs 1 (+0.020 [0.000, +0.050]) — the validation set did not show the safety difference (too few protected contacts
   in 100 scenes).
 
-**Latency** (`latency.model_ms` excludes each episode's first tick; no CPU unit ran during either GPU run): r6G on ood_fresh non-first
+**Latency** (`latency.model_ms` excludes each episode's first tick; no CPU unit ran during either GPU run — a session-shell read of 31
+run-summary JSONs with existence checks did run at 08:16:52 during r8s19G's run, §5): r6G on ood_fresh non-first
 ticks p50 / p95 / p99 **43.7 / 56.1 / 80.7 ms**, 0 of 19,418 over 100 ms, observation → command p95 62.1 ms; first ticks p50 93.5, max
 277.2 ms, 18 of 200 over 100 ms. r8s19G on dev_new2: 43.5 / 56.3 / 81.9 ms, 0 of 8,092; first ticks 21 of 100 over 100 ms (max 275.6 ms).
 The gate (p95 ≤ 80 ms, > 100 ms ≤ 5 %) passes.
@@ -222,13 +238,19 @@ seed, §2), the overlap report, the seed re-check from the Stage A commit (25 s)
 same R7 verdict with `main`'s code), the choice (`r11c-c-select`, 1 m 10 s), ruleG / rule / expert on ood_fresh (6 m 05 s, 6 m 05 s,
 6 m 32 s, in parallel, GPU idle), the final report and verdict (`r11c-c-final`, 12 m 33 s, MemoryMax 40G — it overlapped the test unit,
 which is not a measurement), three probes (13 s, 3 s, 1 s) and the development test runs (`r11c-pt-*`, 2–40 s each). Disk 126 → 125 GB
-free (closed-loop records 791 MB). Cumulative GPU on the DGX Spark ≈ 67.0 h. Cloud spend 0.
+free (closed-loop records 791 MB). Cumulative GPU on the DGX Spark ≈ 67.0 h. Cloud spend 0. *(Fix round 1, review M7:)* the two units that
+overlapped, `r11c-c-final` (MemoryMax 40G) and `r11-pytest` (MemoryMax 90G), together budgeted 130 GiB on a 121 GiB box — `gpu-chain.sh`
+checks only GPU units before it launches; the kernel log for the day has no OOM or `NVRM` line. Fix round 1's checks ran as CPU units
+(`r11c-fix1-verify`, `r11c-fix1-i2`, test units), GPU 0.
 
 **Every CPU job that read records ran as a unit (HANDOFF §5; R9 and R10 broke this rule).** Outside units, from the session shell, only
-report and metadata files were read: before the first unit (07:46–07:57, no GPU job up) the run-summary JSONs, `r10-exploratory.json`,
-the `files` metadata of five dataset manifests (r1, g2, dagger-0, dagger-1, the done-gate collection) and `stat`s of stored episode
-directories; later, the selection, verdict, table and probe outputs (JSON / markdown) and the run-summary rows behind
-`artifacts/scratch/r11/probe/discordant.json`. No episode record was opened outside a unit.
+report and metadata files were read (list completed in fix round 1, review M1): before the first unit (07:46–07:57, no GPU job up) the
+run-summary JSONs, `r10-exploratory.json`, the earlier seed / overlap / crosscheck JSONs, the `files` metadata of five dataset manifests (r1,
+g2, dagger-0, dagger-1, the done-gate collection) and, at 07:54, the five training runs' `metrics.json`; **at 08:16:52, during GPU unit
+`r11-c-dev-r8s19G`**, a `python3` that loaded 31 run-summary JSONs and checked that their episode directories and `manifest.json` files
+exist (`stat` only — no manifest or record opened); after the GPU runs (from 09:11), the selection, verdict, table and probe outputs
+(JSON / markdown) and the run-summary rows behind `artifacts/scratch/r11/probe/discordant.json`. No episode record was opened outside a
+unit.
 
 ## 6. What the round says, and what it does not
 
@@ -242,15 +264,21 @@ directories; later, the selection, verdict, table and probe outputs (JSON / mark
    for R11 separates the two on both holdouts.
 3. **Where the gap is (descriptive) — semantic judgment, as R10 said.** The 28 seeds only the rule judge solved are r6G stalls after
    main-decision (9) or auxiliary (9) disagreements and r6G false dones (10; 2 of them on an earlier instruction's target); the 12 seeds only
-   r6G solved are all rule-judge execution stalls (`geometric`). Of r6G's 55 failures, 54 are semantic: 28 false dones (19 after a last
-   grasp on an earlier instruction's target, 6 on another non-target, 3 other — one of them the shared edge below), 15 main-decision and 11
-   auxiliary failures; of the rule judge's 39, 36 are geometric stalls or timeouts. r6G's false dones are the same in number and kind on both
-   holdouts (28 and 28; 19 and 18 stale-goal), and 17 of its 19 stale-goal false dones fall on scenes the rule judge did not finish either.
-   The gap is in the instruction-change profiles (E1 65 vs 72, E2 40 vs 49; E0 40 vs 40).
+   r6G solved are all rule-judge execution stalls (`geometric`; 12 of 12 `stall_exhausted`, 11 `arm_pinned`). Of r6G's 55 failures, 53
+   are semantic — 27 false dones (19 after a last grasp on an earlier instruction's target, 6 on another non-target, 2 other), 15
+   main-decision and 11 auxiliary failures —, 1 is the shared generator edge (item 6) and 1 is geometric (fix round 1, M4: the first version
+   counted the edge as semantic, "54"); of the rule judge's 39, 36 are geometric stalls or timeouts (plus the same edge and 2 auxiliary).
+   r6G's false dones are the same in number and kind on both holdouts (28 and 28; 19 and 18 stale-goal). Of its 19 stale-goal false dones,
+   2 fall on seeds only the rule judge solved and 17 on seeds both failed — on those 17 the rule judge in the same arm stalled every time
+   (`stall_exhausted`: 16 `arm_pinned`, 1 `no_progress`) and the expert finished 16. The gap is in the instruction-change profiles (E1 65
+   vs 72, E2 40 vs 49; E0 40 vs 40).
 4. **Safety**: r6's `q_stop` catches 1 of 52 stop onsets (the rule judge 29 of 36) and its unsafe-tick rate is 0.036 (0.0002); arm G
    delegates only the gripper, so the stop is still the model's. Whether the missing stops cause the extra forbidden contacts was not tested.
-5. **The fresh draw was easier for every policy** (expert 189 vs 182, both rule-judge arms 161–162 vs 144–145, r6G 145 vs 139): the
-   gap widened because r6G gained least, not because r6G fell.
+5. **Two samples, no finding on "easier"** (rewritten in fix round 1, review I2). Unpaired, each set bootstrapped separately: strict
+   ood_fresh − ood_dev 200 is expert +0.035 [−0.015, +0.085], r6G +0.030 [−0.060, +0.120], the rule judge +0.085 [+0.005, +0.165] and
+   ruleG +0.085 [+0.005, +0.165] (borderline — lower bound ≤ 0 under 84 and 105 of 200 RNG seeds), and the change of the `ruleG − r6G` gap
+   +0.055 [−0.030, +0.150]. Under the zero rule neither "the fresh draw was easier for every policy" nor "the gap widened" holds; the
+   registered call does not rest on either.
 6. **A scene-timing edge of the generator**: in E1:1110410 the second instruction is scheduled at the instant the done tail ends, so a
    completed first instruction is scored against the new target — a "false done" for every policy, the expert included. It cancels in every
    seed-paired comparison and changed nothing here; the harness and generator were not touched (a fix would be a generator change for a
@@ -261,7 +289,14 @@ directories; later, the selection, verdict, table and probe outputs (JSON / mark
    it repairs a collapsed gripper head — only that the best configuration we have does not match the rule judge on unseen scenes.
 
 **Next round (registered: on a fail, written from the numbers only) — DAgger aimed at stale-goal false dones,** with what the numbers say
-about its reach: false dones are r6G's largest single failure class (28 of 200; 19 stale-goal) and DAgger cycles 0–1 did not remove them,
-but only 2 of the 28 seeds the rule judge won are stale-goal false dones — r6G's stalls after main-decision or auxiliary disagreements (18
-of the 28) and its forbidden contacts (13 vs 6; `q_stop` 1 of 52) are of the same size. No contract-change proposal (delegation G into the
-harness) is supported by this round, and nothing here argues for cloud spend.
+about its reach (corrected in fix round 1, review I1 — the first version read the 2 / 17 split backwards): false dones are r6G's largest
+single failure class (27 of 200 besides the shared edge; 19 stale-goal) and DAgger cycles 0–1 did not remove them. (a) = (rule-judge-only
+− r6G-only) / 200 = (28 − 12) / 200. Of the 19 stale-goal false dones, 2 are on rule-judge-only seeds and 17 on seeds both failed, where
+the rule judge stalled every time and the expert finished 16 — a success there would be an r6G-only seed. Every stale-goal false done a fix
+turns into a success therefore lowers (a) by 0.005, whichever group it is in: turning the 2 gives +0.070, turning all 19 gives −0.015. That
+range is untested — it depends on how many of those episodes a fixed policy would actually complete. r6G's stalls after main-decision or
+auxiliary disagreements (18 of the 28 rule-judge-only seeds) and its forbidden contacts (13 vs 6; `q_stop` 1 of 52 — the safety condition
+(s)) are separate targets. **The next verdict needs a new, unused seed walk** (fix round 1, review I3): ood_fresh (1100100~) has now been
+analysed seed by seed and that analysis is designing the next round, so judging it on ood_fresh again would bring back the post hoc
+problem R11 was set up to remove. No contract-change proposal (delegation G into the harness) is supported by this round, and nothing here
+argues for cloud spend.
