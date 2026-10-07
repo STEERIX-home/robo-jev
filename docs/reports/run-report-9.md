@@ -228,3 +228,97 @@ training batch's argmax counts. Reading, per question (descriptive — three see
   0.06–0.20).
 * **`q_main`**: fit early in all three (ratio ≤ 0.24 from step 21–40 on; 0.10 · 0.04 · 0.03 at the end).
 
+## 5. The choice, the registered verdict and the descriptive readings (Stage D)
+
+**Runs, in the registered order, all after the three trainings.** GPU chain `r12-d-dev` (`artifacts/scratch/r12/d-dev.sh` → `d-model.sh`, one
+process per candidate, each with a page-cache drop, the 0.6 fence and `require_free(36 GiB)`; 02:21:05 → 03:35:38): the six candidates on
+dev_new2 100 (R6's seeds; R10/R11's dev_new2 command with `--id-tag r12`) → CPU unit `r12c-d-select` (03:35:55 → 03:36:43; `report --runs
+<the registration's selection_sources + rule, ruleG, expert, r6G on dev_new2> --only dev_new2` → `artifacts/reports/r12-selection-report.json`;
+`select --registration configs/eval/r12-registration.yaml` → `artifacts/reports/r12-selection.json`) → CPU units `r12c-d-new-{rule,expert,ruleG}`
+on ood_new (03:36:53 → 03:43:44, in parallel, GPU idle) → GPU chain `r12-d-judged` (from 03:43:50, no CPU unit running): the chosen
+configuration, then r6G, on ood_new 200.
+
+### The choice (dev_new2 100, the registered rule applied by code)
+
+| configuration | checkpoint · arm | `done` | **strict** | false done |
+| --- | --- | ---: | ---: | ---: |
+| **r12s19G** | r12s19 · G | 73 | **69** | 4 |
+| r12s17G | r12s17 · G | 69 | 65 | 4 |
+| r12s18G | r12s18 · G | 77 | 62 | 15 |
+| r12s19 | r12s19 · native | 61 | 58 | 3 |
+| r12s18 | r12s18 · native | 56 | 44 | 12 |
+| r12s17 | r12s17 · native | 0 | 0 | 0 |
+
+All six eligible (the three training runs completed at 233/233; no run applied a monitor). **Chosen: r12s19G**, decided by the first key
+(69 vs 65); no tie rule was needed. r12s17 native completes nothing — its gripper head never fit (§4) — while the same checkpoint in arm G is
+second. Beside, on the same scenes (not candidates): the rule judge 67 (native and G), the expert 90 and r6G 74 (R10's exploratory dev_new2
+run) — the best new configuration is 5 below r6G on validation.
+
+### The registered verdict (ood_new 200; `artifacts/reports/r12-verdict.json`)
+
+Final report `artifacts/reports/r12-closed-loop.json` (CPU unit `r12c-d-final`, `artifacts/scratch/r12/final-reports.sh`, 04:30:57 → 04:41:48:
+`report --runs <six selection sources + rule, ruleG, expert, r6G on dev_new2 + the five ood_new runs> --only dev_new2,ood_new --seed-pairs
+ruleG:r12s19G r12s19G:ruleG r12s19G:r6G --robustness-metrics forbidden_contacts` → `verdict --registration configs/eval/r12-registration.yaml`).
+The verdict re-chose r12s19G from the final report's dev_new2 table — identical to `select`'s choice (the chain asserts it).
+
+| condition | pair | difference [95 %] | discordant · exact test | RNG seeds 1–200 | holds if | holds? |
+| --- | --- | --- | --- | --- | --- | --- |
+| (a) strict success | `ruleG − r12s19G` | **+0.080 [+0.025, +0.135]** (0.760 vs 0.680; 152 vs 136) | 25 vs 9 · McNemar p = 0.009 | lower ≤ 0 in 0 of 200 (min +0.020) | lower ≤ 0 | **no** |
+| (s) forbidden-contact onsets / episode | `r12s19G − ruleG` | **+0.005 [+0.000, +0.015]** (0.020 vs 0.015; 4 vs 3 onsets) | seeds higher 1 vs 0 · sign test p = 1.000 | lower ≤ 0 in 200 of 200 | lower ≤ 0 | **yes** |
+
+**Registered call: fail — "불통과 — 사이클 2 뒤에도 검증으로 고른 구성은 처음 보는 홀드아웃에서 규칙 판정기에 확실히 뒤지거나 금지 접촉이 확실히
+많다"** (`failed: ['a']`): the chosen configuration still clearly trails the rule judge in its arm on strict success; on forbidden contacts these
+200 episodes do not separate the two (that is not "equal"). dev_new2 (the choice set, beside only): (a) −0.020 [−0.120, +0.070] (11 vs 13),
+(s) +0.000 [−0.030, +0.030].
+
+### Second evidence and descriptive readings (not used to judge)
+
+| policy (ood_new 200) | `done` | **strict** [95 %] | false done (stale goal) | failures main / aux / geometric | first grasp on a non-instructed object | `q_stop` caught / onsets | forbidden-contact onsets (episodes) | unsafe ticks / acted |
+| --- | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: |
+| **r12s19G** (chosen) | 141 | **136** [0.610, 0.745] | **5 (3)** | 23 / 32 / 4 | 4 | 0/52 | **4** (4) | 0.0120 |
+| ruleG (same arm) | 153 | **152** [0.700, 0.815] | 1 (0) | 0 / 9 / 38 | 0 | 43/50 | 3 (3) | 0.0000 |
+| rule (native) | 154 | 153 [0.705, 0.820] | 1 (0) | 0 / 45 / 1 | 0 | 40/47 | 3 (3) | 0.0000 |
+| expert | 182 | 181 [0.860, 0.945] | 1 (0) | 0 / 1 / 17 | 0 | 53/53 | 4 (4) | 0.0000 |
+| **r6G** (before cycle 2) | 168 | **139** [0.630, 0.760] | **29 (16)** | 18 / 10 / 4 | 16 | 1/79 | **17** (9) | 0.0348 |
+
+(Failure classes and first grasps by `artifacts/scratch/r12/failures.py` → `failures.json`; stale goal by the seed metric and R9's
+`false_done_mechanism.py` → `artifacts/scratch/r12/false-done-mechanism.json`, which agree; tables `artifacts/scratch/r12/d-tables.md`.)
+
+* **Second evidence — cycle 2 against the best configuration before it (`r12s19G − r6G`, seed-paired on ood_new)**: strict **−0.015
+  [−0.070, +0.045]** (16 vs 19 discordant, p = 0.74 — no difference found); false dones **−0.120 [−0.170, −0.075]** (1 vs 25 seeds, p = 8 ×
+  10⁻⁷); stale-goal false dones **−0.065 [−0.100, −0.035]** (3 vs 16); forbidden-contact onsets **−0.065 [−0.155, −0.005]** per episode (4 vs 17;
+  seeds 1 vs 6, sign test p = 0.125; the upper bound stays below zero under all 200 RNG seeds — the per-seed sign test does not reach 0.05); beside:
+  auxiliary failures +0.110 [+0.055, +0.165], main-decision failures +0.025 [−0.025, +0.080] (no difference found), missing reference gripper
+  transitions +0.139 [+0.030, +0.236], wrong-action ticks −0.046 [−0.078, −0.015], unsafe ticks −0.023 [−0.047, −0.001]. On dev_new2 the same
+  pair reads strict −0.050 [−0.150, +0.050], false dones −0.110 [−0.180, −0.050], stale-goal −0.090 [−0.150, −0.040].
+* **Where the gap to the rule judge is now** (`artifacts/scratch/r12/discordant.json`): the 25 seeds only ruleG solved are r12s19G stalls —
+  14 after an auxiliary disagreement (`q_path` 29 · `q_speed` 10 · `q_force` 3 · `q_gripper` 2 streaks among its 32 auxiliary failures), 10 after
+  a main-decision disagreement (9 `stall_exhausted`, 1 `max_ms`) and 1 geometric — **none is a false done**; the 9 seeds only r12s19G solved
+  are all rule-judge geometric stalls. Of r12s19G's 64 failures: 32 auxiliary, 23 main-decision, 5 false dones (3 stale goal, 1 other, 1 the
+  shared edge below), 4 geometric. By profile (strict, r12s19G vs ruleG): E0 39 vs 40, E1 67 vs 69, **E2 30 vs 43**. Against r6G the
+  16 r12s19G-only seeds are r6G false dones (9 — 3 stale goal, 5 another non-target, 1 other) and stalls (7); the 19 r6G-only seeds are r12s19G
+  stalls (auxiliary 11, main 7) and 1 false done — cycle 2 turned false dones into stalls about one for one.
+* Seed-paired `r12s19G − ruleG` beside the verdict: false dones +0.020 [+0.005, +0.040] (4 vs 0 seeds), main-decision failures **+0.115
+  [+0.075, +0.160]**, auxiliary failures +0.115 [+0.065, +0.165], wrong-action ticks +0.032 [+0.018, +0.048], unsafe ticks +0.012 [+0.004,
+  +0.023], `q_stop` catch **−0.860 [−0.952, −0.755]**; `rule − r12s19G` strict +0.085 [+0.030, +0.140]; `expert − r12s19G` +0.225 [+0.170,
+  +0.285]; `ruleG − rule` −0.005 [−0.015, −0.000].
+* **The three seeds** (`distribution`; strict on dev_new2, native · G): seed 18 44 · 62 (false dones 12 · 15 — 13 of the G arm's 15 are stale
+  goal), seed 17 **0** · 65 (its gripper head never fit — every native episode ends `stall_exhausted`; delegation rescues it), seed 19 58 · 69 (3
+  · 4). The stale-goal repair is seed-dependent: seeds 17 and 19 under G have 4 false dones each on dev_new2, seed 18 under G 15 (r6G 15). Only
+  r12s19G ran on ood_new (136 strict, 5 false dones).
+* **One false done is shared by every policy, the expert included**: E1:1161544 — the first instruction (o6 → zoneL) is complete at the done
+  tick (71) and at the last tick, but the second instruction is scheduled at 7,420 ms, inside the 0.3 s done tail that ends the episode at
+  7,500 ms, so the outcome is scored against the new target (o0) — the same generator timing edge as R11's E1:1110410
+  (`artifacts/scratch/r12/check/edge_probe.py`, unit `r12c-d-edge-probe`). All five policies end it at tick 71, so it cancels in every
+  seed-paired comparison; nothing was changed.
+
+**Latency** (`latency.model_ms` excludes each episode's first tick; no CPU unit ran during either judged GPU run): r12s19G on ood_new non-first
+ticks p50 / p95 / p99 **43.4 / 56.4 / 81.5 ms**, 1 of 18,070 over 100 ms, observation → command p95 62.8 ms; first ticks p50 93.0, max 270.9 ms,
+18 of 200 over 100 ms. r6G on ood_new 43.7 / 56.6 / 81.6 ms, 0 of 19,467 (first ticks 24 of 200). The six dev_new2 runs: p95 56.8–57.9 ms, 2 of
+57,374 non-first ticks over 100 ms (both r12s17G), first ticks 10–22 of 100 over 100 ms. The gate (p95 ≤ 80 ms, > 100 ms ≤ 5 %) passes.
+
+**Records.** All eleven new closed-loop directories (`artifacts/datasets/r12-closed-loop/`, 1.5 GB) carry one version set — harness `h0.9`,
+controller `c0.6`, expert `e0.4`, rule judge `rj0.5`, generator `gen-robot-v0.3`, generator-config digest `c297ada2e90a` (R10/R11's) — and every
+model run file records contract `93fe26725a4c`, serializer `ts0.6`, fence 0.6, git `fb635d7` (the registration commit). The four checkpoints
+read (r12s18, r12s17, r12s19, r6) have the same size and mtime before their first load and after the last report
+(`artifacts/scratch/r12/checkpoints-stat-{before,after}.txt`).
