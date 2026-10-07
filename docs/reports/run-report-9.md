@@ -322,3 +322,68 @@ controller `c0.6`, expert `e0.4`, rule judge `rj0.5`, generator `gen-robot-v0.3`
 model run file records contract `93fe26725a4c`, serializer `ts0.6`, fence 0.6, git `fb635d7` (the registration commit). The four checkpoints
 read (r12s18, r12s17, r12s19, r6) have the same size and mtime before their first load and after the last report
 (`artifacts/scratch/r12/checkpoints-stat-{before,after}.txt`).
+
+## 6. Measured cost
+
+| unit (systemd, `Started` → end) | what | wall |
+| --- | --- | ---: |
+| `r12-a-smoke` | GPU: collection smoke, 2 episodes | 0 h 00 m 43 s |
+| `r12-a-collect` | GPU: DAgger cycle 2 collection, 400 episodes (r6G under the done gate) | 0 h 52 m 27 s |
+| `r12-t1-s18` | GPU: training, seed 18, 233 steps | 3 h 56 m 34 s |
+| `r12-t1-s17` | GPU: training, seed 17, 233 steps | 3 h 58 m 54 s |
+| `r12-t1-s19` | GPU: training, seed 19, 233 steps | 3 h 59 m 41 s |
+| `r12-d-dev` | GPU: the six candidates on dev_new2 (100 each) | 1 h 14 m 33 s |
+| `r12-d-judged` | GPU: r12s19G and r6G on ood_new (200 each) | 0 h 46 m 45 s |
+| `r12-pytest` | GPU: full suite (fence 0.6 + `require_free(36 GiB)` checked first; nothing else on the GPU) | 0 h 09 m 38 s |
+| **GPU total** | | **53,955 s = 14.99 GPU-h** (brief ≈ 15 h) |
+
+CPU units (`r12c-*`, CUDA hidden, MemoryMax, `choom -n 1000`, Nice 10): the two seed walks and their re-checks (5–30 s each), the two overlap
+reports, the smoke checks, the stale-goal regression on R11's records (13 s), the relabel / QA / A3 tables / strata / ood_new overlap chain
+(`r12c-a3`, 1 m 38 s), the training facts (`r12c-c-facts-*`, ≈ 15 s per seed), the choice (`r12c-d-select`, 48 s), rule / expert / ruleG on
+ood_new (6 m 34 s – 6 m 51 s, in parallel, GPU idle), the final report and verdict (`r12c-d-final`, 10 m 51 s, MemoryMax 40G — it did not
+overlap any GPU unit), the discordant and edge probes, and the development test units (`r12c-pt-*`). Disk: `/` 134 → 52 GB free (10⁹ B; three
+checkpoints 3 × 26.35 GB, dagger-2 421 MB, closed-loop records 1.5 GB, scratch 617 MB). `journalctl -k` since 2026-10-07 13:00: 49 kernel lines,
+no `NVRM`, OOM or killed-process line (the same query shows R9's seven `NVRM` lines of 2026-09-30). Cumulative GPU on the DGX Spark ≈ 82.0 h.
+Cloud spend 0.
+
+**Every CPU job that read records ran as a unit (HANDOFF §5).** Outside units the session shell read only tracked files, scripts, logs, report
+JSONs and dataset-manifest metadata — never an episode record; the complete list with times, including the reads that happened while a GPU unit
+was up (report JSONs during `r12-a-smoke`, `r12-a-collect`, `r12-t1-s18`, `r12-t1-s17` and `r12-t1-s19`; two manifests' first `files` entry keys
+during `r12-a-collect`; `metrics.json` git/status fields), is `artifacts/scratch/r12/session-shell-reads.md`.
+
+## 7. What the round says, and what it does not
+
+1. **Registered call: fail — "불통과 — 사이클 2 뒤에도 검증으로 고른 구성은 처음 보는 홀드아웃에서 규칙 판정기에 확실히 뒤지거나 금지 접촉이 확실히
+   많다", on condition (a) only.** The configuration chosen on validation (r12s19G, 69 of 100 on dev_new2, the highest of six) trails the rule
+   judge in its arm on 200 scenes no policy had run — `ruleG − r12s19G` strict **+0.080 [+0.025, +0.135]** (152 vs 136; 25 vs 9 discordant, p =
+   0.009; above zero under all 200 alternative bootstrap seeds). Condition (s) holds: forbidden-contact onsets `r12s19G − ruleG` **+0.005
+   [+0.000, +0.015]** per episode (4 vs 3) — these 200 episodes do not show r12s19G making clearly more forbidden contacts, which is not "equal".
+2. **Cycle 2 did what it aimed at, and the success count did not move.** Against r6G on the same 200 scenes (second evidence, seed-paired):
+   false dones −0.120 [−0.170, −0.075] (5 vs 29), stale-goal false dones −0.065 [−0.100, −0.035] (3 vs 16), forbidden-contact onsets −0.065
+   [−0.155, −0.005] (4 vs 17), unsafe ticks −0.023 [−0.047, −0.001] — and strict success −0.015 [−0.070, +0.045] (136 vs 139; no difference
+   found). The episodes it no longer ends falsely end in stalls instead: auxiliary failures +0.110 [+0.055, +0.165] (32 vs 10), `stall_exhausted`
+   58 vs 31; seed by seed, its 16 wins over r6G are r6G false dones (9) and stalls (7), its 19 losses are its own stalls or timeouts (18) and one false done.
+3. **The remaining gap to the rule judge is stalls, not false dones** (descriptive). The 25 seeds only the rule judge solved are r12s19G stalls
+   after auxiliary disagreements (14; its 32 auxiliary failures carry `q_path` 29 · `q_speed` 10 · `q_force` 3 · `q_gripper` 2 streaks) and after
+   main-decision disagreements (10; one of them ran out of time, `max_ms`), plus 1 geometric — none is a false done; the 9 seeds only r12s19G solved are rule-judge geometric stalls.
+   Seed-paired against ruleG: main-decision failures +0.115 [+0.075, +0.160], auxiliary +0.115 [+0.065, +0.165], false dones +0.020 [+0.005,
+   +0.040] (4 vs 0). The gap is in E2 (30 vs 43; E0 39 vs 40, E1 67 vs 69).
+4. **The stop is unchanged**: `q_stop` caught 0 of 52 stop onsets (the rule judge 43 of 50; `−0.860 [−0.952, −0.755]`), and in training no seed
+   ever answered `true` on a stop-true tick. Arm G delegates only the gripper; the stop is still the model's.
+5. **The three seeds** (descriptive, three is not a sample a recipe interval can be computed from): seed 17's gripper head never fit (native 0
+   of 100 on dev_new2; under G 65), seed 18's and 19's fit late (onset 179 · 181) — R8's step-150 statistic would have stopped all three; the
+   stale-goal repair is seed-dependent (dev_new2 false dones under G: seed 18 15, seeds 17 and 19 4 each). Validation chose seed 19's G arm,
+   69, below r6G's 74 on the same set.
+6. **A scene-timing edge of the generator, again**: E1:1161544's second instruction is scheduled inside the done tail, so a completed first
+   instruction is scored against the new target — a false done for all five policies. It cancels in every seed-paired comparison; the harness
+   and generator were not touched.
+7. **What the round does not say.** Only the chosen configuration (and r6G, as the registered second evidence) ran on ood_new, so the other five
+   configurations are not ranked there; one holdout of 200; one recipe at three seeds; the rule judge reads the structured goal while the model
+   reads the instruction text. It does not say DAgger cycle 2 failed at its target — the false dones and contacts it aimed at fell — only that
+   the chosen configuration does not yet match the rule judge on success.
+
+**Next round (registered: written from the numbers only).** The gap that remains is the stalls after auxiliary (`q_path`/`q_speed`) and
+main-decision disagreements — all 25 seeds the rule judge won — concentrated in E2, with `q_stop` still catching nothing; false dones and
+forbidden contacts are no longer what separates the two on this holdout. ood_new (1150100~) has now been analysed seed by seed, so the next
+verdict needs another unused seed walk. No contract-change proposal (delegation G into the harness) is made by this round, and nothing here
+argues for cloud spend.
