@@ -148,7 +148,7 @@ dagger-1-donegate, `r1/single-by-split` — their manifests' sha256 enter each r
 | episodes · ticks | 400 · 43,845 |
 | ended under the expert's gate | `done_tail` 356 (355 with the target inside), `stall_exhausted` 43, `max_ms` 1 |
 | model raw false-done events (raw `q_done` ≥ 0.5 on a reference-False tick; runs of ticks) | **55 events · 117 ticks · 51 episodes** (E2 30, E1 19, E0 2); 6 events of ≥ 4 ticks would have ended the episode under the model's own gate |
-| of which **stale-goal** (at the event's first tick: the last grasp commitment before it was on an object that was not that grasp tick's target and had been an earlier instruction's target — R9 fix round 1's definition) | **41 events in 40 episodes** (E2 26, E1 14); the other 14: 6 after a last grasp on another non-target, 8 after a last grasp on the current target |
+| of which **stale-goal** (at the event's first tick: the last grasp commitment before it was on an object that was not that grasp tick's target and had been an earlier instruction's target — R9 fix round 1's definition) | **41 events in 40 episodes** (E2 26, E1 14); the other 14: 6 after a last grasp on a non-target no earlier instruction had named, 5 after a last grasp on the event tick's current target, and 3 after a last grasp on the target of its grasp tick that a later instruction had replaced before the event — an earlier instruction's target completed before the change, not stale under R9's definition, which needs the object not to be the target at its grasp tick (fix round 1, review M2; the first version said "8 after a last grasp on the current target") |
 | after the first stale-goal event | the model grasped the current target in **33 of 40** episodes; 32 completed |
 | forbidden-contact onsets while the model drove (forbidden set = `goal.forbidden_contact` accumulated over the episode — the (s) set) | **21 onsets in 12 episodes** (E0 11 in 3, E1 4 in 3, E2 6 in 6; one E0 episode has 9) |
 | near-forbidden ticks (end effector within *r* of a forbidden object's observed pose, 3-D distance) | *r* = 60 mm (the harness's `compose.forbidden_proximity_mm`): **307 ticks in 5 episodes**; *r* = 40 mm (the expert's `stop_forbidden_mm`): 275 ticks in 5 episodes |
@@ -284,28 +284,42 @@ The verdict re-chose r12s19G from the final report's dev_new2 table — identica
 (Failure classes and first grasps by `artifacts/scratch/r12/failures.py` → `failures.json`; stale goal by the seed metric and R9's
 `false_done_mechanism.py` → `artifacts/scratch/r12/false-done-mechanism.json`, which agree; tables `artifacts/scratch/r12/d-tables.md`.)
 
-* **Second evidence — cycle 2 against the best configuration before it (`r12s19G − r6G`, seed-paired on ood_new)**: strict **−0.015
-  [−0.070, +0.045]** (16 vs 19 discordant, p = 0.74 — no difference found); false dones **−0.120 [−0.170, −0.075]** (1 vs 25 seeds, p = 8 ×
-  10⁻⁷); stale-goal false dones **−0.065 [−0.100, −0.035]** (3 vs 16); forbidden-contact onsets **−0.065 [−0.155, −0.005]** per episode (4 vs 17;
-  seeds 1 vs 6, sign test p = 0.125; the upper bound stays below zero under all 200 RNG seeds — the per-seed sign test does not reach 0.05); beside:
-  auxiliary failures +0.110 [+0.055, +0.165], main-decision failures +0.025 [−0.025, +0.080] (no difference found), missing reference gripper
-  transitions +0.139 [+0.030, +0.236], wrong-action ticks −0.046 [−0.078, −0.015], unsafe ticks −0.023 [−0.047, −0.001]. On dev_new2 the same
-  pair reads strict −0.050 [−0.150, +0.050], false dones −0.110 [−0.180, −0.050], stale-goal −0.090 [−0.150, −0.040].
-* **Where the gap to the rule judge is now** (`artifacts/scratch/r12/discordant.json`): the 25 seeds only ruleG solved are r12s19G stalls —
-  14 after an auxiliary disagreement (`q_path` 29 · `q_speed` 10 · `q_force` 3 · `q_gripper` 2 streaks among its 32 auxiliary failures), 10 after
-  a main-decision disagreement (9 `stall_exhausted`, 1 `max_ms`) and 1 geometric — **none is a false done**; the 9 seeds only r12s19G solved
-  are all rule-judge geometric stalls. Of r12s19G's 64 failures: 32 auxiliary, 23 main-decision, 5 false dones (3 stale goal, 1 other, 1 the
-  shared edge below), 4 geometric. By profile (strict, r12s19G vs ruleG): E0 39 vs 40, E1 67 vs 69, **E2 30 vs 43**. Against r6G the
-  16 r12s19G-only seeds are r6G false dones (9 — 3 stale goal, 5 another non-target, 1 other) and stalls (7); the 19 r6G-only seeds are r12s19G
-  stalls (auxiliary 11, main 7) and 1 false done — cycle 2 turned false dones into stalls about one for one.
-* Seed-paired `r12s19G − ruleG` beside the verdict: false dones +0.020 [+0.005, +0.040] (4 vs 0 seeds), main-decision failures **+0.115
-  [+0.075, +0.160]**, auxiliary failures +0.115 [+0.065, +0.165], wrong-action ticks +0.032 [+0.018, +0.048], unsafe ticks +0.012 [+0.004,
-  +0.023], `q_stop` catch **−0.860 [−0.952, −0.755]**; `rule − r12s19G` strict +0.085 [+0.030, +0.140]; `expert − r12s19G` +0.225 [+0.170,
-  +0.285]; `ruleG − rule` −0.005 [−0.015, −0.000].
+* **Second evidence — the chosen configuration against the best configuration before cycle 2 (`r12s19G − r6G`, seed-paired on ood_new)**:
+  strict **−0.015 [−0.070, +0.045]** (16 vs 19 discordant, p = 0.74 — no difference found); false dones **−0.120 [−0.170, −0.075]** (1 vs 25
+  seeds, p = 8 × 10⁻⁷); stale-goal false dones **−0.065 [−0.100, −0.035]** (3 vs 16); forbidden-contact onsets **−0.065 [−0.155, −0.005]** per
+  episode (4 vs 17 — 7 of r6G's 17 on one seed, E2:1171395; by seed 1 vs 6, sign test p = 0.125; the upper bound stays below zero under all 200
+  RNG seeds — the per-seed sign test does not reach 0.05); beside: auxiliary failures +0.110 [+0.055, +0.165], `stall_exhausted` endings 58 vs
+  31, **+0.135 [+0.075, +0.195]**, main-decision failures +0.025 [−0.025, +0.080] (no difference found), missing reference gripper transitions
+  +0.139 [+0.030, +0.236], wrong-action ticks −0.046 [−0.078, −0.015], unsafe ticks −0.023 [−0.047, −0.001]. On dev_new2 the same pair reads
+  strict −0.050 [−0.150, +0.050], false dones −0.110 [−0.180, −0.050], stale-goal −0.090 [−0.150, −0.040]. *(Fix round 1, review I2 — what this
+  compares:)* one configuration — training seed 19, the best of six on dev_new2 — against r6G, training seed 18. Seed-paired with r6G on
+  dev_new2 in the same arm (`artifacts/scratch/r12/fix1/verify.json`), the false-done reduction appears for **seed 17** (4 vs 15, −0.11 [−0.17,
+  −0.05]; stale-goal 4 vs 12, −0.08 [−0.14, −0.03]) and **seed 19** (4 vs 15, −0.11 [−0.18, −0.05]; stale-goal 3 vs 12) but **not for the seed-18
+  retrain** (15 vs 15, 0.00 [−0.05, +0.05]; stale-goal 13 vs 12, +0.01 [−0.02, +0.04]; its strict success fell, −0.12 [−0.20, −0.05], 2 vs 14
+  discordant, p = 0.004); forbidden contacts show no difference on dev_new2 for any of the three (3 vs 3, 3 vs 3, 1 vs 3). The reduction is seen
+  in two of three seeds; with the material, the training seed and the selection bound together it is not shown to be an effect of cycle 2.
+* **The 25 seeds behind the strict gap** (`artifacts/scratch/r12/discordant.json`): the seeds only ruleG solved are r12s19G stalls — 14 after an
+  auxiliary disagreement (13 with a `q_path` streak; one, E1:1160457, with only `q_force` and `q_gripper` streaks — fix round 1, review M8; over
+  all 32 auxiliary failures the streaks are `q_path` 29 · `q_speed` 10 · `q_force` 3 · `q_gripper` 2), 10 after a main-decision disagreement (9
+  `stall_exhausted`, 1 `max_ms`) and 1 geometric — **none is a false done**; the 9 seeds only r12s19G solved are all rule-judge geometric
+  stalls. Of r12s19G's 64 failures: 32 auxiliary, 23 main-decision, 5 false dones (3 stale goal, 1 other, 1 the shared edge below), 4
+  geometric. By profile (strict, r12s19G vs ruleG): E0 39 vs 40, E1 67 vs 69, **E2 30 vs 43**; seed-paired `ruleG − r12s19G` (fix round 1,
+  review I4): E2 **+0.163 [+0.038, +0.288]**, E0 + E1 +0.025 [−0.025, +0.075], the difference of the two gaps **+0.138 [+0.008, +0.258]**
+  (stratified bootstrap — E2 and E0 + E1 seeds resampled separately, 2,000 resamples, RNG seed 20260921); 19 of the 25 ruleG-only seeds are E2.
+  Against r6G the 16 r12s19G-only seeds are r6G false dones (9 — 3 stale goal, 5 another non-target, 1 other) and stalls (7); the 19 r6G-only
+  seeds are r12s19G stalls or timeouts (18) and 1 false done — the chosen configuration's wins over r6G are mostly r6G false dones and its losses
+  its own stalls.
+* Seed-paired `r12s19G − ruleG` beside the verdict: false dones **+0.020 [+0.005, +0.040]** (5 vs 1; 4 vs 0 seeds — the false-done rate still
+  differs, although none of the 25 ruleG-only seeds is a false done: r12s19G's four false dones besides the shared edge fall on seeds where ruleG
+  also failed, 3 geometric and 1 auxiliary stall, so turning them into successes would move (a) only from +0.080 to +0.060 — fix round 1, review
+  I3), main-decision failures **+0.115 [+0.075, +0.160]**, auxiliary failures +0.115 [+0.065, +0.165], wrong-action ticks +0.032 [+0.018,
+  +0.048], unsafe ticks +0.012 [+0.004, +0.023], `q_stop` catch **−0.860 [−0.952, −0.755]**; `rule − r12s19G` strict +0.085 [+0.030, +0.140];
+  `expert − r12s19G` +0.225 [+0.170, +0.285]; `ruleG − rule` −0.005 [−0.015, 0.000] (zero inside; fix round 1, review M3 — the first version
+  printed a sign-flipped −0.000).
 * **The three seeds** (`distribution`; strict on dev_new2, native · G): seed 18 44 · 62 (false dones 12 · 15 — 13 of the G arm's 15 are stale
   goal), seed 17 **0** · 65 (its gripper head never fit — every native episode ends `stall_exhausted`; delegation rescues it), seed 19 58 · 69 (3
-  · 4). The stale-goal repair is seed-dependent: seeds 17 and 19 under G have 4 false dones each on dev_new2, seed 18 under G 15 (r6G 15). Only
-  r12s19G ran on ood_new (136 strict, 5 false dones).
+  · 4). The false-done reduction is seed-dependent: seeds 17 and 19 under G have 4 false dones each on dev_new2 (each −0.11 against r6G's 15),
+  seed 18 under G 15 (0.00 [−0.05, +0.05]). Only r12s19G ran on ood_new (136 strict, 5 false dones).
 * **One false done is shared by every policy, the expert included**: E1:1161544 — the first instruction (o6 → zoneL) is complete at the done
   tick (71) and at the last tick, but the second instruction is scheduled at 7,420 ms, inside the 0.3 s done tail that ends the episode at
   7,500 ms, so the outcome is scored against the new target (o0) — the same generator timing edge as R11's E1:1110410
@@ -347,9 +361,12 @@ no `NVRM`, OOM or killed-process line (the same query shows R9's seven `NVRM` li
 Cloud spend 0.
 
 **Every CPU job that read records ran as a unit (HANDOFF §5).** Outside units the session shell read only tracked files, scripts, logs, report
-JSONs and dataset-manifest metadata — never an episode record; the complete list with times, including the reads that happened while a GPU unit
-was up (report JSONs during `r12-a-smoke`, `r12-a-collect`, `r12-t1-s18`, `r12-t1-s17` and `r12-t1-s19`; two manifests' first `files` entry keys
-during `r12-a-collect`; `metrics.json` git/status fields), is `artifacts/scratch/r12/session-shell-reads.md`.
+JSONs and dataset-manifest metadata — never an episode record; the list with times, including the reads that happened while a GPU unit was up
+(report JSONs during `r12-a-smoke`, `r12-a-collect`, `r12-t1-s18`, `r12-t1-s17`, `r12-t1-s19` and `r12-d-dev`; two manifests' first `files`
+entry keys during `r12-a-collect`; `metrics.json` git/status fields; during `r12-pytest` the verdict JSON, the eleven R12 closed-loop manifests
+and the `versions` of three manifests — R12's r12s19G/ood_new again, R11's r6G/ood_fresh and dagger-2), is
+`artifacts/scratch/r12/session-shell-reads.md` — completed in fix round 1 (review M1: the first version stopped at 22:27 and so missed
+22:37 during `r12-t1-s19`, 02:21 during `r12-d-dev` and 04:42–04:43 during `r12-pytest`; it now runs to the handback).
 
 ## 7. What the round says, and what it does not
 
@@ -358,32 +375,46 @@ during `r12-a-collect`; `metrics.json` git/status fields), is `artifacts/scratch
    judge in its arm on 200 scenes no policy had run — `ruleG − r12s19G` strict **+0.080 [+0.025, +0.135]** (152 vs 136; 25 vs 9 discordant, p =
    0.009; above zero under all 200 alternative bootstrap seeds). Condition (s) holds: forbidden-contact onsets `r12s19G − ruleG` **+0.005
    [+0.000, +0.015]** per episode (4 vs 3) — these 200 episodes do not show r12s19G making clearly more forbidden contacts, which is not "equal".
-2. **Cycle 2 did what it aimed at, and the success count did not move.** Against r6G on the same 200 scenes (second evidence, seed-paired):
-   false dones −0.120 [−0.170, −0.075] (5 vs 29), stale-goal false dones −0.065 [−0.100, −0.035] (3 vs 16), forbidden-contact onsets −0.065
-   [−0.155, −0.005] (4 vs 17), unsafe ticks −0.023 [−0.047, −0.001] — and strict success −0.015 [−0.070, +0.045] (136 vs 139; no difference
-   found). The episodes it no longer ends falsely end in stalls instead: auxiliary failures +0.110 [+0.055, +0.165] (32 vs 10), `stall_exhausted`
-   58 vs 31; seed by seed, its 16 wins over r6G are r6G false dones (9) and stalls (7), its 19 losses are its own stalls or timeouts (18) and one false done.
-3. **The remaining gap to the rule judge is stalls, not false dones** (descriptive). The 25 seeds only the rule judge solved are r12s19G stalls
-   after auxiliary disagreements (14; its 32 auxiliary failures carry `q_path` 29 · `q_speed` 10 · `q_force` 3 · `q_gripper` 2 streaks) and after
-   main-decision disagreements (10; one of them ran out of time, `max_ms`), plus 1 geometric — none is a false done; the 9 seeds only r12s19G solved are rule-judge geometric stalls.
-   Seed-paired against ruleG: main-decision failures +0.115 [+0.075, +0.160], auxiliary +0.115 [+0.065, +0.165], false dones +0.020 [+0.005,
-   +0.040] (4 vs 0). The gap is in E2 (30 vs 43; E0 39 vs 40, E1 67 vs 69).
+2. **The chosen configuration made fewer false dones, stale-goal false dones and forbidden contacts than r6G, and no difference in strict
+   success was found — the reduction is not shown to be an effect of cycle 2 as such** (rewritten in fix round 1, reviews I1 and I2; the
+   first version read "Cycle 2 did what it aimed at, and the success count did not move"). Against r6G on the same 200 scenes (second
+   evidence, seed-paired): false dones −0.120 [−0.170, −0.075] (5 vs 29), stale-goal false dones −0.065 [−0.100, −0.035] (3 vs 16),
+   forbidden-contact onsets −0.065 [−0.155, −0.005] (4 vs 17 — 7 of r6G's 17 on one seed; by seed 1 vs 6, sign test p = 0.125), unsafe ticks
+   −0.023 [−0.047, −0.001]; strict success −0.015 [−0.070, +0.045] (136 vs 139) — no difference found. Where it did not end falsely it more
+   often stalled: auxiliary failures +0.110 [+0.055, +0.165] (32 vs 10), `stall_exhausted` 58 vs 31, +0.135 [+0.075, +0.195]; seed by seed,
+   its 16 wins over r6G are r6G false dones (9) and stalls (7), its 19 losses its own stalls or timeouts (18) and one false done. This is one
+   configuration (training seed 19, the best of six on dev_new2) against r6G (training seed 18). On dev_new2, seed-paired with r6G in the same
+   arm, the false-done reduction appears for seeds 17 and 19 (−0.11 each) and not for the seed-18 retrain (15 vs 15, 0.00 [−0.05, +0.05]; its
+   strict success fell, −0.12 [−0.20, −0.05]); forbidden contacts show no difference there for any seed. Seen in two of three seeds.
+3. **The 25 seeds behind the strict gap to the rule judge are stalls, not false dones — the false-done rate still differs** (descriptive;
+   rewritten in fix round 1, review I3: the first version said "the remaining gap … is stalls, not false dones"). The 25 seeds only the rule
+   judge solved are r12s19G stalls after auxiliary disagreements (14 — 13 with a `q_path` streak, one with only `q_force` and `q_gripper`
+   streaks) and after main-decision disagreements (10; one ran out of time, `max_ms`), plus 1 geometric — none is a false done; the 9 seeds only
+   r12s19G solved are rule-judge geometric stalls. Seed-paired against ruleG: main-decision failures +0.115 [+0.075, +0.160], auxiliary +0.115
+   [+0.065, +0.165], and **false dones +0.020 [+0.005, +0.040]** (5 vs 1) — r12s19G's four false dones besides the shared edge fall on seeds
+   the rule judge also failed, so turning them into successes would move (a) only from +0.080 to +0.060. The strict gap is in E2: +0.163
+   [+0.038, +0.288] (43 vs 30) against +0.025 [−0.025, +0.075] on E0 + E1 (109 vs 106 — E0 40 vs 39, E1 69 vs 67), the difference
+   +0.138 [+0.008, +0.258] (stratified bootstrap); 19 of the 25 rule-only seeds are E2.
 4. **The stop is unchanged**: `q_stop` caught 0 of 52 stop onsets (the rule judge 43 of 50; `−0.860 [−0.952, −0.755]`), and in training no seed
    ever answered `true` on a stop-true tick. Arm G delegates only the gripper; the stop is still the model's.
 5. **The three seeds** (descriptive, three is not a sample a recipe interval can be computed from): seed 17's gripper head never fit (native 0
    of 100 on dev_new2; under G 65), seed 18's and 19's fit late (onset 179 · 181) — R8's step-150 statistic would have stopped all three; the
-   stale-goal repair is seed-dependent (dev_new2 false dones under G: seed 18 15, seeds 17 and 19 4 each). Validation chose seed 19's G arm,
-   69, below r6G's 74 on the same set.
+   false-done reduction is seed-dependent (dev_new2 false dones under G: seed 18 15, seeds 17 and 19 4 each; r6G 15 — −0.11 for seeds 17 and 19,
+   0.00 [−0.05, +0.05] for seed 18; fix round 1, review I2). Validation chose seed 19's G arm, 69, below r6G's 74 on the same set.
 6. **A scene-timing edge of the generator, again**: E1:1161544's second instruction is scheduled inside the done tail, so a completed first
    instruction is scored against the new target — a false done for all five policies. It cancels in every seed-paired comparison; the harness
    and generator were not touched.
 7. **What the round does not say.** Only the chosen configuration (and r6G, as the registered second evidence) ran on ood_new, so the other five
    configurations are not ranked there; one holdout of 200; one recipe at three seeds; the rule judge reads the structured goal while the model
-   reads the instruction text. It does not say DAgger cycle 2 failed at its target — the false dones and contacts it aimed at fell — only that
-   the chosen configuration does not yet match the rule judge on success.
+   reads the instruction text. Whether cycle 2 caused the chosen configuration's fewer false dones and contacts is not shown — one configuration
+   against r6G, and the seed-18 retrain shows no false-done reduction on dev_new2 (fix round 1, review I2; the first version said "the false dones
+   and contacts it aimed at fell"); what the round shows is that the chosen configuration does not yet match the rule judge on success.
 
-**Next round (registered: written from the numbers only).** The gap that remains is the stalls after auxiliary (`q_path`/`q_speed`) and
-main-decision disagreements — all 25 seeds the rule judge won — concentrated in E2, with `q_stop` still catching nothing; false dones and
-forbidden contacts are no longer what separates the two on this holdout. ood_new (1150100~) has now been analysed seed by seed, so the next
+**Next round (registered: written from the numbers only).** The strict gap that remains is the stalls after auxiliary (mostly `q_path`) and
+main-decision disagreements — all 25 seeds the rule judge won — concentrated in E2 (+0.163 [+0.038, +0.288] against +0.025 [−0.025, +0.075]
+on E0 + E1), with `q_stop` still catching nothing. None of those 25 seeds ends in a false done, but the false-done rate still differs (+0.020
+[+0.005, +0.040], 5 vs 1); forbidden contacts are not separated on this holdout (+0.005 [+0.000, +0.015] — which is not "equal"). Which part of
+the chosen configuration's lower false-done count is cycle 2's is open: the seed-18 retrain shows none on dev_new2 (fix round 1, reviews I2
+and I3). ood_new (1150100~) has now been analysed seed by seed, so the next
 verdict needs another unused seed walk. No contract-change proposal (delegation G into the harness) is made by this round, and nothing here
 argues for cloud spend.
