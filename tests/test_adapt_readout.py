@@ -337,3 +337,36 @@ def test_the_r8_training_config_is_r5s_recipe_with_r7s_data_list_and_the_registe
     assert sorted(key for key in r8[18] if r8[18][key] != r8[19][key]) == ["sampler", "seed"]
     # 기대 draw: 새 의미 계열이 비어 재정규화 → expert 0.7/0.9, DAgger 0.2/0.9 (R5와 같은 비율); DAgger 묶음 600편 중 사이클 1이 400편
     assert round(0.7 / 0.9 * 233) == 181 and round(0.2 / 0.9 * 233) == 52 and round(0.2 / 0.9 * 233 * 400 / 600) == 35
+
+
+def test_the_r12_training_config_is_r6s_recipe_with_dagger_2_in_the_dagger_bundle_and_the_split_non_robot_layout():
+    """Task R12 Stage B (사전 등록): `qwen35-2b-r12.yaml` = **r6의 조리법 그대로**(혼합 비율 0.5/0.5/0.0, `max_steps` 233, 같은 일정·lr·구간·tick weights·
+    후보 치환 — `sampler` 블록을 통째로 잇는다) + 데이터 목록에 DAgger 사이클 2(dagger-2, `material: error_family`)와 R7 A2의 비로봇 분할별 판. r6의 해석된
+    설정과 다른 키는 데이터 목록과 이름뿐이다; 감시(`head_fit_monitor`)는 없다(기록만). seed 18·17·19가 후보 치환 seed도 정하고, seed 사이에는 그 둘만 다르다."""
+    from pathlib import Path
+
+    load_train_config = script().load_train_config
+
+    def resolved(path, seed, steps=233):
+        return resolve_config(dict(load_train_config(REPO / path, mode="t1", steps=steps, seed=seed, run_id="test",
+                                                     overrides={"checkpoint_every": 50, "checkpoint_keep_steps": []})))
+
+    r12 = {seed: resolved("configs/train/qwen35-2b-r12.yaml", seed) for seed in (18, 17, 19)}
+    r6, r8 = resolved("configs/train/qwen35-2b-r6.yaml", 18), resolved("configs/train/qwen35-2b-r8.yaml", 18)
+    config = r12[18]
+    assert sorted(key for key in set(config) | set(r6) if config.get(key) != r6.get(key)) == ["dataset_manifests", "run_name"]
+    assert config["sampler"] == r6["sampler"] and config["sampler"]["material_shares"] == {"existing": 0.5, "error_family": 0.5, "new_semantic_family": 0.0}
+    manifests = config["dataset_manifests"]
+    assert [Path(entry["path"]).parent.name for entry in manifests] == ["r1-rollout-labels-g2", "dagger-0", "dagger-1", "dagger-1-donegate", "dagger-2", "single-by-split"]
+    assert [entry["domain"] for entry in manifests] == ["robot"] * 5 + ["non_robot"]
+    assert [entry.get("material") for entry in manifests] == [None, "error_family", "error_family", "error_family", "error_family", None]
+    assert Path(manifests[4]["path"]).parent.parent.name == "r12-dagger"
+    assert manifests[:4] == r6["dataset_manifests"][:4] and manifests[5] == r8["dataset_manifests"][4]  # 로봇 넷은 r6 그대로, 비로봇은 R7·R8의 분할별 판
+    assert config["max_steps"] == 233 and config["checkpoint_every"] == 50 and config["checkpoint_keep_steps"] == [] and config["splits"] == ["train"]
+    assert config["head_fit_monitor"] is None and r6["head_fit_monitor"] is None  # 감시는 기록만 — 학습을 멈추지 않는다
+    for seed in (18, 17, 19):
+        assert r12[seed]["seed"] == seed and r12[seed]["sampler"]["permute_candidates_seed"] == seed
+    assert sorted(key for key in r12[18] if r12[18][key] != r12[17][key]) == ["sampler", "seed"]
+    assert sorted(key for key in r12[18] if r12[18][key] != r12[19][key]) == ["sampler", "seed"]
+    # 기대 draw: 로봇 단위 233개의 절반이 DAgger 묶음(사이클 0·1·1 done 게이트 600편 + 사이클 2 400편 = 1,000편) — dagger-2는 그 400/1,000
+    assert round(0.5 * 233) == 116 and round(0.5 * 233 * 400 / 1000) == 47

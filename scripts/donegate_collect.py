@@ -6,6 +6,10 @@
     # 수집 (GPU): R5 체크포인트의 모델 답 + expert의 q_done → 원 기록 (그 뒤 gripper_labels dagger --collection expert_done_gate로 재라벨)
     uv run python scripts/donegate_collect.py run --checkpoint artifacts/runs/r5-t1-fp32-2b-s18/checkpoint.pt \\
         --seeds artifacts/reports/r6-donegate-seeds.json --out artifacts/scratch/r6/donegate-raw/train --report artifacts/reports/r6-donegate-run.json
+    # Task R12 — DAgger 사이클 2: base 700100(사이클 2의 자리), E1 160 · E2 160 · E0 80; r6을 배치 구성 그대로 위임 G로 감싸고 done 게이트를 겹친다
+    uv run python scripts/donegate_collect.py seeds --cycle 2 --quota E1=160,E2=160,E0=80 --condition train_dagger2 --out artifacts/reports/r12-dagger2-seeds.json
+    uv run python scripts/donegate_collect.py run --checkpoint artifacts/runs/r6-t1-fp32-2b-s18/checkpoint.pt --delegate G --condition train_dagger2 \\
+        --seeds artifacts/reports/r12-dagger2-seeds.json --label r6G --id-tag r12 --out artifacts/scratch/r12/dagger2-raw/train --report artifacts/reports/r12-dagger2-run.json
 
 GPU 규칙: 울타리 0.6(`robo_jev.gpu`), 적재 전 여유 검사, 한 번에 하나(`artifacts/scratch/r6/gpu.sh`, `choom -n 1000`).
 """
@@ -29,9 +33,24 @@ from robo_jev.gpu import DEFAULT_FRACTION, limit_gpu_memory, memory_report, requ
 GENERATOR_CONFIG = "configs/data/r1_robot.yaml"
 #: 서빙 모델 적재 전에 있어야 하는 장치(통합) 메모리 여유 — `scripts/closed_loop.py`와 같은 값(checkpoint를 CPU에 읽은 뒤 bf16 ≈ 4.2 GiB).
 LOAD_MIN_FREE_BYTES = 36 * 2**30
-#: 사이클 1의 수집 몫 — 지시가 바뀌는 프로파일만(거짓 done은 R5 기록에서 전부 E1·E2였다).
+#: 사이클 1의 수집 몫 — 지시가 바뀌는 프로파일만(거짓 done은 R5 기록에서 전부 E1·E2였다). `--quota`가 덮는다(R12: E1 160 · E2 160 · E0 80).
 QUOTA = {"E1": 100, "E2": 100}
-SCRIPT_VERSION = "r6-donegate-1.0"
+#: seed 파일의 조건 이름 (R6) — `--condition`이 덮는다(R12: train_dagger2).
+CONDITION = "train_donegate"
+SCRIPT_VERSION = "r12-donegate-1.1"
+
+
+def parse_quota(text: str | None) -> dict[str, int]:
+    """``E1=160,E2=160,E0=80`` → 프로파일 → 편 수 (빈 값이면 R6의 몫). 같은 프로파일이 두 번이거나 1 미만이면 거절한다."""
+    if not text:
+        return dict(QUOTA)
+    out: dict[str, int] = {}
+    for part in [item.strip() for item in text.split(",") if item.strip()]:
+        name, _, value = part.partition("=")
+        if not name or not value or name in out or int(value) < 1:
+            raise ValueError(f"--quota: 프로파일=편수를 쉼표로 (같은 프로파일 한 번, 편수 ≥ 1) — 받은 값: {text!r}")
+        out[name] = int(value)
+    return out
 
 
 def _git() -> str | None:
@@ -66,16 +85,19 @@ def cmd_seeds(args: argparse.Namespace) -> int:
     generator = load_generator_config(args.config)
     sim = yaml.safe_load(resolve_config_path(config_paths(generator)["sim_config"]).read_text(encoding="utf-8"))
     base = collection_seed_base(generator, cycle=args.cycle)
-    quota = dict(QUOTA)
+    quota = parse_quota(args.quota)
     block = select_seeds(generator, sim, split="train", count=sum(quota.values()), base=base, per_profile_max=args.per_profile_max, quota=quota)
+    if block["shortfall"]:
+        raise SystemExit(f"걸음 안에서 몫을 다 채우지 못했다: {block['shortfall']} (per_profile_max {args.per_profile_max})")
     r1 = {(profile, seed) for profile, seed in seed_schedule(generator, 400)}
     collisions = [item for item in block["seeds"] if (item["profile"], item["seed"]) in r1]
     if collisions:
         raise SystemExit(f"r1 seed와 겹친다: {collisions[:3]}")
     payload = {"script": SCRIPT_VERSION, "generated_at": _now(), "git": _git(), "config": args.config, "cycle": args.cycle, "seeds_base": base,
-               "conditions": {"train_donegate": {**block, "families": sorted({item["origin_group"] for item in block["seeds"]})}}}
+               "quota": quota, "conditions": {args.condition: {**block, "families": sorted({item["origin_group"] for item in block["seeds"]})}}}
     _write(Path(args.out), payload)
-    print(f"train_donegate: {len(block['seeds'])} seeds · profiles {block['by_profile']} · scanned {block['scanned']} · other splits {block['skipped_other_splits']}")
+    print(f"{args.condition}: {len(block['seeds'])} seeds · profiles {block['by_profile']} · scanned {block['scanned']} · other splits {block['skipped_other_splits']}"
+          f" · unbuildable plans skipped {len(block.get('unbuildable') or [])}")
     return 0
 
 
@@ -83,7 +105,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     import torch
 
     from robo_jev.closed_loop import build_policy
-    from robo_jev.data.done_gate import DoneGatePolicy, collect_done_gate
+    from robo_jev.data.done_gate import DoneGatePolicy, collect_done_gate, wrapper_chain
     from robo_jev.data.robot_episodes import load_generator_config
     from robo_jev.sim.expert import Expert
 
@@ -93,18 +115,21 @@ def cmd_run(args: argparse.Namespace) -> int:
     _log(f"gpu guard {guard} · memory at start {memory_report()}")
     generator = load_generator_config(args.config)
     seeds = json.loads(Path(args.seeds).read_text(encoding="utf-8"))
-    block = seeds["conditions"]["train_donegate"]
+    block = seeds["conditions"][args.condition]
     schedule = [(entry["profile"], int(entry["seed"])) for entry in block["seeds"]]
     if args.limit:
         schedule = schedule[: int(args.limit)]
-    bundle = build_policy("model", generator=generator, checkpoint=args.checkpoint, model_id=args.model, compile_dense=not args.no_compile)
+    # R12: 배치 구성 그대로 위임 갈래(G)로 감싼 모델 위에 done 게이트를 겹친다 — 감싸개 사슬은 done 게이트 → 위임 G → 모델
+    bundle = build_policy("model", generator=generator, checkpoint=args.checkpoint, model_id=args.model, compile_dense=not args.no_compile,
+                          delegate=args.delegate)
     policy = DoneGatePolicy(bundle["policy"], Expert())
     _log(f"collect {len(schedule)} episodes · policy {policy.version} · checkpoint {args.checkpoint}")
     summary = collect_done_gate(policy, schedule, config=generator, out=Path(args.out), label=args.label, id_tag=args.id_tag,
                                 max_ticks=args.max_ticks, log=sys.stderr, describe={k: v for k, v in bundle["describe"].items() if k != "name"})
     payload = {
         "script": SCRIPT_VERSION, "generated_at": _now(), "git": _git(), "checkpoint": args.checkpoint, "seeds_file": args.seeds,
-        "policy": {"name": policy.name, "version": policy.version, "inner": bundle["describe"]}, "summary": summary,
+        "policy": {"name": policy.name, "version": policy.version, "inner": bundle["describe"], "wrappers": wrapper_chain(policy)},
+        "condition": args.condition, "summary": summary,
         "gpu": {"guard": guard, "memory_at_end": memory_report(), "peak_allocated_bytes": int(torch.cuda.max_memory_allocated())},
     }
     _write(Path(args.report), payload)
@@ -120,6 +145,8 @@ def build_parser() -> argparse.ArgumentParser:
     seeds.add_argument("--config", default=GENERATOR_CONFIG)
     seeds.add_argument("--cycle", type=int, default=1)
     seeds.add_argument("--per-profile-max", dest="per_profile_max", type=int, default=4000)
+    seeds.add_argument("--quota", default=None, help="프로파일=편수를 쉼표로 (R12: E1=160,E2=160,E0=80); 없으면 R6의 E1·E2 각 100")
+    seeds.add_argument("--condition", default=CONDITION, help="seed 파일의 조건 이름 (R6 train_donegate · R12 train_dagger2)")
     seeds.add_argument("--out", required=True)
     seeds.set_defaults(func=cmd_seeds)
     run = sub.add_parser("run", help="GPU: 수집 정책으로 돌려 원 기록을 쓴다")
@@ -127,6 +154,8 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--model", default="Qwen/Qwen3.5-2B")
     run.add_argument("--config", default=GENERATOR_CONFIG)
     run.add_argument("--seeds", required=True)
+    run.add_argument("--condition", default=CONDITION, help="seed 파일에서 읽을 조건 (R6 train_donegate · R12 train_dagger2)")
+    run.add_argument("--delegate", default=None, choices=["G"], help="R12: 모델을 위임 갈래 G로 감싼 뒤 done 게이트를 겹친다 (배치 구성 r6G 그대로)")
     run.add_argument("--out", required=True)
     run.add_argument("--report", required=True)
     run.add_argument("--label", default="donegate")

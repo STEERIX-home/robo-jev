@@ -1805,3 +1805,177 @@ def test_a_merged_selection_condition_that_contains_the_judged_set_or_an_exclude
     report["merge"]["mixed"] = ["dev_new", "dev_new2"]  # 판정·제외 집합과 겹치지 않는 합친 조건이면 고른다 (짝 블록은 dev_new2의 것을 그대로 쓴다)
     report["paired"]["mixed"] = report["paired"]["dev_new2"]
     assert select_seed(report, bypass)["selected"] == "r6G"
+
+
+# --------------------------------------------------------------------------
+# Task R12 — 옛 목표형 거짓 done의 seed 지표, 금지 물체 사실, 새 홀드아웃(ood_new)과 DAgger 사이클 2 수집의 걸음
+# --------------------------------------------------------------------------
+
+
+def _stale_seed_record(last, *, done=True, inside=False):
+    """v1(o1) 두 틱 → v2(o2) 세 틱; 틱 0–2는 o1 파지 commitment, 틱 3은 `last`, done 틱은 마지막(4)."""
+    record = _record([{"version": 1}] * 2 + [{"version": 2}] * 3, done=done, inside=inside)
+    for index, tick in enumerate(record["ticks"]):
+        state = tick["request"]["state"]
+        state["goal"]["target_ref"] = "o1" if index < 2 else "o2"
+        held = last if index == 3 else ("o1" if index < 3 else None)
+        state["commitment"] = None if held is None else {"action_ref": "c1", "key": f"grasp:{held}:top:zoneL", "phase": "grasp"}
+    return record
+
+
+def test_the_stale_goal_false_done_seed_metric_is_one_only_for_a_false_done_after_a_last_grasp_on_an_earlier_target():
+    """R12가 더한 seed 지표 `stale_goal_false_done`(0/1): 거짓 done이고 done 틱 앞의 마지막 파지 commitment가 그 파지 틱의 대상이 아닌, 이전 지시의 대상이었다
+    (R9 수정 1·R11 서술표의 정의). 이전 지시가 부른 적 없는 물체·지금 대상·완료한 편·done이 아닌 편은 0이다. R10의 세 지표는 여전히 끝자리다."""
+    from robo_jev.closed_loop import SEED_METRICS, seed_metrics
+
+    assert seed_metrics(_stale_seed_record("o1"))["stale_goal_false_done"] == (1.0, 1.0)
+    for record in (_stale_seed_record("o3"), _stale_seed_record("o2"), _stale_seed_record("o1", inside=True), _stale_seed_record("o1", done=False)):
+        assert seed_metrics(record)["stale_goal_false_done"] == (0.0, 1.0)
+    assert "stale_goal_false_done" in SEED_METRICS and SEED_METRICS[-3:] == ("gripper_missing", "forbidden_contacts", "reflex_ticks")
+
+
+def test_forbidden_facts_count_onsets_on_the_accumulated_forbidden_set_and_ticks_near_a_forbidden_object():
+    """금지 물체 사실 (R12 A3의 표): 접촉 시작은 편 동안 쌓은 목표의 `forbidden_contact` 집합의 물체에 대한 `contact_onset` 수(`stop_vs_reflex`와 같은 셈 —
+    다른 물체와의 접촉은 세지 않는다), 근처 틱은 말단이 금지 물체의 관측 자세에서 반지름 안(3차원 거리)인 틱 — 반지름마다. 금지가 아닌 물체 곁은 세지 않는다."""
+    from robo_jev.closed_loop import forbidden_facts, stop_vs_reflex
+
+    ticks = [{"events": []}, {"events": [{"kind": "contact_onset", "object": "o9"}]}, {"events": [{"kind": "contact_onset", "object": "o2"}]}, {"events": []}]
+    record = _record(ticks, done=False)
+    for tick, ee in zip(record["ticks"], ([0, 0, 0], [30, 0, 0], [100, 0, 0], [50, 0, 0])):  # 말단 — o9는 원점, o2는 (100, 0, 0)
+        state = tick["request"]["state"]
+        state["robot"] = {"ee_pose_mm": ee}
+        state["objects"] = [{"id": "o9", "pose_mm": [0, 0, 0]}, {"id": "o2", "pose_mm": [100, 0, 0]}]
+    record["ticks"][3]["request"]["state"]["goal"]["forbidden_contact"] = []  # 목록이 비어도 편 동안 쌓은 집합으로 센다
+    out = forbidden_facts([record], proximity_mm=(60.0, 40.0))
+    assert out["forbidden_contact_onsets"] == 1 == stop_vs_reflex([record])["forbidden_contact_onsets"] and out["episodes_with_onsets"] == 1
+    assert out["near_ticks"] == {"60": 3, "40": 2} and out["episodes_with_near_ticks"] == {"60": 1, "40": 1}  # 거리 0·30·100·50
+    assert out["by_profile"] == {"E0": {"episodes": 1, "onsets": 1, "onset_episodes": 1}} and out["ticks"] == 4
+    clean = _record([{"events": []}] * 2, done=False)
+    for tick in clean["ticks"]:
+        tick["request"]["state"]["goal"]["forbidden_contact"] = []
+        tick["request"]["state"]["robot"] = {"ee_pose_mm": [0, 0, 0]}
+        tick["request"]["state"]["objects"] = [{"id": "o9", "pose_mm": [0, 0, 0]}]
+    assert forbidden_facts([clean], proximity_mm=(60.0,))["near_ticks"] == {"60": 0}  # 금지 목록이 없으면 곁에 있어도 근처가 아니다
+
+
+def _disjoint(a: set[tuple[int, int]], b: set[tuple[int, int]]) -> bool:
+    return all(high_a <= low_b or high_b <= low_a for low_a, high_a in a for low_b, high_b in b)
+
+
+def test_the_r12_seed_walk_is_r11s_generator_and_mix_for_ood_new_200_on_a_range_no_earlier_walk_or_collection_touches():
+    """Task R12 Stage B: 새 홀드아웃 `ood_new` = ood_dev 분할 200편 — R11과 같은 생성 설정·분할 규칙·프로파일 혼합(20/40/40), seed base 1150100. 걷는 구간
+    (E0 4,000 · E1·E2 8,000 seed)이 r1 · DAgger 사이클 0~7의 자리(사이클 2 = R12의 수집 700100, 사이클 7 = 1200100) · R4 · R5 · R6 · R7 · R11(ood_fresh)의
+    구간과, 자기 프로파일끼리 겹치지 않는다."""
+    r12 = load_closed_loop_config(REPO / "configs/eval/r12-closed-loop.yaml")
+    r11 = load_closed_loop_config(REPO / "configs/eval/r11-closed-loop.yaml")
+    assert r12["conditions"] == {"ood_new": {"split": "ood_dev", "count": 200}} and r12["seeds"]["base"] == 1150100
+    assert r12["generator"] == r11["generator"] and r12["generator_config_path"] == r11["generator_config_path"]
+    assert r12["generator"]["profile_weights"] == [20, 40, 40] and r12["scan"] == r11["scan"] == {"per_profile_max": 4000}
+    mine = _walk_ranges(r12, 1150100)
+    assert sorted(mine) == [(1150100, 1154100), (1160100, 1168100), (1170100, 1178100)]
+    assert all(_disjoint({a}, {b}) for a in mine for b in mine if a != b)
+    cycle_base, cycle_offset = int(r12["generator"]["seeds"]["base"]), int(r12["generator"]["seeds"]["dagger_cycle_offset"])
+    earlier = {"r1": 400100, "R4": 900100, "R5": 950100, "R6": 980100, "R7": 1050100, "R11 ood_fresh": 1100100}
+    earlier.update({f"dagger cycle {cycle}": cycle_base + (cycle + 1) * cycle_offset for cycle in range(8)})
+    assert earlier["dagger cycle 2"] == 700100 and earlier["dagger cycle 7"] == 1200100
+    for name, base in earlier.items():
+        assert _disjoint(mine, _walk_ranges(r12, base)), name
+    assert max(high for _, high in _walk_ranges(r12, 1100100)) == 1128100 < min(low for low, _ in mine)  # R11의 E2 끝 아래에서 시작한다
+    assert max(high for _, high in mine) <= 1200100  # 사이클 7의 자리 앞에서 끝난다
+
+
+def test_the_dagger_cycle_2_collection_walks_its_own_slot_disjoint_from_every_earlier_walk_and_from_ood_new():
+    """Task R12 A2: 수집 장면은 DAgger 사이클 2의 자리(`dagger_seed_schedule(cycle=2)`의 시작 = `seeds.base + 3 × dagger_cycle_offset` = 700100)에서 걷는다 —
+    수집 명령의 걸음(`per_profile_max` 4,000; E0 4,000 · E1·E2 8,000 seed)이 r1 · 사이클 1(R6 done 게이트) · R4 · R5 · R6 · R7 · R11 · ood_new의 구간과 겹치지 않는다."""
+    from robo_jev.data.dagger import dagger_seed_schedule
+    from robo_jev.data.done_gate import collection_seed_base
+
+    r12 = load_closed_loop_config(REPO / "configs/eval/r12-closed-loop.yaml")
+    generator = r12["generator"]
+    base = collection_seed_base(generator, cycle=2)
+    assert base == 700100 == dagger_seed_schedule(generator, 1, cycle=2)[0][1]
+    collection = _walk_ranges(r12, base)
+    assert sorted(collection) == [(700100, 704100), (710100, 718100), (720100, 728100)]
+    for name, other in {"r1": 400100, "cycle 1 (R6 done gate)": 600100, "R4": 900100, "R5": 950100, "R6": 980100, "R7": 1050100, "R11": 1100100,
+                        "R12 ood_new": 1150100}.items():
+        assert _disjoint(collection, _walk_ranges(r12, other)), name
+
+
+R12_REGISTRATION_PATH = REPO / "configs/eval/r12-registration.yaml"
+R12_CONFIGURATIONS = ("r12s18", "r12s17", "r12s19", "r12s18G", "r12s17G", "r12s19G")
+
+
+def test_the_r12_registration_selects_one_of_six_new_configurations_on_dev_new2_and_judges_it_on_ood_new_against_the_rule_judge_in_its_arm():
+    """R12 등록 파일이 브리프 그대로인가 — 판정의 이름 dagger_cycle2, 주 집합 ood_new·둘째 dev_new2(고르는 데 쓴 집합, 옆에만), 등록 부트스트랩; 후보 여섯 구성
+    (새 체크포인트 셋 × native·G, seed 18·17·19, run 디렉터리는 r12 학습 run 셋), 고르기(dev_new2 엄격 → 거짓 done → G → seed 번호; 옛 판정 집합 ood_dev200과
+    R11의 판정 집합 ood_fresh 제외)와 그 값의 출처(여섯 모두 R12의 새 run); 판정 (a) 규칙(같은 갈래) − 고른 구성 엄격 하한 ≤ 0·(s) 고른 구성 − 규칙(같은 갈래) 편당
+    금지 접촉 하한 ≤ 0과 두 등록 문장, 둘의 견고성; 둘째 근거(고른 구성 − r6G: 엄격·거짓 done·옛 목표 거짓 done·금지 접촉)와 R11의 서술 판독; 기록 전용 감시;
+    고른 구성이 G면 규칙_G, native면 규칙과 짝지어지고 seed 쌍이 판정·견고성·서술 판독이 읽는 쌍을 모두 담는다; 판정 집합은 R12의 새 seed 걸음이다."""
+    from robo_jev.closed_loop import SEED_METRICS, load_registration, materialize_selection
+    from robo_jev.evaluate import EPISODE_BOOTSTRAP
+
+    registration = load_registration(R12_REGISTRATION_PATH)
+    assert registration["decision"] == "dagger_cycle2" and registration["primary"] == "ood_new" and registration["secondary"] == ["dev_new2"]
+    assert registration["merge"] == {"ood_dev200": ["ood_dev", "ood_dev_new", "ood_dev_new2"]} and registration["bootstrap"] == EPISODE_BOOTSTRAP
+    expected_groups = {f"r12s{seed}{suffix}": {"checkpoint": f"r12s{seed}", "arm": arm, "seed": seed, "run": f"artifacts/runs/r12-t1-fp32-2b-s{seed}"}
+                       for seed in (18, 17, 19) for arm, suffix in (("native", ""), ("G", "G"))}
+    assert registration["groups"] == expected_groups and set(registration["groups"]) == set(R12_CONFIGURATIONS)
+    assert registration["selection"] == {"condition": "dev_new2", "excluded": ["ood_dev200", "ood_fresh"], "candidates": list(R12_CONFIGURATIONS), "metric": "strict",
+                                         "ties": ["false_done", "arm", "seed"], "arm_order": ["G", "native"]}
+    sources = registration["selection_sources"]
+    assert sources == {name: f"artifacts/reports/r12-run-{name}-dev_new2.json" for name in R12_CONFIGURATIONS}  # 여섯 모두 R12의 새 run
+    a, s = registration["cloud"]["a"], registration["cloud"]["s"]
+    assert (a["group"], a["pair"], a["source"], a["metric"], a["holds_if"]) == ("selected", "rule{arm} - {selected}", "paired", "strict", "lower_le_zero")
+    assert (s["group"], s["pair"], s["source"], s["metric"], s["holds_if"]) == ("selected", "{selected} - rule{arm}", "seed_pairs", "forbidden_contacts", "lower_le_zero")
+    assert list(registration["cloud"]) == ["a", "s"] and registration["cloud"] == registration["conditions"]
+    assert registration["calls"]["pass"] == "통과 — 사이클 2가 검증으로 고른 구성을 처음 보는 홀드아웃에서 규칙 판정기보다 확실히 뒤지지 않고 금지 접촉도 확실히 많지 않게 했다"
+    assert registration["calls"]["fail"].startswith("불통과 — ")
+    assert registration["robustness"] == [{"condition": "a", "pair": "rule{arm} - {selected}", "metric": "strict"},
+                                          {"condition": "s", "pair": "{selected} - rule{arm}", "metric": "forbidden_contacts"}]
+    second = [(entry["source"], entry["metric"]) for entry in registration["stability"] if entry["pair"] == "{selected} - r6G"]
+    assert second == [("paired", "strict"), ("paired", "false_done"), ("seed_pairs", "stale_goal_false_done"), ("seed_pairs", "forbidden_contacts")]
+    assert {entry["metric"] for entry in registration["stability"] if entry["source"] == "seed_pairs"} <= set(SEED_METRICS)
+    assert registration["run_readings"] == {"monitor_log": {"question": "q_gripper", "step": 150, "window": 20, "ratio": 0.70},
+                                            "gripper_onset": {"stratum": "settled", "min_accuracy": 0.5, "min_ticks": 5}, "log_only": list(R12_CONFIGURATIONS)}
+    assert registration["predictions"] == [] and registration.get("monitor") is None and registration.get("cause") is None
+    for selected, rule in (("r12s18G", "ruleG"), ("r12s17", "rule")):
+        filled = materialize_selection(registration, selected)
+        assert (filled["cloud"]["a"]["pair"], filled["cloud"]["s"]["pair"]) == (f"{rule} - {selected}", f"{selected} - {rule}")
+        pairs = {pair.replace(":", " - ") for pair in filled["seed_pairs"]}
+        assert pairs == {f"{rule} - {selected}", f"{selected} - {rule}", f"{selected} - r6G"}
+        read = {entry["pair"] for entry in [*filled["robustness"], *(e for e in filled["stability"] if e["source"] == "seed_pairs")]}
+        assert read <= pairs  # 견고성·seed 단위 서술 판독이 읽는 쌍은 모두 보고서 명령이 싣는다
+    assert registration["documents"]["if_fail"].startswith("다음 라운드는 숫자에서만") and "숫자에서만" in registration["documents"]["if_pass"]
+    scenes = load_closed_loop_config(REPO / "configs/eval/r12-closed-loop.yaml")
+    assert scenes["conditions"] == {registration["primary"]: {"split": "ood_dev", "count": 200}} and scenes["seeds"]["base"] == 1150100
+
+
+def test_the_r12_selection_breaks_ties_by_false_done_then_the_delegated_arm_then_the_smaller_seed_and_never_reads_the_excluded_holdouts(tmp_path):
+    """R12 고르기의 동점 깨기를 R12 등록 그대로 코드로: 엄격 성공 → dev_new2 거짓 done이 적은 쪽 → G → seed 번호가 작은 쪽. 옛 판정 집합(ood_dev200과 그 부분)·
+    R11의 판정 집합(ood_fresh)·새 판정 집합(ood_new)으로 고르는 등록은 읽히지 않는다."""
+    from robo_jev.closed_loop import load_registration, select_seed
+
+    registration = load_registration(R12_REGISTRATION_PATH)
+
+    def table(values):
+        return {label: {"episodes": 100, "strict_done": strict, "done": strict + false, "false_done": [f"E1:{i}" for i in range(false)]}
+                for label, (strict, false) in values.items()}
+
+    def report(values):
+        labels = list(values)
+        paired = {f"{a} - {b} (done ∧ inside)": {"seeds": 100, "margin": 0.0, "margin_ci": [0.0, 0.0]} for i, a in enumerate(labels) for b in labels[i + 1:]}
+        return {"conditions": ["dev_new2", "ood_new"], "tables": {"dev_new2": table(values)}, "paired": {"dev_new2": paired}, "merge": {}}
+
+    base = {"r12s18": (70, 5), "r12s17": (70, 5), "r12s19": (70, 5), "r12s18G": (70, 5), "r12s17G": (70, 5), "r12s19G": (70, 5)}
+    assert select_seed(report(base), registration)["selected"] == "r12s17G"  # 모두 같다 → G → seed 17
+    assert select_seed(report({**base, "r12s19": (70, 4)}), registration)["selected"] == "r12s19"  # 거짓 done이 G보다 앞선다
+    chosen = select_seed(report({**base, "r12s18": (71, 9)}), registration)
+    assert chosen["selected"] == "r12s18" and chosen["decided_by"] == "strict"
+    tie = select_seed(report({**base, "r12s17G": (70, 6)}), registration)
+    assert tie["selected"] == "r12s18G" and tie["decided_by"] == "seed"
+    raw = yaml.safe_load(R12_REGISTRATION_PATH.read_text(encoding="utf-8"))
+    for condition in ("ood_fresh", "ood_dev200", "ood_dev_new2", "ood_new"):
+        path = tmp_path / f"choose-on-{condition}.yaml"
+        path.write_text(yaml.safe_dump({**raw, "selection": {**raw["selection"], "condition": condition}}, allow_unicode=True), encoding="utf-8")
+        with pytest.raises(ValueError, match="판정할 집합의 숫자로 고르지 않는다"):
+            load_registration(path)

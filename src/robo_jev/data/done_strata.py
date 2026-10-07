@@ -40,8 +40,10 @@ __all__ = [
     "SEALED_SPLITS",
     "count_done_strata",
     "done_strata_by_split",
+    "false_done_event_kinds",
     "false_done_events",
     "false_done_facts",
+    "last_grasp_before",
     "model_q_done",
     "model_rates_by_stratum",
     "old_goal_variants",
@@ -51,6 +53,8 @@ __all__ = [
     "reference_done",
     "release_events",
     "release_window_counts",
+    "stale_goal_at",
+    "stale_goal_false_done",
     "tick_done_strata",
 ]
 
@@ -456,3 +460,103 @@ def old_target_releases(record: dict[str, Any]) -> list[dict[str, Any]]:
         if old is not None and released != _goal(ticks[index]).get("target_ref"):
             out.append({"tick": index, "object": released, "instruction_version": old, "ticks_since_instruction_change": index - started[version]})
     return out
+
+
+# --------------------------------------------------------------------------
+# Task R12 — 옛 목표형 거짓 done (R9 수정 라운드 1 `false_done_mechanism.py`의 정의를 코드로)
+# --------------------------------------------------------------------------
+
+
+def _grasp_object(tick: dict[str, Any]) -> str | None:
+    """그 틱의 commitment가 파지면 그 물체 — 관측 상태의 commitment 투영(`state.commitment.key` = ``grasp:<물체>:…``; 요청의 `commitment`와 같은 투영)."""
+    key = str(((_state(tick).get("commitment") or {}).get("key")) or "")
+    return key.split(":")[1] if key.startswith("grasp:") else None
+
+
+def last_grasp_before(record: dict[str, Any], index: int) -> tuple[int, str, str] | None:
+    """틱 `index` **앞**(0 … index−1)의 마지막 파지 commitment — (그 틱, 물체, 그 틱의 지시 대상 `goal.target_ref`; 없으면 빈 문자열). 없으면 None."""
+    found: tuple[int, str, str] | None = None
+    for position, tick in enumerate(record["ticks"][: max(0, int(index))]):
+        held = _grasp_object(tick)
+        if held is not None:
+            found = (position, held, str(_goal(tick).get("target_ref") or ""))
+    return found
+
+
+def stale_goal_at(record: dict[str, Any], index: int) -> dict[str, Any] | None:
+    """틱 `index`에서 done을 말했다면 그 done이 **옛 목표형**인가 — R9 수정 1(`artifacts/scratch/r9/fix1/false_done_mechanism.py`)의 정의이고 R11 서술표의
+    "an earlier instruction's target"이다: 그 틱 앞의 마지막 파지 commitment 물체 X가 (그 파지 틱의) 지시 대상이 **아니고**, X가 틱 `index`의 목표 버전보다
+    **낮은** 버전의 지시 대상이었다(틱 `index` 앞에서 본 지시만). 앞에 파지 commitment가 없거나 틱이 범위 밖이면 None.
+
+    돌려주는 것: ``{"grasp_tick", "object", "target_at_grasp", "last_grasp_non_target", "earlier_target", "stale_goal"}``. 그 틱과 과거 틱만 읽는다."""
+    ticks = record["ticks"]
+    if not 0 <= int(index) < len(ticks):
+        return None
+    grasp = last_grasp_before(record, int(index))
+    if grasp is None:
+        return None
+    at, held, target_then = grasp
+    version = _version(ticks[int(index)])
+    earlier = {str(_goal(tick).get("target_ref")) for tick in ticks[: int(index)] if _version(tick) < version}
+    non_target = held != target_then
+    was_earlier = held in earlier
+    return {"grasp_tick": at, "object": held, "target_at_grasp": target_then, "last_grasp_non_target": non_target, "earlier_target": was_earlier,
+            "stale_goal": bool(non_target and was_earlier)}
+
+
+def stale_goal_false_done(record: dict[str, Any]) -> bool:
+    """편의 결과가 거짓 done(`done ∧ ¬target_inside_zone`)이고 그 done 틱(`outcome.done_tick`)에서 :func:`stale_goal_at`이 옛 목표형인가 — R11 서술표의
+    "false done … of those, an earlier instruction's target" 열(r6G ood_fresh 19)."""
+    outcome = (record.get("provenance") or {}).get("outcome") or {}
+    if not outcome.get("done") or outcome.get("target_inside_zone") or outcome.get("done_tick") is None:
+        return False
+    found = stale_goal_at(record, int(outcome["done_tick"]))
+    return bool(found and found["stale_goal"])
+
+
+def false_done_event_kinds(records: list[dict[str, Any]], *, threshold: float = DONE_GATE_THRESHOLD) -> dict[str, Any]:
+    """모델 raw 거짓 done **사건**(:func:`false_done_events`의 연속 구간 — raw `q_done` ≥ 임계값·참조 거짓)마다 그 첫 틱에서 옛 목표형인가(:func:`stale_goal_at`)를
+    가르고, 편마다 **첫 옛 목표형 사건 뒤**에 모델이 그 틱의 지금 대상을 잡았는가(관측의 `holding`)·편이 완료했는가(`done ∧ target_inside_zone`)를 센다 (Task R12 A3 —
+    수집 정책의 기록에서는 하네스가 expert의 `q_done`을 받았으므로 거짓 done 뒤에도 편이 이어진다)."""
+    events = stale = long_runs = stale_long = 0
+    per_episode: dict[str, Any] = {}
+    for record in records:
+        flags = _false_done_ticks(record, threshold)
+        runs: list[tuple[int, int]] = []
+        start: int | None = None
+        for index, flag in enumerate(flags + [False]):
+            if flag and start is None:
+                start = index
+            elif not flag and start is not None:
+                runs.append((start, index - start))
+                start = None
+        if not runs:
+            continue
+        kinds = []
+        for first, length in runs:
+            found = stale_goal_at(record, first)
+            kinds.append({"first_tick": first, "ticks": length, "stale_goal": bool(found and found["stale_goal"]),
+                          "last_grasp": None if found is None else found["object"], "last_grasp_non_target": bool(found and found["last_grasp_non_target"])})
+        events += len(kinds)
+        stale += sum(1 for kind in kinds if kind["stale_goal"])
+        long_runs += sum(1 for kind in kinds if kind["ticks"] >= TERMINATING_DONE_RUN)
+        stale_long += sum(1 for kind in kinds if kind["stale_goal"] and kind["ticks"] >= TERMINATING_DONE_RUN)
+        first_stale = next((kind["first_tick"] for kind in kinds if kind["stale_goal"]), None)
+        ticks = record["ticks"]
+        grasped = None if first_stale is None else next(
+            (index for index in range(first_stale + 1, len(ticks)) if _holding(ticks[index]) is not None and _holding(ticks[index]) == _goal(ticks[index]).get("target_ref")), None)
+        outcome = (record.get("provenance") or {}).get("outcome") or {}
+        per_episode[str(record.get("episode_id"))] = {
+            "events": kinds, "first_stale_goal_tick": first_stale, "grasped_current_target_after_stale_goal": grasped,
+            "completed": bool(outcome.get("done")) and bool(outcome.get("target_inside_zone")),
+        }
+    with_stale = [row for row in per_episode.values() if row["first_stale_goal_tick"] is not None]
+    return {
+        "events": events, "stale_goal_events": stale, "events_reaching_the_tail": long_runs, "stale_goal_events_reaching_the_tail": stale_long,
+        "tail_ticks": TERMINATING_DONE_RUN, "episodes_with_events": len(per_episode), "episodes_with_stale_goal_events": len(with_stale),
+        "after_first_stale_goal_event": {"grasped_current_target": sum(1 for row in with_stale if row["grasped_current_target_after_stale_goal"] is not None),
+                                         "completed": sum(1 for row in with_stale if row["completed"])},
+        "threshold": float(threshold), "episodes_total": len(records), "per_episode": per_episode,
+        "definition": "stale goal: the last grasp commitment before the event's first tick was on an object that was not the instruction's target at that grasp "
+                      "tick and had been the target of an earlier instruction (a lower goal version) — R9 fix round 1 false_done_mechanism.py, R11's column",
+    }

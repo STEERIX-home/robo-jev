@@ -1,0 +1,55 @@
+# Task R12 Stage B (사전 등록) — **r6의 조리법 그대로 + DAgger 묶음에 사이클 2 재료(dagger-2)**, seed 18·17·19로 세 번. `qwen35-2b-r6.yaml`을 잇는다.
+#
+#   artifacts/scratch/r12/gpu-chain.sh t1-s18 artifacts/scratch/r12/c-train.sh 18     (= 아래 명령; seed 17·19는 숫자만 바뀐다)
+#   scripts/adapt_readout.py --config configs/train/qwen35-2b-r12.yaml --mode t1 --steps 233 --seed 18 \
+#       --set checkpoint_every=50 --set 'checkpoint_keep_steps=[]' --run-id r12-t1-fp32-2b-s18 --no-eval --out artifacts/reports/r12-2b-t1-fp32-s18.json
+#   (저장마다 26.35 GB 여유가 checkpoint.pt 옆에 있어야 한다 — 저장은 atomic(임시 파일 → rename); 각 학습 유닛을 띄우기 전에 `/` 여유 ≥ 60 GB를 확인한다)
+#
+# **왜 (브리프 R12):** R11은 검증으로 고른 r6G가 처음 보는 홀드아웃에서 규칙 판정기에 뒤지고 금지 접촉도 많다고 판정했다(불통과). 가장 큰 단일 실패는
+# **옛 목표 거짓 done**(지시가 바뀐 뒤 이전 지시의 대상을 놓고 done — r6G ood_fresh 19편)이고, 금지 접촉(13 대 6)이 따로 남는다. 사이클 2는 r6을 배치 구성 그대로
+# 위임 G로 감싸고 done 게이트(하네스에 넘기는 `q_done`만 expert의 값)를 겹쳐 그 뒤의 상태를 모델 주행으로 모은 400편이다(train 계열의 새 seed, 사이클 2의 자리
+# 700100: E1 160 · E2 160 · E0 80; `artifacts/datasets/r12-dagger/dagger-2/`, 라벨 v2 재라벨, `material: error_family`).
+#
+# **조리법(바꾸지 않는다) = r6**: fp32 master·5초 구간·backbone_lr 1e-5·readout_lr 3e-4·tick weights 0.25/2/2/1·후보 치환(seed가 덮는다)·`max_steps` 233·
+# 혼합 비율 existing 0.5 / error_family 0.5 / new_semantic_family 0.0(`sampler:` 블록은 r6의 것을 **통째로** 잇는다 — 적지 않았다). 감시는 **기록만** 한다:
+# `head_fit_monitor`가 없다(r6처럼) — 질문별 손실·탐침은 step마다 `metrics.json`에 그대로 적히고, R8의 통계는 등록의 `run_readings.monitor_log`가 학습 뒤
+# 다시 계산해 옆에 적기만 한다(멈추게 하지도, 고르지도, 판정에 들어가지도 않는다).
+#
+# **데이터(바꾸는 것은 이것뿐)**: r6의 다섯에 dagger-2를 DAgger 묶음에 더하고, 비로봇은 R7 A2의 분할별 판(`r1/single-by-split` — R6의 `r1/single`과 같은
+# 레코드·같은 순서의 train 2,620건; 옛 한 파일 판은 봉인 레코드가 섞여 새 적재기가 열지 않는다):
+#   1. `r1-rollout-labels-g2` — expert 편 train 233 (existing)
+#   2. `r5-dagger/dagger-0` — R4 dev 조건 모델 주행 200 (error_family)
+#   3. `r6-dagger/dagger-1` — R5 dev 조건 모델 주행 200 (error_family)
+#   4. `r6-dagger/dagger-1-donegate` — 사이클 1 done 게이트 수집 200 (error_family)
+#   5. `r12-dagger/dagger-2` — **사이클 2**: r6G + done 게이트 수집 400 (error_family)
+#   6. `r1/single-by-split` — 비로봇 단일 요청 (non_robot)
+# 기대 draw(로봇 단위 = step마다 하나): expert ≈ 0.5 × 233 ≈ 116, DAgger ≈ 117 — DAgger 묶음 1,000편에 고르게(묶음 안에서는 epoch마다 섞어 한 번씩)이므로
+# dagger-2는 ≈ 117 × 400/1,000 ≈ 47편. 실현된 수는 run의 `metrics.json`(`summary.sampler.units`, step마다의 `units[].records`)에 있고 보고서 C가 적는다.
+# ood_dev·ood_test 계열은 어느 manifest에도 학습 split로 없다(`splits: [train]`; 수집은 train 계열 장면만 돌았다).
+extends: qwen35-2b-r6.yaml
+run_name: r12-2b
+max_steps: 233                 # r6과 같은 일정
+checkpoint_every: 50
+checkpoint_keep_steps: []
+dataset_manifests:
+  - path: artifacts/datasets/r1-robot/r1-rollout-labels-g2/manifest.json
+    domain: robot
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r5-dagger/dagger-0/manifest.json
+    domain: robot
+    material: error_family
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r6-dagger/dagger-1/manifest.json
+    domain: robot
+    material: error_family
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r6-dagger/dagger-1-donegate/manifest.json
+    domain: robot
+    material: error_family
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r12-dagger/dagger-2/manifest.json   # DAgger 사이클 2 (R12 A3)
+    domain: robot
+    material: error_family
+    files: ["episodes/*/streams.jsonl"]
+  - path: artifacts/datasets/r1/single-by-split/manifest.json     # R7 A2의 분할별 판 (r6은 r1/single)
+    domain: non_robot

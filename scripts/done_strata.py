@@ -8,6 +8,8 @@
         --dataset dagger-0=artifacts/datasets/r5-dagger/dagger-0 --out artifacts/reports/r6-a1-done-strata.json
     # B1(수정 라운드 1): 루프의 거짓 done 상태(이전 대상을 이전 영역에 막 놓은 틱)가 판정 칸과 루프 기록에 몇 틱 있고 모델이 거기서 무엇을 답하는가
     uv run python scripts/done_strata.py loop-state --out artifacts/reports/r6-b1-loop-state.json
+    # Task R12 A3: 수집 데이터셋의 표 — 편·틱, 모델 raw 거짓 done 사건(옛 목표형)과 그 뒤, 금지 접촉 시작·금지 물체 근처 틱, q_done 층, 위임 기록
+    uv run python scripts/done_strata.py collection --dataset artifacts/datasets/r12-dagger/dagger-2 --out artifacts/reports/r12-a3-collection.json
 
 GPU를 쓰지 않는다. 데이터셋·기록은 읽기만 한다.
 """
@@ -26,8 +28,9 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from robo_jev.data.done_strata import (  # noqa: E402
-    DONE_GATE_THRESHOLD, DONE_STRATA, RELEASE_WINDOW_TICKS, SEALED_SPLITS, done_strata_by_split, false_done_facts, model_q_done,
-    model_rates_by_stratum, old_target_release_ticks, old_target_releases, release_window_counts,
+    DONE_GATE_THRESHOLD, DONE_STRATA, RELEASE_WINDOW_TICKS, SEALED_SPLITS, done_strata_by_split, false_done_event_kinds, false_done_events,
+    false_done_facts, model_q_done, model_rates_by_stratum, old_target_release_ticks, old_target_releases, recovery_after_false_done,
+    release_window_counts,
 )
 
 DATASETS = REPO / "artifacts" / "datasets"
@@ -192,6 +195,57 @@ def build_loop_state(*, suite: Path = CELL_SUITE, reports: dict[str, Path] | Non
     return out
 
 
+def proximity_radii(generator_config: str | Path = REPO / "configs" / "data" / "r1_robot.yaml") -> tuple[float, float]:
+    """금지 물체 근처의 두 반지름 — 하네스 `compose.forbidden_proximity_mm`(힘 수준을 회피로 묶는 거리)와 전문가 `thresholds.stop_forbidden_mm`(참조가
+    정지를 말하는 거리). 생성 설정이 가리키는 그 두 설정에서 읽는다(단일 출처)."""
+    from robo_jev.data.robot_episodes import config_paths, load_generator_config
+    from robo_jev.harness.robot import load_harness_config
+    from robo_jev.sim.expert import load_expert_config
+
+    paths = config_paths(load_generator_config(generator_config))
+    harness = load_harness_config(paths["harness_config"])
+    expert = load_expert_config(paths["expert_config"])
+    return float(harness["compose"]["forbidden_proximity_mm"]), float(expert["thresholds"]["stop_forbidden_mm"])
+
+
+def build_collection(directory: Path, *, radii: tuple[float, ...] | None = None) -> dict[str, Any]:
+    """Task R12 A3 — 수집 데이터셋(모델 주행 + 하네스에 expert의 `q_done`; 위임 갈래면 실행 규칙의 `q_gripper`) 하나의 표. 봉인 분할은 열지 않는다
+    (manifest로 먼저 — 수집은 train뿐이다). 무엇을 세는가: 편·틱·프로파일; expert 게이트 아래 완료·종료 이유; 모델 raw 거짓 done(틱·편·사건·꼬리에 닿은
+    사건)과 그 가운데 **옛 목표형** 사건(:func:`robo_jev.data.done_strata.false_done_event_kinds`), 첫 거짓 done 뒤·첫 옛 목표형 사건 뒤에 지금 대상을 잡은 편·
+    완료한 편; 금지 접촉 시작과 금지 물체 근처 틱(:func:`robo_jev.closed_loop.forbidden_facts` — 정의는 산출물에 적힌다); `q_done` 층(A1 정의)과 층별 모델
+    raw `q_done` ≥ 0.5; 위임 기록(실행 규칙이 모델의 `q_gripper` argmax를 바꾼 틱)."""
+    from collections import Counter
+
+    from robo_jev.closed_loop import forbidden_facts
+
+    records, sealed = load_open_records(Path(directory))
+    radii = tuple(radii) if radii is not None else proximity_radii()
+    outcomes = Counter(str(((record.get("provenance") or {}).get("outcome") or {}).get("terminated")) for record in records)
+    completed = sum(1 for record in records if record["provenance"]["outcome"].get("done") and record["provenance"]["outcome"].get("target_inside_zone"))
+    by_profile = Counter(str(record["provenance"].get("profile")) for record in records)
+    events = false_done_events(records)
+    kinds = false_done_event_kinds(records)
+    delegation = Counter()
+    for record in records:
+        summary = (record.get("evidence") or {}).get("delegation") or {}
+        delegation["ticks"] += int(summary.get("ticks") or 0)
+        delegation["q_gripper_changed_ticks"] += int(summary.get("q_gripper_changed_ticks") or 0)
+        delegation["inner_q_gripper_closed_ticks"] += int(summary.get("inner_q_gripper_closed_ticks") or 0)
+        delegation["rule_closed_ticks"] += int(summary.get("rule_closed_ticks") or 0)
+    return {
+        "task": "r12-a3-collection", "generated_at": _now(), "git": _git(), "dataset": str(directory), "sealed": sealed,
+        "episodes": len(records), "ticks": sum(len(record["ticks"]) for record in records), "by_profile": dict(sorted(by_profile.items())),
+        "completed_under_the_experts_gate": completed, "terminated": dict(sorted(outcomes.items())),
+        "false_done_events": {key: value for key, value in events.items() if key != "per_episode"},
+        "recovery_after_first_false_done": {key: value for key, value in recovery_after_false_done(records).items() if key != "per_episode"},
+        "false_done_event_kinds": kinds,
+        "forbidden": forbidden_facts(records, proximity_mm=radii), "proximity_radii_mm": {"harness_forbidden_proximity": radii[0], "expert_stop_forbidden": radii[1]} if len(radii) == 2 else list(radii),
+        "done_strata": done_strata_by_split(records), "model_rates_by_stratum": model_rates_by_stratum(records),
+        "delegation": dict(delegation) if delegation["ticks"] else None,
+        "policies": sorted({json.dumps((record["provenance"].get("policy") or {}).get("wrappers"), sort_keys=True) for record in records}),
+    }
+
+
 def print_counts(payload: dict[str, Any], file: Any = None) -> None:
     file = file or sys.stdout
     print("| dataset | split | episodes | labelled | " + " | ".join(DONE_STRATA) + " |", file=file)
@@ -217,6 +271,9 @@ def main(argv: list[str] | None = None) -> int:
     count.add_argument("--out", required=True)
     loop_state = sub.add_parser("loop-state", help="B1: 루프의 거짓 done 상태 — 판정 칸 대 모델 주행 기록")
     loop_state.add_argument("--out", required=True)
+    collection = sub.add_parser("collection", help="R12 A3: 수집 데이터셋의 표 (거짓 done 사건·옛 목표형·금지 접촉·근처 틱·층)")
+    collection.add_argument("--dataset", required=True)
+    collection.add_argument("--out", required=True)
     args = parser.parse_args(argv)
     if args.command == "mechanism":
         payload = build_mechanism()
@@ -227,6 +284,12 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{name}: false dones {block['false_done']['false_done']} · post_release_other model q_done ≥ 0.5 {rate['model_true']}/{rate['answered']} · window {block['release_window']}")
         if payload["g2_train"]:
             print(f"g2 train release window: {payload['g2_train']['release_window']}")
+    elif args.command == "collection":
+        payload = build_collection(Path(args.dataset))
+        kinds, forbidden = payload["false_done_event_kinds"], payload["forbidden"]
+        print(f"{payload['episodes']} episodes · {payload['ticks']} ticks · completed under the expert's gate {payload['completed_under_the_experts_gate']} · "
+              f"false-done events {kinds['events']} (stale goal {kinds['stale_goal_events']}) in {kinds['episodes_with_events']} episodes · "
+              f"forbidden onsets {forbidden['forbidden_contact_onsets']} in {forbidden['episodes_with_onsets']} episodes · near ticks {forbidden['near_ticks']}")
     elif args.command == "loop-state":
         payload = build_loop_state()
         cell = payload["cell"]
