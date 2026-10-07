@@ -16,6 +16,12 @@
 `collection_only` 표지를 평가 실행기(:func:`robo_jev.closed_loop.run_condition`)가 거절하고, 평가의 정책 목록
 (`closed_loop.POLICY_KINDS`)에 없으며, 수집은 **train 분할의 장면**만 받는다(:func:`collect_done_gate` — 계획을 지어 분할을 먼저 보고,
 다른 분할이면 돌리기 전에 거절한다; ood_dev·ood_test 계열은 학습에 들어가지 않는다).
+
+**위임 갈래 위의 done 게이트 (Task R12 — DAgger 사이클 2).** 안쪽 정책이 위임 감싸개(:class:`robo_jev.delegation.DelegatedExecutionPolicy`,
+갈래 G — 배치 구성 r6G 그대로)여도 같다: 하네스는 `q_gripper`를 실행 쪽 규칙에서, `q_done`을 expert에게서 받고 나머지는 모델의 답이다. 모델의 raw
+`q_done`은 `usage.model_q_done`에, raw `q_gripper`와 실행 규칙의 판단은 `usage.delegation`에 남고(:meth:`DelegatedExecutionPolicy.attach`),
+`provenance.policy.wrappers`가 두 감싸개를 바깥에서 안으로 이름·버전(위임은 갈래도)으로 적는다(:func:`wrapper_chain`). 감싸지 않은 R6 꼴의 기록은
+그대로다(`wrappers`를 달지 않는다).
 """
 
 from __future__ import annotations
@@ -34,6 +40,7 @@ __all__ = [
     "attach_raw_done",
     "collect_done_gate",
     "collection_seed_base",
+    "wrapper_chain",
 ]
 
 #: 감싸개 버전 — 레코드의 `provenance.policy.version`은 ``dg0.1/<안쪽 정책의 버전>``이다.
@@ -91,6 +98,32 @@ def attach_raw_done(record: dict[str, Any], raw: list[dict[str, Any]], *, policy
     return record
 
 
+def wrapper_chain(policy: Any) -> list[dict[str, Any]]:
+    """감싸개 사슬 — 바깥에서 안으로, 감싸개마다 이름·버전(위임 감싸개는 갈래·실행 규칙도). 감싸개가 아닌 안쪽 정책(모델)에서 멈춘다 (Task R12)."""
+    from robo_jev.delegation import DELEGATION_VERSION, DelegatedExecutionPolicy
+
+    out: list[dict[str, Any]] = []
+    node = policy
+    while True:
+        if isinstance(node, DoneGatePolicy):
+            out.append({"name": node.name, "version": DONE_GATE_VERSION, "replaces": ["q_done"], "source": "expert"})
+        elif isinstance(node, DelegatedExecutionPolicy):
+            replaces = ["q_gripper"] + (["q_stop"] if node.arm == "GS" else [])
+            out.append({"name": node.name, "version": DELEGATION_VERSION, "arm": node.arm, "replaces": replaces,
+                        "rule": {"name": node.rule.name, "version": node.rule.version}})
+        else:
+            return out
+        node = node.inner
+
+
+def _delegated_inner(policy: Any) -> Any:
+    """수집 정책 안의 위임 감싸개(있으면) — done 게이트 바로 안쪽만 본다(R12의 사슬: done 게이트 → 위임 G → 모델)."""
+    from robo_jev.delegation import DelegatedExecutionPolicy
+
+    inner = getattr(policy, "inner", None)
+    return inner if isinstance(inner, DelegatedExecutionPolicy) else None
+
+
 def collection_seed_base(config: dict[str, Any], *, cycle: int) -> int:
     """이 사이클의 수집 seed 시작 = `dagger_seed_schedule(cycle)`의 시작 (`seeds.base + (cycle + 1) × dagger_cycle_offset`).
     r1 400100+ · R4 900100+ · R5 950100+ · R6 평가 980100+와 겹치지 않는다(사이클 1 = 600100)."""
@@ -125,6 +158,8 @@ def collect_done_gate(
 
     if not getattr(policy, "collection_only", False):
         raise ValueError("collect_done_gate: 수집 정책(DoneGatePolicy)만 받는다")
+    delegated = _delegated_inner(policy)
+    wrappers = wrapper_chain(policy) if delegated is not None else None
     for profile, seed in schedule:
         split = _scene_split(config, profile, seed)
         if split != "train":
@@ -146,6 +181,10 @@ def collect_done_gate(
             if record["split"] != "train":  # 계획으로 본 분할과 같아야 한다 — 다르면 쓰지 않는다
                 raise ValueError(f"{record['episode_id']}: 기록의 분할이 {record['split']}이다")
             attach_raw_done(record, policy.raw, policy_version=policy.version)
+            if delegated is not None:
+                # 위임 갈래(Task R12): 모델의 raw q_gripper·실행 규칙의 판단을 usage.delegation에, 갈래를 provenance.policy에; 두 감싸개를 이름·버전으로
+                delegated.attach(record)
+                record["provenance"]["policy"]["wrappers"] = [dict(entry) for entry in wrappers or ()]
             validate_record(record)
             write_episode(record, out)
             behaviour = count_policy_behaviour(record)
@@ -169,5 +208,10 @@ def collect_done_gate(
         "policy": {**(describe or {}), "name": policy.name, "version": policy.version, "inner_version": (describe or {}).get("version")},
         "note": "done-gate collection for DAgger training only — the harness received the expert's q_done; never an evaluation",
     }
+    if delegated is not None:
+        manifest["closed_loop"]["arm"] = delegated.arm
+        manifest["closed_loop"]["wrappers"] = [dict(entry) for entry in wrappers or ()]
+        manifest["closed_loop"]["note"] += (f"; inside the done gate the model ran in delegation arm {delegated.arm} — the harness received the execution "
+                                            "rule's q_gripper (the model's raw q_gripper is usage.delegation.inner)")
     (out / "manifest.json").write_bytes((json.dumps(manifest, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
     return {"episodes": len(rows), "wall_seconds": round(wall, 1), "rows": rows, "out": str(out)}

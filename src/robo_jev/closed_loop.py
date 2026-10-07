@@ -78,6 +78,7 @@ __all__ = [
     "episode_summary",
     "failure_cause",
     "family_overlap",
+    "forbidden_facts",
     "gripper_event_metrics",
     "gripper_fit_onset",
     "offline_gripper_transitions",
@@ -818,6 +819,63 @@ def stop_vs_reflex(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+#: 금지 물체 "근처"의 반지름 둘 (Task R12 A3) — 하네스의 `compose.forbidden_proximity_mm`(60: 금지 물체가 이 안이면 힘 수준을 회피로 묶는다)와
+#: 전문가의 `thresholds.stop_forbidden_mm`(40: 이 안이면 전문가 참조가 정지를 말한다). 값은 그 설정에서 읽어 넘긴다 — 여기 수는 기본값일 뿐이다.
+FORBIDDEN_PROXIMITY_MM = (60.0, 40.0)
+
+
+def forbidden_facts(records: list[dict[str, Any]], *, proximity_mm: tuple[float, ...] = FORBIDDEN_PROXIMITY_MM) -> dict[str, Any]:
+    """금지 물체의 사실 (Task R12 A3 — 수집 기록의 표): 금지 집합은 **그 틱까지 본 목표의 `forbidden_contact`를 편 동안 쌓은 것**(:func:`stop_vs_reflex`와
+    판정 (s)의 `forbidden_contacts`와 같은 집합)이다. 접촉 시작 = 그 틱 사건 목록의 `contact_onset`이 금지 물체에(편당 수·편 수 — :func:`stop_vs_reflex`와
+    같은 셈). 근처 틱 = 말단(`state.robot.ee_pose_mm`)이 금지 물체의 관측 자세(`pose_mm`)에서 반지름 안(3차원 거리)인 틱 — 반지름마다 틱 수·편 수.
+    관측 자세가 없는 금지 물체(추적되지 않은 것)는 근처 셈에 들지 않는다."""
+    radii = [float(value) for value in proximity_mm]
+    onsets = onset_episodes = 0
+    near = {radius: 0 for radius in radii}
+    near_episodes = {radius: 0 for radius in radii}
+    by_profile: dict[str, dict[str, int]] = {}
+    per_episode: dict[str, Any] = {}
+    ticks_total = 0
+    for record in records:
+        forbidden: set[str] = set()
+        mine = 0
+        mine_near = {radius: 0 for radius in radii}
+        for tick in record["ticks"]:
+            ticks_total += 1
+            state = tick["request"]["state"]
+            forbidden |= {str(item) for item in ((state.get("goal") or {}).get("forbidden_contact") or ())}
+            mine += sum(1 for event in state.get("events") or () if str(event.get("kind")) == "contact_onset" and str(event.get("object")) in forbidden)
+            ee = (state.get("robot") or {}).get("ee_pose_mm")
+            if ee is None or not forbidden:
+                continue
+            point = [float(value) for value in ee]
+            distances = [math.dist(point, [float(value) for value in entry["pose_mm"]]) for entry in state.get("objects") or ()
+                         if str(entry.get("id")) in forbidden and entry.get("pose_mm") is not None]
+            closest = min(distances) if distances else None
+            for radius in radii:
+                mine_near[radius] += int(closest is not None and closest <= radius)
+        onsets += mine
+        onset_episodes += int(mine > 0)
+        for radius in radii:
+            near[radius] += mine_near[radius]
+            near_episodes[radius] += int(mine_near[radius] > 0)
+        profile = str((record.get("provenance") or {}).get("profile"))
+        block = by_profile.setdefault(profile, {"episodes": 0, "onsets": 0, "onset_episodes": 0})
+        block["episodes"] += 1
+        block["onsets"] += mine
+        block["onset_episodes"] += int(mine > 0)
+        if mine or any(mine_near.values()):
+            per_episode[str(record.get("episode_id"))] = {"onsets": mine, "near_ticks": {f"{radius:g}": count for radius, count in mine_near.items()}}
+    return {
+        "episodes": len(records), "ticks": ticks_total, "forbidden_contact_onsets": onsets, "episodes_with_onsets": onset_episodes,
+        "near_ticks": {f"{radius:g}": near[radius] for radius in radii}, "episodes_with_near_ticks": {f"{radius:g}": near_episodes[radius] for radius in radii},
+        "by_profile": dict(sorted(by_profile.items())), "per_episode": per_episode,
+        "definition": "forbidden set = goal.forbidden_contact accumulated over the episode up to the tick (the set of stop_vs_reflex and of condition (s)); "
+                      "onset = a contact_onset event on a forbidden object; near tick = end effector within the radius (3-D distance, mm) of a forbidden "
+                      "object's observed pose",
+    }
+
+
 def controller_metrics(rows: list[dict[str, Any]]) -> dict[str, Any]:
     commanded = sum(row["commanded"] for row in rows)
     rejected = sum(row["rejected"] for row in rows)
@@ -874,15 +932,19 @@ def paired_false_done(rows_a: list[dict[str, Any]], rows_b: list[dict[str, Any]]
 
 #: seed(편) 하나에서 읽는 (분자, 분모) — 두 정책을 **같은 seed**로 짝지어 합친 비율의 차를 낸다 (Task R6 수정 라운드 1, 리뷰 1 I-3).
 #: 이름이 붙은 "퇴행"은 이 짝지은 구간이 0을 제외할 때만 발견이다. 뒤의 셋은 Task R10이 더했다(위임 갈래의 그리퍼 누락과 GS의 안전 판독):
-#: 참조 그리퍼 전환 가운데 누락 몫, 편당 금지 물체 접촉 시작 수, 편당 반사 사건 틱 수.
+#: 참조 그리퍼 전환 가운데 누락 몫, 편당 금지 물체 접촉 시작 수, 편당 반사 사건 틱 수. `stale_goal_false_done`(Task R12)은 옛 목표형 거짓 done(0/1 —
+#: :func:`robo_jev.data.done_strata.stale_goal_false_done`, R9 수정 1·R11 서술표의 정의)이다 — R10의 셋 앞에 둔다(그 셋이 끝자리라는 R10 시험을 지킨다).
 SEED_METRICS = ("gripper_streak", "gripper_duplicates", "q_stop_caught", "unsafe", "wrong_action", "aux_failure", "main_failure",
-                "gripper_missing", "forbidden_contacts", "reflex_ticks")
+                "stale_goal_false_done", "gripper_missing", "forbidden_contacts", "reflex_ticks")
 
 
 def seed_metrics(record: dict[str, Any], row: dict[str, Any] | None = None) -> dict[str, tuple[float, float]]:
     """편 하나의 (분자, 분모): 그리퍼 연속 불일치 편(0/1), 중복 그리퍼 전환 수(편당), `q_stop`이 잡은 정지 사건 / 정지 사건,
     안전 위반 틱 / 행동한 틱(`selective_metrics_from_stored`와 같은 정의), 오행동 틱 / 행동한 틱(`_decision_ticks`), 실패 원인 aux·main(0/1),
+    (R12) 옛 목표형 거짓 done(0/1, :func:`robo_jev.data.done_strata.stale_goal_false_done`),
     그리고 (R10) 누락된 참조 그리퍼 전환 / 참조 전환(`gripper_event_metrics`), 금지 물체 접촉 시작 수(편당, `stop_vs_reflex`), 반사 사건 틱 수(편당)."""
+    from robo_jev.data.done_strata import stale_goal_false_done
+
     row = row or episode_summary(record)
     per = per_record_rows([record])
     stop = stop_timing(per["stop"], [record]) if per["stop"] else {"reacted": 0, "onsets": 0}
@@ -899,6 +961,7 @@ def seed_metrics(record: dict[str, Any], row: dict[str, Any] | None = None) -> d
         "wrong_action": (float(decisions["wrong_action"]), float(decisions["acted"])),
         "aux_failure": (1.0 if row["failure_cause"] == "semantic_aux" else 0.0, 1.0),
         "main_failure": (1.0 if row["failure_cause"] == "semantic_main" else 0.0, 1.0),
+        "stale_goal_false_done": (1.0 if stale_goal_false_done(record) else 0.0, 1.0),
         "gripper_missing": (float(events["missing"]), float(events["reference_transitions"])),
         "forbidden_contacts": (float(stop_vs_reflex([record])["forbidden_contact_onsets"]), 1.0),
         "reflex_ticks": (float(row["reflex_ticks"]), 1.0),

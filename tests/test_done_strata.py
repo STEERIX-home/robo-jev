@@ -10,12 +10,16 @@ from robo_jev.data.done_strata import (
     RELEASE_WINDOW_TICKS,
     count_done_strata,
     done_strata_by_split,
+    false_done_event_kinds,
     false_done_facts,
+    last_grasp_before,
     model_q_done,
     model_rates_by_stratum,
     old_goal_variants,
     release_events,
     release_window_counts,
+    stale_goal_at,
+    stale_goal_false_done,
     tick_done_strata,
 )
 
@@ -365,3 +369,75 @@ def test_the_loop_state_release_block_counts_releases_their_timing_and_a_q_done_
         tick["model_output"]["q_done"] = 0.1
     assert module._release_block([quiet], answers=lambda rec, index: model_q_done(rec["ticks"][index]))["followed_by_q_done_within_3_ticks"] == 0
     assert "followed_by_q_done_within_3_ticks" not in module._release_block([record])  # 답이 없는 칸(전문가 기록)에는 세지 않는다
+
+
+# --------------------------------------------------------------------------
+# Task R12 — 옛 목표형 거짓 done (R9 수정 1 `false_done_mechanism.py`의 정의)과 수집 기록의 사건 종류
+# --------------------------------------------------------------------------
+
+
+def _grasping(tick, obj):
+    """틱의 관측 상태에 파지 commitment 투영(`state.commitment.key` = ``grasp:<물체>:…``)을 단다 — 하네스가 요청의 commitment와 같은 투영을 거기 둔다."""
+    tick["request"]["state"]["commitment"] = None if obj is None else {"action_ref": f"m-{obj}", "key": f"grasp:{obj}:top:zoneL", "phase": "grasp"}
+    return tick
+
+
+def _stale_record(*, last_grasp="o1", p_done=(0.0, 0.0, 0.0, 0.0, 0.8, 0.9, 0.0, 0.0), done=True, inside=False):
+    """v1: o1 → zoneL, 모델이 o1을 잡는다; 틱 3에 지시가 v2(o2 → zoneR)로 바뀐다; 틱 3까지 모델은 `last_grasp`를 붙잡고 있다가(파지 commitment),
+    틱 4·5에 raw `q_done`이 든다(참조 거짓) — 결과는 done(틱 4) ∧ 대상 밖(거짓 done)."""
+    ticks = []
+    for index in range(len(p_done)):
+        version, target, zone = (1, "o1", "zoneL") if index < 3 else (2, "o2", "zoneR")
+        holding = "o2" if index >= 6 else None
+        tick = _tick(index, version=version, target=target, zone=zone, poses={"o1": IN_L, "o2": OUT}, holding=holding, p_done=p_done[index])
+        _grasping(tick, (last_grasp if index < 4 else None) if index < 6 else "o2")
+        ticks.append(tick)
+    record = _record(ticks, done=done, inside=inside)
+    record["provenance"]["outcome"]["done_tick"] = 4
+    return record
+
+
+def test_stale_goal_at_is_a_last_grasp_on_a_non_target_that_an_earlier_instruction_named():
+    """옛 목표형 = done을 말한 틱 **앞**의 마지막 파지 commitment 물체 X가 그 파지 틱의 지시 대상이 아니고, X가 그 틱보다 낮은 목표 버전의 대상이었다.
+    X가 파지 틱의 대상이면(지시가 바뀌기 전 그 대상을 잡고 있었다) 옛 목표형이 아니고, 이전 지시가 부른 적 없는 물체도 아니다."""
+    stale = _stale_record(last_grasp="o1")  # 틱 3(v2, 대상 o2)에도 o1을 잡고 있었다 — o1은 v1의 대상
+    assert last_grasp_before(stale, 4) == (3, "o1", "o2")
+    found = stale_goal_at(stale, 4)
+    assert found == {"grasp_tick": 3, "object": "o1", "target_at_grasp": "o2", "last_grasp_non_target": True, "earlier_target": True, "stale_goal": True}
+    assert stale_goal_false_done(stale) is True
+    # 이전 지시가 부른 적 없는 물체(o3)를 마지막으로 잡았다 — 대상이 아니지만 옛 목표형이 아니다
+    other = _stale_record(last_grasp="o3")
+    assert stale_goal_at(other, 4)["last_grasp_non_target"] is True and stale_goal_at(other, 4)["stale_goal"] is False
+    assert stale_goal_false_done(other) is False
+    # 지금 대상(o2)을 마지막으로 잡았다
+    current = _stale_record(last_grasp="o2")
+    assert stale_goal_at(current, 4)["stale_goal"] is False and stale_goal_false_done(current) is False
+    # 앞에 파지가 없거나 틱이 범위 밖이면 None — 결과가 완료면 거짓 done이 아니다
+    assert stale_goal_at(stale, 0) is None and stale_goal_at(stale, 99) is None
+    assert stale_goal_false_done(_stale_record(last_grasp="o1", inside=True)) is False
+    assert stale_goal_false_done(_stale_record(last_grasp="o1", done=False)) is False
+    # 그 틱과 과거 틱만 읽는다 — 뒤를 잘라도 같은 답
+    cut = {**stale, "ticks": stale["ticks"][:5]}
+    assert stale_goal_at(cut, 4) == found
+
+
+def test_false_done_event_kinds_mark_each_raw_event_by_its_first_tick_and_count_what_followed_a_stale_goal_event():
+    """모델 raw 거짓 done 사건(raw `q_done` ≥ 0.5 · 참조 거짓의 연속 구간)마다 첫 틱에서 옛 목표형인가를 가르고, 첫 옛 목표형 사건 뒤에 모델이 지금 대상을
+    잡았는가(관측의 `holding`)·편이 완료했는가를 센다. 옛 목표형이 아닌 사건은 옛 목표형으로 세지 않는다."""
+    stale = _stale_record(last_grasp="o1")  # 사건 하나(틱 4–5, 2틱), 틱 6부터 o2를 잡는다; 결과는 거짓 done
+    other = _stale_record(last_grasp="o3", p_done=(0.0, 0.0, 0.0, 0.0, 0.8, 0.0, 0.9, 0.9))
+    other["episode_id"] = "ep-E1-000002"
+    out = false_done_event_kinds([stale, other])
+    assert out["events"] == 3 and out["stale_goal_events"] == 1 and out["episodes_with_events"] == 2 and out["episodes_with_stale_goal_events"] == 1
+    assert out["events_reaching_the_tail"] == 0 and out["tail_ticks"] == 4
+    row = out["per_episode"]["ep-E1-000001"]
+    assert row["events"] == [{"first_tick": 4, "ticks": 2, "stale_goal": True, "last_grasp": "o1", "last_grasp_non_target": True}]
+    assert row["first_stale_goal_tick"] == 4 and row["grasped_current_target_after_stale_goal"] == 6 and row["completed"] is False
+    assert [event["stale_goal"] for event in out["per_episode"]["ep-E1-000002"]["events"]] == [False, False]
+    assert out["after_first_stale_goal_event"] == {"grasped_current_target": 1, "completed": 0}
+    # 수집 정책의 기록이면 raw 답은 `usage.model_q_done`에서 읽는다(model_output은 expert의 값)
+    collected = copy.deepcopy(stale)
+    for tick in collected["ticks"]:
+        tick["usage"]["model_q_done"] = tick["model_output"]["q_done"]
+        tick["model_output"]["q_done"] = 0.0
+    assert false_done_event_kinds([collected])["stale_goal_events"] == 1
