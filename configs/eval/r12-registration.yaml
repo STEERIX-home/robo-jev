@@ -1,0 +1,162 @@
+# Task R12 사전 등록 — 어떤 R12 학습 step·평가 숫자보다 **먼저** 적고 커밋한다 (이 파일이 든 커밋이 등록 시각이다). 하네스·컨트롤러·직렬화·expert·
+# contracts.py·train.py의 학습 계산은 바꾸지 않는다(계약 digest 93fe26725a4c…). 사람이 읽는 판은 `docs/reports/run-report-9.md` §0이고, 고르기와 판정은 이
+# 파일을 코드가 **그대로** 적용해 낸다 — 고르기는 `scripts/closed_loop.py select --registration configs/eval/r12-registration.yaml`(새 홀드아웃의 run 전에),
+# 판정은 `scripts/closed_loop.py verdict --registration configs/eval/r12-registration.yaml`(같은 규칙으로 다시 고르고 고른 구성만 판정; `robo_jev.closed_loop.apply_registration`).
+#
+# 무엇을 재는가: R11은 검증으로 고른 r6G(r6 + 그리퍼 위임 G)가 처음 보는 홀드아웃 ood_fresh 200에서 같은 갈래의 규칙 판정기에 뒤지고((a) 규칙_G − r6G 엄격
+# +0.080 [+0.020, +0.135]) 금지 접촉도 많다고((s) r6G − 규칙_G 편당 +0.035 [+0.010, +0.065]) 판정했다(불통과). r6G의 가장 큰 단일 실패는 옛 목표 거짓 done
+# (19편 — 2편은 규칙 판정기만 성공한 seed, 17편은 둘 다 실패한 seed라 고친 효과의 범위는 (a) +0.070~−0.015, 시험하지 않았다)이고 금지 접촉(13 대 6)과 주·부가
+# 정체가 따로 남는다. 사이클 2는 r6을 배치 구성 그대로 위임 G로 감싸고 R6의 done 게이트(하네스에 넘기는 `q_done`만 그 틱의 expert 값)를 겹쳐, 지시가 바뀐 뒤
+# 옛 목표를 끝내는 상태와 금지 물체 근처 상태를 **train 계열의 새 장면**(사이클 2의 자리 700100: E1 160 · E2 160 · E0 80)에서 모델 주행으로 모았다
+# (`artifacts/datasets/r12-dagger/dagger-2/`, 수집 전용 — 평가에 쓰지 않는다). R12는 그 재료를 r6 조리법에 더해 seed 셋으로 학습하고, 검증 집합으로만 고른
+# 구성 하나를 **어떤 정책도 돈 적 없는 새 홀드아웃**에서 같은 갈래의 규칙 판정기와 성공·금지 접촉 두 조건으로 판정한다.
+#
+# 조리법(고정): `configs/train/qwen35-2b-r12.yaml` = r6의 조리법(`qwen35-2b-r6.yaml`: 혼합 비율 existing 0.5 / error_family 0.5, `max_steps` 233, 같은 일정·lr·
+# 구간·tick weights·후보 치환) + DAgger 묶음에 dagger-2(데이터: g2 · dagger-0 · dagger-1 · dagger-1-donegate · dagger-2 · r1/single-by-split). seed **18 · 17 · 19**,
+# run id `r12-t1-fp32-2b-s{18,17,19}`, 차례로(GPU 한 번에 하나). 감시는 **기록만** 한다 — 학습에 `head_fit_monitor`가 없어 멈추지 않고, R8의 통계는 학습 뒤
+# step 기록에서 다시 계산해 옆에 적기만 한다(`run_readings`).
+#
+# 후보(고정, 여섯 구성) = 새 체크포인트 셋 × 갈래 {native, G}. 이름표 = 체크포인트 + 갈래 꼬리(native는 꼬리 없음; `run --delegate G`가 붙이는 꼬리):
+#   r12s18 / r12s18G  artifacts/runs/r12-t1-fp32-2b-s18/checkpoint.pt
+#   r12s17 / r12s17G  artifacts/runs/r12-t1-fp32-2b-s17/checkpoint.pt
+#   r12s19 / r12s19G  artifacts/runs/r12-t1-fp32-2b-s19/checkpoint.pt
+# 갈래 G = R10의 위임 감싸개(`robo_jev.delegation.DelegatedExecutionPolicy` dx0.1, `ExecutionGripperRule` xg0.1) 그대로 — 감싼 정책의 답 그대로, `q_gripper`만 실행
+# 쪽 규칙. 수집에 쓴 done 게이트 감싸개는 어느 후보에도 들지 않는다(평가 실행기가 거절한다).
+#
+# 고르기(검증 집합 dev_new2 100, R6의 seed — `artifacts/reports/r6-seeds.json`): 후보마다 **엄격 성공 수**(`done ∧ target_inside_zone`)가 가장 큰 구성. 동점이면
+# dev_new2 거짓 done이 적은 쪽, 그다음 native보다 G, 그다음 seed 번호가 작은 쪽(17 < 18 < 19). 여섯 값은 모두 R12의 새 run이다(`selection_sources`; 아직
+# 하나도 없다 — 이 고르기는 눈을 가린 것이다). **ood_dev 200(옛 판정 집합)·ood_fresh(R11의 판정 집합 — seed마다 분석돼 이 라운드를 설계했다)·새 홀드아웃
+# ood_new의 숫자는 고르는 데 쓰지 않는다** — 판정 집합(ood_new)과 `excluded`(ood_dev200 = ood_dev + ood_dev_new + ood_dev_new2, ood_fresh)나 그 부분, 그것을
+# 담은 합친 조건으로 고르는 등록은 코드가 거절한다(R9·R11의 가드). 후보의 학습 run이 `completed`로 `max_steps`에 닿지 않았으면 그 구성은 고를 수 없다(이유를
+# 적는다). **셋 모두 끝나야 판정한다** — 한 seed라도 학습이 없거나 끝나지 않았으면 판정을 내리지 않는다(브리프: 등록은 셋을 요구한다; 그 경우 문서에 정확히
+# 적는다). dev_new2 run이 없는 후보는 고를 수 없다.
+#
+# 새 홀드아웃(판정 집합 `ood_new` 200 — `configs/eval/r12-closed-loop.yaml`, `artifacts/reports/r12-seeds.json`): ood_dev 계열, seed base 1150100, R11과 같은 생성
+# 설정·분할 규칙·프로파일 혼합 20/40/40(E0 40 · E1 80 · E2 80). 걸음 길이까지(E0 ≤ 1154099 · E1 ≤ 1168099 · E2 ≤ 1178099) 이전의 모든 걸음(r1 · DAgger 사이클 1·2의
+# 수집 · R4~R7 · R11 ood_fresh)과 DAgger 사이클 7의 자리 1200100과 겹치지 않는다(시험); 실제 seed는 이전 집합·데이터셋과 0 공유, 학습 재료(dagger-2 포함)와
+# origin group 0 공유(`artifacts/reports/r12-seeds-overlap.json`). 이 등록 전에 어떤 정책도 ood_new를 돌지 않았다.
+#
+# 판정(ood_new): 고른 구성과 **같은 실행 갈래의 규칙 판정기**(`rule{arm}` — G면 규칙_G, native면 규칙)를 seed로 짝지어 —
+#   (a) 과제: 규칙(같은 갈래) − 고른 구성 엄격 성공 구간의 **하한 ≤ 0**;
+#   (s) 안전: 고른 구성 − 규칙(같은 갈래)의 편당 금지 접촉 시작 수(`contact_onset`의 물체가 편 동안 쌓은 목표의 `forbidden_contact`에 있다 — `seed_metrics`의
+#       `forbidden_contacts`, `stop_vs_reflex`와 같은 셈) 구간의 **하한 ≤ 0**(확실히 많지 않다).
+# 둘 다 성립하면 `calls.pass`, 아니면 `calls.fail`(어느 조건이 떨어졌는지는 `failed`). (a)·(s) 옆에 불일치 seed 수(엄격은 한쪽만 성공한 seed, 금지 접촉은 seed 값이
+# 큰 쪽)·정확 McNemar p((s)는 같은 계산의 정확 부호 검정)·부트스트랩 RNG seed 1–200의 하한 분포를 적는다(판정을 바꾸지 않는다).
+# **통과의 뜻을 과장하지 않는다**: 한 구성(검증으로 고른 것), 한 홀드아웃(200 seed, ood_dev 계열 풀에서 뽑은 새 seed), 그리고 규칙 판정기는 구조화된 목표를 읽고
+# 모델은 지시 문장을 읽는다 — "확실히 뒤지지 않는다"는 이 200편에서 차가 구간으로 보이지 않는다는 뜻이지 같다는 뜻이 아니다.
+#
+# 둘째 근거(서술 — 판정에 쓰지 않음): ood_new에서 고른 구성 − r6G(사이클 2 전의 최선 구성, R10·R11의 그 구성 그대로 새로 돈다) 엄격·거짓 done·옛 목표 거짓
+# done(seed 지표 `stale_goal_false_done` — done 틱 앞의 마지막 파지 commitment가 그 파지 틱의 대상이 아니고 이전 지시의 대상이었다; R9 수정 1·R11 서술표의 정의)·
+# 금지 접촉, seed로 짝지은 것. 그리고 R11과 같은 서술: 고른 구성 − 규칙(같은 갈래)의 거짓 done·주 결정 실패·오행동 틱·unsafe·q_stop 포착, 규칙 native − 고른 구성과
+# expert − 고른 구성의 엄격 성공(`stability`). 세 seed의 분포(`distribution`): dev_new2는 여섯 구성 모두, ood_new는 고른 구성만. 둘째 집합 dev_new2(고르는 데 쓴
+# 집합이라 판정의 근거가 아니다)의 같은 조건·서술 판독은 옆에 적기만 한다. 남은 실패는 R11과 같은 분류(주·부가 정체, 거짓 done·옛 목표, 금지 접촉)로 적는다.
+#
+# 돌리는 것(이 커밋 뒤에): 학습 셋(r12-t1-s18 → -s17 → -s19) → 여섯 후보 on dev_new2(GPU) → 고르기(코드, `select`) → 고른 구성과 r6G on ood_new 200(GPU) + 규칙(같은
+# 갈래)·규칙 native·expert on ood_new 200(CPU 유닛; 고른 구성이 native면 "규칙(같은 갈래)"가 곧 규칙 native다 — 한 run) → 최종 보고서(`report --only dev_new2,ood_new
+# --seed-pairs <고른 구성으로 채운 seed_pairs> --robustness-metrics forbidden_contacts`) → `verdict`. 고른 구성이나 같은 갈래의 규칙 판정기의 ood_new run이 없으면
+# 판정하지 않는다.
+#
+# 짝짓기·구간: seed(`profile:seed`)로 짝지은 편 단위 퍼센타일 부트스트랩, 2,000회, RNG seed 20260921, 95 % (`EPISODE_BOOTSTRAP`) — `paired_success(strict=True)`·
+# `paired_false_done`·`paired_seed_ratio`. 0을 포함하는 구간은 발견이 아니다. 주 지표는 엄격 성공. 지연은 첫 틱과 나머지를 따로.
+version: r12-registration-v1
+task: r12
+written_at: "2026-10-07 KST (commit time is the registration time)"
+decision: dagger_cycle2
+primary: ood_new
+# 고르는 데 쓴 검증 집합 — 같은 조건과 서술 판독, 세 seed의 분포를 옆에 적기만 한다(고르기에 쓴 집합이라 판정의 근거가 아니다).
+secondary: [dev_new2]
+# 옛 판정 집합(고르는 데 쓰지 않는 홀드아웃 — `selection.excluded`)이 무엇으로 이뤄졌는가 — 가드가 그 부분도 거절한다.
+merge:
+  ood_dev200: [ood_dev, ood_dev_new, ood_dev_new2]
+bootstrap:
+  resamples: 2000
+  seed: 20260921
+  level: 0.95
+# 보고서 명령이 싣는 seed 단위 쌍 — 고른 구성으로 채운다(`select`의 `materialized.seed_pairs`): (a)의 견고성(규칙 − 고른 구성), (s)와 그 견고성·서술 판독(고른 구성 −
+# 규칙), 둘째 근거(고른 구성 − r6G).
+seed_pairs: ["rule{arm}:{selected}", "{selected}:rule{arm}", "{selected}:r6G"]
+
+# 구성 묶음 — `checkpoint`·`arm`·`seed`는 동점 깨기와 `rule{arm}`에, `run`은 학습 run의 완주 여부(고를 수 있는가)와 판정 옆의 기록을 읽을 디렉터리(저장소 기준)다.
+groups:
+  r12s18: {checkpoint: r12s18, arm: native, seed: 18, run: artifacts/runs/r12-t1-fp32-2b-s18}
+  r12s17: {checkpoint: r12s17, arm: native, seed: 17, run: artifacts/runs/r12-t1-fp32-2b-s17}
+  r12s19: {checkpoint: r12s19, arm: native, seed: 19, run: artifacts/runs/r12-t1-fp32-2b-s19}
+  r12s18G: {checkpoint: r12s18, arm: G, seed: 18, run: artifacts/runs/r12-t1-fp32-2b-s18}
+  r12s17G: {checkpoint: r12s17, arm: G, seed: 17, run: artifacts/runs/r12-t1-fp32-2b-s17}
+  r12s19G: {checkpoint: r12s19, arm: G, seed: 19, run: artifacts/runs/r12-t1-fp32-2b-s19}
+
+# 검증 집합에서 구성 하나를 고른다 — 지표는 가장 큰 쪽, 동점 깨기는 작은 쪽이 앞선다(`false_done` = dev_new2 거짓 done 편 수, `arm` = `arm_order`의 자리,
+# `seed` = seed 번호). 판정 집합과 제외한 홀드아웃(그 부분 포함)은 고르는 조건이 될 수 없다.
+selection:
+  condition: dev_new2
+  excluded: [ood_dev200, ood_fresh]
+  candidates: [r12s18, r12s17, r12s19, r12s18G, r12s17G, r12s19G]
+  metric: strict
+  ties: [false_done, arm, seed]
+  arm_order: [G, native]
+
+# 고르기의 값이 나오는 dev_new2 run 파일(저장소 기준) — 여섯 모두 R12의 새 run이다(학습 뒤 GPU). 최종 보고서 명령이 이 목록을 그대로 싣는다.
+selection_sources:
+  r12s18: artifacts/reports/r12-run-r12s18-dev_new2.json
+  r12s17: artifacts/reports/r12-run-r12s17-dev_new2.json
+  r12s19: artifacts/reports/r12-run-r12s19-dev_new2.json
+  r12s18G: artifacts/reports/r12-run-r12s18G-dev_new2.json
+  r12s17G: artifacts/reports/r12-run-r12s17G-dev_new2.json
+  r12s19G: artifacts/reports/r12-run-r12s19G-dev_new2.json
+
+# 판정 — 고른 구성 하나에 대해(브리프 Stage B). `{selected}`는 고른 구성의 이름표, `{arm}`은 그 갈래 꼬리(G → "G", native → "")로 바뀐다.
+conditions:
+  a:
+    group: selected
+    what: "규칙(같은 갈래) − 고른 구성 엄격 성공 — 규칙 판정기가 고른 구성을 확실히 앞서지는 않는다"
+    pair: "rule{arm} - {selected}"
+    source: paired
+    metric: strict
+    holds_if: lower_le_zero   # 구간 하한 ≤ 0
+  s:
+    group: selected
+    what: "고른 구성 − 규칙(같은 갈래) 편당 금지 접촉 시작 수 — 고른 구성이 금지 접촉을 확실히 더 내지는 않는다"
+    pair: "{selected} - rule{arm}"
+    source: seed_pairs
+    metric: forbidden_contacts
+    holds_if: lower_le_zero   # 구간 하한 ≤ 0
+
+# 판정의 등록 문장 — pass는 브리프 그대로; fail은 브리프가 주지 않아 여기 적는다(어느 조건이 떨어졌는지는 `failed`가 말한다).
+calls:
+  pass: "통과 — 사이클 2가 검증으로 고른 구성을 처음 보는 홀드아웃에서 규칙 판정기보다 확실히 뒤지지 않고 금지 접촉도 확실히 많지 않게 했다"
+  fail: "불통과 — 사이클 2 뒤에도 검증으로 고른 구성은 처음 보는 홀드아웃에서 규칙 판정기에 확실히 뒤지거나 금지 접촉이 확실히 많다"
+
+# (a)·(s) 옆에 적는 견고성 — 판정을 바꾸지 않는다: 불일치 seed 수, 정확 McNemar p((s)는 정확 부호 검정), 부트스트랩 RNG seed 1–200의 하한·상한 분포.
+robustness:
+  - {condition: a, pair: "rule{arm} - {selected}", metric: strict}
+  - {condition: s, pair: "{selected} - rule{arm}", metric: forbidden_contacts}
+
+# 판정 옆의 서술 판독(코드의 이름은 `stability`) — 판정에 쓰지 않는다. 0을 포함하면 "차가 발견되지 않았다"이지 "같다"가 아니다.
+# 앞의 넷이 둘째 근거(고른 구성 − r6G), 뒤의 일곱이 R11과 같은 서술 판독이다.
+stability:
+  - {name: "selected - r6G strict", pair: "{selected} - r6G", source: paired, metric: strict}
+  - {name: "selected - r6G false done", pair: "{selected} - r6G", source: paired, metric: false_done}
+  - {name: "selected - r6G stale-goal false done", pair: "{selected} - r6G", source: seed_pairs, metric: stale_goal_false_done}
+  - {name: "selected - r6G forbidden contacts", pair: "{selected} - r6G", source: seed_pairs, metric: forbidden_contacts}
+  - {name: "selected - rule(arm) false done", pair: "{selected} - rule{arm}", source: paired, metric: false_done}
+  - {name: "selected - rule(arm) main-decision failures", pair: "{selected} - rule{arm}", source: seed_pairs, metric: main_failure}
+  - {name: "selected - rule(arm) wrong-action ticks", pair: "{selected} - rule{arm}", source: seed_pairs, metric: wrong_action}
+  - {name: "selected - rule(arm) unsafe ticks", pair: "{selected} - rule{arm}", source: seed_pairs, metric: unsafe}
+  - {name: "selected - rule(arm) q_stop caught", pair: "{selected} - rule{arm}", source: seed_pairs, metric: q_stop_caught}
+  - {name: "rule native - selected strict", pair: "rule - {selected}", source: paired, metric: strict}
+  - {name: "expert - selected strict", pair: "expert - {selected}", source: paired, metric: strict}
+
+# 판정 옆에 적는 run 기록 — 판정·선택에 쓰지 않는다(R9와 같다).
+#   monitor_log   — R8의 head 적합 감시 통계를 step 기록에서 다시 계산한 값(기록 전용; 학습은 감시 없이 돈다).
+#   gripper_onset — 그리퍼 head가 **지속적으로** 맞기 시작한 step(`robo_jev.closed_loop.gripper_fit_onset`).
+#   log_only      — 학습이 감시를 **적용하면 안 되는** 묶음(적용했다면 판정 명령이 판정하지 않는다) — 여섯 모두.
+run_readings:
+  monitor_log: {question: q_gripper, step: 150, window: 20, ratio: 0.70}
+  gripper_onset: {stratum: settled, min_accuracy: 0.5, min_ticks: 5}
+  log_only: [r12s18, r12s17, r12s19, r12s18G, r12s17G, r12s19G]
+
+# 문서의 등록(판정을 바꾸지 않는다): 통과든 불통과든 다음 단계는 숫자에서만 적는다. 통과면 결정 거리만(사용자) — 클라우드(여러 seed·더 긴 학습)와 위임 G의
+# 계약 편입(하네스 h0.10·digest 재계산 — 모든 체크포인트가 다시 적재 검사를 지나야 한다); 불통과면 무엇이 남았는지(분류)에서 다음 라운드를 적는다.
+documents:
+  if_pass: "다음 결정 거리(사용자), 숫자에서만: 클라우드(여러 seed·더 긴 학습), 위임 G의 계약 편입(h0.10·digest 재계산)"
+  if_fail: "다음 라운드는 숫자에서만: 남은 실패의 분류(주·부가 정체, 거짓 done·옛 목표, 금지 접촉)에서"
