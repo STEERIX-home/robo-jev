@@ -180,6 +180,20 @@ def test_wrapper_chain_names_each_wrapper_from_the_outside_in_and_stops_at_the_m
     assert wrapper_chain(DoneGatePolicy(AlwaysDone(), Expert())) == [wrapper_chain(policy)[0]]  # R6 꼴: done 게이트 하나
 
 
+def test_wrapper_chain_names_arm_x_with_its_version_and_the_three_answers_it_replaces():
+    """R13의 갈래 X를 감싼 사슬: 위임 감싸개의 버전은 그 갈래의 dx0.2이고, 바꾸는 답은 `q_gripper`·`q_path`·`q_force`, 경로·힘 규칙의 이름·버전도 적힌다
+    (G의 사슬은 위 시험 그대로 — dx0.1, `q_gripper` 하나)."""
+    from robo_jev.data.done_gate import wrapper_chain
+    from robo_jev.delegation import EXECUTION_FORCE_VERSION, EXECUTION_GRIPPER_VERSION, EXECUTION_PATH_VERSION, DelegatedExecutionPolicy
+
+    policy = DoneGatePolicy(DelegatedExecutionPolicy(AlwaysDoneAlwaysClosed(), arm="X"), Expert())
+    assert wrapper_chain(policy)[1] == {
+        "name": "DelegatedExecutionPolicy", "version": "dx0.2", "arm": "X", "replaces": ["q_gripper", "q_path", "q_force"],
+        "rule": {"name": "ExecutionGripperRule", "version": EXECUTION_GRIPPER_VERSION},
+        "path_rule": {"name": "ExecutionPathRule", "version": EXECUTION_PATH_VERSION}, "force_rule": {"name": "ExecutionForceRule", "version": EXECUTION_FORCE_VERSION},
+    }
+
+
 @pytest.fixture(scope="module")
 def collected_delegated(tmp_path_factory):
     out = tmp_path_factory.mktemp("dagger2") / "train"

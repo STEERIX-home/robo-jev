@@ -1592,7 +1592,7 @@ def test_a_configuration_registration_needs_each_candidate_to_name_a_checkpoint_
     with pytest.raises(ValueError, match="이름표"):
         load_registration(_configuration_registration(tmp_path, groups=wrong_label))
     unknown_arm = copy.deepcopy(groups)
-    unknown_arm["r6G"]["arm"] = "X"
+    unknown_arm["r6G"]["arm"] = "Z"  # R13이 X를 갈래로 더했다 — 모르는 갈래의 예는 Z다
     with pytest.raises(ValueError, match="arm"):
         load_registration(_configuration_registration(tmp_path, groups=unknown_arm))
     no_order = {"arm_order": None}
@@ -1979,3 +1979,74 @@ def test_the_r12_selection_breaks_ties_by_false_done_then_the_delegated_arm_then
         path.write_text(yaml.safe_dump({**raw, "selection": {**raw["selection"], "condition": condition}}, allow_unicode=True), encoding="utf-8")
         with pytest.raises(ValueError, match="판정할 집합의 숫자로 고르지 않는다"):
             load_registration(path)
+
+
+# --------------------------------------------------------------------------
+# Task R13 — 갈래 X(그리퍼·경로·힘을 실행 쪽 규칙에)의 구성 이름표, 고른 체크포인트의 두 갈래 쌍(`{checkpoint}`), 새 홀드아웃(ood_new2)의 걸음
+# --------------------------------------------------------------------------
+
+
+def test_arm_x_is_a_configuration_arm_whose_suffix_builds_its_label_and_its_rule_judge(tmp_path):
+    """R13의 구성 = 체크포인트 × {G, X}: 갈래 X의 이름표는 체크포인트 + "X"(`r6X`), `rule{arm}`은 `ruleX`; 이름표가 꼬리와 맞지 않으면 거절한다."""
+    from robo_jev.closed_loop import ARM_SUFFIX, load_registration, materialize_selection
+
+    assert ARM_SUFFIX["X"] == "X" and ARM_SUFFIX["G"] == "G" and ARM_SUFFIX["native"] == ""
+    groups = {f"{checkpoint}{arm}": {"checkpoint": checkpoint, "arm": arm, "run": f"runs/{checkpoint}"} for checkpoint in ("r5", "r6") for arm in ("G", "X")}
+    path = _configuration_registration(tmp_path, groups=groups, selection={"candidates": list(groups), "arm_order": ["X", "G"]})
+    registration = load_registration(path)
+    filled = materialize_selection(registration, "r6X")
+    assert (filled["cloud"]["a"]["pair"], filled["cloud"]["s"]["pair"]) == ("ruleX - r6X", "r6X - ruleX")
+    wrong = {**groups, "r6X": {"checkpoint": "r6", "arm": "G", "run": "runs/r6"}}
+    with pytest.raises(ValueError, match="이름표"):
+        load_registration(_configuration_registration(tmp_path, groups=wrong, selection={"candidates": list(groups), "arm_order": ["X", "G"]}))
+
+
+def test_materialize_selection_fills_the_checkpoint_token_with_the_selected_configurations_checkpoint(tmp_path):
+    """`{checkpoint}`(R13)은 고른 구성의 체크포인트 이름으로 바뀐다 — `{checkpoint}X - {checkpoint}G`는 고른 체크포인트의 두 갈래 쌍(어느 갈래가 골렸든 같다).
+    그 자리 표시를 쓰는 등록은 후보마다 체크포인트가 있어야 하고(구성 검사), 체크포인트가 없는 묶음을 고른 사본은 채우지 못한다."""
+    from robo_jev.closed_loop import CHECKPOINT_TOKEN, load_registration, materialize_selection
+
+    assert CHECKPOINT_TOKEN == "{checkpoint}"
+    groups = {f"{checkpoint}{arm}": {"checkpoint": checkpoint, "arm": arm, "run": f"runs/{checkpoint}"} for checkpoint in ("r5", "r12s19") for arm in ("G", "X")}
+    stability = [{"name": "checkpoint X - G strict", "pair": "{checkpoint}X - {checkpoint}G", "source": "paired", "metric": "strict"}]
+    path = _configuration_registration(tmp_path, groups=groups, selection={"candidates": list(groups), "arm_order": ["X", "G"], "ties": ["false_done"]},
+                                       stability=stability, seed_pairs=["rule{arm}:{selected}", "{checkpoint}X:{checkpoint}G"])
+    registration = load_registration(path)
+    for selected in ("r12s19G", "r12s19X"):
+        filled = materialize_selection(registration, selected)
+        assert filled["stability"][0]["pair"] == "r12s19X - r12s19G" and filled["seed_pairs"][1] == "r12s19X:r12s19G"
+    assert materialize_selection(registration, "r5X")["seed_pairs"] == ["ruleX:r5X", "r5X:r5G"]
+    # `{checkpoint}`을 쓰면(동점 깨기·{arm}이 없어도) 후보마다 체크포인트·갈래가 있어야 한다
+    no_checkpoint = {label: {"arm": entry["arm"], "run": entry["run"]} for label, entry in groups.items()}
+    plain = [{"name": "x", "pair": "{checkpoint}X - {checkpoint}G", "source": "paired", "metric": "strict"}]
+    with pytest.raises(ValueError, match="checkpoint"):
+        load_registration(_configuration_registration(tmp_path, groups=no_checkpoint, selection={"candidates": list(groups), "ties": ["false_done"], "arm_order": None},
+                                                      stability=plain, conditions={"a": {"group": "selected", "pair": "rule - {selected}", "source": "paired",
+                                                                                         "metric": "strict", "holds_if": "lower_le_zero"}},
+                                                      robustness=[], seed_pairs=[]))
+    bypass = copy.deepcopy(registration)
+    del bypass["groups"]["r5X"]["checkpoint"]
+    with pytest.raises(ValueError, match="checkpoint"):
+        materialize_selection(bypass, "r5X")
+
+
+def test_the_r13_seed_walk_is_r12s_generator_and_mix_for_ood_new2_200_on_a_range_no_earlier_walk_or_collection_touches():
+    """Task R13 Stage B: 새 홀드아웃 `ood_new2` = ood_dev 분할 200편 — R11·R12와 같은 생성 설정·분할 규칙·프로파일 혼합(20/40/40), seed base 1250100. 걷는
+    구간(E0 4,000 · E1·E2 8,000 seed)이 r1 · DAgger 사이클 0~8의 자리(사이클 2 = R12의 수집 700100, 사이클 7 = 1200100, 사이클 8 = 1300100) · R4 · R5 · R6 · R7 ·
+    R11(ood_fresh) · R12(ood_new)의 구간과, 자기 프로파일끼리 겹치지 않는다."""
+    r13 = load_closed_loop_config(REPO / "configs/eval/r13-closed-loop.yaml")
+    r12 = load_closed_loop_config(REPO / "configs/eval/r12-closed-loop.yaml")
+    assert r13["conditions"] == {"ood_new2": {"split": "ood_dev", "count": 200}} and r13["seeds"]["base"] == 1250100
+    assert r13["generator"] == r12["generator"] and r13["generator_config_path"] == r12["generator_config_path"]
+    assert r13["generator"]["profile_weights"] == [20, 40, 40] and r13["scan"] == r12["scan"] == {"per_profile_max": 4000}
+    mine = _walk_ranges(r13, 1250100)
+    assert sorted(mine) == [(1250100, 1254100), (1260100, 1268100), (1270100, 1278100)]
+    assert all(_disjoint({a}, {b}) for a in mine for b in mine if a != b)
+    cycle_base, cycle_offset = int(r13["generator"]["seeds"]["base"]), int(r13["generator"]["seeds"]["dagger_cycle_offset"])
+    earlier = {"r1": 400100, "R4": 900100, "R5": 950100, "R6": 980100, "R7": 1050100, "R11 ood_fresh": 1100100, "R12 ood_new": 1150100}
+    earlier.update({f"dagger cycle {cycle}": cycle_base + (cycle + 1) * cycle_offset for cycle in range(9)})
+    assert (earlier["dagger cycle 2"], earlier["dagger cycle 7"], earlier["dagger cycle 8"]) == (700100, 1200100, 1300100)
+    for name, base in earlier.items():
+        assert _disjoint(mine, _walk_ranges(r13, base)), name
+    assert max(high for _, high in _walk_ranges(r13, 1200100)) == 1228100 < min(low for low, _ in mine)  # 사이클 7의 E2 끝 위에서 시작한다
+    assert max(high for _, high in mine) <= 1300100  # 사이클 8의 자리 앞에서 끝난다

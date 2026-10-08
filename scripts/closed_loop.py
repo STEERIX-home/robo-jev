@@ -12,6 +12,7 @@
     # B3·C: 정책·조건별 지표와 seed로 짝지은 구간
     uv run python scripts/closed_loop.py report --runs artifacts/reports/r4-run-*.json --out artifacts/reports/r4-closed-loop.json
     # R10: 실행 쪽 위임 갈래 — q_gripper를 실행 쪽 규칙(전문가 _gripper)으로(G), 거기에 q_stop 언제나 거짓(GS); 이름표에 갈래가 붙는다(r5 → r5G)
+    # R13: 갈래 X — G + q_path·q_force도 실행 쪽 규칙(--delegate X; r12s19 → r12s19X, rule → ruleX)
     uv run python scripts/closed_loop.py run --policy model --checkpoint … --label r5 --delegate G --id-tag r10 \\
         --condition ood_dev,ood_dev_new,ood_dev_new2 --seeds artifacts/reports/r4-seeds.json artifacts/reports/r6-seeds.json artifacts/reports/r7-seeds.json …
 
@@ -695,8 +696,9 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--manifest", default=str(DEFAULT_MANIFEST))
     run.add_argument("--seeds", nargs="+", default=None,
                      help="`seeds` 명령의 산출물 하나 이상 (조건을 합친다 — 같은 조건 이름이 둘이면 거절; 없으면 다시 고른다 — 결정적이다)")
-    run.add_argument("--delegate", default=None, choices=["G", "GS"],
-                     help="R10 위임 갈래: G = q_gripper를 실행 쪽 규칙(전문가 _gripper)으로, GS = G + q_stop 언제나 거짓; 이름표에 갈래가 붙는다(r5 → r5G)")
+    run.add_argument("--delegate", default=None, choices=["G", "GS", "X"],
+                     help="위임 갈래: G = q_gripper를 실행 쪽 규칙(전문가 _gripper)으로, GS = G + q_stop 언제나 거짓 (R10); X = G + q_path·q_force도 실행 쪽 "
+                          "규칙(전문가 _path에서 금지 물체의 추가 여유를 뺀 것·국면별 힘) (R13); 이름표에 갈래가 붙는다(r5 → r5G, r5X)")
     run.add_argument("--out", required=True, help="에피소드를 쓸 디렉터리 (조건마다 하위 디렉터리)")
     run.add_argument("--report", required=True, help="run 요약 JSON (`report` 명령의 입력)")
     run.add_argument("--limit", type=int, default=None, help="조건마다 앞 N편만 (검사용)")
