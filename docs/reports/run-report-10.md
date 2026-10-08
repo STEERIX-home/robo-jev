@@ -119,3 +119,143 @@ found", never "the same"). Strict success is primary. Latency reports each episo
 **review proposal** only (what goes to the execution layer and what stays with the model, why the speed's fragile cap stays, the path
 rule's forbidden band, harness h0.10 / digest re-computation / what happens to existing checkpoints) — the decision is the user's. On a
 fail, no proposal; the next round is written from the remaining failures' classes.
+
+## 1. Weights (no training)
+
+No training step ran and no checkpoint was written. Five existing checkpoints were read by the serving path, each in arm X on dev_new2 and
+the chosen one also in both arms on ood_new2; every load passed the contract check (`93fe26725a4c…`, serializer `ts0.6`). Size and mtime of
+each file are identical before its first load and after its last (`artifacts/scratch/r13/checkpoints-stat-{before,after}.txt`):
+
+| checkpoint | file | size (B) | written | load s (X, dev_new2) |
+| --- | --- | ---: | --- | ---: |
+| r12s19 | `artifacts/runs/r12-t1-fp32-2b-s19/checkpoint.pt` | 26,350,618,645 | 2026-10-08 02:19:52 | 41.8 (ood_new2: 38.3 X, 37.9 G) |
+| r12s17 | `artifacts/runs/r12-t1-fp32-2b-s17/checkpoint.pt` | 26,350,618,325 | 2026-10-07 22:19:15 | 39.7 |
+| r12s18 | `artifacts/runs/r12-t1-fp32-2b-s18/checkpoint.pt` | 26,350,617,685 | 2026-10-07 18:19:30 | 39.2 |
+| r6 | `artifacts/runs/r6-t1-fp32-2b-s18/checkpoint.pt` (model only — R8 A2) | 3,765,449,845 | 2026-09-29 17:10:12 | 24.4 |
+| r5 | `artifacts/runs/r5-t1-fp32-2b-s18/checkpoint.pt` (model only — R8 A2) | 3,765,327,925 | 2026-09-29 17:09:25 | 22.9 |
+
+Compile 2.1–2.4 s per process; evaluation-process GPU peak 4.15 GiB.
+
+## 2. Reproducible data
+
+**Arm X** is code (`src/robo_jev/delegation.py`, Stage A commit `7744b91`); its agreement with the expert on every stored closed-loop tick is
+`artifacts/reports/r13-a1-rule-agreement.json` (§0; re-produced from the commit identical apart from timestamps). **ood_new2**
+(`artifacts/reports/r13-seeds.json`, `r13-seeds-overlap.json`) is §0's walk. **Records**: twelve new closed-loop directories under
+`artifacts/datasets/r13-closed-loop/` (1.7 GB) — `r12s19X`, `r12s17X`, `r12s18X`, `r6X`, `r5X` and `ruleX` on dev_new2; `r12s19X`, `r12s19G`,
+`ruleX`, `ruleG`, `rule`, `expert` on ood_new2 — one version set (harness `h0.9`, controller `c0.6`, expert `e0.4`, rule judge `rj0.5`,
+generator `gen-robot-v0.3`, generator-config digest as R10–R12); every run file records git `a3f7950` (the registration commit, clean tree),
+and every model run file contract `93fe26725a4c`, serializer `ts0.6`, fence 0.6. The G-arm dev_new2 values are the stored R10 / R12 run
+files named in §0. The sealed split is not opened: the closed-loop configs refuse `ood_test`, the seed walk only counts sealed seeds, the
+overlap report counts sealed manifest entries without reading them, and every analysis reads records through the manifest-first reader.
+
+## 3. Resume
+
+Not applicable (no training).
+
+## 4. Runs, in the registered order
+
+| unit (systemd, `Started` → end) | what | wall |
+| --- | --- | ---: |
+| `r13c-c-dev-ruleX` (CPU) | ruleX on dev_new2 100 (beside the choice set) | 3 m 03 s |
+| `r13-c-dev` (GPU chain, `artifacts/scratch/r13/c-dev.sh` → `c-model.sh`) | r12s19X · r12s17X · r12s18X · r6X · r5X on dev_new2 100, one process each (page-cache drop, fence 0.6, `require_free(36 GiB)`; each checkpoint's training run checked `completed` 233/233 first) | 1 h 04 m 20 s (12 m 48 s · 13 m 31 s · 12 m 43 s · 13 m 04 s · 11 m 30 s) |
+| `r13c-c-select` (CPU) | dev_new2 report (ten selection sources + rule, ruleG, ruleX, expert) → `select` | 1 m 18 s |
+| `r13c-c-new-{ruleX,ruleG,rule,expert}` (CPU, in parallel, GPU idle) | the four CPU policies on ood_new2 200 | 6 m 06 s – 6 m 55 s |
+| `r13-c-judged` (GPU chain, no CPU unit running) | r12s19X, then r12s19G, on ood_new2 200 | 47 m 24 s (23 m 24 s · 23 m 20 s) |
+| `r13c-c-final` (CPU, MemoryMax 40G) | final report → `verdict` → tables, failures, band ticks, discordant seeds | 14 m 11 s |
+
+## 5. The choice, the registered verdict and the descriptive readings
+
+### The choice (dev_new2 100, the registered rule applied by code; `artifacts/reports/r13-selection.json`)
+
+| configuration | source of the dev_new2 value | `done` | **strict** | false done | failures main / aux / geometric | aux-failure streaks |
+| --- | --- | ---: | ---: | ---: | --- | --- |
+| **r12s19X** | R13 | 82 | **79** | 3 | 5 / 9 / 4 | speed 8, path 1 |
+| r6G | R10 | 89 | 74 | 15 | 3 / 5 / 3 | path 4, speed 3, gripper 1, force 1 |
+| r12s17X | R13 | 77 | 72 | 5 | 6 / 13 / 4 | speed 11, path 6, gripper 3, force 3 |
+| r6X | R13 | 88 | 72 | 16 | 2 / 6 / 4 | path 5, speed 4, gripper 1, force 1 |
+| r12s19G | R12 | 73 | 69 | 4 | 5 / 21 / 1 | path 16, speed 11, force 2 |
+| r12s18X | R13 | 81 | 68 | 13 | 7 / 5 / 7 | speed 4, path 1 |
+| r12s17G | R12 | 69 | 65 | 4 | 5 / 24 / 2 | path 22, speed 18, force 4, gripper 3 |
+| r12s18G | R12 | 77 | 62 | 15 | 7 / 14 / 2 | path 9, speed 7, gripper 1, force 1 |
+| r5G | R10 | 71 | 60 | 11 | 5 / 9 / 15 | path 7, speed 2, force 1 |
+| r5X | R13 | 71 | 59 | 12 | 7 / 4 / 18 | path 3, speed 1 |
+
+All ten eligible (each checkpoint's training run `completed` 233/233). **Chosen: r12s19X**, decided by the first key (79 vs r6G's 74); no tie
+rule was needed. The verdict re-chose r12s19X from the final report's dev_new2 table — identical (the chain asserts it). Beside, on the same
+scenes (not candidates): rule 67, ruleG 67, **ruleX 64**, expert 90. X − G per checkpoint on dev_new2 (seed-paired strict, the choice set —
+descriptive): r12s19 **+0.100 [+0.030, +0.170]**, r12s17 +0.070 [−0.010, +0.150], r12s18 **+0.060 [+0.020, +0.110]**, r6 −0.020 [−0.060,
++0.020], r5 −0.010 [−0.050, +0.020] — a gain where the checkpoint's own auxiliary answers stalled it (R12's three), no difference found for
+r6 and r5.
+
+### The registered verdict (ood_new2 200; `artifacts/reports/r13-verdict.json`)
+
+Final report `artifacts/reports/r13-closed-loop.json` (`report --runs <ten selection sources + rule, ruleG, ruleX, expert on dev_new2 + the six
+ood_new2 runs> --only dev_new2,ood_new2 --seed-pairs ruleX:r12s19X r12s19X:ruleX r12s19X:r12s19G ruleX:ruleG --robustness-metrics
+forbidden_contacts` → `verdict --registration configs/eval/r13-registration.yaml`).
+
+| condition | pair | difference [95 %] | discordant · exact test | RNG seeds 1–200 | holds if | holds? |
+| --- | --- | --- | --- | --- | --- | --- |
+| (a) strict success | `ruleX − r12s19X` | **−0.025 [−0.080, +0.035]** (0.745 vs 0.770; 149 vs 154) | 15 vs 20 · McNemar p = 0.50 | lower ≤ 0 in 200 of 200 (lower −0.090 … −0.080) | lower ≤ 0 | **yes** |
+| (s) forbidden-contact onsets / episode | `r12s19X − ruleX` | **+0.015 [0.000, +0.040]** (0.025 vs 0.010; 5 vs 2 onsets) | seeds higher 2 vs 0 · sign test p = 0.50 | lower ≤ 0 in 200 of 200 (lower exactly 0.000 under every RNG seed) | lower ≤ 0 | **yes** |
+
+**Registered call: pass — "통과 — 그리퍼·경로·힘을 실행 쪽에 맡기면 검증으로 고른 구성이 처음 보는 홀드아웃에서 규칙 판정기보다 확실히 뒤지지
+않고 금지 접촉도 확실히 많지 않다"** (`holds: true`, `failed: []`). Read with the zero rule: on these 200 episodes no strict-success difference
+was found between the chosen configuration and the rule judge in arm X (the point estimate favours the model by 5 seeds, the interval
+contains zero both ways), and the model's forbidden contacts are not clearly more — **(s) holds at its boundary**: the lower bound is exactly
+0, because the difference rests on two seeds (E1:1261661 one onset, E2:1270694 two), both against the model, and the 2.5 % quantile of a
+two-seed difference over 200 resampled seeds is 0. Those two seeds' contacts are the model's own (r12s19G, the same checkpoint with its own
+path and force, has the same five onsets on the same four seeds), not the path or force rule's. dev_new2 (the choice set, beside only):
+(a) −0.150 [−0.240, −0.070] (4 vs 19), (s) +0.010 [0.000, +0.030].
+
+### Descriptive readings (not used to judge)
+
+| policy (ood_new2 200) | `done` | **strict** [95 %] | false done (stale goal) | failures main / aux / geometric | aux-failure streaks | `q_stop` caught / onsets | forbidden-contact onsets (episodes) | unsafe ticks / acted | `stall_exhausted` |
+| --- | ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| **r12s19X** (chosen) | 161 | **154** [0.710, 0.830] | 7 (4) | 18 / 11 / 10 | speed 10, force 4, gripper 3, path 2 | 0/64 | 5 (4) | 0.0123 | 39 |
+| r12s19G (same checkpoint, arm G) | 142 | 131 [0.585, 0.720] | 11 (5) | 17 / 37 / 4 | path 30, speed 16, force 7, gripper 5 | 0/67 | 5 (4) | 0.0119 | 58 |
+| ruleX (same arm) | 149 | **149** [0.685, 0.805] | 0 | 2 / 8 / 41 | path 7, force 1 | 56/65 | 2 (2) | 0.0006 | 50 |
+| ruleG | 155 | 155 [0.720, 0.835] | 0 | 2 / 7 / 36 | path 6, force 1 | 56/65 | 2 (2) | 0.0006 | 37 |
+| rule (native) | 154 | 154 [0.715, 0.830] | 0 | 2 / 42 / 2 | gripper 40, path 6, force 1 | 61/69 | 2 (2) | 0.0005 | 38 |
+| expert | 179 | 179 [0.850, 0.935] | 0 | 1 / 1 / 19 | force 1 | 76/76 | 4 (4) | 0.0000 | 20 |
+
+(`artifacts/scratch/r13/c-tables.md`, `describe.json`, `probe.json`, `strata.json`; failure classes by `failure_cause`, the auxiliary
+streak being the adopted (executed) answer against the expert's label for ≥ 3 ticks.)
+
+* **The chosen checkpoint, X − G (`r12s19X − r12s19G`, seed-paired)**: strict **+0.115 [+0.065, +0.170]** (154 vs 131; 27 vs 4 discordant,
+  McNemar p = 3 × 10⁻⁵); auxiliary failures **−0.130 [−0.180, −0.080]** (11 vs 37); main-decision failures +0.005 [−0.030, +0.035], false
+  dones −0.020 [−0.045, 0.000] (7 vs 11), forbidden contacts 0.000 (5 vs 5, the same seeds), unsafe ticks +0.000 [−0.001, +0.003] — no
+  difference found for those four. By profile: **E2 +0.238 [+0.125, +0.350]** (47 vs 28), E0 + E1 +0.033 [−0.008, +0.075] (107 vs 103), the
+  difference of the two gaps **+0.204 [+0.088, +0.329]** (stratified bootstrap); 22 of the 27 X-only seeds are E2. In arm G those 27 seeds
+  were auxiliary stalls (19 — every one with a `q_path` streak), main-decision stalls (5) and false dones (3, 2 of them stale-goal); the 4
+  G-only seeds are X main-decision stalls (3) and one `q_path`+`q_speed` stall. On dev_new2 the same pair reads +0.100 [+0.030, +0.170] and
+  auxiliary failures −0.120 [−0.200, −0.050].
+* **The rule judge, X − G (`ruleX − ruleG`)**: strict **−0.030 [−0.055, −0.010]** (149 vs 155; 0 vs 6 discordant, McNemar p = 0.031) — the
+  rule judge does worse with the three execution rules than with its own path and force answers; the 6 seeds only ruleG solved are 4 ruleX
+  `q_path` stalls — exactly its 4 band episodes among them (below) — and 2 geometric stalls. Auxiliary failures +0.005 [−0.020,
+  +0.030], contacts 2 vs 2 (no difference found).
+* **The band (the one place the path rule differs from the expert)**: ticks where the path rule held and the tick's expert reference
+  retreated — r12s19X **198 ticks in 18 episodes** (10 of them ended in main-decision stalls, 5 succeeded, 2 auxiliary stalls with a `q_path`
+  streak — one also `q_speed` —, 1 stale-goal false done), ruleX **165 ticks in 17 episodes** (11 succeeded, 5 `q_path` stalls, 1 geometric). Of the 15 seeds only ruleX
+  solved, 4 are r12s19X band episodes; of the 20 seeds only r12s19X solved, 1 is a ruleX band episode. On dev_new2: r12s19X 50 ticks / 7
+  episodes, ruleX 98 / 6.
+* **The 35 seeds behind (a)**: the 15 seeds only ruleX solved are r12s19X stalls after main-decision disagreements (5), auxiliary
+  disagreements (7 — every one with a `q_speed` streak; 3 also `q_force`, 2 also `q_gripper`, 1 also `q_path`) and false dones (3); the 20
+  seeds only r12s19X solved are ruleX geometric stalls (18), one main-decision and one `q_path` stall. By profile (strict, r12s19X vs ruleX):
+  E0 40 vs 40, E1 67 vs 61, E2 47 vs 48; seed-paired `ruleX − r12s19X` E2 +0.012 [−0.088, +0.113], E0 + E1 −0.050 [−0.125, +0.017] (no
+  difference found in either; R12's E2 gap of +0.163 is not seen here).
+* **Seed-paired `r12s19X − ruleX` beside the verdict**: false dones **+0.035 [+0.010, +0.060]** (7 vs 0), stale-goal false dones **+0.020
+  [+0.005, +0.040]** (4 vs 0), main-decision failures **+0.080 [+0.040, +0.120]** (18 vs 2), auxiliary failures +0.015 [−0.020, +0.050] (no
+  difference found), wrong-action ticks +0.032 [+0.018, +0.047], unsafe ticks +0.012 [+0.005, +0.021], `q_stop` catch **−0.862 [−0.957,
+  −0.769]** (0/64 vs 56/65); `rule − r12s19X` strict 0.000 [−0.060, +0.065] (154 vs 154); `expert − r12s19X` **+0.125 [+0.075, +0.175]**.
+  The rule judge's failures are geometric (41 of 51); the model's are semantic (18 main, 7 false dones) and its auxiliary residue is `q_speed`
+  — the one execution answer it still gives.
+* **Residual auxiliary streaks in arm X** are mostly `q_speed` (the model's own answer). The `q_force`, `q_gripper` and `q_path` streaks that
+  remain (4, 3, 2) compare the *executed* answer with the expert's label: the harness caps the force near forbidden objects, keeps the
+  gripper and discards auxiliary answers on switch ticks, and reroutes blocked paths — the expert itself shows such a streak once (force).
+
+**Latency** (`latency.model_ms` excludes each episode's first tick; no CPU unit ran during either judged GPU run): r12s19X on ood_new2
+non-first ticks p50 / p95 / p99 **43.4 / 55.9 / 80.0 ms**, 0 of 19,517 over 100 ms, observation → command p95 61.7 ms; first ticks p50 92.0,
+max 244.9 ms, 10 of 200 over 100 ms. r12s19G on ood_new2 43.4 / 55.7 / 78.0 ms, 0 of 18,917 (first ticks 13 of 200). The five X runs on
+dev_new2: p95 56.7–57.2 ms, 1 of 49,985 non-first ticks over 100 ms (r5X), first ticks 6–13 of 100 over 100 ms. The gate (p95 ≤ 80 ms,
+> 100 ms ≤ 5 %) passes. The three rules run on the CPU after the model, outside `model_ms`; observation → command p95 is 61.7 ms (X) vs
+61.6 ms (G) on ood_new2.
