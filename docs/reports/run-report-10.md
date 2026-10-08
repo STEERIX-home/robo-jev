@@ -184,8 +184,9 @@ All ten eligible (each checkpoint's training run `completed` 233/233). **Chosen:
 rule was needed. The verdict re-chose r12s19X from the final report's dev_new2 table — identical (the chain asserts it). Beside, on the same
 scenes (not candidates): rule 67, ruleG 67, **ruleX 64**, expert 90. X − G per checkpoint on dev_new2 (seed-paired strict, the choice set —
 descriptive): r12s19 **+0.100 [+0.030, +0.170]**, r12s17 +0.070 [−0.010, +0.150], r12s18 **+0.060 [+0.020, +0.110]**, r6 −0.020 [−0.060,
-+0.020], r5 −0.010 [−0.050, +0.020] — a gain where the checkpoint's own auxiliary answers stalled it (R12's three), no difference found for
-r6 and r5.
++0.020], r5 −0.010 [−0.050, +0.020] — a gain for r12s19 and r12s18; for r12s17 (+0.070 [−0.010, +0.150]), r6 and r5 no difference was found
+(fix round 1, review I1: the first version said "a gain where the checkpoint's own auxiliary answers stalled it (R12's three)" — r12s17's
+interval contains zero).
 
 ### The registered verdict (ood_new2 200; `artifacts/reports/r13-verdict.json`)
 
@@ -203,8 +204,9 @@ forbidden_contacts` → `verdict --registration configs/eval/r13-registration.ya
 was found between the chosen configuration and the rule judge in arm X (the point estimate favours the model by 5 seeds, the interval
 contains zero both ways), and the model's forbidden contacts are not clearly more — **(s) holds at its boundary**: the lower bound is exactly
 0, because the difference rests on two seeds (E1:1261661 one onset, E2:1270694 two), both against the model, and the 2.5 % quantile of a
-two-seed difference over 200 resampled seeds is 0. Those two seeds' contacts are the model's own (r12s19G, the same checkpoint with its own
-path and force, has the same five onsets on the same four seeds), not the path or force rule's. dev_new2 (the choice set, beside only):
+two-seed difference over 200 resampled seeds is 0. Those two seeds' contacts are not the path or force rule's: r12s19G, the same checkpoint
+with its own path and force, has the same five onsets on the same four seeds (arm G shares the gripper rule, so this comparison does not
+separate the gripper rule from the model's answers; fix round 1, review M1). dev_new2 (the choice set, beside only):
 (a) −0.150 [−0.240, −0.070] (4 vs 19), (s) +0.010 [0.000, +0.030].
 
 ### Descriptive readings (not used to judge)
@@ -227,8 +229,9 @@ streak being the adopted (executed) answer against the expert's label for ≥ 3 
   difference found for those four. By profile: **E2 +0.238 [+0.125, +0.350]** (47 vs 28), E0 + E1 +0.033 [−0.008, +0.075] (107 vs 103), the
   difference of the two gaps **+0.204 [+0.088, +0.329]** (stratified bootstrap); 22 of the 27 X-only seeds are E2. In arm G those 27 seeds
   were auxiliary stalls (19 — every one with a `q_path` streak), main-decision stalls (5) and false dones (3, 2 of them stale-goal); the 4
-  G-only seeds are X main-decision stalls (3) and one `q_path`+`q_speed` stall. On dev_new2 the same pair reads +0.100 [+0.030, +0.170] and
-  auxiliary failures −0.120 [−0.200, −0.050].
+  G-only seeds are X main-decision stalls (3) and one `q_path`+`q_speed` stall — 2 of the 4 (E2:1270225, E2:1270633) are arm-X band episodes.
+  Auxiliary failures fell from 37 to 11, not to zero (fix round 1, review I2; residue in the bullet below). On dev_new2 the same pair reads
+  +0.100 [+0.030, +0.170] and auxiliary failures −0.120 [−0.200, −0.050].
 * **The rule judge, X − G (`ruleX − ruleG`)**: strict **−0.030 [−0.055, −0.010]** (149 vs 155; 0 vs 6 discordant, McNemar p = 0.031) — the
   rule judge does worse with the three execution rules than with its own path and force answers; the 6 seeds only ruleG solved are 4 ruleX
   `q_path` stalls — exactly its 4 band episodes among them (below) — and 2 geometric stalls. Auxiliary failures +0.005 [−0.020,
@@ -239,7 +242,9 @@ streak being the adopted (executed) answer against the expert's label for ≥ 3 
   solved, 4 are r12s19X band episodes; of the 20 seeds only r12s19X solved, 1 is a ruleX band episode. On dev_new2: r12s19X 50 ticks / 7
   episodes, ruleX 98 / 6.
 * **The 35 seeds behind (a)**: the 15 seeds only ruleX solved are r12s19X stalls after main-decision disagreements (5), auxiliary
-  disagreements (7 — every one with a `q_speed` streak; 3 also `q_force`, 2 also `q_gripper`, 1 also `q_path`) and false dones (3); the 20
+  disagreements (7 — every one with a `q_speed` streak; 3 also `q_force`, 2 also `q_gripper`, 1 also `q_path`; 4 of the 7 are switch-tick
+  churn — E1:1260162, E1:1260667, E2:1270317, E2:1270543 —, in 3 the model's own speed answer was executed against the label — E2:1270225,
+  also the band, E2:1270294, E2:1270973; see the residue bullet, `artifacts/scratch/r13/fix1/probe_35.json`) and false dones (3); the 20
   seeds only r12s19X solved are ruleX geometric stalls (18), one main-decision and one `q_path` stall. By profile (strict, r12s19X vs ruleX):
   E0 40 vs 40, E1 67 vs 61, E2 47 vs 48; seed-paired `ruleX − r12s19X` E2 +0.012 [−0.088, +0.113], E0 + E1 −0.050 [−0.125, +0.017] (no
   difference found in either; R12's E2 gap of +0.163 is not seen here).
@@ -247,11 +252,27 @@ streak being the adopted (executed) answer against the expert's label for ≥ 3 
   [+0.005, +0.040]** (4 vs 0), main-decision failures **+0.080 [+0.040, +0.120]** (18 vs 2), auxiliary failures +0.015 [−0.020, +0.050] (no
   difference found), wrong-action ticks +0.032 [+0.018, +0.047], unsafe ticks +0.012 [+0.005, +0.021], `q_stop` catch **−0.862 [−0.957,
   −0.769]** (0/64 vs 56/65); `rule − r12s19X` strict 0.000 [−0.060, +0.065] (154 vs 154); `expert − r12s19X` **+0.125 [+0.075, +0.175]**.
-  The rule judge's failures are geometric (41 of 51); the model's are semantic (18 main, 7 false dones) and its auxiliary residue is `q_speed`
-  — the one execution answer it still gives.
-* **Residual auxiliary streaks in arm X** are mostly `q_speed` (the model's own answer). The `q_force`, `q_gripper` and `q_path` streaks that
-  remain (4, 3, 2) compare the *executed* answer with the expert's label: the harness caps the force near forbidden objects, keeps the
-  gripper and discards auxiliary answers on switch ticks, and reroutes blocked paths — the expert itself shows such a streak once (force).
+  The rule judge's failures are geometric (41 of 51); the model's are semantic (18 main, 7 false dones) and its 11 auxiliary stalls are
+  switch-tick churn, its own speed answer and the band (next bullet; fix round 1 — the first version called the residue simply `q_speed`).
+* **Residual auxiliary streaks in arm X** (rewritten in fix round 1, review I2, after a tick-level probe over every streak of ≥ 3 ticks —
+  `artifacts/scratch/r13/fix1/probe_streaks_all.json`, `probe_stop_tick.json`, `verify.json`): the 11 auxiliary failures left (37 under G)
+  carry a `q_speed` streak in 10, a `q_force` streak in 4, a `q_gripper` streak in 3 and a `q_path` streak in 2. **The `q_path` streaks are
+  the path rule's forbidden band**: all 25 of their ticks (E2:1270225 138–142; E2:1270399 92–106 and 118–122) are band ticks — the rule held
+  where the expert's label says retreat; E2:1270399 has no other streak, so one arm-X auxiliary stall is the band itself. **The `q_force` and
+  `q_gripper` streaks are switch-tick churn**: of their 112 and 54 ticks all but one are switch ticks — the commitment was released and a
+  candidate adopted anew on each, so the harness discarded every auxiliary answer and used its initial profile (force 0, the current gripper)
+  — and the one other (E1:1260162 tick 53, in both) is a reflex stop on contact force; the rule's answer equalled the expert's label on all of
+  them. **The `q_speed` streaks are both**: of their 149 ticks, 100 are switch ticks (the model's speed answer equalled the label on 92 of
+  those) and 49 are ticks on which the model's own speed answer was executed against the label. In 5 episodes (E1:1260162, E1:1260667,
+  E2:1270317, E2:1270543, E2:1270860) every speed-streak tick is a switch tick; in the other 5 (E2:1270225, E2:1270262, E2:1270294,
+  E2:1270473, E2:1270973) the model's own answer accounts for 8–14 ticks each, including at least one whole ≥ 3-tick streak. Per episode:
+  switch-tick churn only 5, the model's speed answer 5 (one of them also the band), the band only 1. **The churn is a main decision**: on the
+  196 switch ticks inside those 5 episodes' streaks the model adopted a grasp on 192 (mostly one candidate per episode, again and again —
+  E1:1260162 52 of 53) while the expert reference's main answer was hold on 194; the failure classifier counts a main-decision failure only
+  where the reference allows a joint action, so these 5 are filed as auxiliary (`artifacts/scratch/r13/fix1/probe_churn.json`; what released
+  the commitment on each tick is not in the records). The first version said the residue was
+  "mostly `q_speed` (the model's own answer)" and blamed the `q_path` streaks on the harness rerouting blocked paths and the `q_force` streaks
+  on its force cap — the probe shows neither (the executed force 0 is the initial profile's).
 
 **Latency** (`latency.model_ms` excludes each episode's first tick; no CPU unit ran during either judged GPU run): r12s19X on ood_new2
 non-first ticks p50 / p95 / p99 **43.4 / 55.9 / 80.0 ms**, 0 of 19,517 over 100 ms, observation → command p95 61.7 ms; first ticks p50 92.0,
@@ -292,34 +313,46 @@ while a GPU unit was up (log tails during `r13-pytest-a`, `r13-c-dev` and `r13-c
    `r12s19X − ruleX` **+0.015 [0.000, +0.040]** (5 vs 2) — not clearly more, with the lower bound exactly at 0: two seeds, both against the model,
    carry the whole difference, and the same two seeds carry the same contacts when that checkpoint drives its own path and force (arm G). A
    pass is grounds to review a contract change (§12 of docs/08 has the proposal); it is not the decision, which is the user's.
-2. **Handing the path and the force to the execution side removed this checkpoint's auxiliary stalls.** The same checkpoint, X − G on
-   ood_new2: strict **+0.115 [+0.065, +0.170]** (154 vs 131; 27 vs 4 discordant), auxiliary failures **−0.130 [−0.180, −0.080]**; 19 of the 27
-   seeds it gained were `q_path` stalls in arm G. The gain sits in E2 (+0.238 [+0.125, +0.350] against +0.033 [−0.008, +0.075] on E0 + E1),
-   where R12's gap to the rule judge sat. It depends on the checkpoint: on dev_new2 X − G is +0.100 [+0.030, +0.170] (r12s19), +0.070 [−0.010,
-   +0.150] (r12s17), +0.060 [+0.020, +0.110] (r12s18), −0.020 [−0.060, +0.020] (r6), −0.010 [−0.050, +0.020] (r5) — a gain for the three R12
-   checkpoints whose auxiliary heads stalled them, no difference found for r6 and r5.
+2. **Handing the path and the force to the execution side cut this checkpoint's auxiliary stalls from 37 to 11** (rewritten in fix round 1,
+   review I2: the first version said "removed"). The same checkpoint, X − G on ood_new2: strict **+0.115 [+0.065, +0.170]** (154 vs 131; 27 vs
+   4 discordant), auxiliary failures **−0.130 [−0.180, −0.080]**; 19 of the 27 seeds it gained were `q_path` stalls in arm G. Of the 11 left,
+   10 carry a `q_speed` streak; by episode 5 are switch-tick churn (the model re-adopting a grasp where the reference holds), 5 carry the
+   model's own speed answer (one of them also a band `q_path` streak) and 1 is the path rule's forbidden band alone (§5). The gain sits in E2 (+0.238
+   [+0.125, +0.350] against +0.033 [−0.008, +0.075] on E0 + E1), where R12's gap to the rule judge sat. It depends on the checkpoint: on dev_new2 X − G is +0.100 [+0.030, +0.170] (r12s19), +0.070 [−0.010,
+   +0.150] (r12s17), +0.060 [+0.020, +0.110] (r12s18), −0.020 [−0.060, +0.020] (r6), −0.010 [−0.050, +0.020] (r5) — a gain for r12s19 and
+   r12s18; no difference found for r12s17, r6 and r5 (fix round 1, review I1: the first version said "a gain for the three R12 checkpoints").
 3. **What separates the model from the rule judge in arm X is semantic.** Seed-paired `r12s19X − ruleX`: false dones +0.035 [+0.010, +0.060]
    (7 vs 0; 4 stale-goal), main-decision failures +0.080 [+0.040, +0.120] (18 vs 2), `q_stop` caught 0 of 64 (the rule judge 56 of 65),
-   unsafe ticks +0.012 [+0.005, +0.021]; auxiliary failures +0.015 [−0.020, +0.050] (no difference found — the model's residue is `q_speed`,
-   the one execution answer it still gives). The rule judge's failures are geometric (41 of 51). The two lose different seeds — 15 seeds only
-   the rule judge solved (the model's main-decision stalls 5, `q_speed` stalls 7, false dones 3) and 20 only the model solved (the rule
-   judge's geometric stalls 18) — and on these 200 the counts did not separate them. The expert still leads the model by +0.125 [+0.075,
-   +0.175].
+   unsafe-action ticks **+0.012 [+0.005, +0.021]**; auxiliary failures +0.015 [−0.020, +0.050] (no difference found — the model's 11 are
+   switch-tick churn 5, its own speed answer 5 and the band 1; §5). The rule judge's failures are geometric (41 of 51). The two lose different
+   seeds — 15 seeds only the rule judge solved (the model's main-decision stalls 5, auxiliary stalls 7 — 4 switch-tick churn, 3 with its own
+   speed answer —, false dones 3) and 20 only the model solved (the rule judge's geometric stalls 18) — and on these 200 the counts did not
+   separate them. The expert still leads the model by +0.125 [+0.075, +0.175].
 4. **The path rule's information boundary has a measurable cost.** The rule does not read which objects are forbidden (instruction
    information), so in the 60 mm forbidden band it holds where the expert retreats (§0). The rule judge pays for it: `ruleX − ruleG` strict
    −0.030 [−0.055, −0.010] (0 vs 6 discordant; 4 of the 6 are exactly its band episodes, ended in `q_path` stalls). The model meets the band
    too (198 ticks in 18 episodes; 4 of its 15 losses to ruleX are band episodes). The harness (h0.9, unchanged) already receives the
    structured forbidden constraints and uses them for its planner margins and force cap; whether an execution-layer path rule may read them
    is part of the review, not settled here.
-5. **The stop is unchanged** — `q_stop` caught 0 of 64 stop onsets; arm X does not delegate it.
+5. **The stop is unchanged, and under X nothing else ends a pressing episode** (fix round 1, review I3) — `q_stop` caught 0 of 64 stop onsets;
+   arm X does not delegate it. On dev_new2 r6's X − G unsafe-action ticks is **+0.023 [+0.000, +0.064]** (lower bound 1.2 × 10⁻⁵, above 0 under
+   all 200 RNG seeds), and all of it is one seed, E1:990321: in arm X (r6X, r12s19X, r12s18X, r12s17X) the episode runs to the time limit (450
+   ticks) while the expert reference says stop (`contact_force`, up to 94 N) on 408 ticks and the model's `q_stop` never fires; in arm G the
+   model's own path answers (a 15-tick `q_path` streak) let the harness's stall watchdog end it (`stall_exhausted`, `arm_pinned`) at 224 (r6),
+   150 (r12s19) and 166 (r12s18) ticks (r12s17G runs to 450 as well); r5, whose `q_stop` fires there, and the three rule judges end it at 58
+   ticks with 0 unsafe. Without that seed r6's X − G is +0.000; r12s19's and r12s18's (+0.030 [−0.001, +0.085] each, no difference found) come
+   from the same seed. On ood_new2 no such X − G difference was found for the chosen checkpoint (+0.000 [−0.001, +0.003]); against ruleX the
+   model has more unsafe-action ticks (+0.012 [+0.005, +0.021]). (`artifacts/scratch/r13/fix1/verify.json`, `probe_990321.json`.)
 6. **What the round does not say.** One configuration (training seed 19, chosen on validation), one holdout of 200, a rule judge that reads
    the structured goal while the model reads the instruction text, and a comparison inside arm X (both sides use the same execution
    rules). dev_new2's (a) −0.150 [−0.240, −0.070] is the choice set's, favoured by the choice, and is written beside only. The second-best
    configuration on dev_new2 was r6G (74) — an arm G configuration; X's advantage there was checkpoint-dependent. The rule judge in arm X is
-   weaker than in its own arm (149 vs 155) — the verdict compares the model with that judge, as registered; against ruleG (a cross-arm
-   comparison, descriptive) the model reads +0.005 [−0.055, +0.070] (155 vs 154), no difference found either.
+   weaker than in its own arm (149 vs 155) — the verdict compares the model with that judge, as registered; across arms (descriptive)
+   `ruleG − r12s19X` is +0.005 [−0.055, +0.070] (155 vs 154 — ruleG one seed ahead), no difference found either (fix round 1, review M3: the
+   first version read as if the model led).
 
 **Next step (registered: written from the numbers only).** The decisions are the user's: whether to review the contract change in docs/08
 §12 (the model = semantic judgment; gripper, path and force = the execution layer; harness h0.10, which re-digests every checkpoint; the
-forbidden band), and the cloud question. For the model, what remains is semantic — main-decision stalls, stale-goal false dones, `q_stop`
-— and `q_speed`. ood_new2 (1250100~) has now been analysed seed by seed, so any further verdict needs another unused seed walk.
+forbidden band, and who stops a pressing episode when the model's `q_stop` stays silent), and the cloud question. For the model, what remains
+is semantic — main-decision stalls and switch-tick churn, stale-goal false dones, `q_stop` — and its speed answer. ood_new2 (1250100~) has
+now been analysed seed by seed, so any further verdict needs another unused seed walk.

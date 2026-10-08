@@ -767,30 +767,111 @@ def test_aux_rule_agreement_names_a_tick_where_the_rules_and_the_recorded_expert
         aux_rule_agreement([record], path_rule, force_rule)
 
 
-def test_the_path_and_force_rules_read_neither_the_goal_nor_object_attributes_nor_the_observation(path_rule, force_rule, expert_ticks):
-    """목표(문장·대상·영역·금지·취약)와 물체 속성(금지·취약)을 바꿔도 두 규칙의 판단이 같고, commitment·말단·경로 막힘을 바꾸면 판단이 바뀐다.
-    두 규칙은 전문가 객체를 들지 않는다."""
-    tick = next(t for t in expert_ticks if (t["request"].get("commitment") or {}).get("phase") == "approach")
-    before = (path_rule.decide(tick, None), force_rule.decide(tick, None))
-    changed = copy.deepcopy(tick)
-    state = changed["request"]["state"]
-    state["goal"].update({"text": "anything", "target_ref": "nothing", "target_zone": "zoneZ", "forbidden_contact": [e["id"] for e in state["objects"]],
-                          "fragile": [e["id"] for e in state["objects"]]})
+def _without_forbidden_marks(tick):
+    """금지 표시를 모두 지운 사본 — 목표의 `forbidden_contact`를 비우고 물체 속성에서 `forbidden`을 뺀다."""
+    out = copy.deepcopy(tick)
+    state = out["request"]["state"]
+    state["goal"]["forbidden_contact"] = []
     for entry in state["objects"]:
-        entry["attributes"] = ["forbidden", "fragile"]
-    assert (path_rule.decide(changed, None), force_rule.decide(changed, None)) == before
-    uncommitted = copy.deepcopy(tick)
+        entry["attributes"] = [item for item in entry.get("attributes") or () if item != "forbidden"]
+    return out
+
+
+def _marked_forbidden(tick, object_id, *, goal=False, attribute=False):
+    """물체 하나를 금지로 표시한 사본 — 목표의 `forbidden_contact`에만, 물체 속성에만, 또는 둘 다."""
+    out = copy.deepcopy(tick)
+    state = out["request"]["state"]
+    if goal:
+        state["goal"]["forbidden_contact"] = [object_id]
+    if attribute:
+        entry = next(item for item in state["objects"] if str(item["id"]) == object_id)
+        entry["attributes"] = [*(entry.get("attributes") or ()), "forbidden"]
+    return out
+
+
+def test_the_path_and_force_rules_read_neither_the_goal_nor_object_attributes_nor_the_observation(path_rule, force_rule, rule, expert, expert_ticks):
+    """정보 경계를 그것이 갈리는 자리에서 본다 — 규칙이 목표·물체 속성·관측 가운데 하나라도 읽으면 이 시험이 떨어진다 (수정 1, 리뷰 1 I5: 옛 판은 경로가
+    빈 틱 하나만 써서 목표·속성이 닿는 유일한 갈래에 이르지 못했고 관측을 넣어 보지도 않았다).
+    (1) 경로 — 막힌 경로·경유점 없음·retreat 있음, 말단이 대상이 아닌 물체 O의 추가 여유 띠 안(외접 구 + margin 밖, + forbidden margin 안). 양성 대조: 전문가의
+        답은 O를 목표에만·속성에만·둘 다 금지로 표시하면 retreat, 표시가 없으면 hold로 갈린다 — 그 표시를 읽는 경로 규칙이면 여기서 갈린다. 실행 경로 규칙의
+        판단은 표시와 목표의 다른 필드(문장·대상·영역·취약)를 어떻게 바꿔도 같다(hold).
+    (2) 힘 — 밀기 국면(수준 2)에서 말단 곁(하네스의 금지 근접 60 mm 안)의 물체 P를 금지로 표시해도 2 그대로. 양성 대조: 하네스의 힘 상한(`_cap_force`, 금지 속성을
+        읽는다)은 같은 상태에서 2를 0으로 내린다 — 그렇게 금지를 읽는 힘 규칙이면 여기서 갈린다.
+    (3) 관측 — 갈래 X 감싸개에 관측 인자를 None·빈 dict·O를 금지로 적은 시뮬레이터 관측 꼴(물체 속성·`goal.forbidden_refs`)로 바꿔 줘도, 하네스가 받는 세 답과
+        기록되는 세 판단이 같고 요청만으로 계산한 세 규칙의 답과 같다 — 관측을 규칙에 건네 읽게 하는 감싸개면 여기서 갈린다.
+    (4) 양성 대조 — commitment·말단·경로 막힘·국면을 바꾸면 판단이 바뀐다(규칙은 그것은 읽는다). 두 규칙은 전문가 객체를 들지 않는다."""
+    from robo_jev.harness.robot import RobotHarness
+
+    harness_config = load_harness_config(load_expert_config()["harness_config"])
+    margin, extra = float(harness_config["planner"]["margin_mm"]), float(harness_config["planner"]["forbidden_margin_mm"])
+    base = next(tick for tick in expert_ticks if tick["request"]["state"]["robot"].get("holding") is None
+                and any(str(entry.get("key", "")).startswith("grasp:") for entry in tick["request"]["candidates"]["q_main"]))
+    blocked_paths = [{"id": "p0", "kind": "direct"}, {"id": "pr", "kind": "retreat"}, {"id": "ph", "kind": "hold"}]
+
+    # (1) 경로: 금지 띠의 틱 — 표시 없는 바탕에서 O의 표시만 바꾼다
+    band, joint = _variant(base, phase="approach", path_ok=False, q_path=blocked_paths)
+    band = _without_forbidden_marks(band)
+    target = joint["key"].split(":")[1]
+    state = band["request"]["state"]
+    other = next(entry for entry in state["objects"] if str(entry["id"]) != target)
+    pose = [float(value) for value in other["pose_mm"]]
+    state["robot"]["ee_pose_mm"] = [pose[0], pose[1], pose[2] + circumradius_mm(other["obb_mm"]) + margin + extra / 2.0]
+    assert not _plain_inside(state, candidate_values(joint), margin)  # 전제: 어느 물체의 평범한 구 안도 아니다 — 띠에만 있다
+    o = str(other["id"])
+    variants = {"unmarked": band, "goal": _marked_forbidden(band, o, goal=True), "attribute": _marked_forbidden(band, o, attribute=True),
+                "both": _marked_forbidden(band, o, goal=True, attribute=True)}
+    goal_fields = copy.deepcopy(variants["both"])
+    goal_fields["request"]["state"]["goal"].update({"text": "anything else", "target_ref": "nothing", "target_zone": "zoneZ",
+                                                    "fragile": [str(e["id"]) for e in goal_fields["request"]["state"]["objects"]]})
+    for entry in goal_fields["request"]["state"]["objects"]:
+        entry["attributes"] = [*(entry.get("attributes") or ()), "fragile"]
+    variants["goal_fields"] = goal_fields
+    expert_reasons = {name: _expert_path(expert, tick)["reason"] for name, tick in variants.items()}
+    assert expert_reasons == {"unmarked": "blocked_no_detour", "goal": "hand_inside_obstacle", "attribute": "hand_inside_obstacle",
+                              "both": "hand_inside_obstacle", "goal_fields": "hand_inside_obstacle"}  # 양성 대조 — 이 틱에서 표시가 전문가를 가른다
+    decisions = {name: (path_rule.decide(tick), force_rule.decide(tick)) for name, tick in variants.items()}
+    assert all(decision == decisions["unmarked"] for decision in decisions.values()), decisions
+    assert decisions["unmarked"][0]["reason"] == "blocked_no_detour" and decisions["unmarked"][0]["choice"] == "ph"
+    assert all(path_rule.answer(tick) == path_rule.answer(band) for tick in variants.values())
+
+    # (2) 힘: 밀기 국면, 말단 곁 60 mm 안의 물체 P를 금지로 표시해도 국면 값 그대로
+    pushed, push_joint = _variant(base, phase="push", path_ok=True, q_path=blocked_paths)
+    pushed = _without_forbidden_marks(pushed)
+    push_target = push_joint["key"].split(":")[1]
+    near = next(entry for entry in pushed["request"]["state"]["objects"] if str(entry["id"]) != push_target)
+    near_pose = [float(value) for value in near["pose_mm"]]
+    pushed["request"]["state"]["robot"]["ee_pose_mm"] = [near_pose[0], near_pose[1], near_pose[2] + 30.0]
+    harness = RobotHarness(harness_config)
+    info = {"target_ref": push_target}
+    for marks in ({"goal": True}, {"attribute": True}, {"goal": True, "attribute": True}):
+        marked = _marked_forbidden(pushed, str(near["id"]), **marks)
+        assert force_rule.decide(marked) == force_rule.decide(pushed) and force_rule.decide(marked)["level"] == "2", marks
+    capped = harness._cap_force(2, _marked_forbidden(pushed, str(near["id"]), attribute=True)["request"]["state"], info)
+    assert capped == 0 and harness._cap_force(2, pushed["request"]["state"], info) == 2  # 양성 대조 — 금지를 읽는 상한이면 여기서 0이 된다
+
+    # (3) 관측: 감싸개에 넣는 관측을 바꿔도 하네스가 받는 세 답과 세 판단이 같다
+    observations = [None, {}, {"objects": [{"id": o, "attributes": ["forbidden"], "pos_mm": [round(v) for v in pose]}],
+                               "goal": {"forbidden_refs": [o], "target_ref": target}, "robot": {"ee_pos_mm": state["robot"]["ee_pose_mm"]}}]
+    wrapper = DelegatedExecutionPolicy(FixedX(), arm="X", rule=rule, path_rule=path_rule, force_rule=force_rule)
+    received = [wrapper.act(band, None, observation) for observation in observations]
+    for out in received:
+        assert (out["q_gripper"], out["q_path"], out["q_force"]) == (rule.answer(band), path_rule.answer(band), force_rule.answer(band))
+    assert all(entry["path_rule"] == decisions["unmarked"][0] and entry["force_rule"] == decisions["unmarked"][1] for entry in wrapper.raw)
+    assert wrapper.inner.calls[-1][2] is observations[-1]  # 관측은 감싼 정책에게만 간다
+
+    # (4) 양성 대조 — 규칙은 commitment·말단·경로 막힘·국면은 읽는다
+    uncommitted = copy.deepcopy(band)
     uncommitted["request"]["commitment"] = None
     assert path_rule.decide(uncommitted)["reason"] == "no_commitment" and force_rule.decide(uncommitted)["reason"] == "no_commitment"
-    flipped = copy.deepcopy(tick)
-    entry = next(e for e in flipped["request"]["candidates"]["q_main"] if e["id"] == flipped["request"]["commitment"]["action_ref"])
-    entry["path"] = "blocked" if entry.get("path", "ok") == "ok" else "ok"
-    assert path_rule.decide(flipped)["reason"] != before[0]["reason"]
-    pushed = copy.deepcopy(tick)
-    pushed["request"]["commitment"]["phase"] = "push"
-    assert force_rule.decide(pushed)["level"] == "2" != before[1]["level"]
-    for rule in (path_rule, force_rule):
-        assert not any(isinstance(value, Expert) for value in vars(rule).values())
+    inside = copy.deepcopy(band)
+    inside["request"]["state"]["robot"]["ee_pose_mm"] = list(pose)
+    assert path_rule.decide(inside)["reason"] == "hand_inside_obstacle"
+    cleared = copy.deepcopy(band)
+    next(e for e in cleared["request"]["candidates"]["q_main"] if e["id"] == cleared["request"]["commitment"]["action_ref"])["path"] = "ok"
+    assert path_rule.decide(cleared)["reason"] == "clear"
+    assert force_rule.decide(pushed)["level"] == "2" != force_rule.decide(band)["level"]
+    for item in (path_rule, force_rule):
+        assert not any(isinstance(value, Expert) for value in vars(item).values())
 
 
 class FixedX(Fixed):

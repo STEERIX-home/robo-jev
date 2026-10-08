@@ -1580,7 +1580,7 @@ def test_the_arm_token_names_the_rule_judge_in_the_selected_configurations_arm_a
 
 
 def test_a_configuration_registration_needs_each_candidate_to_name_a_checkpoint_and_an_arm_whose_suffix_builds_its_label(tmp_path):
-    """`{arm}`이나 갈래·체크포인트 동점 깨기를 쓰는 등록은 후보마다 `checkpoint`·`arm`(native·G·GS)이 있어야 하고 이름표가 체크포인트 + 갈래 꼬리여야
+    """`{arm}`이나 갈래·체크포인트 동점 깨기를 쓰는 등록은 후보마다 `checkpoint`·`arm`(native·G·GS·X — X는 R13)이 있어야 하고 이름표가 체크포인트 + 갈래 꼬리여야
     한다(그래야 `rule{arm}`이 같은 갈래의 규칙 판정기를 가리킨다); 갈래 동점 깨기는 모든 후보의 갈래를 담은 `arm_order`가 필요하다; seed 동점 깨기는
     여전히 정수 seed가 필요하다."""
     from robo_jev.closed_loop import load_registration
