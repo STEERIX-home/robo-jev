@@ -99,8 +99,9 @@ def attach_raw_done(record: dict[str, Any], raw: list[dict[str, Any]], *, policy
 
 
 def wrapper_chain(policy: Any) -> list[dict[str, Any]]:
-    """감싸개 사슬 — 바깥에서 안으로, 감싸개마다 이름·버전(위임 감싸개는 갈래·실행 규칙도). 감싸개가 아닌 안쪽 정책(모델)에서 멈춘다 (Task R12)."""
-    from robo_jev.delegation import DELEGATION_VERSION, DelegatedExecutionPolicy
+    """감싸개 사슬 — 바깥에서 안으로, 감싸개마다 이름·버전(위임 감싸개는 갈래·실행 규칙도). 감싸개가 아닌 안쪽 정책(모델)에서 멈춘다 (Task R12).
+    위임 감싸개의 버전은 그 갈래의 것이다(G·GS = dx0.1 그대로, X = dx0.2 — Task R13); X는 `q_path`·`q_force`도 바꾸고 그 두 규칙을 적는다."""
+    from robo_jev.delegation import DelegatedExecutionPolicy
 
     out: list[dict[str, Any]] = []
     node = policy
@@ -108,9 +109,13 @@ def wrapper_chain(policy: Any) -> list[dict[str, Any]]:
         if isinstance(node, DoneGatePolicy):
             out.append({"name": node.name, "version": DONE_GATE_VERSION, "replaces": ["q_done"], "source": "expert"})
         elif isinstance(node, DelegatedExecutionPolicy):
-            replaces = ["q_gripper"] + (["q_stop"] if node.arm == "GS" else [])
-            out.append({"name": node.name, "version": DELEGATION_VERSION, "arm": node.arm, "replaces": replaces,
-                        "rule": {"name": node.rule.name, "version": node.rule.version}})
+            replaces = ["q_gripper"] + (["q_stop"] if node.arm == "GS" else []) + (["q_path", "q_force"] if node.arm == "X" else [])
+            entry = {"name": node.name, "version": node.delegation_version, "arm": node.arm, "replaces": replaces,
+                     "rule": {"name": node.rule.name, "version": node.rule.version}}
+            if node.path_rule is not None and node.force_rule is not None:
+                entry.update({"path_rule": {"name": node.path_rule.name, "version": node.path_rule.version},
+                              "force_rule": {"name": node.force_rule.name, "version": node.force_rule.version}})
+            out.append(entry)
         else:
             return out
         node = node.inner

@@ -412,7 +412,7 @@ def build_policy(
 ) -> dict[str, Any]:
     """정책 묶음 ``{"kind", "policy", "expert", "describe"}`` — `expert`는 참조·라벨의 원천(정책이 expert면 같은 객체).
 
-    `delegate`(Task R10 — `G` | `GS`)를 주면 그 정책을 실행 쪽 위임 감싸개(:class:`robo_jev.delegation.DelegatedExecutionPolicy`)로 감싼
+    `delegate`(Task R10 — `G` | `GS`; Task R13 — `X`: 그리퍼·경로·힘)를 주면 그 정책을 실행 쪽 위임 감싸개(:class:`robo_jev.delegation.DelegatedExecutionPolicy`)로 감싼
     묶음이다(`arm` 키가 붙는다). 주지 않으면 감싸지 않은 묶음 그대로다."""
     bundle = _build_policy(kind, generator=generator, checkpoint=checkpoint, model_id=model_id, compile_dense=compile_dense)
     if delegate is None:
@@ -1426,9 +1426,13 @@ SELECTED_GROUP = "selected"
 SELECTION_METRICS = ("strict",)
 SELECTION_TIES = ("false_done", "seed", "arm", "checkpoint")
 #: 구성의 갈래 → 이름표 꼬리 (Task R11 — 구성 = 체크포인트 × 갈래: `r6` + G → `r6G`; R10의 `scripts/closed_loop.py run --delegate`가 붙이는 꼬리와 같다).
-ARM_SUFFIX = {"native": "", "G": "G", "GS": "GS"}
+#: R13: 갈래 X(그리퍼·경로·힘을 실행 쪽 규칙에) — `r6` + X → `r6X`, 규칙 판정기는 `ruleX`.
+ARM_SUFFIX = {"native": "", "G": "G", "GS": "GS", "X": "X"}
 #: 고르는 등록의 쌍 이름 안에서 고른 구성의 갈래 꼬리로 바뀌는 자리 표시 — `rule{arm}`은 같은 갈래의 규칙 판정기다(G면 `ruleG`, native면 `rule`).
 ARM_TOKEN = "{arm}"
+#: 고르는 등록의 쌍 이름 안에서 고른 구성의 **체크포인트 이름**으로 바뀌는 자리 표시 (Task R13) — `{checkpoint}X - {checkpoint}G`는 고른 체크포인트의
+#: 두 갈래 차다(어느 갈래가 골렸든 같은 쌍).
+CHECKPOINT_TOKEN = "{checkpoint}"
 #: 판정 옆에 적는 run 기록(Task R9 `run_readings`)의 키 — 기록 전용 감시, 그리퍼 적합 시작 step의 정의, 감시를 기록만 해야 하는 묶음.
 _RUN_READING_KEYS = ("monitor_log", "gripper_onset", "log_only")
 
@@ -1515,7 +1519,7 @@ def load_registration(path: str | Path) -> dict[str, Any]:
             raise ValueError(f"{path}: selection.candidates의 묶음마다 groups에 run이 필요하다 (run 상태를 읽는다)")
         if "seed" in ties and any(not isinstance(groups[name].get("seed"), int) for name in candidates):
             raise ValueError(f"{path}: selection.candidates의 묶음마다 groups에 정수 seed와 run이 필요하다 (동점 깨기와 run 상태를 읽는다)")
-        if any(ARM_TOKEN in text for text in _registration_pairs(raw)) or "arm" in ties or "checkpoint" in ties:
+        if any(token in text for text in _registration_pairs(raw) for token in (ARM_TOKEN, CHECKPOINT_TOKEN)) or "arm" in ties or "checkpoint" in ties:
             _check_configurations(path, groups, candidates)
         if "arm" in ties:
             order = selection.get("arm_order")
@@ -1810,13 +1814,15 @@ def select_seed(report: dict[str, Any], registration: dict[str, Any], *, unavail
 
 def materialize_selection(registration: dict[str, Any], selected: str | None) -> dict[str, Any]:
     """고른 묶음(seed — R9, 구성 — R11)의 이름표를 판정 조건·견고성·서술 판독·예측의 쌍 이름과 보고서 명령이 싣는 seed 쌍(`a:b`)에 넣은 등록 사본 —
-    `{selected}`는 고른 이름표로, `{arm}`은 고른 구성의 갈래 꼬리(:data:`ARM_SUFFIX`; `rule{arm}` → G면 `ruleG`, native면 `rule`)로 바뀐다. 자리 표시가 없는
+    `{selected}`는 고른 이름표로, `{arm}`은 고른 구성의 갈래 꼬리(:data:`ARM_SUFFIX`; `rule{arm}` → G면 `ruleG`, native면 `rule`)로, `{checkpoint}`(R13)는
+    고른 구성의 체크포인트 이름(`{checkpoint}X - {checkpoint}G` = 고른 체크포인트의 두 갈래)으로 바뀐다. 자리 표시가 없는
     쌍(R9의 seed 사이 서술 판독)은 그대로다. 고른 것이 없으면(고를 수 있는 후보가 없다) 쌍은 그대로 둔다."""
     out = copy.deepcopy(registration)
     if selected is None:
         return out
     group = (out.get("groups") or {}).get(selected) or {}
     suffix = ARM_SUFFIX.get(str(group["arm"])) if group.get("arm") is not None else None
+    checkpoint = str(group["checkpoint"]) if group.get("checkpoint") else None
 
     def fill(text: str) -> str:
         filled = str(text).replace(SELECTED_TOKEN, selected)
@@ -1824,6 +1830,10 @@ def materialize_selection(registration: dict[str, Any], selected: str | None) ->
             if suffix is None:
                 raise ValueError(f"{text!r}: 고른 묶음 {selected!r}에 갈래(arm)가 없어 {ARM_TOKEN!r}를 채울 수 없다")
             filled = filled.replace(ARM_TOKEN, suffix)
+        if CHECKPOINT_TOKEN in filled:
+            if checkpoint is None:
+                raise ValueError(f"{text!r}: 고른 묶음 {selected!r}에 체크포인트(checkpoint)가 없어 {CHECKPOINT_TOKEN!r}를 채울 수 없다")
+            filled = filled.replace(CHECKPOINT_TOKEN, checkpoint)
         return filled
 
     for entry in out["cloud"].values():
