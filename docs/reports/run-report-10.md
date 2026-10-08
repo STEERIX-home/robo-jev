@@ -259,3 +259,67 @@ max 244.9 ms, 10 of 200 over 100 ms. r12s19G on ood_new2 43.4 / 55.7 / 78.0 ms, 
 dev_new2: p95 56.7–57.2 ms, 1 of 49,985 non-first ticks over 100 ms (r5X), first ticks 6–13 of 100 over 100 ms. The gate (p95 ≤ 80 ms,
 > 100 ms ≤ 5 %) passes. The three rules run on the CPU after the model, outside `model_ms`; observation → command p95 is 61.7 ms (X) vs
 61.6 ms (G) on ood_new2.
+
+## 6. Measured cost
+
+| unit (systemd, `Started` → end) | what | wall |
+| --- | --- | ---: |
+| `r13-pytest-a` | GPU: full suite after Stage A (fence 0.6 + `require_free(36 GiB)` first; nothing else on the GPU) | 0 h 09 m 56 s |
+| `r13-c-dev` | GPU: the five checkpoints in arm X on dev_new2 (100 each) | 1 h 04 m 20 s |
+| `r13-c-judged` | GPU: r12s19X and r12s19G on ood_new2 (200 each) | 0 h 47 m 24 s |
+| `r13-pytest-b` | GPU: full suite at the end (same checks) | 0 h 09 m 52 s |
+| **GPU total** | | **7,892 s = 2.19 GPU-h** (brief ≈ 2–3 h) |
+
+CPU units (`r13c-*`, CUDA hidden, MemoryMax, `choom -n 1000`, Nice 10): the agreement check over every stored R4–R12 closed-loop tick (2 m 51 s,
+then 2 m 42 s from the commit), the ood_new2 seed walk (26 s) and overlap, ruleX on dev_new2 (3 m 03 s), the choice (1 m 18 s), the four CPU
+policies on ood_new2 (6 m 06 s – 6 m 55 s, in parallel, GPU idle), the final report and verdict (14 m 11 s, MemoryMax 40G — it did not
+overlap any GPU unit), the band / contact probe (21 s) and the per-profile intervals (2 s), and the development test units (`r13c-pt-*`).
+Disk: `/` 49 → 46 GB free (10⁹ B; closed-loop records 1.7 GB, scratch ≈ 0.2 GB). `journalctl -k` since 2026-10-08 15:16: 9 kernel lines, no
+`NVRM`, OOM or killed-process line (the same query shows R9's seven `NVRM` lines of 2026-09-30). Cumulative GPU on the DGX Spark ≈ 84.2 h.
+Cloud spend 0.
+
+**Every CPU job that read records ran as a unit (HANDOFF §5).** Outside units the session shell read only tracked files, scripts, logs, report
+JSONs, scratch tables derived from records, and dataset-manifest metadata — never an episode record; the list with times, including the reads
+while a GPU unit was up (log tails during `r13-pytest-a`, `r13-c-dev` and `r13-c-judged`; six run files' `episodes_dir` fields during
+`r13-c-dev`; `r13-selection.json` during `r13-c-judged`), is `artifacts/scratch/r13/session-shell-reads.md`.
+
+## 7. What the round says, and what it does not
+
+1. **Registered call: pass — "통과 — 그리퍼·경로·힘을 실행 쪽에 맡기면 검증으로 고른 구성이 처음 보는 홀드아웃에서 규칙 판정기보다 확실히 뒤지지
+   않고 금지 접촉도 확실히 많지 않다".** The configuration chosen on validation (r12s19X, 79 of 100 on dev_new2, the highest of ten) against
+   the rule judge given the same three execution rules, on 200 scenes no policy had run: strict `ruleX − r12s19X` **−0.025 [−0.080, +0.035]**
+   (149 vs 154; 15 vs 20 discordant, p = 0.50) — no difference found, which is not "equal" and not "better"; forbidden-contact onsets
+   `r12s19X − ruleX` **+0.015 [0.000, +0.040]** (5 vs 2) — not clearly more, with the lower bound exactly at 0: two seeds, both against the model,
+   carry the whole difference, and the same two seeds carry the same contacts when that checkpoint drives its own path and force (arm G). A
+   pass is grounds to review a contract change (§12 of docs/08 has the proposal); it is not the decision, which is the user's.
+2. **Handing the path and the force to the execution side removed this checkpoint's auxiliary stalls.** The same checkpoint, X − G on
+   ood_new2: strict **+0.115 [+0.065, +0.170]** (154 vs 131; 27 vs 4 discordant), auxiliary failures **−0.130 [−0.180, −0.080]**; 19 of the 27
+   seeds it gained were `q_path` stalls in arm G. The gain sits in E2 (+0.238 [+0.125, +0.350] against +0.033 [−0.008, +0.075] on E0 + E1),
+   where R12's gap to the rule judge sat. It depends on the checkpoint: on dev_new2 X − G is +0.100 [+0.030, +0.170] (r12s19), +0.070 [−0.010,
+   +0.150] (r12s17), +0.060 [+0.020, +0.110] (r12s18), −0.020 [−0.060, +0.020] (r6), −0.010 [−0.050, +0.020] (r5) — a gain for the three R12
+   checkpoints whose auxiliary heads stalled them, no difference found for r6 and r5.
+3. **What separates the model from the rule judge in arm X is semantic.** Seed-paired `r12s19X − ruleX`: false dones +0.035 [+0.010, +0.060]
+   (7 vs 0; 4 stale-goal), main-decision failures +0.080 [+0.040, +0.120] (18 vs 2), `q_stop` caught 0 of 64 (the rule judge 56 of 65),
+   unsafe ticks +0.012 [+0.005, +0.021]; auxiliary failures +0.015 [−0.020, +0.050] (no difference found — the model's residue is `q_speed`,
+   the one execution answer it still gives). The rule judge's failures are geometric (41 of 51). The two lose different seeds — 15 seeds only
+   the rule judge solved (the model's main-decision stalls 5, `q_speed` stalls 7, false dones 3) and 20 only the model solved (the rule
+   judge's geometric stalls 18) — and on these 200 the counts did not separate them. The expert still leads the model by +0.125 [+0.075,
+   +0.175].
+4. **The path rule's information boundary has a measurable cost.** The rule does not read which objects are forbidden (instruction
+   information), so in the 60 mm forbidden band it holds where the expert retreats (§0). The rule judge pays for it: `ruleX − ruleG` strict
+   −0.030 [−0.055, −0.010] (0 vs 6 discordant; 4 of the 6 are exactly its band episodes, ended in `q_path` stalls). The model meets the band
+   too (198 ticks in 18 episodes; 4 of its 15 losses to ruleX are band episodes). The harness (h0.9, unchanged) already receives the
+   structured forbidden constraints and uses them for its planner margins and force cap; whether an execution-layer path rule may read them
+   is part of the review, not settled here.
+5. **The stop is unchanged** — `q_stop` caught 0 of 64 stop onsets; arm X does not delegate it.
+6. **What the round does not say.** One configuration (training seed 19, chosen on validation), one holdout of 200, a rule judge that reads
+   the structured goal while the model reads the instruction text, and a comparison inside arm X (both sides use the same execution
+   rules). dev_new2's (a) −0.150 [−0.240, −0.070] is the choice set's, favoured by the choice, and is written beside only. The second-best
+   configuration on dev_new2 was r6G (74) — an arm G configuration; X's advantage there was checkpoint-dependent. The rule judge in arm X is
+   weaker than in its own arm (149 vs 155) — the verdict compares the model with that judge, as registered; against ruleG (a cross-arm
+   comparison, descriptive) the model reads +0.005 [−0.055, +0.070] (155 vs 154), no difference found either.
+
+**Next step (registered: written from the numbers only).** The decisions are the user's: whether to review the contract change in docs/08
+§12 (the model = semantic judgment; gripper, path and force = the execution layer; harness h0.10, which re-digests every checkpoint; the
+forbidden band), and the cloud question. For the model, what remains is semantic — main-decision stalls, stale-goal false dones, `q_stop`
+— and `q_speed`. ood_new2 (1250100~) has now been analysed seed by seed, so any further verdict needs another unused seed walk.
