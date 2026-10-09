@@ -91,13 +91,15 @@ LOG_QUESTIONS = ("q_gripper", "q_stop", "q_main")
 
 def step_line(metrics: dict[str, Any]) -> str:
     """학습 로그의 step 한 줄 — step 손실, 질문별 가중 손실/기준선(q_gripper·q_stop·q_main, :func:`robo_jev.train.question_table`),
-    학습 배치의 그리퍼 탐침(initiate·settled·open 정답/수), step 초 (Task R8 A1 — 25분마다의 확인이 이 줄을 읽는다)."""
+    학습 배치의 그리퍼 탐침(initiate·settled·open 정답/수), step 초 (Task R8 A1 — 25분마다의 확인이 이 줄을 읽는다). 질문별 손실 가중치가
+    1이 아닌 질문(Task R14)은 이름 뒤에 ``×λ``를 붙인다 — 그 손실/기준선은 가중치를 곱하기 전의 값이다."""
     table = metrics.get("loss_by_question") or {}
     parts = [f"[train] step {metrics['step']} loss {float(metrics['loss']):.4f}"]
     for key in LOG_QUESTIONS:
         entry = table.get(key) or {}
         if entry.get("loss") is not None and entry.get("baseline") is not None:
-            parts.append(f"{key} {entry['loss']:.4f}/{entry['baseline']:.4f}")
+            weight = float(entry.get("loss_weight", 1.0))
+            parts.append(f"{key}{'' if weight == 1.0 else f'×{weight:g}'} {entry['loss']:.4f}/{entry['baseline']:.4f}")
     gripper = (metrics.get("probes") or {}).get("q_gripper") or {}
     strata = [f"{name} {gripper[name]['correct']}/{gripper[name]['n']}" for name in ("initiate", "settled", "open") if name in gripper]
     if strata:

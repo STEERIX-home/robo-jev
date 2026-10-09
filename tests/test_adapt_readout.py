@@ -307,6 +307,18 @@ def test_the_step_log_line_shows_the_per_question_loss_against_its_baseline_and_
     assert module.step_line({"step": 1, "loss": 2.6}) == "[train] step 1 loss 2.6000"
 
 
+def test_the_step_log_line_marks_a_question_whose_loss_weight_is_not_one():
+    """Task R14: 질문별 손실 가중치가 1이 아닌 질문은 로그 줄의 이름 뒤에 ``×λ``가 붙는다 — 그 손실/기준선은 가중치를 곱하기 전의 값이다(0인 head도
+    계속 보인다). 가중치 1(또는 그 키가 없는 옛 기록)은 R8의 줄 그대로다."""
+    module = script()
+    metrics = {
+        "step": 3, "loss": 0.4,
+        "loss_by_question": {"q_gripper": {"loss": 0.7, "baseline": 0.6, "loss_weight": 0.0}, "q_stop": {"loss": 0.1, "baseline": 0.2, "loss_weight": 0.5},
+                             "q_main": {"loss": 0.05, "baseline": 1.9, "loss_weight": 1.0}},
+    }  # fmt: skip
+    assert module.step_line(metrics) == "[train] step 3 loss 0.4000 · q_gripper×0 0.7000/0.6000 · q_stop×0.5 0.1000/0.2000 · q_main 0.0500/1.9000"
+
+
 def test_the_r8_training_config_is_r5s_recipe_with_r7s_data_list_and_the_registered_head_fit_monitor():
     """Task R8 Stage B: `qwen35-2b-r8.yaml` = **R5 조리법 그대로**(혼합 비율 기본값 0.7/0.2/0.1, `max_steps` 233, 같은 일정·lr·구간·tick
     weights·후보 치환) + R7의 데이터 목록(g2 · DAgger-0 · DAgger-1 · done 게이트 수집 · 비로봇 분할별 판) + 사전 등록한 head 적합 감시

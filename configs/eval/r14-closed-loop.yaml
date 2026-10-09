@@ -1,0 +1,21 @@
+# Task R14 — 폐루프 **새 홀드아웃** `ood_new3` 200 (브리프 Stage B). R11·R12·R13의 `r11-closed-loop.yaml`·`r12-closed-loop.yaml`·`r13-closed-loop.yaml`과 같은
+# 생성 설정(`configs/data/r1_robot.yaml`)·분할 규칙·프로파일 혼합(E0/E1/E2 = 20/40/40)이고 seed 구간만 **1350100~**이다(E0 1350100~ · E1 1360100~ · E2 1370100~;
+# 선택기의 일정은 순환 [E0, E1, E2, E1, E2]를 `per_profile_max`번 돌므로 E0은 최대 4,000, E1·E2는 최대 8,000 seed까지 — E0 ≤ 1354099 · E1 ≤ 1368099 ·
+# E2 ≤ 1378099; E1의 걸음은 E2의 시작 아래에서 끝난다). 이전의 모든 걸음 — r1 400100~ · DAgger 사이클 1(done 게이트 수집) 600100~ · 사이클 2(R12 수집)
+# 700100~ · R4 900100~ · R5 950100~ · R6 980100~ · R7 1050100~ · R11 1100100~(ood_fresh) · R12 1150100~(ood_new) · R13 1250100~(ood_new2, E2 최대 1278099) — 과도,
+# 공식(`seeds.base + (사이클 + 1) × dagger_cycle_offset`)상의 DAgger 사이클 8의 자리 1300100~(E2 최대 1328099)·사이클 9의 자리 1400100~과도 구간이 겹치지
+# 않는다(시험이 걸음 길이까지 대조한다; 겹침 보고서가 실제 seed의 교집합을 적는다). R13의 ood_new2는 seed마다 분석됐으므로 판정에 다시 쓰지 않는다 —
+# 이 걸음은 어떤 정책도 돈 적이 없다.
+# 판정 집합이다 — **어떤 R14 학습 step·평가 숫자보다 먼저 사전 등록**(`configs/eval/r14-registration.yaml`)을 커밋하고, 고르는 데는 쓰지 않는다(고르기는
+# dev_new2). ood_dev 계열은 어떤 학습 재료에도 없다(겹침 보고서 `artifacts/reports/r14-seeds-overlap.json` — 학습 재료는 R12의 다섯 그대로: g2 · dagger-0 ·
+# dagger-1 · dagger-1-donegate · dagger-2). `ood_test`에 떨어진 seed는 **만들지도 적지도 않는다**(봉인; 선택기가 세기만 한다).
+version: r14-closed-loop-v0.1
+generator_config: configs/data/r1_robot.yaml
+seeds:
+  base: 1350100
+scan:
+  per_profile_max: 4000
+conditions:
+  ood_new3:
+    split: ood_dev
+    count: 200

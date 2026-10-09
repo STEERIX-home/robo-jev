@@ -1435,11 +1435,15 @@ ARM_TOKEN = "{arm}"
 CHECKPOINT_TOKEN = "{checkpoint}"
 #: 판정 옆에 적는 run 기록(Task R9 `run_readings`)의 키 — 기록 전용 감시, 그리퍼 적합 시작 step의 정의, 감시를 기록만 해야 하는 묶음.
 _RUN_READING_KEYS = ("monitor_log", "gripper_onset", "log_only")
+#: 등록한 **비교**(Task R14 `comparisons` — 등록 질문 2: 고른 구성이 이전 라운드의 구성보다 나은가)의 세 갈래 판정 이름. 구간이 `better_if`면
+#: 나음, `worse_if`면 나쁨, 둘 다 아니면(0을 포함하면) 차가 발견되지 않음 — 이름마다 등록한 문장이 붙는다.
+COMPARISON_CALLS = ("better", "no_difference", "worse")
 
 
 def _registration_pairs(raw: dict[str, Any]) -> list[str]:
-    """등록이 적은 쌍 이름 전부 — 판정 조건(`cloud`)·견고성·서술 판독·예측의 `pair`와 보고서 명령이 싣는 seed 쌍(`a:b`)."""
+    """등록이 적은 쌍 이름 전부 — 판정 조건(`cloud`)·비교(`comparisons`, R14)·견고성·서술 판독·예측의 `pair`와 보고서 명령이 싣는 seed 쌍(`a:b`)."""
     texts = [str(entry.get("pair", "")) for entry in (raw.get("cloud") or {}).values()]
+    texts += [str(entry.get("pair", "")) for entry in (raw.get("comparisons") or {}).values()]
     for key in ("robustness", "stability", "predictions"):
         texts += [str(entry.get("pair", "")) for entry in raw.get(key) or ()]
     return texts + [str(pair) for pair in raw.get("seed_pairs") or ()]
@@ -1479,7 +1483,12 @@ def load_registration(path: str | Path) -> dict[str, Any]:
     R11에서 더한 것(없으면 R10과 똑같이 읽힌다): 고르는 후보가 seed가 아니라 **구성**(체크포인트 × 갈래)일 수 있다 — 묶음에 `checkpoint`·`arm`(native·G·GS)이
     있고 이름표 = 체크포인트 + 갈래 꼬리; 동점 깨기 `arm`(`selection.arm_order`의 앞이 앞선다)·`checkpoint`(이름 오름차순); 쌍 이름의 `{arm}`은 고른 구성의
     갈래 꼬리로 바뀐다(`rule{arm}` = 같은 갈래의 규칙 판정기). `seed` 동점 깨기를 쓸 때만 정수 seed가 필요하다(R9 그대로). `selection.excluded`(조건 이름 목록)는
-    고르는 데 쓰지 않는 홀드아웃 — 그 조건과 그것을 합쳐 만든 조건(`merge`)으로 고르는 등록은 판정 집합처럼 거절한다."""
+    고르는 데 쓰지 않는 홀드아웃 — 그 조건과 그것을 합쳐 만든 조건(`merge`)으로 고르는 등록은 판정 집합처럼 거절한다.
+
+    R14에서 더한 것(없으면 R13과 똑같이 읽힌다): `comparisons`(등록한 **비교** — 이름마다 쌍·출처(paired | seed_pairs)·지표·`better_if`·`worse_if`
+    (둘 다 :data:`_BOUNDS` 의 이름)·`calls`(:data:`COMPARISON_CALLS` 세 문장); 판정 조건(`conditions`)과 따로 그 자체의 세 갈래 판정을 낸다 — 고르는 등록이면
+    `group: selected`이고 쌍에 `{selected}`가 있다), `selection.require_all`(참이면 후보 가운데 **하나라도** 고를 수 없을 때(학습이 없거나 끝나지 않았다)
+    등록 판정을 내리지 않는다 — 판정 산출물의 `verdict.issued`가 거짓이고 이유를 적는다)."""
     path = Path(path)
     raw = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     for key in ("version", "primary", "bootstrap"):
@@ -1527,6 +1536,21 @@ def load_registration(path: str | Path) -> dict[str, Any]:
                 raise ValueError(f"{path}: selection.arm_order는 후보의 갈래를 모두 담은 겹치지 않는 목록이어야 한다 (받은 값: {order!r}) — 갈래 동점 깨기의 순서다")
         if selection.get("metric") not in SELECTION_METRICS:
             raise ValueError(f"{path}: selection.metric은 {list(SELECTION_METRICS)} 중 하나다 (받은 값: {selection.get('metric')!r})")
+        if "require_all" in selection and not isinstance(selection["require_all"], bool):
+            raise ValueError(f"{path}: selection.require_all은 true/false다 (받은 값: {selection['require_all']!r}) — 참이면 후보가 하나라도 빠지면 판정하지 않는다")
+    comparisons = dict(raw.get("comparisons") or {})
+    for name, entry in comparisons.items():
+        source, metric = entry.get("source"), entry.get("metric")
+        valid = (source == "paired" and metric in _PAIRED_SUFFIX) or (source == "seed_pairs" and metric in SEED_METRICS)
+        calls_of = entry.get("calls")
+        if (not valid or not entry.get("pair") or entry.get("better_if") not in _BOUNDS or entry.get("worse_if") not in _BOUNDS
+                or not isinstance(calls_of, dict) or set(calls_of) != set(COMPARISON_CALLS) or not all(isinstance(text, str) and text for text in calls_of.values())):
+            raise ValueError(f"{path}: comparisons.{name}에는 pair·source(paired|seed_pairs)와 그 출처의 지표, better_if·worse_if({sorted(_BOUNDS)}), "
+                             f"calls({list(COMPARISON_CALLS)}의 문장)가 필요하다")
+        if name in raw["cloud"]:
+            raise ValueError(f"{path}: comparisons.{name}: 판정 조건과 이름이 겹친다 — 견고성이 어느 쪽을 가리키는지 알 수 없다")
+        if selection and (entry.get("group") != SELECTED_GROUP or SELECTED_TOKEN not in str(entry["pair"])):
+            raise ValueError(f"{path}: comparisons.{name}: 고르는 등록에서는 group이 {SELECTED_GROUP!r}이고 pair에 {SELECTED_TOKEN!r}가 있어야 한다 — 고른 구성의 비교다")
     for name, entry in raw["cloud"].items():
         if entry.get("source") not in ("paired", "seed_pairs") or entry.get("holds_if") not in _BOUNDS or not entry.get("pair") or not entry.get("metric"):
             raise ValueError(f"{path}: cloud.{name}에는 pair·metric·source(paired|seed_pairs)·holds_if({sorted(_BOUNDS)})가 필요하다")
@@ -1581,7 +1605,7 @@ def load_registration(path: str | Path) -> dict[str, Any]:
             raise ValueError(f"{path}: predictions[{position}]: name·pair·source(paired|seed_pairs|effects)와 그 출처의 지표, holds_if({sorted(_BOUNDS)})가 필요하다")
     return {**raw, "path": str(path), "secondary": list(raw.get("secondary") or []), "seed_pairs": list(raw.get("seed_pairs") or []),
             "groups": groups, "stability": stability, "cause": cause or None, "selection": selection or None, "calls": calls,
-            "run_readings": readings, "decision": decision, "predictions": predictions}
+            "run_readings": readings, "decision": decision, "predictions": predictions, "comparisons": comparisons}
 
 
 def _flip(low: float, high: float) -> list[float]:
@@ -1658,9 +1682,26 @@ def _apply_to_condition(report: dict[str, Any], condition: str, registration: di
             read = _read_seed_pair(report, condition, rule["pair"], rule["metric"], bootstrap)
         low, high = read["ci"]
         conditions[name] = {**base, **read, "holds": bool(_BOUNDS[rule["holds_if"]](low, high))}
+    comparisons: dict[str, Any] = {}
+    for name, rule in (registration.get("comparisons") or {}).items():
+        # 등록한 비교(R14 등록 질문 2) — 세 갈래: better_if면 나음, worse_if면 나쁨, 아니면(0을 포함) 차가 발견되지 않음
+        group = rule.get("group")
+        base = {"what": rule.get("what"), "group": group, "pair": rule["pair"], "metric": rule["metric"], "source": rule["source"],
+                "better_if": rule["better_if"], "worse_if": rule["worse_if"]}
+        if group is not None and group in stopped:
+            comparisons[name] = {**base, "value": None, "ci": None, "status": None, "call": None, "stopped": stopped[group]}
+            continue
+        try:
+            read = _read_any(report, condition, rule, bootstrap)
+        except ValueError as exc:  # 둘째 집합에 그 쌍이 없을 수 있다 — 주 집합에서 없으면 apply_registration이 거절한다
+            comparisons[name] = {**base, "value": None, "ci": None, "status": None, "call": None, "available": False, "reason": str(exc)}
+            continue
+        low, high = read["ci"]
+        status = "better" if _BOUNDS[rule["better_if"]](low, high) else ("worse" if _BOUNDS[rule["worse_if"]](low, high) else "no_difference")
+        comparisons[name] = {**base, **read, "status": status, "call": rule["calls"][status], "includes_zero": bool(low <= 0.0 <= high)}
     robustness: dict[str, Any] = {}
     for entry in registration.get("robustness") or ():
-        group = (registration["cloud"].get(entry["condition"]) or {}).get("group")
+        group = (registration["cloud"].get(entry["condition"]) or (registration.get("comparisons") or {}).get(entry["condition"]) or {}).get("group")
         if group is not None and group in stopped:
             robustness[entry["condition"]] = {"available": False, "reason": f"{group} stopped: {stopped[group]}"}
             continue
@@ -1714,6 +1755,8 @@ def _apply_to_condition(report: dict[str, Any], condition: str, registration: di
         block["passed"] = not block["failed"]
     out = {"condition": condition, "conditions": conditions, "cloud": not failed, "failed": failed, "groups": groups, "robustness": robustness,
            "cause": cause_out, "stability": stability}
+    if comparisons:
+        out["comparisons"] = comparisons
     if registration.get("predictions"):
         # 등록한 예측(R10): 성립 여부를 옆에 적는다 — 판정(`failed`)에는 들지 않는다. 읽을 수가 없으면 없다고 적는다
         predictions: list[dict[str, Any]] = []
@@ -1839,6 +1882,9 @@ def materialize_selection(registration: dict[str, Any], selected: str | None) ->
     for entry in out["cloud"].values():
         entry["pair"] = fill(entry["pair"])
         entry["group"] = selected
+    for entry in (out.get("comparisons") or {}).values():  # R14: 등록한 비교도 고른 구성의 것이다
+        entry["pair"] = fill(entry["pair"])
+        entry["group"] = selected
     for key in ("robustness", "stability", "predictions"):
         for entry in out.get(key) or ():
             entry["pair"] = fill(entry["pair"])
@@ -1920,7 +1966,11 @@ def apply_registration(report: dict[str, Any], registration: dict[str, Any], *, 
     그 이름표를 넣어 **고른 seed만** 판정한다; 고를 수 있는 후보가 없으면 조건 전부가 불성립이다. `calls`가 있으면 판정의 등록 문장을 옆에 싣는다.
 
     등록의 `decision`이 `cloud`가 아니면(R10 `delegation`) 판정은 `verdict.cloud` 대신 `verdict.decision`(그 이름)·`verdict.holds`(조건이 모두
-    성립하는가)로 적힌다 — 같은 규칙이고 이름만 판정의 뜻을 따른다. `predictions`가 있으면 집합마다 그 성립 여부를 옆에 싣는다(판정을 바꾸지 않는다)."""
+    성립하는가)로 적힌다 — 같은 규칙이고 이름만 판정의 뜻을 따른다. `predictions`가 있으면 집합마다 그 성립 여부를 옆에 싣는다(판정을 바꾸지 않는다).
+
+    R14: `comparisons`가 있으면 집합마다 그 비교의 세 갈래 상태(better · no_difference · worse)와 등록 문장을 싣고, 주 집합의 것을
+    `verdict.comparisons`에 적는다(판정 조건과 따로 — 조건의 성립을 바꾸지 않는다; 주 집합에서 그 쌍을 읽을 수 없으면 거절한다).
+    `selection.require_all`이 참인데 고를 수 없는 후보가 있으면 `verdict.issued`가 거짓이고 판정(`holds`·`call`·비교의 문장)을 비운다 — 계산은 옆에 남는다."""
     from robo_jev.evaluate import EPISODE_BOOTSTRAP as registered_default
 
     if dict(registration["bootstrap"]) != dict(registered_default):
@@ -1940,6 +1990,9 @@ def apply_registration(report: dict[str, Any], registration: dict[str, Any], *, 
             # 고를 수 있는 후보가 없다 — 판정할 seed가 없으므로 조건 전부가 보고서를 읽지 않고 불성립이다
             effective_stopped[SELECTED_GROUP] = f"no eligible seed on {selection['condition']}: {[(row['label'], row.get('reason')) for row in selection['candidates']]}"
     out = _apply_to_condition(report, primary, registration, effective_stopped)
+    for name, entry in (out.get("comparisons") or {}).items():
+        if entry.get("available") is False:
+            raise ValueError(f"{primary}: 등록한 비교 {name}의 쌍을 읽을 수 없다 — {entry['reason']}")
     secondary: dict[str, Any] = {}
     for name in registration["secondary"]:
         if name not in (report.get("conditions") or []):
@@ -1958,6 +2011,21 @@ def apply_registration(report: dict[str, Any], registration: dict[str, Any], *, 
     if calls:
         verdict["call"] = "pass" if out["cloud"] else "fail"
         verdict["call_text"] = calls[verdict["call"]]
+    if out.get("comparisons"):
+        # 등록한 비교(R14 등록 질문 2)의 세 갈래 판정 — 판정 조건과 따로 적는다(조건의 성립을 바꾸지 않는다)
+        verdict["comparisons"] = {name: {"call": entry["status"], "text": entry["call"], "pair": entry["pair"], "value": entry["value"], "ci": entry["ci"]}
+                                  for name, entry in out["comparisons"].items()}
+    if selection is not None and registration["selection"].get("require_all"):
+        # R14: 후보가 하나라도 고를 수 없으면(학습이 없거나 끝나지 않았다) 등록 판정을 내리지 않는다 — 계산은 옆에 남고 판정은 비운다
+        missing = [(row["label"], row.get("reason")) for row in selection["candidates"] if not row["eligible"]]
+        verdict["issued"] = not missing
+        if missing:
+            verdict["not_issued_reason"] = f"selection.require_all: candidates that cannot be chosen {missing} — no registered verdict"
+            verdict["holds" if "holds" in verdict else "cloud"] = None
+            for key in ("call", "call_text"):
+                verdict.pop(key, None)
+            for entry in (verdict.get("comparisons") or {}).values():
+                entry["call"], entry["text"] = None, None
     result = {
         "registration": {"version": registration["version"], "path": registration.get("path"), "written_at": registration.get("written_at")},
         "bootstrap": dict(registration["bootstrap"]), "primary": out, "secondary": secondary, "stopped": dict(stopped or {}), "verdict": verdict,
