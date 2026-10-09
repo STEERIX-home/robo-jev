@@ -382,3 +382,25 @@ def test_the_r12_training_config_is_r6s_recipe_with_dagger_2_in_the_dagger_bundl
     assert sorted(key for key in r12[18] if r12[18][key] != r12[19][key]) == ["sampler", "seed"]
     # 기대 draw: 로봇 단위 233개의 절반이 DAgger 묶음(사이클 0·1·1 done 게이트 600편 + 사이클 2 400편 = 1,000편) — dagger-2는 그 400/1,000
     assert round(0.5 * 233) == 116 and round(0.5 * 233 * 400 / 1000) == 47
+
+
+def test_the_r14_training_config_is_r12s_recipe_with_the_three_execution_heads_zero_weighted():
+    """Task R14 Stage B (사전 등록): `qwen35-2b-r14.yaml` = **R12의 조리법 그대로**(데이터 여섯·혼합 비율 0.5/0.5/0.0·`max_steps` 233·일정·lr·구간·tick
+    weights·후보 치환) + `question_loss_weights`(q_gripper·q_path·q_force = 0, 나머지 일곱은 1). R12의 해석된 설정과 다른 키는 그 가중치와 이름뿐이다;
+    감시(`head_fit_monitor`)는 없다(기록만). seed 18·17·19가 후보 치환 seed도 정하고, seed 사이에는 그 둘만 다르다."""
+    load_train_config = script().load_train_config
+
+    def resolved(path, seed, steps=233):
+        return resolve_config(dict(load_train_config(REPO / path, mode="t1", steps=steps, seed=seed, run_id="test",
+                                                     overrides={"checkpoint_every": 50, "checkpoint_keep_steps": []})))
+
+    r14 = {seed: resolved("configs/train/qwen35-2b-r14.yaml", seed) for seed in (18, 17, 19)}
+    for seed in (18, 17, 19):
+        r12 = resolved("configs/train/qwen35-2b-r12.yaml", seed)
+        config = r14[seed]
+        assert sorted(key for key in set(config) | set(r12) if config.get(key) != r12.get(key)) == ["question_loss_weights", "run_name"]
+        assert config["question_loss_weights"] == {"q_gripper": 0.0, "q_path": 0.0, "q_force": 0.0} and r12["question_loss_weights"] is None
+        assert config["run_name"] == "r14-2b" and config["seed"] == seed and config["sampler"]["permute_candidates_seed"] == seed
+        assert config["head_fit_monitor"] is None and config["max_steps"] == 233 and config["checkpoint_every"] == 50 and config["splits"] == ["train"]
+    assert sorted(key for key in r14[18] if r14[18][key] != r14[17][key]) == ["sampler", "seed"]
+    assert sorted(key for key in r14[18] if r14[18][key] != r14[19][key]) == ["sampler", "seed"]
