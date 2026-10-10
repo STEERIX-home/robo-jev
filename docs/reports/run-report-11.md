@@ -388,7 +388,7 @@ slimming report JSON during `r14-pytest-b`), is
    configuration, whose heads were trained. Seed by seed on dev_new2 (beside; the same draws and recipe, only the loss weights differ — the
    spread of repeated runs at one configuration was not measured): strict −0.020 [−0.110, +0.070] · −0.050 [−0.140, +0.040] (no difference
    found) · −0.130 [−0.220, −0.040] (seeds 18 · 17 · 19); no seed shows a gain.
-3. **Where it lost: false dones and a slow speed answer.** Seed-paired against r12s19X: false dones **+0.140 [+0.085, +0.200]** (36 vs 8),
+3. **Where it lost: false dones** (its slower speed answers are not a found difference — auxiliary failures +0.020 [−0.030, +0.065], 19 vs 15). Seed-paired against r12s19X: false dones **+0.140 [+0.085, +0.200]** (36 vs 8),
    stale-goal **+0.120 [+0.065, +0.175]** (29 vs 5), unsafe-action ticks +0.024 [+0.007, +0.049]; main-decision and auxiliary failures,
    forbidden contacts and `q_stop` — no difference found. Of the 35 seeds only r12s19X solved, 23 are r14s17X's false dones (17 stale-goal) and
    7 its own-speed stalls. The probe places the false dones right after a release: on the ticks ≤ 6 after the hand released an object that is
@@ -413,7 +413,8 @@ slimming report JSON during `r14-pytest-b`), is
    beside only. (a) failed at its boundary; question 2 is far from its boundary.
 
 **Next step (registered: written from the numbers only; on a fail, from the remaining failures' classes and question 2's call).** Question 2
-says the zero-weight recipe is worse than keeping the heads trained, so the base for the next round stays R13's configuration (R12's checkpoints
+says the chosen zero-weight configuration is worse than R13's configuration — two configurations trained from different seeds, so
+it is not a recipe-level comparison (per seed on dev_new2, beside only: strict −0.020 / −0.050 / −0.130, only the last excluding zero) — so the base for the next round stays R13's configuration (R12's checkpoints
 served in arm X) with the three execution questions still trained — whether to drop them from the question set (docs/08 §12.1) remains the
 user's decision, and this round gives no ground for dropping them. The chosen configuration's remaining failures by class: false dones 36 (29
 stale-goal — `q_done` right after releasing a non-target object), its own speed answer 19 (too slow), main-decision stalls 17, geometric 2;
