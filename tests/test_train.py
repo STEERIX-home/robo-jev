@@ -1114,3 +1114,245 @@ def test_a_zero_baseline_step_inside_the_monitor_window_counts_as_zero_in_the_ba
     empty = head_fit_monitor_result([step(n, 0.1, 0.0) for n in (1, 2, 3, 4)], monitor)
     assert empty["baseline_mean"] == 0.0 and empty["ratio_to_baseline"] is None and empty["threshold"] == 0.0
     assert empty["verdict"] == "not_fitting"
+
+
+# --------------------------------------------------------------------------
+# 질문별 손실 가중치 (Task R14 A2 — 설정 `question_loss_weights`)
+# --------------------------------------------------------------------------
+
+from robo_jev.loss import judgment_loss  # noqa: E402
+from robo_jev.train import weighted_labels  # noqa: E402
+
+#: 이 옵션을 더하기 **전** 코드(main @ 44b93ae, 깨끗한 작업 트리)로 같은 소형 run(`tiny_config`, seed 17, max_steps 3)을 돌려 적은 비트 값 —
+#: `artifacts/scratch/r14/a2/golden.py`(CPU 유닛 두 번, 같은 값). 기본값(가중치 없음 = 모두 1)은 이 값과 비트 단위로 같아야 한다.
+BEFORE_WEIGHTS_STEPS = [
+    {"loss": "0x1.1873f5c000000p+0", "grad_norm": "0x1.30664e0000000p+4",
+     "loss_by_type": {"boolean": "0x1.c36f9692f684cp-1", "choice": "0x1.6c08556fb5870p+0", "ordinal": "0x1.92fcd20000000p+0"},
+     "loss_by_domain": {"non_robot": "0x1.2c1ccd5555555p+0", "robot": "0x1.0b58b9b555555p+0"}},
+    {"loss": "0x1.01d9384000000p+0", "grad_norm": "0x1.57c3b20000000p+4",
+     "loss_by_type": {"boolean": "0x1.c51b3c0f3cf3dp-1", "choice": "0x1.5657cb8ba2e8cp+0", "ordinal": "0x1.7ee8e0ea0ea0fp+0"},
+     "loss_by_domain": {"non_robot": "0x1.f71a9bc000000p-1", "robot": "0x1.060bd1a4fa4fap+0"}},
+    {"loss": "0x1.dcd9378000000p-1", "grad_norm": "0x1.26ef7c0000000p+4",
+     "loss_by_type": {"boolean": "0x1.b817d0f430c31p-1", "choice": "0x1.49de8017b425fp+0", "ordinal": "0x1.7bc895c1f07c2p+0"},
+     "loss_by_domain": {"non_robot": "0x1.ae03017249249p-1", "robot": "0x1.fc12afd27d27dp-1"}},
+]  # fmt: skip
+BEFORE_WEIGHTS_FINAL_SHA256 = "dfa6d2967710d1115668080d8b8522d63083bbe0f6fd953b8073f42bb7d723a2"
+#: 같은 코드로 첫 스트림(`ep-d0-001`)의 첫 구간(틱 0–10)만 forward·backward한 손실과 gradient 전체의 sha256.
+BEFORE_WEIGHTS_CHUNK = {"record": "ep-d0-001", "chunk": (0, 10), "loss": "0x1.8dc8360000000p-1",
+                        "grads_sha256": "c197601df34eb47b8ab1453dd80e9eb934694f4aec9d956c17c06d2b2e10049d"}
+#: R14의 조리법이 0으로 두는 세 실행 head.
+ZEROED = {"q_gripper": 0, "q_path": 0, "q_force": 0}
+
+
+def _tensor_sha256(module: torch.nn.Module, *, grads: bool) -> str:
+    digest = hashlib.sha256()
+    for name, parameter in module.named_parameters():
+        tensor = parameter.grad if grads else parameter
+        if tensor is None:
+            continue
+        digest.update(name.encode())
+        digest.update(tensor.detach().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes())
+    return digest.hexdigest()
+
+
+def _bits(metrics: dict) -> dict:
+    return {
+        "loss": float(metrics["loss"]).hex(), "grad_norm": float(metrics["grad_norm"]).hex(),
+        "loss_by_type": {key: float(value).hex() for key, value in sorted(metrics["loss_by_type"].items())},
+        "loss_by_domain": {key: (None if value is None else float(value).hex()) for key, value in sorted(metrics["loss_by_domain"].items())},
+    }  # fmt: skip
+
+
+def test_default_question_loss_weights_leave_loss_and_gradients_bit_identical_to_the_code_before_the_option(tmp_path):
+    """기본값(키 없음·null·빈 dict·모두 1)의 학습이 이 옵션 전 코드와 **비트 단위로** 같다: 세 step의 손실·gradient norm·타입별·분야별 손실,
+    최종 가중치 전체의 sha256, 그리고 한 구간의 손실과 gradient 전체의 sha256이 44b93ae에서 적은 값 그대로다. 정규형은 None이다."""
+    every_one = {qid: 1 for qid in QUESTION_SET_V0}
+    for tag, extra in (("absent", {}), ("null", {"question_loss_weights": None}), ("empty", {"question_loss_weights": {}}),
+                       ("ones", {"question_loss_weights": every_one})):  # fmt: skip
+        config = tiny_config(tmp_path, max_steps=3, run_id=f"default-{tag}", **extra)
+        assert resolve_config(config)["question_loss_weights"] is None, tag
+        with Trainer(config) as trainer:
+            steps = [_bits(trainer.run_step()) for _ in range(3)]
+            final = _tensor_sha256(trainer.model, grads=False)
+        assert steps == BEFORE_WEIGHTS_STEPS, tag
+        assert final == BEFORE_WEIGHTS_FINAL_SHA256, tag
+    for weights in (None, {}):
+        with Trainer(tiny_config(tmp_path, max_steps=1, run_id="default-chunk")) as trainer:
+            item = next(item for item in trainer.items if item.kind == "stream")
+            plan = trainer._plan(item)
+            assert (item.record_id, plan.chunks[0]) == (BEFORE_WEIGHTS_CHUNK["record"], BEFORE_WEIGHTS_CHUNK["chunk"])
+            result = run_stream_chunk(trainer.model, item, plan.chunks[0], carried=None, plan=plan, scale=1.0 / plan.normaliser, question_weights=weights)
+            result.loss.backward()
+            assert result.loss.item().hex() == BEFORE_WEIGHTS_CHUNK["loss"]
+            assert _tensor_sha256(trainer.model, grads=True) == BEFORE_WEIGHTS_CHUNK["grads_sha256"]
+    labels = [{"question_id": "q_main", "kind": "valid_set", "candidate_ids": ["a"]}]
+    assert weighted_labels(labels, None) is labels and weighted_labels(labels, {}) is labels  # 같은 객체 — 같은 연산
+
+
+def _state_outputs(seed: int = 3) -> tuple[dict, dict[str, list[str]]]:
+    generator = torch.Generator().manual_seed(seed)
+    candidates = {"q_main": ["a", "b", "c"], "q_gripper": ["open", "closed"], "q_stop": ["true", "false"], "q_force": ["0", "1", "2"]}
+    logits = {qid: torch.randn(len(ids), generator=generator, dtype=torch.float64).requires_grad_(True) for qid, ids in candidates.items()}
+    return {"logits": [logits], "candidates": [candidates]}, candidates
+
+
+STATE_LABELS = [
+    {"question_id": "q_main", "kind": "valid_set", "candidate_ids": ["b"]},
+    {"question_id": "q_gripper", "kind": "valid_set", "candidate_ids": ["closed"]},
+    {"question_id": "q_stop", "kind": "single", "answer": False, "weight": 0.25},
+    {"question_id": "q_force", "kind": "single", "answer": "1"},
+]  # fmt: skip
+
+
+def test_a_zero_weight_removes_that_questions_labels_so_the_loss_and_every_gradient_equal_the_loss_without_them():
+    """가중치 0 = 그 라벨이 없는 손실: 값과 모든 logits의 gradient가 그 라벨을 뺀 손실과 비트 단위로 같고, 0인 질문의 logits는 gradient를 받지
+    않는다(그래프에 들지 않는다). 0이 아닌 가중치는 라벨 weight에 곱해져 상태 안 평균을 다시 정규화한다: Σ λw L / Σ λw."""
+    zeroed = {"q_gripper": 0.0, "q_force": 0.0}
+    weighted_outputs, _ = _state_outputs()
+    removed_outputs, _ = _state_outputs()
+    with_weights = judgment_loss(weighted_outputs, {"labels": [weighted_labels(STATE_LABELS, zeroed)]})
+    without = judgment_loss(removed_outputs, {"labels": [[label for label in STATE_LABELS if label["question_id"] not in zeroed]]})
+    assert with_weights.item().hex() == without.item().hex()
+    with_weights.backward()
+    without.backward()
+    for qid in ("q_main", "q_stop"):
+        assert torch.equal(weighted_outputs["logits"][0][qid].grad, removed_outputs["logits"][0][qid].grad), qid
+    for qid in zeroed:
+        assert weighted_outputs["logits"][0][qid].grad is None and removed_outputs["logits"][0][qid].grad is None, qid
+    # 0이 아닌 가중치: λ_force = 0.5, 낮은 신뢰도 라벨(weight 0.25)에 λ_stop = 2 — 손으로 쓴 식과 같다
+    outputs, candidates = _state_outputs()
+    factors = {"q_main": 1.0, "q_gripper": 1.0, "q_stop": 2.0, "q_force": 0.5}
+    value = judgment_loss(outputs, {"labels": [weighted_labels(STATE_LABELS, {"q_stop": 2.0, "q_force": 0.5})]})
+    terms = [(factors[label["question_id"]] * float(label.get("weight", 1.0)), label_loss(outputs["logits"][0][label["question_id"]], candidates[label["question_id"]], label))
+             for label in STATE_LABELS]  # fmt: skip
+    expected = sum(weight * loss.item() for weight, loss in terms) / sum(weight for weight, _ in terms)
+    assert value.item() == pytest.approx(expected, rel=1e-12)
+    assert [label.get("weight") for label in weighted_labels(STATE_LABELS, {"q_stop": 2.0, "q_force": 0.5})] == [None, None, 0.5, 0.5]
+    assert STATE_LABELS[2]["weight"] == 0.25 and "weight" not in STATE_LABELS[3]  # 원본 라벨은 바꾸지 않는다
+
+
+def test_zero_weighting_the_three_execution_heads_trains_bit_identically_to_removing_their_robot_labels(tmp_path):
+    """R14의 조리법(q_gripper·q_path·q_force = 0)으로 돈 소형 run = 그 세 질문의 라벨을 **로봇 틱에서 지운** 데이터로 돈 기본 run: 세 step의 손실·
+    gradient norm·분야별 손실·최종 가중치가 비트 단위로 같다. 비로봇 단일 요청의 같은 이름 질문(D0의 q_force)은 가중치를 받지 않는다(분야가 다르다)."""
+    with Trainer(tiny_config(tmp_path, max_steps=3, run_id="zeroed", question_loss_weights=ZEROED)) as zeroed:
+        assert zeroed.config["question_loss_weights"] == {"q_gripper": 0.0, "q_path": 0.0, "q_force": 0.0}
+        weighted = [zeroed.run_step() for _ in range(3)]
+        weighted_final = snapshot(zeroed.model)
+    with Trainer(tiny_config(tmp_path, max_steps=3, run_id="removed")) as removed:
+        dropped = 0
+        for item in removed.items:
+            if item.domain != "robot":
+                continue
+            for tick in item.record["ticks"]:
+                kept = [label for label in tick.get("labels", []) if label["question_id"] not in ZEROED]
+                dropped += len(tick.get("labels", [])) - len(kept)
+                tick["labels"] = kept
+        assert dropped > 0 and not removed._plans  # 계획은 아직 없다 — 지운 라벨로 처음 만든다
+        plain = [removed.run_step() for _ in range(3)]
+        plain_final = snapshot(removed.model)
+    for a, b in zip(weighted, plain):
+        assert (a["loss"], a["grad_norm"], a["loss_by_domain"]) == (b["loss"], b["grad_norm"], b["loss_by_domain"])
+        assert [unit["records"] for unit in a["units"]] == [unit["records"] for unit in b["units"]]
+    for name in weighted_final:
+        assert torch.equal(weighted_final[name], plain_final[name]), name
+    # 비로봇 쪽은 그대로다: D0 단일 요청의 q_force 라벨은 가중치 run에서도 손실에 든다
+    assert any(label["question_id"] == "q_force" for item in zeroed.items if item.domain == "non_robot" for label in item.record.get("labels", []))
+    assert zeroed._question_weights("non_robot") is None and zeroed._question_weights("robot") == zeroed.config["question_loss_weights"]
+
+
+def test_the_per_question_record_keeps_the_unweighted_loss_and_baseline_and_adds_the_applied_mass_and_contribution(tmp_path):
+    """질문별 기록(R8 A1)은 가중치를 곱하기 **전**의 손실·기준선·질량을 그대로 적고(step 1은 같은 가중치·같은 배치라 기본 run과 비트 단위로 같다),
+    옆에 λ와 실제로 들어간 질량·기여를 적는다: Σ weighted_contribution = step 손실, Σ weighted_mass = 1, 0인 head는 0 — 그래도 그 head의 손실·기준선·
+    라벨 수는 계속 보인다 (float64 fixture)."""
+    weights = {"q_gripper": 0, "q_force": 0.5}
+    with Trainer(tiny_config(tmp_path, max_steps=2, dtype="float64", run_id="weighted", question_loss_weights=weights)) as weighted:
+        steps = [weighted.run_step() for _ in range(2)]
+    with Trainer(tiny_config(tmp_path, max_steps=1, dtype="float64", run_id="plain")) as plain:
+        first = plain.run_step()
+    for metrics in steps:
+        table = metrics["loss_by_question"]
+        assert sum(entry["weighted_contribution"] for entry in table.values()) == pytest.approx(metrics["loss"], rel=1e-10, abs=1e-12)
+        assert sum(entry["weighted_mass"] for entry in table.values()) == pytest.approx(1.0, rel=1e-12)
+        gripper, force, main = table["q_gripper"], table["q_force"], table["q_main"]
+        assert gripper["loss_weight"] == 0.0 and gripper["weighted_mass"] == 0.0 and gripper["weighted_contribution"] == 0.0
+        assert gripper["loss"] is not None and gripper["baseline"] is not None and gripper["n"] > 0 and gripper["mass"] > 0
+        assert force["loss_weight"] == 0.5 and 0 < force["weighted_mass"] < force["mass"]
+        assert main["loss_weight"] == 1.0 and main["weighted_mass"] > main["mass"]  # 다른 질문이 비운 몫을 나눠 받는다
+        assert all(entry["loss_weight"] == 1.0 for key, entry in table.items() if key.startswith("non_robot/"))
+        assert sum(entry["contribution"] for entry in table.values()) != pytest.approx(metrics["loss"], rel=1e-6)  # 가중 전 기여의 합은 step 손실이 아니다
+    for key, entry in first["loss_by_question"].items():  # step 1: 같은 초기 가중치·같은 배치 → 가중 전 값이 기본 run과 같다
+        mine = steps[0]["loss_by_question"][key]
+        assert (mine["n"], mine["mass"], mine["contribution"], mine["loss"], mine["baseline"]) == (entry["n"], entry["mass"], entry["contribution"], entry["loss"], entry["baseline"]), key
+        assert entry["weighted_mass"] == entry["mass"] and entry["weighted_contribution"] == entry["contribution"] and entry["loss_weight"] == 1.0
+    assert steps[0]["probes"]["q_gripper"] == first["probes"]["q_gripper"]  # 탐침도 그대로다
+    assert steps[0]["loss"] != first["loss"]
+
+
+def test_question_loss_weights_accept_only_question_set_ids_with_finite_non_negative_numbers_and_normalize_ones_away(tmp_path):
+    """질문 이름은 질문 세트(QUESTION_SET_V0)의 것만, 값은 유한한 0 이상의 수만 받는다; 1인 질문은 지우고 질문 세트 순서로 둔다(남는 것이 없으면
+    null); 로봇 질문이 모두 0이면 거절한다."""
+    resolved = resolve_config(tiny_config(tmp_path, question_loss_weights={"q_force": 0, "q_gripper": 1, "q_path": 0.0, "q_main": 2}))
+    assert resolved["question_loss_weights"] == {"q_main": 2.0, "q_path": 0.0, "q_force": 0.0}
+    assert list(resolved["question_loss_weights"]) == ["q_main", "q_path", "q_force"]
+    assert resolve_config(tiny_config(tmp_path, question_loss_weights={qid: 1.0 for qid in QUESTION_SET_V0}))["question_loss_weights"] is None
+    for bad, message in (({"q_target": 0}, "질문 세트에 없는"), ({"Q_main": 1}, "질문 세트에 없는"), ({"q_gripper": -0.5}, "0 이상"),
+                         ({"q_gripper": float("nan")}, "유한한"), ({"q_gripper": float("inf")}, "유한한"), ({"q_gripper": True}, "0 이상"),
+                         ({"q_gripper": "0"}, "0 이상"), (["q_gripper"], "꼴"), ({qid: 0 for qid in QUESTION_SET_V0}, "모든 로봇 질문")):  # fmt: skip
+        with pytest.raises(ValueError, match="question_loss_weights") as excinfo:
+            resolve_config(tiny_config(tmp_path, question_loss_weights=bad))
+        assert message in str(excinfo.value), (bad, str(excinfo.value))
+
+
+def test_question_loss_weights_are_run_identity_so_a_resume_must_use_the_same_weights_and_old_checkpoints_resume_with_the_default(tmp_path):
+    """이 키는 재개에서 자유롭지 않다: 같은 가중치로 2 + 재시작 + 2 step = 4 step 연속(가중치 전체 비트 단위), 다른 가중치로 이어 가면 이름으로
+    거절한다. 이 키가 없는 옛 checkpoint(R13까지)는 기본값(null)으로 이어 간다."""
+    assert "question_loss_weights" not in RESUME_FREE_KEYS
+    with Trainer(tiny_config(tmp_path, max_steps=4, run_id="weighted-continuous", question_loss_weights=ZEROED)) as trainer:
+        trainer.run()
+        continuous = snapshot(trainer.model)
+    with Trainer(tiny_config(tmp_path, max_steps=4, run_id="weighted-split", question_loss_weights=ZEROED, stop_after={"step": 2})) as trainer:
+        assert trainer.run()["status"] == "interrupted"
+    saved = tmp_path / "runs" / "weighted-split" / "checkpoint.pt"
+    resumed_config = tiny_config(tmp_path, max_steps=4, run_id="weighted-split", question_loss_weights=ZEROED)
+    with Trainer(resumed_config, resume=saved) as trainer:
+        assert trainer.step == 2
+        trainer.run()
+        resumed = snapshot(trainer.model)
+    for name in continuous:
+        assert torch.equal(continuous[name], resumed[name]), name
+    for other in (None, {"q_gripper": 0}, {**ZEROED, "q_speed": 0.5}):
+        with pytest.raises(ValueError, match="question_loss_weights"):
+            Trainer(tiny_config(tmp_path, max_steps=4, run_id="weighted-split", question_loss_weights=other), resume=saved)
+    # 옛 checkpoint: 설정에 이 키가 없다 → 기본값(null)으로 이어 간다, 가중치를 주면 거절한다
+    with Trainer(tiny_config(tmp_path, max_steps=4, run_id="old", stop_after={"step": 1})) as trainer:
+        trainer.run()
+    old_path = tmp_path / "runs" / "old" / "checkpoint.pt"
+    state = load_checkpoint(old_path)
+    del state["config"]["question_loss_weights"]
+    torch.save(state, old_path)
+    with Trainer(tiny_config(tmp_path, max_steps=4, run_id="old"), resume=old_path) as trainer:
+        assert trainer.step == 1 and trainer.config["question_loss_weights"] is None
+    with pytest.raises(ValueError, match="question_loss_weights"):
+        Trainer(tiny_config(tmp_path, max_steps=4, run_id="old", question_loss_weights=ZEROED), resume=old_path)
+
+
+def test_a_tick_whose_only_labels_have_zero_weight_drops_out_of_the_episode_plan_like_a_tick_without_labels(streams):
+    """틱 유효성(손실 정규화의 분모)도 가중치를 건 라벨을 따른다: 가중치 0인 질문의 라벨만 있는 틱은 라벨이 없는 틱과 같이 유효하지 않고, 계획
+    (유효 틱·분모)이 그 라벨을 지운 레코드의 계획과 같다. 가중치가 없으면 계획은 이 옵션 전과 같다."""
+    record = copy.deepcopy(streams[0])
+    with_gripper = [index for index, tick in enumerate(record["ticks"]) if any(label["question_id"] == "q_gripper" for label in tick.get("labels", []))]
+    only_gripper = tuple(with_gripper[1:4])
+    assert len(only_gripper) == 3
+    for index in only_gripper:
+        record["ticks"][index]["labels"] = [label for label in record["ticks"][index]["labels"] if label["question_id"] == "q_gripper"]
+        assert record["ticks"][index]["labels"]
+    stripped = copy.deepcopy(record)
+    for tick in stripped["ticks"]:
+        tick["labels"] = [label for label in tick.get("labels", []) if label["question_id"] != "q_gripper"]
+    weighted = plan_episode(record, chunk_seconds=5, tick_weights=TICK_WEIGHTS, question_weights={"q_gripper": 0.0})
+    plain = plan_episode(record, chunk_seconds=5, tick_weights=TICK_WEIGHTS)
+    removed = plan_episode(stripped, chunk_seconds=5, tick_weights=TICK_WEIGHTS)
+    assert [weighted.valid[index] for index in only_gripper] == [False, False, False] and all(plain.valid[index] for index in only_gripper)
+    assert (weighted.valid, weighted.weights, weighted.normaliser, weighted.chunks) == (removed.valid, removed.weights, removed.normaliser, removed.chunks)
+    assert weighted.normaliser == plain.normaliser - sum(plain.weights[index] for index in only_gripper)
+    assert plan_episode(record, chunk_seconds=5, tick_weights=TICK_WEIGHTS, question_weights=None) == plain

@@ -1,0 +1,28 @@
+# Task R14 Stage B (사전 등록) — **R12의 조리법 그대로 + 세 실행 head(q_gripper·q_path·q_force)의 손실 가중치 0**, seed 18·17·19로 세 번. `qwen35-2b-r12.yaml`을 잇는다.
+#
+#   artifacts/scratch/r14/gpu-chain.sh t1-s18 artifacts/scratch/r14/c-train.sh 18     (= 아래 명령; seed 17·19는 숫자만 바뀐다)
+#   scripts/adapt_readout.py --config configs/train/qwen35-2b-r14.yaml --mode t1 --steps 233 --seed 18 \
+#       --set checkpoint_every=50 --set 'checkpoint_keep_steps=[]' --run-id r14-t1-fp32-2b-s18 --no-eval --out artifacts/reports/r14-2b-t1-fp32-s18.json
+#   (저장마다 26.35 GB 여유가 checkpoint.pt 옆에 있어야 한다 — 저장은 atomic(임시 파일 → rename); 각 학습 유닛을 띄우기 전에 `/` 여유 ≥ 60 GB를 확인한다)
+#
+# **왜 (브리프 R14):** R13은 그리퍼·경로·힘을 실행 쪽 규칙에 맡긴 갈래 X에서 검증으로 고른 r12s19X가 새 홀드아웃에서 규칙_X와 엄격 성공 차가 발견되지 않고
+# 금지 접촉도 확실히 많지 않다고 판정했다(통과). 그러나 모델은 의미 판단에서 여전히 뒤진다(주 결정 실패 +0.080, 거짓 done +0.035, `q_stop` 0/64, unsafe
+# 틱 +0.012). 서빙에서 그 세 답을 실행 쪽이 정하므로(계약은 그대로 — 감싸개 유지, 사용자 결정 2026-10-09) 그 head들의 손실은 의미 head와 경쟁할 뿐이다 —
+# R7~R12 내내 그리퍼 head의 ≈ 100 step 평탄 구간과 seed마다의 실패가 학습 예산을 썼다. **가설**: 세 head의 손실을 0으로 두면 학습이 주 결정·완료·지시
+# 상태(그리고 `q_stop`·`q_speed`)에 모이고, X로 서빙한 구성이 더 좋아진다.
+#
+# **바꾸는 것은 이것 하나** (`robo_jev.train` `question_loss_weights`, Stage A — 커밋 76f9222): 로봇 틱의 라벨 가운데 q_gripper·q_path·q_force의 라벨을 손실의
+# 입력에서 뺀다(그 라벨이 없는 데이터로 돈 학습과 비트 단위로 같다 — 시험); 나머지 일곱 질문의 가중치는 1이고, 틱 손실은 그 일곱(과 그 틱에 있는 것)의
+# 가중 평균으로 다시 정규화된다. 비로봇 단일 요청은 그대로다. 세 head는 여전히 **계산되고 기록된다**(질문별 기록의 가중 전 손실·기준선·탐침 — 감시는 기록만):
+# 출력 head·질문 세트·직렬화·라벨은 바뀌지 않아 계약 digest(93fe26725a4c…)는 그대로이고, 서빙의 하네스는 그 세 답을 실행 규칙(갈래 X)에서 받는다.
+#
+# **조리법(바꾸지 않는다) = R12**: fp32 master·5초 구간·backbone_lr 1e-5·readout_lr 3e-4·tick weights 0.25/2/2/1·후보 치환(seed가 덮는다)·`max_steps` 233·
+# 혼합 비율 existing 0.5 / error_family 0.5 / new_semantic_family 0.0·데이터 여섯(g2 · dagger-0 · dagger-1 · dagger-1-donegate · dagger-2 · r1/single-by-split) —
+# 모두 `qwen35-2b-r12.yaml`(과 그것이 잇는 r6·r5)에서 그대로 온다; 해석된 설정이 R12와 다른 키는 `question_loss_weights`·`run_name`뿐이다(시험).
+# `head_fit_monitor`가 없다(감시는 기록만 — 질문별 손실·탐침은 step마다 `metrics.json`에 그대로 적힌다).
+extends: qwen35-2b-r12.yaml
+run_name: r14-2b
+question_loss_weights:   # 세 실행 head — 서빙에서는 갈래 X의 실행 규칙(xg0.1·xp0.1·xf0.1)이 그 답을 정한다
+  q_gripper: 0
+  q_path: 0
+  q_force: 0

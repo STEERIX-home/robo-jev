@@ -57,6 +57,14 @@ id, 비로봇이면 ``non_robot/<타입>``이다(비로봇 질문 id는 레코�
 이상인지 보고 그러면 run을 멈춘다(status `stopped_head_not_fitting`, :func:`head_fit_monitor_result`). `metrics.json`은 step마다
 atomic하게 다시 쓴다 — 도중에 멈춰도 그때까지의 step 기록이 남는다.
 
+**질문별 손실 가중치 (Task R14, 설정 `question_loss_weights`).** 로봇 분야 상태의 라벨마다 그 질문의 가중치 λ_q(적지 않으면 1)를 라벨 `weight`에
+곱하고 상태 안 가중 평균을 다시 정규화한다: ``L_s = Σ_q λ_q w_q L_q / Σ_q λ_q w_q``. λ_q = 0이면 그 라벨은 손실·분모·틱 유효성에서 **빠진다**
+(그 라벨이 없는 것과 비트 단위로 같다 — :func:`weighted_labels` 가 손실 함수의 입력에서 뺀다; 손실 함수는 그대로다). 기본값(null = 모두 1)은
+같은 라벨 목록 객체를 그대로 넘겨 이 옵션 전과 비트 단위로 같다(시험이 이 옵션 전 코드의 값으로 고정한다). 질문별 기록은 가중치를 곱하기 **전**의
+손실·기준선(`loss`·`baseline`·`mass` — R8의 정의 그대로)과 실제로 들어간 질량·기여(`weighted_mass`·`weighted_contribution`, 합이 step 손실)를
+함께 적는다 — 가중치 0인 head가 무엇을 하는지 계속 보이게. 탐침도 그대로다. 이 키는 run의 정체다(:data:`RESUME_FREE_KEYS` 밖): 다른 가중치로
+이어 학습하면 이름으로 거절하고, 이 키가 없던 옛 checkpoint는 기본값(null)으로 이어 간다.
+
 **run의 정체 (리뷰 11 S1).** 재개는 두 가지를 대조한다. (1) 설정 — 중단·예산·경로·이름(:data:`RESUME_FREE_KEYS`)과
 내용으로 대조하는 경로 키(:data:`RESUME_PATH_KEYS`: 모델 설정 파일, tokenizer; `dataset_manifests`의 경로)를 뺀
 나머지는 문자 그대로 같아야 한다. (2) manifest의 **identity 블록**(:func:`manifest_identity`) — 데이터 manifest의
@@ -167,6 +175,7 @@ __all__ = [
     "train",
     "load_readout_checkpoint",
     "trainable_state_dict",
+    "weighted_labels",
 ]
 
 # --------------------------------------------------------------------------
@@ -200,6 +209,7 @@ DEFAULT_SAMPLER = {
 
 #: 재개할 때 checkpoint의 설정과 달라도 되는 키 — 중단·예산·경로·이름뿐이다(run id는 checkpoint의 것을
 #: 쓴다). 나머지는 run의 정체라 같아야 한다. `head_fit_monitor`(Task R8)도 중단 규칙이다 — 발동하기 전에는 계산을 바꾸지 않는다.
+#: `question_loss_weights`(Task R14)는 여기 **없다** — 손실을 바꾸므로 run의 정체다(옛 checkpoint에는 키가 없어 기본값 null과 같게 읽힌다).
 RESUME_FREE_KEYS = (
     "resume", "stop_after", "max_wall_hours", "checkpoint_every", "checkpoint_keep_steps", "artifacts_dir", "run_id", "run_name",
     "resume_reschedule", "head_fit_monitor",
@@ -286,6 +296,11 @@ DEFAULTS: dict[str, Any] = {
     # head 적합 감시 (Task R8): {question, step, window, ratio} — `step`에서 창(step−window+1 … step)의 평균 가중 손실이
     # 평균 기준선의 `ratio`배 이상이면 run을 멈춘다(:func:`head_fit_monitor_result`). null이면 감시하지 않는다.
     "head_fit_monitor": None,
+    # 질문별 손실 가중치 (Task R14): {로봇 질문 id: 0 이상의 수} — 질문 세트(QUESTION_SET_V0)의 id만 받고, 적지 않은 질문은 1이다.
+    # 로봇 분야 상태(틱)의 라벨 `weight`에 곱하고 상태 안 가중 평균을 그 곱으로 다시 정규화한다; 0이면 그 질문의 라벨은 손실·gradient에서
+    # **빠진다**(그 라벨이 없는 것과 같다 — :func:`weighted_labels`). null(기본) = 모두 1 = 이 옵션 전의 계산 그대로(같은 객체·같은 연산).
+    # 1인 질문은 정규화에서 지운다(모두 1이면 null) — 재개의 정체는 계산이 같은 설정끼리 같다. run의 정체다(재개에서 자유롭지 않다).
+    "question_loss_weights": None,
 }
 
 
@@ -433,7 +448,26 @@ def resolve_config(config: dict) -> dict:
         _need(_is_int(monitor["window"]) and 1 <= monitor["window"] <= monitor["step"], f"head_fit_monitor.window: 1 이상 step 이하의 정수여야 한다 (받은 값: {monitor['window']!r})")
         _need(_is_number(monitor["ratio"]) and monitor["ratio"] > 0, f"head_fit_monitor.ratio: 양수여야 한다 (받은 값: {monitor['ratio']!r})")
         out["head_fit_monitor"] = {"question": str(monitor["question"]), "step": int(monitor["step"]), "window": int(monitor["window"]), "ratio": float(monitor["ratio"])}
+    out["question_loss_weights"] = _question_loss_weights(out["question_loss_weights"])
     return out
+
+
+def _question_loss_weights(raw: Any) -> dict[str, float] | None:
+    """설정의 `question_loss_weights`를 검사하고 정규형으로 (Task R14): 질문 세트(QUESTION_SET_V0)의 id → 유한한 0 이상의 수만 받는다.
+    1인 질문은 지우고(적지 않은 것과 같다) 질문 세트 순서로 둔다 — 남는 것이 없으면 None(= 이 옵션 전의 계산). 모든 로봇 질문이 0이면 로봇 손실이
+    통째로 사라지므로 거절한다."""
+    if raw is None:
+        return None
+    _need(isinstance(raw, dict), f"question_loss_weights: {{질문 id: 0 이상의 수}} 꼴이거나 null이어야 한다 (받은 값: {raw!r})")
+    unknown = [key for key in raw if key not in QUESTION_SET_V0]
+    _need(not unknown, f"question_loss_weights: 질문 세트에 없는 질문 {unknown} (있는 것: {list(QUESTION_SET_V0)})")
+    for key, value in raw.items():
+        _need(_is_number(value) and math.isfinite(float(value)) and float(value) >= 0.0,
+              f"question_loss_weights.{key}: 유한한 0 이상의 수여야 한다 (받은 값: {value!r})")  # fmt: skip
+    _need(any(float(raw.get(qid, 1.0)) > 0.0 for qid in QUESTION_SET_V0),
+          "question_loss_weights: 모든 로봇 질문이 0이다 — 로봇 손실이 통째로 사라진다 (그것이 뜻이면 robot_loss_share를 0으로)")  # fmt: skip
+    kept = {qid: float(raw[qid]) for qid in QUESTION_SET_V0 if qid in raw and float(raw[qid]) != 1.0}
+    return kept or None
 
 
 # --------------------------------------------------------------------------
@@ -774,16 +808,44 @@ class EpisodePlan:
     normaliser: float
 
 
+def weighted_labels(labels: list[dict], question_weights: dict[str, float] | None) -> list[dict]:
+    """질문별 손실 가중치(Task R14 — 설정 `question_loss_weights`)를 건 라벨 목록: 가중치가 0인 질문의 라벨은 **뺀다**(그 라벨이 없는 것과
+    같다 — 손실에도, 상태 안 가중 평균의 분모에도, 틱의 유효성에도 들지 않는다), 1이 아닌 질문은 라벨의 `weight`(기본 1)에 곱한 사본이다.
+    가중치가 없으면(None·빈 dict) **같은 목록 객체**를 그대로 돌려준다 — 기본값의 계산은 이 옵션 전과 같은 객체·같은 연산이다. 손실 함수
+    (:func:`robo_jev.loss.judgment_loss`)는 그대로이고 이 함수가 그 입력만 바꾼다: 상태 손실 = Σ λ_q w_q L_q / Σ λ_q w_q."""
+    if not question_weights:
+        return labels
+    out: list[dict] = []
+    for label in labels:
+        factor = float(question_weights.get(str(label.get("question_id")), 1.0))
+        if factor == 0.0:
+            continue
+        out.append(label if factor == 1.0 else {**label, "weight": float(label.get("weight", 1.0)) * factor})
+    return out
+
+
+def _labels_view(record: dict, question_weights: dict[str, float] | None) -> dict:
+    """유효성 검사(:func:`robo_jev.sampler.valid_label_ticks`·`valid_single`)에 넘길 레코드 — 가중치가 없으면 레코드 그대로, 있으면 틱(또는 단일
+    요청)의 라벨만 :func:`weighted_labels` 로 바꾼 가벼운 사본이다. 가중치 0인 질문의 라벨만 있던 틱은 라벨이 없는 틱과 같이 유효하지 않다."""
+    if not question_weights:
+        return record
+    if "ticks" in record:
+        return {"ticks": [{"labels": weighted_labels(tick.get("labels", []), question_weights)} for tick in record["ticks"]]}
+    return {"labels": weighted_labels(record.get("labels", []), question_weights)}
+
+
 def plan_episode(
     record: dict,
     *,
     chunk_seconds: float | None,
     tick_weights: dict[str, float],
     steady_min_held_ticks: int = 3,
+    question_weights: dict[str, float] | None = None,
 ) -> EpisodePlan:
     classes = [tick_class(record, i, steady_min_held_ticks=steady_min_held_ticks) for i in range(len(record["ticks"]))]
     weights = [float(tick_weights[name]) for name in classes]
-    valid = valid_label_ticks(record)
+    # 질문별 손실 가중치(Task R14)가 있으면 그것을 건 라벨로 유효성을 본다 — 가중치 0인 질문만 라벨이 있는 틱은 분모에 들지 않는다
+    valid = valid_label_ticks(_labels_view(record, question_weights))
     normaliser = sum(w for w, ok in zip(weights, valid) if ok)
     return EpisodePlan(
         chunks=episode_chunks(record, chunk_seconds), classes=classes, weights=weights, valid=valid,
@@ -845,16 +907,23 @@ def question_records(
     coefficient: float,
     domain: str,
     question_types: dict[str, str],
+    question_weights: dict[str, float] | None = None,
 ) -> list[dict[str, Any]]:
     """상태 하나의 질문별 기록 — :func:`robo_jev.loss.question_losses` 의 항목(`entries`)과 그 float 값(`values`)에서.
 
     ``mass = coefficient · w_q / Σ_q w_q``(`coefficient` = 이 상태가 step 손실에 곱해지는 계수: 로봇 틱 ``scale·w_t``, 비로봇 상태
-    ``scale``)라 기록의 ``Σ mass·loss``가 이 상태의 step 손실 기여와 같다(:func:`robo_jev.loss.judgment_loss` 의 상태 안 가중 평균을
-    풀어 쓴 것). 후보가 고정된 질문은 주변분포 몫(`share`)과 기준선을 다시 잴 라벨을, 후보가 바뀌는 질문은 균등 head의 손실(`baseline`)을
-    바로 남긴다. 유효 라벨이 없거나 가중치 합이 0인 상태는 `judgment_loss`처럼 세지 않는다(빈 목록)."""
+    ``scale``)라 가중치가 없으면 기록의 ``Σ mass·loss``가 이 상태의 step 손실 기여와 같다(:func:`robo_jev.loss.judgment_loss` 의 상태 안 가중
+    평균을 풀어 쓴 것). 후보가 고정된 질문은 주변분포 몫(`share`)과 기준선을 다시 잴 라벨을, 후보가 바뀌는 질문은 균등 head의 손실(`baseline`)을
+    바로 남긴다. 유효 라벨이 없거나 가중치 합이 0인 상태는 `judgment_loss`처럼 세지 않는다(빈 목록).
+
+    **질문별 손실 가중치(Task R14, `question_weights`)**: `mass`·`loss`·기준선은 **가중치를 곱하기 전**의 정의 그대로다(R8과 같은 자 — 가중치
+    0인 head도 무엇을 하는지 계속 보인다). 그 옆에 ``loss_weight`` = λ_q와 실제로 step 손실에 들어간 질량 ``weighted_mass = coefficient ·
+    λ_q w_q / Σ_q λ_q w_q``(λ = 0이면 0)를 적는다 — ``Σ weighted_mass·loss``가 이 상태의 step 손실 기여다. 가중치가 없으면 두 질량은 같은 값이다."""
     total = sum(float(entry["weight"]) for entry in entries.values())
     if not entries or total <= 0:
         return []
+    factors = {qid: (float(question_weights.get(qid, 1.0)) if question_weights else 1.0) for qid in entries}
+    applied = sum(factors[qid] * float(entry["weight"]) for qid, entry in entries.items())
     by_question = {str(label.get("question_id")): label for label in labels if label.get("question_id") in entries}
     out: list[dict[str, Any]] = []
     for qid, entry in entries.items():
@@ -865,6 +934,8 @@ def question_records(
             "key": question_key(qid, question_type, domain), "mass": float(coefficient) * float(entry["weight"]) / total,
             "loss": float(values[qid]), "kind": str(entry["kind"]),
             "two_valued": bool(entry["kind"] == "valid_set" and len(label.get("candidate_ids") or ()) == 2),
+            "loss_weight": factors[qid],
+            "weighted_mass": (float(coefficient) * (factors[qid] * float(entry["weight"])) / applied) if applied > 0 else 0.0,
         }
         if _fixed_vocabulary(qid, question_type, domain):
             row["share"] = label_prior_share(ids, label)
@@ -891,6 +962,9 @@ def question_table(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
       - 후보가 바뀌는 질문(`q_main`·`q_path`·비로봇 choice): 이 상태 후보 위의 **균등** head — single은 ``log K``,
         허용 집합은 ``−log(|A| / |A ∪ I|)``(unknown은 정규화에서 빠진다).
     * ``ratio`` = ``loss / baseline`` (기준선이 0이면 None). ``prior``는 고정 후보 질문의 π다(예: `q_gripper`의 P(closed)).
+    * 질문별 손실 가중치(Task R14): ``loss_weight``(λ_q), ``weighted_mass``·``weighted_contribution``(step 손실에 **실제로** 들어간 질량과 기여 —
+      ``Σ weighted_contribution``이 step 손실이다; λ = 0이면 둘 다 0). 위의 `mass`·`contribution`·`loss`·기준선은 가중치를 곱하기 **전**의 값
+      그대로라 가중치가 1이 아니면 ``Σ contribution``은 step 손실이 아니다. 가중치가 없는 run은 두 쌍이 같다(이 키가 없던 옛 행도 같게 읽는다).
     """
     groups: dict[str, list[dict[str, Any]]] = {}
     for row in records:
@@ -900,8 +974,12 @@ def question_table(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         rows = groups[key]
         mass = sum(float(row["mass"]) for row in rows)
         contribution = sum(float(row["mass"]) * float(row["loss"]) for row in rows)
+        weighted_mass = sum(float(row.get("weighted_mass", row["mass"])) for row in rows)
+        weighted_contribution = sum(float(row.get("weighted_mass", row["mass"])) * float(row["loss"]) for row in rows)
         fixed = "share" in rows[0]
-        entry: dict[str, Any] = {"n": len(rows), "mass": mass, "contribution": contribution, "loss": (contribution / mass) if mass > 0 else None}
+        entry: dict[str, Any] = {"n": len(rows), "mass": mass, "contribution": contribution, "loss": (contribution / mass) if mass > 0 else None,
+                                 "loss_weight": float(rows[0].get("loss_weight", 1.0)), "weighted_mass": weighted_mass,
+                                 "weighted_contribution": weighted_contribution}
         if fixed:
             prior: dict[str, float] = {}
             for row in rows:
@@ -1058,6 +1136,7 @@ def run_stream_chunk(
     carried: StreamState | None,
     plan: EpisodePlan,
     scale: float = 1.0,
+    question_weights: dict[str, float] | None = None,
 ) -> ChunkResult:
     """에피소드 구간 ``[start, end)``의 forward와 손실 기여 ``scale × Σ_t w_t L_t`` (유효 라벨이 있는 틱).
 
@@ -1065,6 +1144,9 @@ def run_stream_chunk(
     정규화된 손실은 ``1 / plan.normaliser``. `carried`는 앞 구간이 넘긴(detach된) 공통 상태다(첫 구간은
     `None` — prefix부터 읽는다). 돌려주는 ``state``는 이 구간 끝의 공통 상태로 그래프가 붙어 있다 —
     다음 구간에 넘기기 전에 호출자가 :func:`detach_stream_state` 한다.
+
+    `question_weights`(Task R14)가 있으면 틱 손실 L_t는 :func:`weighted_labels` 를 건 라벨의 손실이다(`plan`도 같은 가중치로 만든 것이어야
+    한다 — 유효 틱과 분모가 그 가중치를 따른다). 질문별 기록은 모든 라벨(가중치 0인 질문 포함)의 가중 전 손실과 가중된 질량을 적는다.
     """
     start, end = chunk
     layout = item.layout
@@ -1085,7 +1167,8 @@ def run_stream_chunk(
         one = {"logits": [outputs["logits"][offset]], "candidates": [outputs["candidates"][offset]]}
         tick_labels = record["ticks"][index].get("labels", [])
         labels = {"labels": [tick_labels]}
-        tick_loss = judgment_loss(one, labels)
+        # 질문별 손실 가중치(Task R14) — 없으면 같은 라벨 목록 그대로(이 옵션 전의 계산), 있으면 가중치 0인 질문의 라벨을 뺀 목록
+        tick_loss = judgment_loss(one, {"labels": [weighted_labels(tick_labels, question_weights)]})
         weight = plan.weights[index]
         term = tick_loss * (weight * scale)
         total = term if total is None else total + term
@@ -1101,7 +1184,7 @@ def run_stream_chunk(
         _add_type_losses(by_type, entries, item.question_types, values)
         questions.extend(question_records(
             entries, values, tick_labels, outputs["candidates"][offset], coefficient=weight * scale, domain=item.domain,
-            question_types=item.question_types,
+            question_types=item.question_types, question_weights=question_weights,
         ))  # fmt: skip
         _probe_tick(probes, record["ticks"][index], outputs["logits"][offset], outputs["candidates"][offset])
     tokens = (int(layout["prefix_end"]) if start == 0 else 0) + sum(
@@ -1122,8 +1205,11 @@ def run_stream_chunk(
     )
 
 
-def run_single_unit(judge: Judge, items: list[Item], *, scale: float = 1.0) -> ChunkResult:
-    """단일 요청 microbatch(한 forward)의 손실 기여 ``scale × Σ_s L_s`` (유효 라벨이 있는 상태; 상태마다 기록)."""
+def run_single_unit(judge: Judge, items: list[Item], *, scale: float = 1.0, question_weights: dict[str, float] | None = None) -> ChunkResult:
+    """단일 요청 microbatch(한 forward)의 손실 기여 ``scale × Σ_s L_s`` (유효 라벨이 있는 상태; 상태마다 기록).
+
+    `question_weights`(Task R14)는 :func:`run_stream_chunk` 와 같다 — 상태의 유효성과 손실이 :func:`weighted_labels` 를 건 라벨을 따른다(학습
+    loop는 로봇 분야 단위에만 넘긴다)."""
     outputs = judge({"layout": "state_first", "states": [item.layout for item in items]})
     total: Tensor | None = None
     per_item: list[dict[str, Any]] = []
@@ -1131,13 +1217,13 @@ def run_single_unit(judge: Judge, items: list[Item], *, scale: float = 1.0) -> C
     questions: list[dict[str, Any]] = []
     valid_states = 0
     for position, item in enumerate(items):
-        if not valid_single(item.record):
+        if not valid_single(_labels_view(item.record, question_weights)):
             per_item.append({"index": item.index, "valid": False, "loss": 0.0, "contribution": 0.0})
             continue
         one = {"logits": [outputs["logits"][position]], "candidates": [outputs["candidates"][position]]}
         state_labels = item.record.get("labels", [])
         labels = {"labels": [state_labels]}
-        state_loss = judgment_loss(one, labels)
+        state_loss = judgment_loss(one, {"labels": [weighted_labels(state_labels, question_weights)]})
         term = state_loss * scale
         total = term if total is None else total + term
         valid_states += 1
@@ -1150,7 +1236,7 @@ def run_single_unit(judge: Judge, items: list[Item], *, scale: float = 1.0) -> C
         _add_type_losses(by_type, entries, item.question_types, values)
         questions.extend(question_records(
             entries, values, state_labels, outputs["candidates"][position], coefficient=scale, domain=item.domain,
-            question_types=item.question_types,
+            question_types=item.question_types, question_weights=question_weights,
         ))  # fmt: skip
     labels_total, labels_low = _count_labels([item.record for item in items])
     return ChunkResult(
@@ -1482,6 +1568,11 @@ class Trainer:
 
     # -- 단위 --
 
+    def _question_weights(self, domain: str) -> dict[str, float] | None:
+        """이 분야의 상태에 거는 질문별 손실 가중치 (Task R14) — 질문 세트가 로봇 스트림의 것이므로 **로봇 분야에만** 건다(비로봇 단일 요청의
+        질문 id는 레코드마다 새로 붙는다 — 이름이 같아도 그 head가 아니다). 설정이 없으면 None(이 옵션 전의 계산)."""
+        return self.config["question_loss_weights"] if domain == "robot" else None
+
     def _plan(self, item: Item) -> EpisodePlan:
         if item.index not in self._plans:
             sampler_config = self.config["sampler"]
@@ -1489,6 +1580,7 @@ class Trainer:
                 item.record, chunk_seconds=self.config["stream_chunk_seconds"],
                 tick_weights=sampler_config["tick_weights"],
                 steady_min_held_ticks=sampler_config["steady_min_held_ticks"],
+                question_weights=self._question_weights(item.domain),
             )  # fmt: skip
         return self._plans[item.index]
 
@@ -1498,17 +1590,19 @@ class Trainer:
         return 1
 
     def _run(self, unit: Unit, chunk_index: int, carried: StreamState | None, scale: float) -> ChunkResult:
+        weights = self._question_weights(unit.domain)
         if unit.kind == "stream":
             item = self.items[unit.items[0]]
             plan = self._plan(item)
-            return run_stream_chunk(self.model, item, plan.chunks[chunk_index], carried=carried, plan=plan, scale=scale)
-        return run_single_unit(self.model, [self.items[index] for index in unit.items], scale=scale)
+            return run_stream_chunk(self.model, item, plan.chunks[chunk_index], carried=carried, plan=plan, scale=scale, question_weights=weights)
+        return run_single_unit(self.model, [self.items[index] for index in unit.items], scale=scale, question_weights=weights)
 
     def _unit_weight(self, unit: Unit) -> float:
-        """단위의 상태 가중치 합 — 라벨만으로: 에피소드는 유효 틱의 종류 가중치 합, 단일 요청은 유효 상태 수."""
+        """단위의 상태 가중치 합 — 라벨만으로: 에피소드는 유효 틱의 종류 가중치 합, 단일 요청은 유효 상태 수 (질문별 손실 가중치를 건 라벨로)."""
         if unit.kind == "stream":
             return float(self._plan(self.items[unit.items[0]]).normaliser)
-        return float(sum(1 for index in unit.items if valid_single(self.items[index].record)))
+        weights = self._question_weights(unit.domain)
+        return float(sum(1 for index in unit.items if valid_single(_labels_view(self.items[index].record, weights))))
 
     def _plan_step(self, units: list[Unit]) -> dict[str, Any]:
         """분모·비중·scale을 단위를 돌리기 전에 정한다 (모듈 설명 참조)."""

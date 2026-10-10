@@ -1,8 +1,8 @@
-"""`scripts/slim_checkpoint.py` — 끝난 run의 체크포인트 슬림화 (Task R8 A2, 사용자 승인: 정확히 아홉 파일).
+"""`scripts/slim_checkpoint.py` — 끝난 run의 체크포인트 슬림화 (Task R8 A2, 사용자 승인: 정확히 아홉 파일; Task R14 A1: 일곱 파일 더, 상시 규칙).
 
 도구는 파일마다 optimizer만 뺀 model-only 파일을 같은 디렉터리의 임시 파일에 쓰고, (1) model tensor가 원본과 비트 단위로 같은지,
 (2) optimizer 밖의 다른 키가 같은지, (3) 평가 경로가 그 파일을 받는지를 본 뒤 **셋 다 통과할 때만** 원본을 대체한다. 하나라도 떨어지면
-원본은 바이트 하나 바뀌지 않고 임시 파일도 남지 않는다. 대체할 수 있는 경로는 사용자가 승인한 아홉 개뿐이다. 여기서는 소형 fixture의
+원본은 바이트 하나 바뀌지 않고 임시 파일도 남지 않는다. 대체할 수 있는 경로는 사용자가 승인한 파일뿐이다(승인마다 날짜가 붙은 묶음). 여기서는 소형 fixture의
 진짜 저장 단위와, 평가 경로 자리에 같은 `load_readout_checkpoint`를 소형 모델로 부르는 검사를 쓴다(실제 2B 적재는 그 도구의 몫).
 """
 
@@ -125,16 +125,76 @@ def test_a_dry_run_verifies_but_never_replaces(tmp_path):
     assert sha256(path) == before and not list(path.parent.glob("*.tmp"))
 
 
-def test_only_the_nine_approved_checkpoints_can_be_slimmed(tmp_path):
-    """사용자가 승인한 것은 정확히 아홉 파일이다 — 목록 밖의 경로는 아무것도 읽기 전에 거절한다."""
+#: Task R8 A2 — 사용자 승인(2026-09-29)의 아홉 파일.
+R8_NINE = (
+    "artifacts/runs/r2-t1-fp32-2b/checkpoint.pt", "artifacts/runs/r2-t1-fp32-2b/checkpoint-step40.pt", "artifacts/runs/r3a-t1-fp32-2b-s18/checkpoint.pt",
+    "artifacts/runs/r3a-t1-fp32-2b-s19/checkpoint.pt", "artifacts/runs/r3a-t1-fp32-2b-s19/checkpoint-step40.pt",
+    "artifacts/runs/r3a-t1-466/r3a-t1-fp32-2b-466/checkpoint.pt", "artifacts/runs/r5-t1-fp32-2b-s18/checkpoint.pt",
+    "artifacts/runs/r6-t1-fp32-2b-s18/checkpoint.pt", "artifacts/runs/r7-t1-fp32-2b-s18/checkpoint.pt",
+)  # fmt: skip
+#: Task R14 A1 — 사용자 승인(2026-10-09, AskUserQuestion "일곱 개 슬림화 + 이후 자동")의 일곱 파일, 브리프의 목록 그대로.
+R14_SEVEN = (
+    "artifacts/runs/r8-t1-fp32-2b-s18/checkpoint.pt", "artifacts/runs/r8-t1-fp32-2b-s19/checkpoint.pt", "artifacts/runs/r9-t1-fp32-2b-s17/checkpoint.pt",
+    "artifacts/runs/r9-t1-fp32-2b-s18c/r8-t1-fp32-2b-s18/checkpoint.pt", "artifacts/runs/r12-t1-fp32-2b-s17/checkpoint.pt",
+    "artifacts/runs/r12-t1-fp32-2b-s18/checkpoint.pt", "artifacts/runs/r12-t1-fp32-2b-s19/checkpoint.pt",
+)  # fmt: skip
+#: 상시 규칙(2026-10-09, HANDOFF §5) — Task R14 자신의 세 체크포인트(모든 R14 평가 run이 끝난 뒤 승인 묶음에 더했다).
+R14_OWN = ("artifacts/runs/r14-t1-fp32-2b-s18/checkpoint.pt", "artifacts/runs/r14-t1-fp32-2b-s17/checkpoint.pt",
+           "artifacts/runs/r14-t1-fp32-2b-s19/checkpoint.pt")
+
+
+def test_only_the_user_approved_checkpoints_can_be_slimmed_each_under_its_dated_approval(tmp_path):
+    """대체할 수 있는 것은 사용자가 승인한 파일뿐이다 — R8의 아홉(2026-09-29), R14 A1의 일곱(2026-10-09), 그리고 상시 규칙(2026-10-09)으로 더한 R14 자신의
+    셋(평가 run이 모두 끝난 뒤에 더했다 — 완주한 run만 대체한다); 승인마다 날짜·근거가 붙은 묶음이다. 목록 밖의 경로는 아무것도 읽기 전에 거절한다."""
     module = script()
-    assert len(module.APPROVED) == 9 and len(set(module.APPROVED)) == 9
+    assert [(approval["date"], approval["standing_rule"], approval["paths"]) for approval in module.APPROVALS] == [
+        ("2026-09-29", False, R8_NINE), ("2026-10-09", False, R14_SEVEN), ("2026-10-09", True, R14_OWN)]
+    assert module.APPROVED == R8_NINE + R14_SEVEN + R14_OWN and len(set(module.APPROVED)) == 19
+    assert module.approval_of("artifacts/runs/r14-t1-fp32-2b-s19/checkpoint.pt")["standing_rule"] is True  # 상시 규칙 — 완주한 run만 대체한다
     assert all(path.startswith("artifacts/runs/") and path.endswith(".pt") for path in module.APPROVED)
-    assert "artifacts/runs/r7-t1-fp32-2b-s18/checkpoint.pt" in module.APPROVED and "artifacts/runs/r2-t1-fp32-2b/checkpoint-step40.pt" in module.APPROVED
+    assert module.approval_of("artifacts/runs/r12-t1-fp32-2b-s19/checkpoint.pt") == {
+        "date": "2026-10-09", "basis": module.APPROVALS[1]["basis"], "standing_rule": False}
+    assert module.approval_of("artifacts/runs/r7-t1-fp32-2b-s18/checkpoint.pt")["date"] == "2026-09-29"
+    with pytest.raises(KeyError):
+        module.approval_of("artifacts/runs/r6-t1-fp32-2b-s18/metrics.json")
     path, _ = finished_run(tmp_path)
     with pytest.raises(SystemExit):
         module.main(["run", "--files", str(path), "--out", str(tmp_path / "report.json")])
     assert not (tmp_path / "report.json").exists() and load_checkpoint(path)["format"] == CHECKPOINT_FORMAT
+
+
+def test_a_standing_rule_checkpoint_is_slimmed_only_when_its_run_completed_and_every_row_names_its_approval(tmp_path, monkeypatch):
+    """상시 규칙(2026-10-09)으로 더한 묶음은 run이 `completed`로 `max_steps`에 닿았을 때만 대체한다 — 끝나지 않은 run(재개할 수 있는 상태)은
+    읽지도 않고 그대로 두고 이유를 적는다. 보고서의 행마다 승인 묶음(날짜·근거·상시 규칙 여부)이, 머리에 실행한 커밋과 작업 트리의 변경 파일이 실린다."""
+    module = script()
+    done_config = {**tiny_config(tmp_path, "done"), "artifacts_dir": str(tmp_path / "artifacts" / "runs")}
+    with Trainer(done_config) as trainer:
+        trainer.run()
+    half_config = {**tiny_config(tmp_path, "half"), "artifacts_dir": str(tmp_path / "artifacts" / "runs"), "stop_after": {"step": 1}}
+    with Trainer(half_config) as trainer:
+        assert trainer.run()["status"] == "interrupted"
+    done, half = tmp_path / "artifacts/runs/done/checkpoint.pt", tmp_path / "artifacts/runs/half/checkpoint.pt"
+    half_before = sha256(half)
+    approvals = ({"date": "2026-10-09", "basis": "standing rule (test)", "standing_rule": True,
+                  "paths": ("artifacts/runs/done/checkpoint.pt", "artifacts/runs/half/checkpoint.pt")},)  # fmt: skip
+    monkeypatch.setattr(module, "REPO", tmp_path)
+    monkeypatch.setattr(module, "APPROVALS", approvals)
+    monkeypatch.setattr(module, "APPROVED", approvals[0]["paths"])
+    monkeypatch.setattr(module, "serving_load_check", tiny_evaluation(done_config))
+    assert module.run_completed(done) == (True, "completed 2/2") and module.run_completed(half)[0] is False
+    assert module.main(["run", "--out", str(tmp_path / "report.json")]) == 1  # 한 파일이 대체되지 않았다
+    report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
+    rows = {row["path"]: row for row in report["files"]}
+    assert rows["artifacts/runs/done/checkpoint.pt"]["replaced"] is True and load_model_checkpoint(done)["format"] == MODEL_ONLY_FORMAT
+    assert rows["artifacts/runs/half/checkpoint.pt"]["replaced"] is False and "standing rule" in rows["artifacts/runs/half/checkpoint.pt"]["error"]
+    assert "status interrupted" in rows["artifacts/runs/half/checkpoint.pt"]["error"]
+    assert sha256(half) == half_before and load_checkpoint(half)["format"] == CHECKPOINT_FORMAT
+    assert all(row["approval"] == {"date": "2026-10-09", "basis": "standing rule (test)", "standing_rule": True} for row in report["files"])
+    assert report["failed"] == ["artifacts/runs/half/checkpoint.pt"] and report["replaced"] == 1
+    assert report["approvals"] == [{**approvals[0], "paths": list(approvals[0]["paths"])}] and report["script"] == "slim-checkpoint-1.1"
+    assert "git" in report and "git_dirty_files" in report  # 저장소 밖(tmp)이라 None이다 — 저장소 안에서는 커밋과 변경 파일 목록
+    assert set(report["tool_files_sha256"]) == {"scripts/slim_checkpoint.py", "src/robo_jev/checkpoint.py", "src/robo_jev/train.py",
+                                                "src/robo_jev/harness/model_policy.py"}  # 실행한 코드의 sha256 (tmp에는 없어 None)
 
 
 def test_the_loaded_state_check_compares_what_the_evaluation_loader_put_into_the_model_bit_for_bit():
@@ -143,3 +203,24 @@ def test_the_loaded_state_check_compares_what_the_evaluation_loader_put_into_the
     assert module.loaded_state_check({**model, "other": torch.zeros(3)}, model, contract_sha256="x")["params_equal"] is True
     assert module.loaded_state_check({"U.weight": torch.ones(2, 2), "bias": torch.ones(1)}, model, contract_sha256="x")["mismatches"] == ["bias"]
     assert module.loaded_state_check({"U.weight": torch.ones(2, 2)}, model, contract_sha256="x")["mismatches"] == ["bias"]
+
+
+def test_the_dirty_file_list_names_each_changed_tracked_file_by_its_full_path(tmp_path, monkeypatch):
+    """보고서의 `git_dirty_files`는 바뀐 추적 파일의 **온전한** 저장소 기준 경로다 — `git status --porcelain`의 첫 줄 앞 공백(상태 열)을 지우면 첫
+    경로의 첫 글자가 잘린다(R14 A1의 마른 실행에서 `cripts/…`로 나온 결함). 추적하지 않는 파일은 세지 않는다."""
+    import subprocess
+
+    module = script()
+    for name in ("scripts/tool.py", "src/model.py"):
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text("x = 1\n", encoding="utf-8")
+    git = ["git", "-C", str(tmp_path), "-c", "user.name=test", "-c", "user.email=test@example.com"]
+    subprocess.run([*git, "init", "-q"], check=True)
+    subprocess.run([*git, "add", "."], check=True)
+    subprocess.run([*git, "commit", "-q", "-m", "init"], check=True)
+    monkeypatch.setattr(module, "REPO", tmp_path)
+    assert module.dirty_files() == []
+    for name in ("scripts/tool.py", "src/model.py"):
+        (tmp_path / name).write_text("x = 2\n", encoding="utf-8")
+    (tmp_path / "untracked.txt").write_text("u", encoding="utf-8")
+    assert module.dirty_files() == ["scripts/tool.py", "src/model.py"]

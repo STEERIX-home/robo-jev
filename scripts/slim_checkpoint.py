@@ -1,8 +1,14 @@
-"""Task R8 A2 — 끝난 run의 체크포인트 슬림화 (사용자 승인 2026-09-29: **정확히 아래 아홉 파일**의 optimizer 상태만 지운다).
+"""Task R8 A2 — 끝난 run의 체크포인트 슬림화 (사용자 승인 2026-09-29: **정확히 아홉 파일**; Task R14 A1, 사용자 승인 2026-10-09: R8·R9·R12의
+끝난 체크포인트 **정확히 일곱 파일** — 승인마다 :data:`APPROVALS` 의 한 묶음이다. 이 도구는 그 파일들의 optimizer 상태만 지운다).
 
     CUDA_VISIBLE_DEVICES= uv run --no-sync python scripts/slim_checkpoint.py run --out artifacts/reports/r8-a2-slim.json
     CUDA_VISIBLE_DEVICES= uv run --no-sync python scripts/slim_checkpoint.py run --files artifacts/runs/r7-t1-fp32-2b-s18/checkpoint.pt --out …
     CUDA_VISIBLE_DEVICES= uv run --no-sync python scripts/slim_checkpoint.py run --dry-run --out …   # 검증만, 원본은 그대로
+
+**상시 규칙 (2026-10-09 사용자 승인, HANDOFF §4):** 각 라운드는 평가 run이 모두 끝난 **자기** 체크포인트를 이 도구·이 검증으로 model-only로
+슬림화한다 — 그때 그 경로들을 승인 묶음 하나로 더한다(근거 = 상시 규칙, 날짜 = 2026-10-09). 그 밖의 파일·P 계열·HF 캐시는 따로 동의를 받는다.
+상시 규칙의 묶음(`standing_rule: True`)은 run이 `completed`로 `max_steps`에 닿았을 때만 대체한다(`metrics.json` — 끝나지 않은 run의 재개
+상태를 지우지 않게).
 
 파일 하나는 26.35 GB = `model` 3.76 GB + `optimizer` 22.58 GB(AdamW 모멘트와 fp32 master 사본) + 작은 키들이다. 파일마다 차례로:
 
@@ -18,7 +24,8 @@
    **원본은 건드리지 않은 채** 이유를 적는다.
 
 대체할 수 있는 경로는 :data:`APPROVED` 뿐이다 — 목록 밖의 경로는 아무것도 읽기 전에 거절한다. 이미 model-only인 파일은 건너뛴다(다시 돌려도 된다).
-보고서(JSON)에는 파일별 표와 `/`의 여유 전후가 든다. GPU를 쓰지 않는다 — `CUDA_VISIBLE_DEVICES`를 비우고 돌린다.
+보고서(JSON)에는 파일별 표(승인 묶음 포함)와 `/`의 여유 전후, 실행한 커밋과 작업 트리의 변경 파일이 든다. GPU를 쓰지 않는다 — `CUDA_VISIBLE_DEVICES`를
+비우고 돌린다.
 """
 
 from __future__ import annotations
@@ -52,19 +59,72 @@ from robo_jev.checkpoint import (  # noqa: E402
     write_temporary,
 )
 
-#: 사용자가 승인한 아홉 파일 (브리프 A2의 목록 그대로, 저장소 기준 경로). 이 밖의 파일은 이 도구가 대체하지 않는다.
-APPROVED = (
-    "artifacts/runs/r2-t1-fp32-2b/checkpoint.pt",
-    "artifacts/runs/r2-t1-fp32-2b/checkpoint-step40.pt",
-    "artifacts/runs/r3a-t1-fp32-2b-s18/checkpoint.pt",
-    "artifacts/runs/r3a-t1-fp32-2b-s19/checkpoint.pt",
-    "artifacts/runs/r3a-t1-fp32-2b-s19/checkpoint-step40.pt",
-    "artifacts/runs/r3a-t1-466/r3a-t1-fp32-2b-466/checkpoint.pt",
-    "artifacts/runs/r5-t1-fp32-2b-s18/checkpoint.pt",
-    "artifacts/runs/r6-t1-fp32-2b-s18/checkpoint.pt",
-    "artifacts/runs/r7-t1-fp32-2b-s18/checkpoint.pt",
+#: 사용자 승인 — 승인마다 날짜·근거·파일(브리프의 목록 그대로, 저장소 기준 경로). 이 밖의 파일은 이 도구가 대체하지 않는다. `standing_rule`이
+#: 참인 묶음은 상시 규칙(라운드의 자기 체크포인트, 평가 run이 모두 끝난 뒤)으로 더한 것이다 — 대체 전에 run의 완주를 확인한다.
+APPROVALS = (
+    {
+        "date": "2026-09-29", "basis": "Task R8 A2 — user approval, exactly these nine files", "standing_rule": False,
+        "paths": (
+            "artifacts/runs/r2-t1-fp32-2b/checkpoint.pt",
+            "artifacts/runs/r2-t1-fp32-2b/checkpoint-step40.pt",
+            "artifacts/runs/r3a-t1-fp32-2b-s18/checkpoint.pt",
+            "artifacts/runs/r3a-t1-fp32-2b-s19/checkpoint.pt",
+            "artifacts/runs/r3a-t1-fp32-2b-s19/checkpoint-step40.pt",
+            "artifacts/runs/r3a-t1-466/r3a-t1-fp32-2b-466/checkpoint.pt",
+            "artifacts/runs/r5-t1-fp32-2b-s18/checkpoint.pt",
+            "artifacts/runs/r6-t1-fp32-2b-s18/checkpoint.pt",
+            "artifacts/runs/r7-t1-fp32-2b-s18/checkpoint.pt",
+        ),
+    },
+    {
+        "date": "2026-10-09", "basis": "Task R14 A1 — user approval (AskUserQuestion), exactly these seven finished R8·R9·R12 checkpoints", "standing_rule": False,
+        "paths": (
+            "artifacts/runs/r8-t1-fp32-2b-s18/checkpoint.pt",
+            "artifacts/runs/r8-t1-fp32-2b-s19/checkpoint.pt",
+            "artifacts/runs/r9-t1-fp32-2b-s17/checkpoint.pt",
+            "artifacts/runs/r9-t1-fp32-2b-s18c/r8-t1-fp32-2b-s18/checkpoint.pt",
+            "artifacts/runs/r12-t1-fp32-2b-s17/checkpoint.pt",
+            "artifacts/runs/r12-t1-fp32-2b-s18/checkpoint.pt",
+            "artifacts/runs/r12-t1-fp32-2b-s19/checkpoint.pt",
+        ),
+    },
+    {
+        "date": "2026-10-09", "basis": "standing rule (user approval 2026-10-09, HANDOFF §5) — Task R14's own three checkpoints, after every R14 evaluation run",
+        "standing_rule": True,
+        "paths": (
+            "artifacts/runs/r14-t1-fp32-2b-s18/checkpoint.pt",
+            "artifacts/runs/r14-t1-fp32-2b-s17/checkpoint.pt",
+            "artifacts/runs/r14-t1-fp32-2b-s19/checkpoint.pt",
+        ),
+    },
 )
-SCRIPT_VERSION = "r8-slim-checkpoint-1.0"
+#: 승인된 경로 전부 (승인 순서).
+APPROVED = tuple(path for approval in APPROVALS for path in approval["paths"])
+#: R8의 1.0과 같은 검사·같은 대체 규칙이다 — 1.1은 승인 묶음(날짜·근거)을 행마다 적고, 실행한 작업 트리의 변경 파일을 적고, 상시 규칙 묶음의 완주
+#: 확인을 더했다 (Task R14 A1).
+SCRIPT_VERSION = "slim-checkpoint-1.1"
+
+
+def approval_of(path: str) -> dict[str, Any]:
+    """저장소 기준 경로의 승인 묶음 — 날짜·근거·상시 규칙 여부 (경로 목록은 뺀다). 승인 밖이면 KeyError."""
+    for approval in APPROVALS:
+        if path in approval["paths"]:
+            return {key: value for key, value in approval.items() if key != "paths"}
+    raise KeyError(path)
+
+
+def run_completed(checkpoint: Path) -> tuple[bool, str]:
+    """체크포인트 옆 `metrics.json`이 run의 완주(`status: completed`, `step == max_steps`)를 말하는가 — 상시 규칙 묶음의 대체 전 확인."""
+    path = Path(checkpoint).parent / "metrics.json"
+    if not path.is_file():
+        return False, f"{path} is missing"
+    metrics = json.loads(path.read_text(encoding="utf-8"))
+    status, step, max_steps = metrics.get("status"), metrics.get("step"), (metrics.get("config") or {}).get("max_steps")
+    if status != "completed" or step is None or max_steps is None or int(step) != int(max_steps):
+        return False, f"the run did not complete (status {status}, step {step} of max_steps {max_steps})"
+    return True, f"completed {step}/{max_steps}"
+
+
 #: sha256을 읽는 묶음 크기.
 _CHUNK = 64 * 2**20
 
@@ -237,9 +297,23 @@ def _resolve_approved(files: list[str] | None) -> list[Path]:
         candidate = Path(name) if Path(name).is_absolute() else REPO / name
         resolved = candidate.resolve()
         if resolved not in approved:
-            raise SystemExit(f"slim_checkpoint: {name}는 사용자가 승인한 아홉 파일이 아니다 — 대체하지 않는다 (승인 목록: scripts/slim_checkpoint.py APPROVED)")
+            raise SystemExit(f"slim_checkpoint: {name}는 사용자가 승인한 파일이 아니다 — 대체하지 않는다 (승인 목록: scripts/slim_checkpoint.py APPROVALS)")
         out.append(approved[resolved])
     return out
+
+
+def _git(*command: str) -> str | None:
+    """git의 출력 — 끝의 줄바꿈만 지운다(`status --porcelain`의 첫 줄 앞 공백은 상태 열이라 남긴다)."""
+    try:
+        return subprocess.run(["git", *command], cwd=REPO, capture_output=True, text=True, check=True).stdout.rstrip("\n")
+    except (OSError, subprocess.CalledProcessError):
+        return None
+
+
+def dirty_files() -> list[str] | None:
+    """작업 트리에서 바뀐 추적 파일(저장소 기준 경로) — `git status --porcelain`의 상태 두 글자와 공백을 떼어 낸다. git이 없으면 None."""
+    status = _git("status", "--porcelain", "--untracked-files=no")
+    return None if status is None else [line[3:] for line in status.splitlines() if line.strip()]
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -247,20 +321,33 @@ def cmd_run(args: argparse.Namespace) -> int:
     root = REPO / "artifacts"
     report: dict[str, Any] = {
         "script": SCRIPT_VERSION, "generated_at": _now(), "dry_run": bool(args.dry_run), "approved": list(APPROVED),
+        "approvals": [{key: (list(value) if key == "paths" else value) for key, value in approval.items()} for approval in APPROVALS],
         "disk_free_before_bytes": disk_free(root), "files": [],
     }  # fmt: skip
-    try:
-        report["git"] = subprocess.run(["git", "rev-parse", "HEAD"], cwd=REPO, capture_output=True, text=True, check=True).stdout.strip()
-    except (OSError, subprocess.CalledProcessError):
-        report["git"] = None
-    _log(f"{len(paths)} file(s) · / free {report['disk_free_before_bytes'] / 1e9:.2f} GB · dry run {args.dry_run}")
+    report["git"] = _git("rev-parse", "HEAD")
+    # 실행한 작업 트리의 추적 파일 변경 — 비어 있으면 이 도구·검사 코드가 `git`의 커밋 그대로다 (R8 리뷰 1 M-6의 출처 문제를 기록으로 닫는다)
+    report["git_dirty_files"] = dirty_files()
+    # 이 실행이 쓴 코드의 sha256 — 도구·저장 형식·평가 적재 경로(작업 트리가 dirty여도 나중에 커밋된 파일과 바이트로 대조할 수 있게)
+    report["tool_files_sha256"] = {
+        name: (hashlib.sha256((REPO / name).read_bytes()).hexdigest() if (REPO / name).is_file() else None)
+        for name in ("scripts/slim_checkpoint.py", "src/robo_jev/checkpoint.py", "src/robo_jev/train.py", "src/robo_jev/harness/model_policy.py")
+    }  # fmt: skip
+    _log(f"{len(paths)} file(s) · / free {report['disk_free_before_bytes'] / 1e9:.2f} GB · dry run {args.dry_run} · git {report['git']} dirty {report['git_dirty_files']}")
     out = Path(args.out)
     for path in paths:
+        name = str(path.relative_to(REPO))
+        approval = approval_of(name)
         if not path.is_file():
-            report["files"].append({"path": str(path.relative_to(REPO)), "replaced": False, "error": "missing"})
+            report["files"].append({"path": name, "approval": approval, "replaced": False, "error": "missing"})
             continue
+        if approval["standing_rule"]:
+            completed, reason = run_completed(path)
+            if not completed:  # 상시 규칙: 끝나지 않은 run의 재개 상태는 지우지 않는다 — 읽지도 않고 그대로 둔다
+                report["files"].append({"path": name, "approval": approval, "replaced": False, "error": f"standing rule: {reason} — the original is untouched"})
+                continue
         row = slim_one(path, evaluate=None if args.no_evaluation else serving_load_check, dry_run=args.dry_run)
-        row["path"] = str(path.relative_to(REPO))
+        row["path"] = name
+        row["approval"] = approval
         row["disk_free_after_bytes"] = disk_free(root)
         report["files"].append(row)
         _log(f"{row['path']}: replaced {row['replaced']} · {row['bytes_before'] / 1e9:.2f} → {(row['bytes_after'] or 0) / 1e9:.2f} GB · "
@@ -280,7 +367,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
-    run = sub.add_parser("run", help="승인한 파일(기본: 아홉 전부)을 차례로 슬림한다")
+    run = sub.add_parser("run", help="승인한 파일(기본: APPROVED 전부 — 이미 model-only인 것은 건너뛴다)을 차례로 슬림한다")
     run.add_argument("--files", nargs="*", default=None, help="승인 목록 가운데 일부 (저장소 기준 경로)")
     run.add_argument("--dry-run", dest="dry_run", action="store_true", help="검사만 하고 대체하지 않는다")
     run.add_argument("--no-evaluation", dest="no_evaluation", action="store_true", help="평가 경로 적재 검사를 건너뛴다 (시험·진단용 — 이것으로 대체하지 않는다)")

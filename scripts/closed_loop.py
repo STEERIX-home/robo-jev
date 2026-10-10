@@ -519,14 +519,27 @@ def print_verdict(verdict: dict[str, Any], file: Any = None) -> None:
             low, high = entry["ci"]
             print(f"- registered prediction {entry['name']} ({entry['pair']} {entry['metric']}): {entry['value']:+.3f} [{low:+.3f}, {high:+.3f}], "
                   f"holds if {entry['holds_if']} → **{'yes' if entry['holds'] else 'no'}**", file=file)
+        for name, entry in (block.get("comparisons") or {}).items():
+            # R14: 등록한 비교(세 갈래) — 판정 조건과 따로
+            if entry.get("status") is None:
+                why = f"stopped: {entry['stopped']}" if entry.get("stopped") else f"not available — {entry.get('reason')}"
+                print(f"- registered comparison {name} ({entry['pair']} {entry['metric']}): — ({why})", file=file)
+                continue
+            low, high = entry["ci"]
+            print(f"- registered comparison {name} ({entry['pair']} {entry['metric']}): {entry['value']:+.3f} [{low:+.3f}, {high:+.3f}] → **{entry['status']}** — {entry['call']}", file=file)
         decision = verdict["verdict"].get("decision")
         if decision is None:
             print(f"- cloud: **{'recommend' if block['cloud'] else 'closed'}**" + (f" (failed: {block['failed']})" if block["failed"] else ""), file=file)
         else:
             # R10: 등록한 조건들이 정하는 것은 클라우드가 아니다 — 그 이름과 성립 여부만 적는다
             print(f"- {decision}: registered conditions **{'all hold' if block['cloud'] else 'do not all hold'}**" + (f" (failed: {block['failed']})" if block["failed"] else ""), file=file)
+    if verdict["verdict"].get("issued") is False:
+        print(f"\n- **no registered verdict** — {verdict['verdict']['not_issued_reason']}", file=file)
     if verdict["verdict"].get("call"):
         print(f"\n- registered call: **{verdict['verdict']['call']}** — {verdict['verdict']['call_text']}", file=file)
+    for name, entry in (verdict["verdict"].get("comparisons") or {}).items():
+        if entry.get("call"):
+            print(f"- registered comparison call ({name}, {entry['pair']}): **{entry['call']}** — {entry['text']}", file=file)
 
 
 def monitor_verdicts(registration: dict[str, Any], runs_root: Path) -> tuple[dict[str, str], dict[str, Any]]:
@@ -610,8 +623,18 @@ def cmd_select(args: argparse.Namespace) -> int:
         "materialized": {"seed_pairs": filled["seed_pairs"], "conditions": {name: entry["pair"] for name, entry in filled["cloud"].items()}, "robustness": robustness,
                          "robustness_seed_metrics": sorted({entry["metric"] for entry in robustness if entry["metric"] in SEED_METRICS})},
     }
+    if filled.get("comparisons"):
+        payload["materialized"]["comparisons"] = {name: entry["pair"] for name, entry in filled["comparisons"].items()}
+    if registration["selection"].get("require_all"):
+        # R14: 후보가 하나라도 고를 수 없으면 등록 판정은 나오지 않는다 — 판정 집합을 돌기 전에 그것을 적는다
+        missing = [(row["label"], row.get("reason")) for row in selection["candidates"] if not row["eligible"]]
+        payload["issuable"] = not missing
+        if missing:
+            payload["not_issuable_reason"] = f"selection.require_all: candidates that cannot be chosen {missing} — no registered verdict will be issued"
     _write(Path(args.out), payload)
     print_selection(selection)
+    if payload.get("issuable") is False:
+        print(f"- **no registered verdict will be issued** — {payload['not_issuable_reason']}")
     return 0
 
 
