@@ -327,3 +327,98 @@ r12s19X on ood_new3 43.4 / 55.8 / 77.6 ms, 0 of 20,193 (first ticks 11 of 200). 
 text serializer `ts0.6`, arm X wrapper `dx0.2/X/mp0.1` (execution rules `xg0.1` · `xp0.1` · `xf0.1`), fence 0.6, all nine run files at git `f77c695`. The
 four checkpoints read (r14s18 · r14s17 · r14s19 full, r12s19 model-only) are unchanged in size and mtime before their first load and after their last
 (`artifacts/scratch/r14/checkpoints-stat-{before,after}.txt`).
+
+## 6. Measured cost, disk and this round's own checkpoints (Stage E)
+
+| unit (systemd, `Started` → end) | what | wall |
+| --- | --- | ---: |
+| `r14-pytest-a` | GPU: full suite after Stage A (fence 0.6 + `require_free(36 GiB)` first; nothing else on the GPU) | 0 h 11 m 26 s |
+| `r14-t1-s18` | GPU: training, seed 18 (233 steps) | 3 h 49 m 55 s |
+| `r14-t1-s17` | GPU: training, seed 17 (launched by `r14c-launcher` after seed 18 read `completed` 233/233) | 3 h 53 m 10 s |
+| `r14-t1-s19` | GPU: training, seed 19 (same launcher check) | 3 h 53 m 01 s |
+| `r14-d-dev` | GPU: the three in arm X on dev_new2 (100 each) | 0 h 44 m 40 s |
+| `r14-d-judged` | GPU: r14s17X and r12s19X on ood_new3 (200 each) | 0 h 51 m 20 s |
+| `r14-pytest-b` | GPU: full suite at the end (same checks), on the Stage D commit `99eda6b` after the slimming | 0 h 11 m 23 s |
+| **GPU total** | | **48,895 s = 13.58 GPU-h** (brief ≈ 14 h: training 11.60 · evaluation 1.60 · tests 0.38) |
+
+CPU units (`r14c-*`, CUDA hidden, MemoryMax, `choom -n 1000`, Nice 10): the A2 golden values and mutation checks (2 × ≈ 6 m), the R11–R13
+verdict regression (1 s), the A1 dry run and slimming (37 s; 5 m 36 s), the ood_new3 seed walk (26 s) and overlap (1 s), the training-facts
+tables (`c-facts-*`, `c-step1-*`, seconds each), the launcher (waiting only — it read each run's `metrics.json` status), the choice (30 s), the
+four CPU policies on ood_new3 (5 m 47 s – 6 m 55 s, in parallel, GPU idle), the final report and verdict (16 m 23 s, MemoryMax 40G — it did not
+overlap any GPU unit), the mechanism probe (25 s), the version-set check, the Stage E dry run and slimming (46 s; 2 m 17 s, MemoryMax 40G,
+GPU idle) and the development test units (`r14c-pt-*`). Disk (`/`, 10⁹ B free): 48.81 before A1 → 206.89 after A1 → 207 · 181 · 154 at the
+three training launches → 128 after training → 125.96 before Stage E → **193.71** after it (closed-loop records 1.56 GB; checkpoints three ×
+26.35 GB → three × 3.77 GB). `journalctl -k` since 2026-10-09 22:00: 49 kernel lines, all apparmor audit records — no `NVRM`, OOM or
+killed-process line. Cumulative GPU on the DGX Spark ≈ 97.8 h. Cloud spend 0.
+
+**This round's own checkpoints, slimmed under the standing rule (HANDOFF §5) after every evaluation run** (`artifacts/reports/r14-e-slim.json`;
+`scripts/slim_checkpoint.py run --files artifacts/runs/r14-t1-fp32-2b-s{18,17,19}/checkpoint.pt`, tool `slim-checkpoint-1.1`, CPU unit
+`r14c-e-slim` 12:58:48 → 13:01:05, after a dry run on seed 18 `artifacts/scratch/r14/e/dry-r14s18.json`; git `99eda6b` with a clean tree —
+`git_dirty_files` empty; the approval group is the standing rule's, dated 2026-10-09, and the tool confirmed each run's `metrics.json` read
+`completed` at 233/233 before touching it; the last evaluation run had ended at 12:27:27 and the final report at 12:44:54):
+
+| file | run · step · status | bytes before → after | sha256 before → after | checks | s |
+| --- | --- | --- | --- | --- | ---: |
+| `artifacts/runs/r14-t1-fp32-2b-s18/checkpoint.pt` | r14-t1-fp32-2b-s18 · 233 · completed | 26,350,744,917 → 3,766,342,645 | `1de814b61148…` → `efe8b4e200b8…` | model 323 tensors / 3,764,698,756 B bit-equal · 10 other keys equal · `load_serving_judge` (CPU) loads with `93fe26725a4c…`, parameters bit-equal | 45.8 |
+| `artifacts/runs/r14-t1-fp32-2b-s17/checkpoint.pt` | r14-t1-fp32-2b-s17 · 233 · completed | 26,350,745,685 → 3,766,343,349 | `4c54784cbe4b…` → `c5edefc67747…` | same, all pass | 45.4 |
+| `artifacts/runs/r14-t1-fp32-2b-s19/checkpoint.pt` | r14-t1-fp32-2b-s19 · 233 · completed | 26,350,745,941 → 3,766,343,605 | `e3328899200a…` → `c7edcb9f5742…` | same, all pass | 44.9 |
+
+Replaced 3 of 3, failed 0; freed **67,753,206,944 B** (22,584,402,272 + 22,584,402,336 + 22,584,402,336); `/` free 125,964,906,496 →
+193,709,273,088 B. These three runs can now be evaluated and served but not resumed (the resume path refuses model-only files). Sizes and
+mtimes before and after: `artifacts/scratch/r14/e/{before,after}.txt`; full hashes in the JSON.
+
+**Every CPU job that read records ran as a unit (HANDOFF §5).** Outside units the session shell read only tracked files, scripts, logs, report
+JSONs (run summary files included), scratch tables derived from records inside units, and dataset-manifest metadata — never an episode record
+(the two tracked test fixtures aside); the list with times, including the reads while a GPU unit was up (training-log tails and the
+training-facts tables during the three training units, log lines during `r14-d-dev` and `r14-d-judged`, log tails, tracked files and the
+slimming report JSON during `r14-pytest-b`), is
+`artifacts/scratch/r14/session-shell-reads.md`.
+
+## 7. What the round says, and what it does not
+
+1. **Registered call, question 1: fail — "불통과 — 의미 head에 학습을 모은 구성은 검증으로 고른 뒤 처음 보는 홀드아웃에서 규칙 판정기에 확실히 뒤지거나
+   금지 접촉이 확실히 많다".** The configuration chosen on validation (r14s17X, 67 of 100 on dev_new2 — the best of the three R14 checkpoints
+   in arm X, and below R12's same seeds 68 · 72 · 79) against the rule judge in arm X on 200 scenes no policy had run: strict `ruleX − r14s17X`
+   **+0.070 [+0.005, +0.135]** (140 vs 126; 29 vs 15 discordant, p = 0.049) — the rule judge is ahead by an interval that only just excludes
+   zero (the lower bound is 0.000 under 9 of 200 alternative RNG seeds), so (a) fails at its boundary; that is the registered call. Forbidden-
+   contact onsets: no difference found (+0.015 [−0.010, +0.050], 6 vs 3).
+2. **Registered call, question 2: worse — "나쁘다 — 의미 head 집중 학습으로 고른 구성이 R13의 구성보다 확실히 뒤진다".** `r14s17X − r12s19X`
+   **−0.120 [−0.185, −0.055]** (126 vs 150; 11 vs 35 discordant, p = 0.0005; the upper bound stays below zero under all 200 RNG seeds). Zeroing
+   the three execution heads' losses and retraining R12's recipe gave a configuration clearly worse on the new holdout than R13's passing
+   configuration, whose heads were trained. Seed by seed on dev_new2 (beside; the same draws and recipe, only the loss weights differ — the
+   spread of repeated runs at one configuration was not measured): strict −0.020 [−0.110, +0.070] · −0.050 [−0.140, +0.040] (no difference
+   found) · −0.130 [−0.220, −0.040] (seeds 18 · 17 · 19); no seed shows a gain.
+3. **Where it lost: false dones and a slow speed answer.** Seed-paired against r12s19X: false dones **+0.140 [+0.085, +0.200]** (36 vs 8),
+   stale-goal **+0.120 [+0.065, +0.175]** (29 vs 5), unsafe-action ticks +0.024 [+0.007, +0.049]; main-decision and auxiliary failures,
+   forbidden contacts and `q_stop` — no difference found. Of the 35 seeds only r12s19X solved, 23 are r14s17X's false dones (17 stale-goal) and
+   7 its own-speed stalls. The probe places the false dones right after a release: on the ticks ≤ 6 after the hand released an object that is
+   not the current target, the chosen model's raw `q_done` is ≥ 0.5 on 129 of 228 (r12s19X 29 of 337, ruleX 0 of 48), and on dev_new2 each
+   R14 seed is above its R12 counterpart (65/146 · 72/136 · 74/101 vs 48/155 · 20/172 · 9/178). After an instruction change it more often never
+   commits to the new target (34 of 109 episodes vs 15 of 102) and then finishes the old placement and declares done (22 of those 34). All 19
+   of its auxiliary failures are its own speed answer (no switch-tick churn, so R13 fix round 1's recount changes nothing), mostly too slow
+   (speed 1 where the label said 2 on 810 streak ticks) — the direction of the training-batch `q_speed` fit, worse in all three runs (§4). Its
+   first grasp went to an object that was not the instruction's target in 28 of 200 episodes (0 for every other policy).
+4. **What the weights did not change.** On the training batch `q_main` and `q_done` fit as in R12; `q_stop` still never fired on a stop-true
+   tick (0/277 · 0/244 · 0/146), and in the loop it catches 0 of 53 — moving loss mass to the remaining heads (≈ 1.3× each) did not teach the
+   stop or the speed. The zeroed heads stayed untrained by design; in arm X their answers never reach the harness (the rules changed the
+   chosen model's argmax on 13,893 `q_gripper`, 1,624 `q_path` and 16,979 `q_force` of 22,408 ticks).
+5. **R13's pass recurred on this holdout (descriptive).** `r12s19X − ruleX` strict +0.050 [−0.005, +0.105] (150 vs 140; 20 vs 10, p = 0.099),
+   forbidden contacts +0.000 (3 vs 3) — under R13's registered rule a pass again; its false dones (+0.040 [+0.015, +0.070], 8 vs 0) and `q_stop`
+   0 of 67 are R13's picture. What failed here is the training change, not arm X.
+6. **What the round does not say.** One chosen configuration (training seed 17), one holdout of 200, one recipe (R12 + three zero weights,
+   233 steps); the rule judge reads the structured goal while the model reads the instruction text. It does not say that removing these losses
+   is always worse — only that in this recipe and these three seeds no gain was seen and the chosen configuration was clearly worse than R13's.
+   Why removing them raises `q_done` right after a release was not tested (that the gripper and path labels carried "what was just released,
+   what is being done now" into the shared representation is one explanation, untested). dev_new2's numbers are the choice set's and are written
+   beside only. (a) failed at its boundary; question 2 is far from its boundary.
+
+**Next step (registered: written from the numbers only; on a fail, from the remaining failures' classes and question 2's call).** Question 2
+says the zero-weight recipe is worse than keeping the heads trained, so the base for the next round stays R13's configuration (R12's checkpoints
+served in arm X) with the three execution questions still trained — whether to drop them from the question set (docs/08 §12.1) remains the
+user's decision, and this round gives no ground for dropping them. The chosen configuration's remaining failures by class: false dones 36 (29
+stale-goal — `q_done` right after releasing a non-target object), its own speed answer 19 (too slow), main-decision stalls 17, geometric 2;
+`q_stop` 0 of 53. R13's configuration on the same scenes: main-decision stalls 25 (one of them switch-tick churn), auxiliary 14 (own speed 9),
+false dones 8 (5 stale-goal), geometric 3, `q_stop` 0 of 67. So the next round's targets, from these classes, are the post-release `q_done`
+(stale-goal false dones), `q_stop` and `q_speed`, aimed at directly — how (data at those ticks, labels, or another objective) is the next
+brief's design; re-weighting losses was not the means. The cloud question and the contract change stay the user's. ood_new3 (1350100~) has now
+been analysed seed by seed, so any further verdict needs another unused seed walk.
