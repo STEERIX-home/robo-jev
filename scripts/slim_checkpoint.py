@@ -88,6 +88,15 @@ APPROVALS = (
             "artifacts/runs/r12-t1-fp32-2b-s19/checkpoint.pt",
         ),
     },
+    {
+        "date": "2026-10-09", "basis": "standing rule (user approval 2026-10-09, HANDOFF §5) — Task R14's own three checkpoints, after every R14 evaluation run",
+        "standing_rule": True,
+        "paths": (
+            "artifacts/runs/r14-t1-fp32-2b-s18/checkpoint.pt",
+            "artifacts/runs/r14-t1-fp32-2b-s17/checkpoint.pt",
+            "artifacts/runs/r14-t1-fp32-2b-s19/checkpoint.pt",
+        ),
+    },
 )
 #: 승인된 경로 전부 (승인 순서).
 APPROVED = tuple(path for approval in APPROVALS for path in approval["paths"])

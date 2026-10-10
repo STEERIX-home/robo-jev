@@ -217,3 +217,113 @@ from):
   state from the input (97 · 11 · none; batch settled 334/334 · 621/621 · 88/517).
 * **The weighted step loss** ends higher than R12's (mean of the last 20 steps 0.287 · 0.296 · 0.336 vs 0.265 · 0.261 · 0.248) — it is a mean over
   seven questions instead of ten and the dropped ones were among the best-fit; not a quality reading.
+
+## 5. Runs, the choice, the registered verdict and the descriptive readings (Stage D)
+
+### Runs, in the registered order (every run file at git `f77c695` — the Stage C commit — with a clean tree, checked before each model run)
+
+| unit (systemd, `Started` → end) | what | wall |
+| --- | --- | ---: |
+| `r14-d-dev` (GPU chain, `artifacts/scratch/r14/d-dev.sh` → `d-model.sh`) | r14s18X · r14s17X · r14s19X on dev_new2 100, one process each (page-cache drop, fence 0.6, `require_free(36 GiB)`; each checkpoint's run checked `completed` 233/233 first) | 44 m 40 s (14 m 59 s · 14 m 57 s · 14 m 43 s) |
+| `r14c-d-select` (CPU) | dev_new2 report (three selection sources + rule, ruleG, ruleX, expert) → `select` | 30 s |
+| `r14c-d-new-{ruleX,ruleG,rule,expert}` (CPU, in parallel, GPU idle) | the four CPU policies on ood_new3 200 | 5 m 47 s – 6 m 55 s |
+| `r14-d-judged` (GPU chain, no CPU unit running) | r14s17X, then r12s19X (R13's model-only checkpoint), on ood_new3 200 | 51 m 20 s (26 m 42 s · 24 m 38 s) |
+| `r14c-d-final` (CPU, MemoryMax 40G) | final report → `verdict` → tables → failure classes and discordant seeds | 16 m 23 s |
+
+### The choice (dev_new2 100, the registered rule applied by code; `artifacts/reports/r14-selection.json`)
+
+| configuration | `done` | **strict** | false done (stale goal) | failures main / aux / geometric | aux-failure streaks |
+| --- | ---: | ---: | ---: | --- | --- |
+| r14s18X | 82 | 66 | 16 (16) | 4 / 14 / 0 | speed 14, path 5, gripper 2, force 2 |
+| **r14s17X** | 85 | **67** | 18 (16) | 3 / 12 / 0 | speed 12, path 4, force 1 |
+| r14s19X | 85 | 66 | 19 (17) | 5 / 10 / 0 | speed 10, path 1 |
+
+All three eligible (each run `completed` 233/233), so `require_all` holds and the verdict is issuable (`issuable: true`). **Chosen: r14s17X**,
+decided by the first key (67 vs 66). The verdict re-chose r14s17X from the final report's dev_new2 table — identical (the chain asserts it). Beside,
+on the same scenes (not candidates): R12's same-seed checkpoints in arm X (R13's stored runs) r12s18X 68, r12s17X 72, **r12s19X 79**; rule 67, ruleG 67,
+ruleX 64, expert 90. Every R14 configuration is below R12's best (r12s19X) on the choice set, and all three make far more false dones (16–19, almost
+all stale-goal) than R12's same seeds (13 · 5 · 3).
+
+### The registered verdict (ood_new3 200; `artifacts/reports/r14-verdict.json`)
+
+Final report `artifacts/reports/r14-closed-loop.json` (`report --runs <three selection sources + R12's three X on dev_new2 + rule, ruleG, ruleX, expert on
+dev_new2 + the six ood_new3 runs> --only dev_new2,ood_new3 --seed-pairs ruleX:r14s17X r14s17X:ruleX r14s17X:r12s19X r12s19X:ruleX r14s18X:r12s18X
+r14s17X:r12s17X r14s19X:r12s19X --robustness-metrics forbidden_contacts` → `verdict --registration configs/eval/r14-registration.yaml`).
+
+| question | condition | pair | difference [95 %] | discordant · exact test | RNG seeds 1–200 | holds if | result |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | (a) strict success | `ruleX − r14s17X` | **+0.070 [+0.005, +0.135]** (0.700 vs 0.630; 140 vs 126) | 29 vs 15 · McNemar p = 0.049 | lower ≤ 0 in 9 of 200 (lower 0.000 … +0.010) | lower ≤ 0 | **no** |
+| 1 | (s) forbidden-contact onsets / episode | `r14s17X − ruleX` | +0.015 [−0.010, +0.050] (0.030 vs 0.015; 6 vs 3) | seeds higher 2 vs 1 · sign test p = 1.0 | lower ≤ 0 in 200 of 200 | lower ≤ 0 | yes |
+| 2 | strict success | `r14s17X − r12s19X` | **−0.120 [−0.185, −0.055]** (0.630 vs 0.750; 126 vs 150) | 11 vs 35 · McNemar p = 0.0005 | upper ≥ 0 in 0 of 200 | better if lower > 0, worse if upper < 0 | **worse** |
+
+**Registered calls.** Question 1: **fail — "불통과 — 의미 head에 학습을 모은 구성은 검증으로 고른 뒤 처음 보는 홀드아웃에서 규칙 판정기에 확실히 뒤지거나
+금지 접촉이 확실히 많다"** (`holds: false`, `failed: [a]`; `issued: true`). Question 2: **worse — "나쁘다 — 의미 head 집중 학습으로 고른 구성이 R13의 구성보다
+확실히 뒤진다"**. Read with the zero rule: (a) fails **at its boundary** — the lower bound is +0.005 under the registered RNG seed and 0.000 under 9 of 200
+alternative seeds (exact McNemar p = 0.049), so the rule judge is ahead by an interval that only just excludes zero; (s) holds (no difference found in
+forbidden contacts: 6 onsets in 4 episodes vs 3 in 3). Question 2 is not near a boundary: the chosen R14 configuration trails R13's passing configuration
+by 24 successes on the same 200 scenes (35 vs 11 discordant), and the upper bound stays below zero under every one of the 200 RNG seeds. dev_new2 (the
+choice set, beside only): (a) −0.030 [−0.110, +0.040], (s) +0.020 [0.000, +0.050], question 2 −0.120 [−0.220, −0.030] (7 vs 19, p = 0.029).
+
+### Descriptive readings (not used to judge)
+
+| policy (ood_new3 200) | `done` | **strict** [95 %] | false done (stale goal) | failures main / aux / geometric | aux-failure streaks | `q_stop` caught / onsets | forbidden-contact onsets (episodes) | unsafe ticks / acted | `stall_exhausted` |
+| --- | ---: | ---: | ---: | --- | --- | ---: | ---: | ---: | ---: |
+| **r14s17X** (chosen) | 162 | **126** [0.560, 0.695] | 36 (29) | 17 / 19 / 2 | speed 19, path 3 | 0/53 | 6 (4) | 0.0300 | 38 |
+| r12s19X (R13's passing configuration) | 158 | 150 [0.685, 0.805] | 8 (5) | 24 / 15 / 3 | speed 13, path 5, gripper 2, force 2 | 0/67 | 3 (3) | 0.0062 | 42 |
+| ruleX (same arm) | 140 | **140** [0.635, 0.760] | 0 | 2 / 11 / 47 | path 10, force 1 | 50/53 | 3 (3) | 0.0001 | 60 |
+| ruleG | 147 | 147 [0.670, 0.795] | 0 | 2 / 5 / 46 | path 4, force 1 | 51/54 | 3 (3) | 0.0001 | 48 |
+| rule (native) | 146 | 146 [0.665, 0.790] | 0 | 1 / 52 / 1 | gripper 52, path 4 | 51/54 | 3 (3) | 0.0001 | 49 |
+| expert | 187 | 187 [0.900, 0.965] | 0 | 2 / 1 / 10 | force 1 | 65/65 | 3 (3) | 0.0000 | 13 |
+
+(`artifacts/scratch/r14/d-tables.md`, `describe.json`, `d/probe.json`; failure classes by `failure_cause`, the auxiliary streak being the adopted
+(executed) answer against the expert's label for ≥ 3 ticks.)
+
+* **R13's pass on another holdout** (`r12s19X − ruleX`, the same registered checks, descriptive): strict +0.050 [−0.005, +0.105] (150 vs 140; 20 vs 10,
+  p = 0.099) — no difference found, the point estimate in the model's favour; forbidden contacts +0.000 [0.000, 0.000] (3 vs 3). Under R13's registered
+  rule this would again read as a pass. r12s19X's false dones +0.040 [+0.015, +0.070] (8 vs 0) and its `q_stop` 0/67 are R13's picture again.
+* **The chosen configuration against ruleX** (`r14s17X − ruleX`, seed-paired): false dones **+0.180 [+0.130, +0.240]** (36 vs 0), stale-goal **+0.145
+  [+0.100, +0.195]** (29 vs 0), main-decision failures +0.075 [+0.035, +0.120] (17 vs 2), auxiliary failures +0.040 [−0.005, +0.090] (no difference
+  found), wrong-action ticks +0.055 [+0.035, +0.077], unsafe-action ticks **+0.030 [+0.012, +0.057]**, `q_stop` caught −0.943 [−1.000, −0.873] (0/53 vs
+  50/53); `rule − r14s17X` +0.100 [+0.035, +0.170], `ruleG − r14s17X` +0.105 [+0.040, +0.175], `expert − r14s17X` +0.305 [+0.240, +0.375].
+* **The chosen configuration against R13's** (`r14s17X − r12s19X`): false dones **+0.140 [+0.085, +0.200]** (36 vs 8), stale-goal **+0.120 [+0.065,
+  +0.175]** (29 vs 5), unsafe-action ticks +0.024 [+0.007, +0.049]; main-decision failures −0.035 [−0.085, +0.015] (17 vs 24), auxiliary +0.020 [−0.030,
+  +0.065] (19 vs 15), forbidden contacts +0.015 [−0.010, +0.050] (6 vs 3), `q_stop` 0/53 vs 0/67 — no difference found for those four.
+* **The 46 seeds behind question 2**: the 35 only r12s19X solved are, for r14s17X, stale-goal false dones 17, other false dones 6, auxiliary stalls with
+  its own speed answer 7 and main-decision stalls 5 (E1 24, E2 11); the 11 only r14s17X solved are, for r12s19X, main-decision stalls 6, own-speed stalls 2,
+  stale-goal false dones 2 and one band stall (E1 2, E2 9). **The 44 seeds behind (a)**: the 29 only ruleX solved are r14s17X's own-speed stalls 8,
+  stale-goal false dones 8, main-decision stalls 8 and other false dones 5 (E1 20, E2 9); the 15 only r14s17X solved are ruleX's geometric stalls 13, one
+  switch-tick churn and one band stall (E0 1, E1 2, E2 12).
+* **Remaining failures in R13 fix round 1's classes** (switch-tick churn re-counted as a main decision): r14s17X's 74 non-successes are false dones 36 (29
+  stale-goal), main-decision stalls 17, auxiliary stalls 19 — **all 19 its own speed answer** (no switch-tick churn, so the recount leaves main 17) — and
+  geometric 2; r12s19X's 50 are false dones 8 (5 stale-goal), main 24 (+1 churn → 25), auxiliary 15 (own speed 9, band 2, churn 1, other 3 → 14) and
+  geometric 3; ruleX's 60 are geometric 47, auxiliary 11 (band 8, other 2, churn 1 → 10) and main 2 (→ 3).
+* **What the stale-goal false dones are** (`artifacts/scratch/r14/d/probe.py` → `probe.json`, CPU unit `r14c-d-probe`; R6 A1's `q_done` strata): on the
+  ticks right after the hand released an object that is not the current target (`post_release_other`, ≤ 6 ticks after the release), the chosen model's
+  raw `q_done` is ≥ 0.5 on **129 of 228** ticks (r12s19X 29 of 337, ruleX 0 of 48); on dev_new2 the three R14 configurations do it on 65/146 · 72/136 · 74/101
+  ticks and R12's same seeds on 48/155 · 20/172 · 9/178. In the 109 ood_new3 episodes whose target changed, r14s17X held the old target at the change in 81
+  (r12s19X 96 of 102), **never committed to the new target in 34** (r12s19X 15) and 22 of those 34 ended in a stale-goal false done (r12s19X 1). So the R14
+  model finishes the old instruction's placement and then declares done.
+* **What the own-speed stalls are**: on the streak ticks where the model's own speed answer was executed against the label, r14s17X answered speed 1 where
+  the label said 2 on 810 ticks (1 where the label said 0 on 135); R12's configurations' own-answer ticks are the other way round (r12s19X 1 where the label
+  said 0 on 85). The R14 model moves too slowly and the stall watchdog ends the episode — consistent with §4: `q_speed` fit worse in all three R14 runs.
+* **First grasp not the target**: on ood_new3 the chosen model's first grasp commitment was on an object that was not the instruction's target (and never
+  had been) in **28 of 200** episodes (E1 6, E2 22; 13 still succeeded, 11 ended in main-decision stalls, 4 in false dones); r12s19X and every rule policy
+  0; on dev_new2 1 of 100 (the R12 configurations 0).
+* **Each seed's R14 − R12, same seed, arm X (dev_new2, beside)**: strict seed 18 −0.020 [−0.110, +0.070], seed 17 −0.050 [−0.140, +0.040] (no difference
+  found), **seed 19 −0.130 [−0.220, −0.040]**; false dones seed 18 +0.030 [−0.040, +0.100] (no difference found), **seed 17 +0.130 [+0.050, +0.210]**, **seed
+  19 +0.160 [+0.090, +0.230]**; stale-goal false dones +0.050 (nd) · +0.110 · +0.150. On dev_new2 the R14 configurations' unsafe-action ticks are lower than
+  R12's (0.006–0.008 vs 0.046–0.049; no difference found per seed), on ood_new3 the chosen's are higher (above).
+* **Delegation activity** on ood_new3: the three rules changed the chosen model's argmax on `q_gripper` 13,893, `q_path` 1,624 and `q_force` 16,979 of 22,408
+  delegated ticks (r12s19X 1,075 / 1,012 / 565 of 20,393) — the zeroed heads answer far from the rules, and arm X never hands those answers to the harness.
+
+**Latency** (`latency.model_ms` excludes each episode's first tick; no CPU unit ran during either judged GPU run): r14s17X on ood_new3 non-first ticks p50 /
+p95 / p99 **42.9 / 55.1 / 77.6 ms**, 0 of 22,208 over 100 ms, observation → command p95 60.8 ms; first ticks p50 91.8, max 267.3 ms, 14 of 200 over 100 ms.
+r12s19X on ood_new3 43.4 / 55.8 / 77.6 ms, 0 of 20,193 (first ticks 11 of 200). The three dev_new2 runs: p95 56.2–56.4 ms, 0 of 35,604 non-first ticks over
+100 ms (first ticks 16–17 of 100 each). The gate (p95 ≤ 80 ms, > 100 ms ≤ 5 %) passes. GPU peak 4.15 GiB per evaluation process.
+
+**Records**: nine new directories in `artifacts/datasets/r14-closed-loop/` (1.56 GB) — `r14s18X`, `r14s17X`, `r14s19X` on dev_new2; `r14s17X`, `r12s19X`,
+`ruleX`, `ruleG`, `rule`, `expert` on ood_new3 — one version set (harness `h0.9`, controller `c0.6`, expert `e0.4`, rule judge `rj0.5`, extractor
+`pw0.2`, sim and record serializer `s0.3`, generator `gen-robot-v0.3`, generator-config digest `c297ada2e90a`); every model run: contract `93fe26725a4c`,
+text serializer `ts0.6`, arm X wrapper `dx0.2/X/mp0.1` (execution rules `xg0.1` · `xp0.1` · `xf0.1`), fence 0.6, all nine run files at git `f77c695`. The
+four checkpoints read (r14s18 · r14s17 · r14s19 full, r12s19 model-only) are unchanged in size and mtime before their first load and after their last
+(`artifacts/scratch/r14/checkpoints-stat-{before,after}.txt`).
