@@ -16,7 +16,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-from robo_jev.simgen.catalog import default_config  # noqa: E402
+from robo_jev.simgen.catalog import VALUES_PATH, default_config  # noqa: E402
 from robo_jev.simgen.examples import build_examples, dumps_jsonl, render_markdown  # noqa: E402
 from robo_jev.simgen.generate import git_short_sha  # noqa: E402
 from robo_jev.simgen.record import validate_record  # noqa: E402
@@ -25,8 +25,9 @@ from robo_jev.simgen.record import validate_record  # noqa: E402
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--out-dir", type=Path, required=True)
+    parser.add_argument("--values", type=Path, default=VALUES_PATH, help="가치표(기본 values-v0; 제안 values-v0.1)")
     args = parser.parse_args(argv)
-    cfg = default_config()
+    cfg = default_config(args.values.resolve())
     records = build_examples(cfg, git=git_short_sha(REPO))
     errors = {r["id"]: validate_record(r) for r in records if validate_record(r)}
     args.out_dir.mkdir(parents=True, exist_ok=True)

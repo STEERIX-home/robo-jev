@@ -19,7 +19,7 @@ REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
 from robo_jev.simgen import GENERATOR_VERSION, SCHEMA  # noqa: E402
-from robo_jev.simgen.catalog import default_config  # noqa: E402
+from robo_jev.simgen.catalog import VALUES_PATH, default_config  # noqa: E402
 from robo_jev.simgen.generate import generate_batch, git_short_sha  # noqa: E402
 from robo_jev.simgen.record import dumps, validate_record  # noqa: E402
 from robo_jev.simgen.stats import dataset_stats  # noqa: E402
@@ -32,9 +32,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--k", type=int, default=None, help="사후 표본 수(기본: catalog의 posterior_k)")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--stats", type=Path, required=True)
+    parser.add_argument("--values", type=Path, default=VALUES_PATH, help="가치표(기본 values-v0; 제안 values-v0.1)")
     args = parser.parse_args(argv)
 
-    cfg = default_config()
+    cfg = default_config(args.values.resolve())
     git = git_short_sha(REPO)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     records = []
