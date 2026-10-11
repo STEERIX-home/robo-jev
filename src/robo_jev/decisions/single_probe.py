@@ -67,6 +67,7 @@ __all__ = [
     "partition",
     "probe_values",
     "render_probe_comparison",
+    "sample_and_convert",
     "state_text",
     "summarize",
     "trim_options",
@@ -316,6 +317,27 @@ def convert_records(records: Iterable[dict[str, Any]], *, splits: Sequence[str])
         counts.update(found)
         out.extend(converted)
     return out, {"source_records": source_records, **summarize(out), "conversion": dict(sorted(counts.items()))}
+
+
+def sample_and_convert(sources: dict[str, Sequence[dict[str, Any]]], *, per_source: int, seed: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """원본 묶음마다 seed로 `per_source`개를 무작위로 뽑아(묶음 이름과 seed에서 정한 순열 — 원본 파일 순서로 되돌린다) 변환한다 — 일반 능력 시험
+    G2(공개 BoolQ dev·MultiNLI dev_matched, 통제자 결정 2026-10-12). 분할은 거르지 않는다(공개 세트는 dev 하나다). 돌려주는 것: (변환본 —
+    묶음 순서, 묶음 안은 원본 순서), 묶음마다 {원본 수, 뽑은 수, 뽑은 request id, 변환 센 것}."""
+    out: list[dict[str, Any]] = []
+    picked: dict[str, Any] = {}
+    for name, records in sources.items():
+        records = list(records)
+        if per_source > len(records):
+            raise ValueError(f"{name}: {per_source}개를 뽑을 수 없다 (원본 {len(records)}개)")
+        index = sorted(_seeded(seed, name, "sample").sample(range(len(records)), per_source))
+        counts: Counter = Counter()
+        for i in index:
+            converted, found = convert_record(records[i])
+            counts.update(found)
+            out.extend(converted)
+        picked[name] = {"records_total": len(records), "sampled": len(index), "request_ids": [str(records[i]["request"]["request_id"]) for i in index],
+                        "conversion": dict(sorted(counts.items()))}  # fmt: skip
+    return out, picked
 
 
 def summarize(converted: Sequence[dict[str, Any]]) -> dict[str, Any]:

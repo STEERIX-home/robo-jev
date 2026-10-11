@@ -130,6 +130,58 @@ def cmd_convert(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_sample(args: argparse.Namespace) -> int:
+    """공개 세트(judgment-v0)에서 묶음마다 seed로 N개를 뽑아 변환한 봉인 시험 (G2) + manifest."""
+    from robo_jev.decisions.records import file_sha256, read_records
+    from robo_jev.decisions.single_probe import CONVERTER_VERSION, sample_and_convert, summarize
+
+    paths: dict[str, Path] = {}
+    for item in args.source:
+        name, separator, path = item.partition("=")
+        if not separator or not name or name in paths:
+            raise SystemExit(f"--source는 이름=경로 꼴이고 이름이 겹치지 않아야 한다: {item!r}")
+        paths[name] = Path(path)
+    sources = {name: read_records(path) for name, path in paths.items()}
+    by_id = {str(r["request"]["request_id"]): r for records in sources.values() for r in records}
+    converted, picked = sample_and_convert(sources, per_source=args.per_source, seed=args.seed)
+    problems = _check(converted, by_id)
+    if problems:
+        raise SystemExit(f"{args.name}: {len(problems)} problems — first: {problems[:5]}")
+    expected = {name: set(spec.split(",")) for name, spec in (e.partition("=")[::2] for e in args.expect_types)} if args.expect_types else {}
+    by_source_type: dict[str, set[str]] = {}
+    for name, spec in picked.items():
+        ids = set(spec["request_ids"])
+        found = set()
+        for record in converted:
+            if record["meta"]["source_record"] in ids:
+                for question in record["request"]["questions"].values():
+                    found.add(f"{question['type']}:{len(question.get('criteria') or {})}" if question["type"] == "choice" else question["type"])
+        by_source_type[name] = found
+        if name in expected and found != expected[name]:
+            raise SystemExit(f"{name}: converted question types {sorted(found)} differ from the expected {sorted(expected[name])}")
+    path = args.out_dir / f"{args.name}.jsonl"
+    _write_jsonl(path, converted)
+    git = _git()
+    manifest = {
+        "kind": "decisions-probe-v0", "name": args.name, "role": "sealed",
+        "use": "SEALED general-ability probe (public sets) — evaluation only, never training or selection",
+        "file": {"path": str(path), "sha256": file_sha256(path), "bytes": path.stat().st_size, "records": len(converted)},
+        "seed": args.seed, "per_source": args.per_source,
+        "sampling": "per source: sha256(seed|name|sample)-seeded random.sample of record indices, restored to source file order",
+        "sources": {name: {"path": str(paths[name]), "sha256": file_sha256(paths[name]),
+                           "manifest": str(paths[name].with_name("manifest.json")) if paths[name].with_name("manifest.json").is_file() else None,
+                           "manifest_sha256": file_sha256(paths[name].with_name("manifest.json")) if paths[name].with_name("manifest.json").is_file() else None,
+                           "question_types": sorted(by_source_type[name]), **picked[name]} for name in paths},
+        "converter": {"version": CONVERTER_VERSION, "script_version": SCRIPT_VERSION, "git": git["commit"], "git_dirty": git["dirty"]},
+        "counts": summarize(converted),
+        "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+    }  # fmt: skip
+    _write_json(args.out_dir / f"{args.name}.manifest.json", manifest)
+    drawn = " · ".join(f"{n} {spec['sampled']}/{spec['records_total']}" for n, spec in picked.items())
+    _log(f"{args.name}: {drawn} (seed {args.seed}) → {len(converted)} records → {path}")
+    return 0
+
+
 #: 두 예측이 같아야 하는 채점 조건 (예측 줄마다 진단 도구가 적는다).
 SCORING_KEYS = ("mode", "format", "prompt_version", "orders", "shuffle_seed")
 
@@ -268,6 +320,15 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--title", default=None)
     compare.add_argument("--allow-mismatch", action="store_true", help="두 예측의 프롬프트 판·형식·배치·seed가 달라도 비교한다 (보고서에 적힌다)")
     compare.set_defaults(func=cmd_compare)
+    sample = sub.add_parser("sample", help="공개 세트(judgment-v0)에서 묶음마다 seed로 N개를 뽑아 변환한 봉인 시험 G2 + manifest (CPU)")
+    sample.add_argument("--source", action="append", required=True, metavar="NAME=PATH", help="묶음 이름=judgment-v0 records.jsonl (여러 번)")
+    sample.add_argument("--per-source", type=int, default=500)
+    sample.add_argument("--seed", type=int, required=True, help="뽑기 seed (manifest에 적힌다)")
+    sample.add_argument("--name", default="G2")
+    sample.add_argument("--expect-types", nargs="*", default=None, metavar="NAME=TYPES",
+                        help="묶음마다 기대하는 판단 질문 종류 (예: boolq=noul multinli=choice:3) — 다르면 쓰지 않는다")
+    sample.add_argument("--out-dir", type=Path, required=True)
+    sample.set_defaults(func=cmd_sample)
     mix = sub.add_parser("mix", help="학습 파일 + G1-train-mix를 이어 붙인 학습 입력과 manifest (CPU)")
     mix.add_argument("--base", type=Path, required=True, help="학습 파일 (예: artifacts/simgen/v01/train-50k.jsonl)")
     mix.add_argument("--probe", type=Path, required=True, help="G1-train-mix.jsonl")
