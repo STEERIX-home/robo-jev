@@ -32,10 +32,12 @@ from __future__ import annotations
 import copy
 import json
 import os
+import re
 import shlex
 import signal
 import subprocess
 import time
+import traceback
 from pathlib import Path
 from typing import Any
 
@@ -67,6 +69,9 @@ MIN_STEP_SECONDS = 20.0
 #: SIGTERM 뒤 SIGKILL까지.
 KILL_GRACE_SECONDS = 30.0
 STEP_KEYS = {"name", "argv", "fallback", "max_minutes", "optional", "wall_set", "est_minutes", "env"}
+#: argv 틀의 자리 표시 — `{이름}` 꼴만 채운다. 다른 중괄호(`lora={r: 4, …}` 같은 YAML 값)는 그대로 둔다.
+PLACEHOLDERS = ("python", "uv", "repo", "run_dir", "runs", "reports", "model", "step", "run_id")
+_PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 JOB_KEYS = {"kind", "model", "inputs", "setup", "steps", "fetch", "runtime", "code", "deadline_epoch", "deadline_limit"}
 TOP_KEYS = {"kind", "name", "description", "job", "provider", "budget", "estimate", "notes"}
 
@@ -112,6 +117,10 @@ def _step(raw: Any, where: str) -> dict[str, Any]:
     argv = raw.get("argv")
     if not isinstance(argv, list) or not argv or not all(isinstance(a, (str, int, float)) for a in argv):
         raise JobError(f"{where}: argv는 비지 않은 문자열 목록이다")
+    for item in [*argv, *(raw.get("fallback") or [])]:
+        unknown = [m for m in _PLACEHOLDER.findall(str(item)) if m not in PLACEHOLDERS]
+        if unknown:
+            raise JobError(f"{where}: argv {item!r}의 모르는 자리 표시 {unknown} — 쓸 수 있는 것: {list(PLACEHOLDERS)}")
     step = {
         "name": name,
         "argv": [str(a) for a in argv],
@@ -246,13 +255,18 @@ def expand(argv: list[str], context: dict[str, str]) -> list[str]:
     """
     out: list[str] = []
     for item in argv:
-        if item.startswith("{") and item.endswith("}") and item[1:-1] in context and " " in context[item[1:-1]]:
-            out.extend(shlex.split(context[item[1:-1]]))
+        whole = _PLACEHOLDER.fullmatch(item)
+        if whole and whole.group(1) in context and " " in context[whole.group(1)]:
+            out.extend(shlex.split(context[whole.group(1)]))
             continue
-        try:
-            out.append(item.format(**context))
-        except (KeyError, IndexError, ValueError) as error:
-            raise JobError(f"argv {item!r}: 모르는 자리 표시 ({error}) — 쓸 수 있는 것: {sorted(context)}") from None
+
+        def _fill(match: re.Match[str]) -> str:
+            name = match.group(1)
+            if name not in context:
+                raise JobError(f"argv {item!r}: 모르는 자리 표시 {{{name}}} — 쓸 수 있는 것: {sorted(context)}")
+            return context[name]
+
+        out.append(_PLACEHOLDER.sub(_fill, item))
     return out
 
 
@@ -435,7 +449,35 @@ def verify_inputs(uploads: list[dict[str, Any]], repo: Path) -> list[str]:
 
 
 def run_job(bundle: str | Path, *, repo: str | Path) -> int:
-    """원격에서 job 하나를 끝까지 돌린다. 돌려주는 것은 종료 코드(runner의 EXIT_* 와 같다)."""
+    """원격에서 job 하나를 끝까지 돌린다. 돌려주는 것은 종료 코드(runner의 EXIT_* 와 같다).
+
+    러너 자신의 예외도 상태로 남긴다(`failed(error)` + job 보고서 + `finished` 표지) — 러너가 조용히 죽어 `state.json`이 `running`으로
+    남으면 실행기는 마감까지 기다리고, pod에서는 그 시간이 돈이다.
+    """
+    from robo_jev.launch.runner import EXIT_ERROR, _log
+
+    run_dir = Path(bundle).parent
+    try:
+        return _run_job(bundle, repo=repo)
+    except BaseException as error:  # noqa: BLE001 — 어떤 실패도 상태로
+        _log("러너 실패:\n" + traceback.format_exc())
+        path = run_dir / "state.json"
+        try:
+            state = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            state = {}
+        if state.get("state") in (None, "running"):
+            state.update(state="failed", exit_reason="error", error=f"{type(error).__name__}: {error}"[:2000], finished_at=now(), updated_at=now())
+            temp = path.with_name(path.name + ".tmp")
+            temp.write_text(json.dumps(state, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+            os.replace(temp, path)
+        (run_dir / "finished").write_text(now() + "\n", encoding="utf-8")
+        if isinstance(error, (KeyboardInterrupt, SystemExit)):
+            raise
+        return EXIT_ERROR
+
+
+def _run_job(bundle: str | Path, *, repo: str | Path) -> int:
     from robo_jev.launch.runner import EXIT_BUDGET, EXIT_CANCELLED, EXIT_ERROR, EXIT_INPUTS, EXIT_OK, RunnerState, _log
 
     bundle, repo = Path(bundle), Path(repo)

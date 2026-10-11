@@ -84,6 +84,15 @@ def test_placeholders_expand_and_a_several_word_python_is_split():
         expand(["{nope}"], context)
 
 
+def test_other_braces_are_left_alone_and_unknown_placeholders_are_refused_up_front():
+    """`--set lora={r: 4, …}`처럼 YAML 값의 중괄호는 자리 표시가 아니다 — 그대로 간다 (Task v0d 학습기의 실제 인자로 드러난 결함)."""
+    context = {"python": "/py", "runs": "/r/runs", "step": "s", "repo": "/r", "model": "m"}
+    assert expand(["--set", "lora={r: 4, alpha: 8, targets: [q_proj]}", "--set", "out={runs}"], context) == [
+        "--set", "lora={r: 4, alpha: 8, targets: [q_proj]}", "--set", "out=/r/runs"]
+    with pytest.raises(JobError, match="모르는 자리 표시"):
+        resolve_job(base(steps=[{"name": "a", "argv": ["{pyhton}", "x"]}]))  # 오타는 원격에 보내기 전에 걸린다
+
+
 def test_the_fetch_plan_always_brings_back_the_state_the_report_and_the_logs():
     plan = decisions_artifact_plan({"fetch": ["runs/*/checkpoint.pt", "reports/*"]})
     remotes = {entry["remote"]: entry for entry in plan}
@@ -219,6 +228,18 @@ def test_children_do_not_inherit_the_pod_api_key(tmp_path, monkeypatch):
     run_dir, repo = _bundle(tmp_path, steps)
     assert run_job(run_dir / "bundle", repo=repo) == 0
     assert (repo / "env.txt").read_text() == "absent"
+
+
+def test_a_runner_failure_outside_any_step_is_written_down_not_left_running(tmp_path):
+    """러너 자신이 죽으면 `state.json`이 `running`으로 남는다 — 실행기는 마감까지 기다리고, pod에서는 그것이 돈이다."""
+    run_dir, repo = _bundle(tmp_path, [{"name": "s", "argv": ["true"]}])
+    manifest = json.loads((run_dir / "bundle" / "manifest.json").read_text(encoding="utf-8"))
+    manifest["job"]["steps"][0]["argv"] = ["{not_a_placeholder}"]  # 정의 검사를 건너뛴 묶음 (손으로 고친 명세)
+    (run_dir / "bundle" / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert run_job(run_dir / "bundle", repo=repo) == 1
+    state = _state(run_dir)
+    assert (state["state"], state["exit_reason"]) == ("failed", "error") and "JobError" in state["error"]
+    assert (run_dir / "finished").is_file(), "끝 표지가 있어야 pod 안의 감시가 '끝난 뒤 유예'를 센다"
 
 
 def test_inputs_whose_hash_moved_stop_the_job_before_any_step(tmp_path):

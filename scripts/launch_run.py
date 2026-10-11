@@ -395,6 +395,20 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(ledger.summary(), ensure_ascii=False, indent=1))
         return 0
 
+    if args.command in ("prices", "pods"):
+        from robo_jev.launch.providers.runpod import RunPodError
+
+        try:
+            return _read_only_command(args)
+        except RunPodError as exc:
+            raise SystemExit(f"[launch_run] RunPod 읽기 실패: {exc}") from None
+
+    manifest = load_manifest(args.manifest)
+    return _manifest_command(args, parser, manifest)
+
+
+def _read_only_command(args: argparse.Namespace) -> int:
+    """읽기 전용 명령(prices·pods) — 클라이언트가 GET 밖을 보내기 전에 거절한다."""
     if args.command == "prices":
         provider = _runpod(args, read_only=True)
         gpus = args.gpu or list(DEFAULT_PRICE_GPUS)
@@ -424,8 +438,10 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"queried_at": now(), "pods": rows, "network_volumes": volumes, "live_pods": len(live), "clean": not live and not volumes},
                          ensure_ascii=False, indent=1))  # fmt: skip
         return 0
+    raise AssertionError(args.command)  # pragma: no cover
 
-    manifest = load_manifest(args.manifest)
+
+def _manifest_command(args: argparse.Namespace, parser: argparse.ArgumentParser, manifest: dict[str, Any]) -> int:
 
     if args.command == "dry-run":
         from robo_jev.launch.jobs import format_plan, plan_job

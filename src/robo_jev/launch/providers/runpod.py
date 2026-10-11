@@ -54,6 +54,9 @@ DEFAULT_KEY_FILE = Path("~/.config/robo-jev/runpod.env")
 KEY_NAME = "RUNPOD_API_KEY"
 #: 단가를 견줄 때의 허용 오차(USD/h) — 반 센트. 콘솔·카탈로그는 센트 단위로 적는다.
 PRICE_TOLERANCE = 0.005
+#: 요청의 User-Agent. urllib의 기본값(`Python-urllib/3.x`)은 api.runpod.io 앞의 Cloudflare가 "Error 1010"(브라우저 서명)으로 막는다
+#: (2026-10-11 실측: 읽기 전용 카탈로그 조회가 403) — 도구 이름을 밝힌다.
+USER_AGENT = "robo-jev-launcher/0.1 (+https://github.com/robo-jev; task-cloud1)"
 #: 살아 있는 상태 — 이 상태의 pod는 돈이 나간다(PROVISIONING도 자원을 붙잡고 있다고 본다).
 LIVE_STATUSES = ("PROVISIONING", "STARTING", "RUNNING")
 
@@ -228,7 +231,7 @@ class RunPodClient:
         if self.read_only and method != "GET":
             raise ReadOnlyViolation(f"읽기 전용 클라이언트가 {method} {path}를 받았다 — 보내지 않았다")
         url = self._url(path, query)
-        headers = {"Authorization": f"Bearer {self._key.reveal()}", "Accept": "application/json"}
+        headers = {"Authorization": f"Bearer {self._key.reveal()}", "Accept": "application/json", "User-Agent": USER_AGENT}
         payload = None
         if body is not None:
             payload = json.dumps(body).encode("utf-8")

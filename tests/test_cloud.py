@@ -114,6 +114,14 @@ def test_the_key_travels_only_in_the_authorization_header():
         assert KEY not in json.dumps(request["body"])
 
 
+def test_every_request_names_the_tool_in_its_user_agent():
+    """urllib의 기본 User-Agent(`Python-urllib/3.x`)는 api.runpod.io 앞의 Cloudflare가 Error 1010으로 막는다 (2026-10-11 실측 403)."""
+    api = FakeRunPodApi()
+    RunPodClient(Secret(KEY), transport=api).gpu_types()
+    agent = api.requests[0]["headers"]["User-Agent"]
+    assert agent.startswith("robo-jev-launcher/") and "Python-urllib" not in agent
+
+
 def test_an_api_error_that_echoes_the_key_is_redacted():
     def echo(method, url, headers, body, timeout):
         return 401, {}, json.dumps({"title": "Unauthorized", "status": 401, "detail": f"bad token {headers['Authorization']}"}).encode()
@@ -450,6 +458,19 @@ def test_a_failing_job_is_fetched_and_the_pod_is_still_deleted(pod_world):
     assert (saved["state"], saved["exit_reason"]) == ("failed", "step:boom:failed")
     assert pod_world["api"].live_pods() == [] and saved["provider"]["pod"]["delete_confirmed"] is True
     assert any(e.get("local") and e["remote"].startswith("logs/") for e in saved["artifacts"]), "실패한 run의 로그도 가져온다"
+
+
+def test_the_launcher_does_not_wait_for_the_deadline_when_the_runner_dies(pod_world):
+    """러너가 SIGKILL로 죽어 상태가 `running`에 멈추면 — 실행기는 프로세스가 없는 것을 보고 곧바로 가져오고 지운다(마감까지 기다리지 않는다)."""
+    steps = [{"name": "kill-runner", "argv": ["{python}", "-c", "import os, signal, time; os.kill(os.getppid(), signal.SIGKILL); time.sleep(20)"],
+              "max_minutes": 2}]  # fmt: skip
+    manifest, path = _prepared(pod_world, _unique("cloud1-dead"), steps=steps)
+    started = time.monotonic()
+    launch_pod(manifest, manifest_path=path, ctx=pod_world["ctx"], yes=True, dest=pod_world["tmp"] / "f")
+    assert time.monotonic() - started < 60, "가져오기 마감(≈ 25분)까지 기다리지 않았다"
+    saved = load_manifest(path)
+    assert (saved["state"], saved["exit_reason"]) == ("failed", "process_vanished")
+    assert pod_world["api"].live_pods() == [] and saved["provider"]["pod"]["delete_confirmed"] is True
 
 
 def test_a_failed_fetch_still_deletes_the_pod_after_trying_until_its_deadline(pod_world, monkeypatch):

@@ -316,6 +316,7 @@ def _watch(backend: Backend, handle: Handle, manifest: dict[str, Any], manifest_
     stop_sent = False
     last_line = None
     misses = 0
+    gone = 0
     while True:
         state = _remote_state(backend)
         if state is None:
@@ -334,6 +335,15 @@ def _watch(backend: Backend, handle: Handle, manifest: dict[str, Any], manifest_
             manifest["progress"].update(updated_at=state.get("updated_at"), observed_at=now(), alive=True)
             if state.get("state") in ("completed", "failed", "cancelled"):
                 return state
+            # 상태는 running인데 러너 프로세스가 없다 — 두 번 연속이면 죽은 것이다 (마감까지 기다리지 않는다)
+            try:
+                alive = backend.alive(handle)
+            except Exception:  # noqa: BLE001 — 끊긴 연결은 '모른다'
+                alive = True
+            gone = 0 if alive else gone + 1
+            if gone >= 2:
+                ctx.say("상태는 running인데 러너가 없다 — 러너가 죽었다. 있는 것을 가져오고 지운다")
+                return {**state, "state": "failed", "exit_reason": "process_vanished"}
         moment = ctx.clock()
         if moment >= runner_deadline + 120 and not stop_sent:
             ctx.say("러너가 마감을 2분 넘겼다 — 정지를 요청한다 (실행기 쪽 상한)")
