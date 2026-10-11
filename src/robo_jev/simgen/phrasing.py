@@ -22,15 +22,22 @@ from functools import lru_cache
 
 __all__ = [
     "DEFAULT_PHRASING",
+    "MAX_CHAR_SIMILARITY",
     "MAX_SIMILARITY",
+    "STOPWORDS_EN",
+    "STOPWORDS_KO",
     "PHRASINGS",
     "TABLES",
     "bank_digest",
     "base_tables",
+    "char_similarity",
     "counterfactual_keys",
     "description_table",
     "fact_order_stats",
     "forbidden_ngrams",
+    "held_out_only",
+    "is_content",
+    "language_wide_hits",
     "meaning_violations",
     "new_tables",
     "ngrams",
@@ -40,6 +47,7 @@ __all__ = [
     "placeholders",
     "proximity",
     "required_new",
+    "required_placeholders",
     "similarity",
     "tokens",
     "violations",
@@ -52,6 +60,22 @@ PHRASINGS = ("v0b", "v01")
 DEFAULT_PHRASING = "v0b"
 #: 새 문구와 같은 열쇠의 빼 둔 문구 사이 낱말 유사도의 상한(미만이어야 한다)
 MAX_SIMILARITY = 0.8
+#: 같은 열쇠의 빼 둔 문구와의 글자 단위 유사도(정규화한 글의 difflib ratio) 상한 — 낱말만 바꾼 베끼기를 막는다(리뷰 1 M2)
+MAX_CHAR_SIMILARITY = 0.75
+#: 내용어가 아닌 낱말(영어: NLTK 영어 불용어 목록) — 언어 전체 빼 둔 낱말·3-gram 금지에서 내용어만 센다(리뷰 1 M1). 자리 표시 ``{}``·숫자·한 글자도 내용어가 아니다.
+STOPWORDS_EN = frozenset("""
+i me my myself we our ours ourselves you your yours yourself yourselves he him his himself she her hers herself it its itself they them their theirs
+themselves what which who whom this that these those am is are was were be been being have has had having do does did doing a an the and but if or
+because as until while of at by for with about against between into through during before after above below to from up down in out on off over under
+again further then once here there when where why how all any both each few more most other some such no nor not only own same so than too very s t
+can will just don should now d ll m o re ve y ain aren couldn didn doesn hadn hasn haven isn ma mightn mustn needn shan shouldn wasn weren won wouldn
+""".split())
+#: 한국어 어절 가운데 내용어가 아닌 것(대명사·지시어·접속어·담화 부사·계사·의존 명사 — 영어 불용어 목록의 짝: '정도'·'쯤'·'약' ↔ about,
+#: '같은' ↔ same)
+STOPWORDS_KO = frozenset("""
+당신 그 이 저 그것 이것 저것 거기 여기 그곳 이곳 또 또는 혹은 및 그리고 그러나 하지만 가령 만약 혹시 즉 곧 막 늘 아주 매우 더 덜 좀 꼭 약 대략
+것 수 때 중 등 쯤 뿐 정도 같은 입니다 합니다 됩니다 있습니다 없습니다 입니까 합니까 됩니까 있습니까 없습니까
+""".split())
 #: 문구 표의 이름: 질문 지시문·점수 기준 열쇠, 선택지 설명(갈래별)
 TABLES = ("instructions", "desc.main", "desc.arm", "desc.head_on", "desc.p6", "desc.p4", "desc.turn", "desc.turn_full")
 
@@ -83,6 +107,55 @@ def ngrams(words: list[str], n: int = 3) -> set[tuple[str, ...]]:
 def similarity(a: str, b: str) -> float:
     """낱말(어절) 단위 SequenceMatcher 유사도."""
     return difflib.SequenceMatcher(None, tokens(a), tokens(b), autojunk=False).ratio()
+
+
+def char_similarity(a: str, b: str) -> float:
+    """글자 단위 SequenceMatcher 유사도(정규화한 글) — 낱말만 바꾼 베끼기를 잰다(리뷰 1 M2)."""
+    return difflib.SequenceMatcher(None, normalize(a), normalize(b), autojunk=False).ratio()
+
+
+def is_content(word: str, lang: str) -> bool:
+    """내용어인가(불용어·자리 표시·숫자·한 글자가 아닌 낱말)."""
+    if word == "{}" or word.isdigit() or len(word) < 2:
+        return False
+    return word not in (STOPWORDS_KO if lang == "ko" else STOPWORDS_EN)
+
+
+@lru_cache(maxsize=2)
+def held_out_only(lang: str) -> tuple[frozenset[str], frozenset[tuple[str, ...]]]:
+    """언어 전체에서 빼 둔 문구에만 있는 것: (내용어 낱말, 내용어를 하나 이상 담은 3-gram) — 어느 열쇠든 빼 둔 문구에는 있고 어느 열쇠의
+    v0b 학습 문구에도 없는 것(리뷰 1 M1: 열쇠별 금지만으로는 다른 열쇠의 빼 둔 말이 새 문구로 학습에 들어갈 수 있었다)."""
+    held_words, train_words, held_grams, train_grams = set(), set(), set(), set()
+    for keys in base_tables(lang).values():
+        for bank in keys.values():
+            for t in bank["heldout"]:
+                words = tokens(t)
+                held_words |= set(words)
+                held_grams |= ngrams(words)
+            for t in bank["train"]:
+                words = tokens(t)
+                train_words |= set(words)
+                train_grams |= ngrams(words)
+    only_words = frozenset(w for w in held_words - train_words if is_content(w, lang))
+    only_grams = frozenset(g for g in held_grams - train_grams if any(is_content(w, lang) for w in g))
+    return only_words, only_grams
+
+
+def language_wide_hits(lang: str, template: str) -> tuple[list[str], list[str]]:
+    """(쓴 빼 둔 문구 전용 내용어, 쓴 빼 둔 문구 전용 3-gram — 내용어를 하나 이상 담은 것) — 언어 전체 기준."""
+    only_words, only_grams = held_out_only(lang)
+    words = tokens(template)
+    return sorted(set(words) & only_words), sorted(" ".join(g) for g in ngrams(words) if g in only_grams)
+
+
+def required_placeholders(lang: str, table: str, key: str) -> set[str]:
+    """새 문구가 반드시 가질 자리 표시: 그 열쇠의 v0b 학습 문구 모두에 있는 것(교집합), 그리고 영어 가정 질문 열쇠는 ``{action}``(리뷰 1 M3 —
+    가정 행동을 빠뜨린 문구가 v0의 T2 실패 꼴이다). 한국어 가정 질문은 :func:`violations` 가 {act_if}·{act_noun} 가운데 하나를 요구한다."""
+    bank = base_tables(lang)[table][key]
+    out = set.intersection(*(placeholders(t) for t in bank["train"]))
+    if lang == "en" and table == "instructions" and key in counterfactual_keys():
+        out.add("action")
+    return out
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -236,7 +309,9 @@ def meaning_violations(lang: str, table: str, key: str, template: str) -> list[s
 
 
 def violations(lang: str, table: str, key: str, new: list[str]) -> list[str]:
-    """한 열쇠의 새 문구 목록에 대한 위반(비면 통과): 수, 중복, 빼 둔 문구 근접·3-gram, 자리 표시, 뜻 규칙."""
+    """한 열쇠의 새 문구 목록에 대한 위반(비면 통과): 수, 중복, 빼 둔 문구 근접(같음, 낱말 유사도 < 0.8, 글자 유사도 < 0.75, 그 열쇠의 빼 둔
+    문구에만 있는 3-gram, 언어 전체에서 빼 둔 문구에만 있는 내용어·내용어 3-gram), 자리 표시(v0b 학습 문구의 것만, 모두에 있는 것은 반드시,
+    가정 질문은 행동 자리), 뜻 규칙."""
     bank = base_tables(lang)[table].get(key)
     if bank is None:
         return [f"{lang}:{table}:{key}: unknown key"]
@@ -265,6 +340,17 @@ def violations(lang: str, table: str, key: str, new: list[str]) -> list[str]:
         extra = placeholders(template) - allowed
         if extra:
             out.append(f"{where}: placeholders {sorted(extra)} not used by the v0b training wordings: {template!r}")
+        missing = required_placeholders(lang, table, key) - placeholders(template)
+        if missing:
+            out.append(f"{where}: placeholders {sorted(missing)} that every v0b training wording of the key has are missing: {template!r}")
+        if lang == "ko" and table == "instructions" and key in counterfactual_keys() and not placeholders(template) & {"act_if", "act_noun"}:
+            out.append(f"{where}: counterfactual wording without the action slot {{act_if}}/{{act_noun}}: {template!r}")
+        char = max(char_similarity(template, h) for h in bank["heldout"])
+        if char >= MAX_CHAR_SIMILARITY:
+            out.append(f"{where}: character similarity {char:.3f} to a held-out wording: {template!r}")
+        words, grams = language_wide_hits(lang, template)
+        if words or grams:
+            out.append(f"{where}: language-wide held-out-only words {words} / 3-grams {grams}: {template!r}")
         out += [f"{where}: {v}: {template!r}" for v in meaning_violations(lang, table, key, template)]
     return out
 

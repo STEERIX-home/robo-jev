@@ -155,6 +155,66 @@ def test_new_wordings_keep_away_from_held_out_ones_and_keep_the_meaning(lang):
     assert not problems, "\n".join(problems[:30])
 
 
+@pytest.mark.parametrize("lang", ["en", "ko"])
+def test_no_new_wording_uses_held_out_only_vocabulary_of_any_key(lang):
+    """리뷰 1 M1 — 언어 전체 기준: 새 문구는 어느 열쇠의 빼 둔 문구에만 있는 내용어(불용어가 아닌 낱말·어절)와, 그런 3-gram 가운데 내용어를
+    하나 이상 담은 것을 쓰지 않는다(열쇠별 금지만으로는 다른 열쇠의 빼 둔 말 — 'strike', 'What is your next step?' — 이 학습에 들어갔다)."""
+    only_words, only_grams = ph.held_out_only(lang)
+    assert only_words and only_grams                # 규칙이 비어 있지 않다(빼 둔 문구에만 있는 말이 실제로 있다)
+    hits = []
+    for _, table, key in (e for e in _entries() if e[0] == lang):
+        for template in ph.new_tables(lang)[table][key]:
+            words, grams = ph.language_wide_hits(lang, template)
+            if words or grams:
+                hits.append((key, template, words, grams))
+    assert not hits, hits[:20]
+
+
+@pytest.mark.parametrize("lang", ["en", "ko"])
+def test_new_wordings_are_not_character_level_near_copies_of_held_out_ones(lang):
+    """리뷰 1 M2 — 낱말 유사도(< 0.8)에 더해 정규화한 글의 글자 유사도도 같은 열쇠의 빼 둔 문구와 0.75 미만(낱말만 바꾼 베끼기 금지)."""
+    worst = []
+    for _, table, key in (e for e in _entries() if e[0] == lang):
+        for template in ph.new_tables(lang)[table][key]:
+            score = max(ph.char_similarity(template, h) for h in ph.base_tables(lang)[table][key]["heldout"])
+            if score >= ph.MAX_CHAR_SIMILARITY:
+                worst.append((key, template, round(score, 3)))
+    assert not worst, worst
+
+
+@pytest.mark.parametrize("lang", ["en", "ko"])
+def test_new_wordings_keep_every_placeholder_their_key_always_has(lang):
+    """리뷰 1 M3 — 그 열쇠의 v0b 학습 문구 모두에 있는 자리 표시는 새 문구에도 있다; 가정 질문은 행동 자리(영어 {action}, 한국어 {act_if}·{act_noun})를
+    빠뜨리지 않는다(가정 행동을 읽지 않는 것이 v0의 T2 실패 꼴이다)."""
+    missing = []
+    for _, table, key in (e for e in _entries() if e[0] == lang):
+        need = ph.required_placeholders(lang, table, key)
+        for template in ph.new_tables(lang)[table][key]:
+            have = ph.placeholders(template)
+            if need - have:
+                missing.append((key, template, sorted(need - have)))
+            if table == "instructions" and key in ph.counterfactual_keys():
+                assert have & ({"action"} if lang == "en" else {"act_if", "act_noun"}), (key, template)
+    assert not missing, missing
+
+
+def test_the_language_wide_character_and_placeholder_rules_catch_their_cases():
+    """규칙 자체의 대조(리뷰 1 M1~M3): 다른 열쇠의 빼 둔 말('strike', 'your next step'), 낱말만 바꾼 빼 둔 문구, 행동 자리를 뺀 가정 질문이 걸린다."""
+    def flagged(lang, key, text, what, table="instructions"):
+        return any(what in v for v in ph.violations(lang, table, key, [text]))
+
+    assert "strike" in ph.held_out_only("en")[0]
+    assert flagged("en", "noul.contact", "Suppose you {action}. Do you strike {ref} within the next 3 s?", "language-wide")
+    assert flagged("en", "act.p1_crossing_stopped", "Waiting at the edge of the crossing, what is your next step?", "language-wide")
+    assert flagged("en", "act.p5_braking", "Which braking strength do you pick for stopping before {obstacle}?", "character similarity")
+    assert flagged("en", "noul.contact", "Will you touch {ref} within the next 3 seconds?", "are missing")
+    assert flagged("ko", "noul.contact", "앞으로 3초 안에 {ref:과} 닿습니까?", "action slot")
+    assert flagged("ko", "noul.contact", "{act_if} 앞으로 3초 안에 {ref:과} 닿는지 판단하십시오.", "language-wide")
+    assert flagged("ko", "start_gentle", "급하게 나가지 않고 약한 가속으로 서서히 출발합니다.", "are missing", table="desc.main")
+    # 불용어만 겹치는 말(빼 둔 문구에만 있는 3-gram이어도 내용어가 없으면)은 막지 않는다
+    assert not ph.is_content("what", "en") and not ph.is_content("{}", "en") and ph.is_content("strike", "en")
+
+
 def test_counterfactual_keys_have_at_least_six_new_english_wordings():
     keys = ph.counterfactual_keys()
     assert len(keys) == 39 and {"noul.topple_stack", "score.topple_stack", "noul.contact", "noul.overrun"} <= keys
