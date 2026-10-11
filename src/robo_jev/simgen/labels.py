@@ -2,10 +2,13 @@
 
 * ``noul`` — K개 세계에서 그 사건이 일어난 비율.
 * ``score`` — [0, 1] 양의 K개 평균(대개 어떤 사건의 확률, 또는 가까움·빈 높이 사용·3초로 자른 지연).
-* 행동 ``choice`` — 선택지마다 기대 비용 E[c_a] = K개 세계의 비용 평균(사고 비용 합 + 진행 손실 초 × 시간 비용),
+* 행동 ``choice`` — 선택지마다 기대 비용 E[c_a] = K개 세계의 비용 평균(사고 비용 합 + 진행 손실 초 × 시간 비용 + 급제동 비용),
   p_a = softmax(−(E[c_a] − min_b E[c_b]) / τ). argmax는 언제나 기대 비용 최소다. 기대 비용을 정답에 같이 적는다.
   **'각 선택지가 최선이었던 빈도'는 쓰지 않는다**(docs/12 §5 — 가끔 큰 사고를 내는 선택지가 높게 나온다).
-* 상태 ``choice`` — 이산 상태(의도, 채움 구간, 뚜껑 …)의 사후 비율 그대로.
+  가치표의 두 기제(리뷰 1 질문 1·6): 닿음·넘어섬 비용 × max(floor, min(1, (충격 속도 / v_ref)²)) — 질문 기준이 덮어쓴 항목에는 걸지
+  않는다(기준은 '닿지 않기'를 속도와 무관하게 요구한다); 급제동 선택지에 몸별 비용(짐 실은 지게차는 따로). values-v0에서는 둘 다 꺼짐.
+* 상태 ``choice`` — 이산 상태(의도, 채움 구간, 뚜껑 …)의 사후 확률. 닫힌 꼴이 있으면(:func:`~robo_jev.simgen.posterior.exact_labels`)
+  표본 빈도 대신 그 값을 쓴다(리뷰 1 m2) — 세계 사건 중 stops_short·passable도 같다.
 * 규칙 적용 ``choice`` — 질문 글에 적힌 규칙을 글에 적힌 값에 적용한 결과(확률 1). 답은 질문 생성기가 정한다.
 
 반올림: 기대 비용은 소수 4자리로 먼저 반올림하고 그 값으로 확률을 계산한 뒤 소수 8자리로 반올림한다(합 오차 ≤ 4e-8 — 계약은 ±1e-6).
@@ -20,7 +23,9 @@ import numpy as np
 from robo_jev.simgen.rollout import Outcomes
 
 __all__ = [
+    "uses_exact",
     "action_label",
+    "cost_model",
     "costs_for",
     "expected_costs",
     "label_for",
@@ -41,17 +46,50 @@ def costs_for(values: dict, criterion: str | None) -> dict[str, float]:
     return costs
 
 
-def world_costs(outcomes: Outcomes, costs: dict[str, float]) -> np.ndarray:
+def cost_model(values: dict, criterion: str | None, body: str, loaded: bool = False) -> dict:
+    """비용표 + 두 기제의 설정(그 몸에 맞춘 값)."""
+    costs = costs_for(values, criterion)
+    speed = values.get("contact_speed") or {}
+    hard = values.get("hard_brake_cost") or {}
+    hard_key = f"{body}_loaded" if loaded and f"{body}_loaded" in hard else body
+    return {
+        "costs": costs,
+        "speed_scaled": bool(speed.get("enabled", False)),
+        "v_ref": float((speed.get("v_ref") or {}).get(body, 1.0)),
+        "floor": float(speed.get("floor", 1.0)),
+        "overridden": frozenset(values["criteria"][criterion]) if criterion else frozenset(),
+        "hard_brake": float(hard.get(hard_key, 0.0)),
+    }
+
+
+def _model_for(outcomes: Outcomes, values: dict, criterion: str | None) -> dict:
+    return cost_model(values, criterion, outcomes.body, outcomes.loaded)
+
+
+def event_weights(outcomes: Outcomes, model: dict, event: str) -> np.ndarray:
+    """사건 하나의 세계별 비용 비율 (A, K): 일어났나(0/1) × 충격 속도 비율(기제가 켜졌고 기준이 덮어쓰지 않은 항목만)."""
+    weight = outcomes.events[event].astype(float)
+    item = outcomes.cost_items[event]
+    if model["speed_scaled"] and event in outcomes.impact and item not in model["overridden"]:
+        ratio = np.minimum(1.0, (outcomes.impact[event] / model["v_ref"]) ** 2)
+        weight = weight * np.maximum(model["floor"], ratio)
+    return weight
+
+
+def world_costs(outcomes: Outcomes, model: dict) -> np.ndarray:
     """세계마다의 비용 (A, K)."""
+    costs = model["costs"]
     total = costs["delay_per_s"] * outcomes.quantities["delay"]
     for event, item in outcomes.cost_items.items():
-        total = total + costs[item] * outcomes.events[event]
+        total = total + costs[item] * event_weights(outcomes, model, event)
+    if outcomes.hard_brake is not None and model["hard_brake"] > 0.0:
+        total = total + model["hard_brake"] * outcomes.hard_brake[:, None].astype(float)
     return total
 
 
-def expected_costs(outcomes: Outcomes, costs: dict[str, float]) -> np.ndarray:
+def expected_costs(outcomes: Outcomes, model: dict) -> np.ndarray:
     """선택지마다의 기대 비용 (A,)."""
-    return world_costs(outcomes, costs).mean(axis=1)
+    return world_costs(outcomes, model).mean(axis=1)
 
 
 def _rounded_distribution(probs: dict[str, float]) -> dict[str, float]:
@@ -69,9 +107,9 @@ def softmax_probabilities(expected: dict[str, float], tau: float) -> dict[str, f
     return _rounded_distribution(dict(zip(keys, p, strict=True)))
 
 
-def action_label(outcomes: Outcomes, keymap: dict[str, str], costs: dict[str, float], tau: float) -> dict:
+def action_label(outcomes: Outcomes, keymap: dict[str, str], model: dict, tau: float) -> dict:
     """행동 choice 정답. keymap = 질문의 선택지 열쇠 → 정식 선택지."""
-    ec_all = expected_costs(outcomes, costs)
+    ec_all = expected_costs(outcomes, model)
     expected = {key: round(float(ec_all[outcomes.index(canon)]), 4) for key, canon in keymap.items()}
     return {
         "type": "choice",
@@ -89,7 +127,10 @@ def _event(outcomes: Outcomes, recipe: dict) -> np.ndarray:
     return ~values if recipe.get("negate") else values
 
 
-def noul_label(outcomes: Outcomes, recipe: dict) -> dict:
+def noul_label(outcomes: Outcomes, recipe: dict, exact: dict | None = None) -> dict:
+    if exact and recipe["source"] == "world" and recipe["event"] in exact:
+        p = float(exact[recipe["event"]])
+        return {"type": "noul", "p_yes": round(1.0 - p if recipe.get("negate") else p, 6)}
     return {"type": "noul", "p_yes": round(float(np.mean(_event(outcomes, recipe))), 6)}
 
 
@@ -114,9 +155,34 @@ def _state_values(outcomes: Outcomes, recipe: dict) -> np.ndarray:
     return outcomes.world_events[recipe["world_event"]].astype(float)
 
 
-def state_label(outcomes: Outcomes, recipe: dict) -> dict:
-    values = _state_values(outcomes, recipe)
-    probs = {key: float(np.mean(np.isin(values, accepted))) for key, accepted in recipe["options"].items()}
+def uses_exact(recipe: dict, exact: dict | None) -> bool:
+    """이 질문의 정답을 닫힌 꼴(표본 빈도가 아닌)로 계산하나."""
+    if not exact:
+        return False
+    if recipe["kind"] == "noul":
+        return recipe["source"] == "world" and recipe["event"] in exact
+    if recipe["kind"] == "state":
+        return "state" in recipe and recipe["state"] in exact
+    return False
+
+
+def _exact_state(exact: dict | None, recipe: dict) -> np.ndarray | None:
+    """닫힌 꼴의 상태 분포(값 번호 → 확률) — 없으면 None."""
+    if not exact or "state" not in recipe or recipe["state"] not in exact:
+        return None
+    value = exact[recipe["state"]]
+    if recipe["state"] == "lid":
+        return np.array([1.0 - float(value), float(value)])
+    return np.asarray(value, dtype=float)
+
+
+def state_label(outcomes: Outcomes, recipe: dict, exact: dict | None = None) -> dict:
+    dist = _exact_state(exact, recipe)
+    if dist is not None:
+        probs = {key: float(sum(dist[int(v)] for v in accepted)) for key, accepted in recipe["options"].items()}
+    else:
+        values = _state_values(outcomes, recipe)
+        probs = {key: float(np.mean(np.isin(values, accepted))) for key, accepted in recipe["options"].items()}
     return {"type": "choice", "kind": "state", "probabilities": _rounded_distribution(probs)}
 
 
@@ -124,17 +190,17 @@ def rule_label(recipe: dict) -> dict:
     return {"type": "choice", "kind": "rule", "probabilities": {k: (1.0 if k == recipe["answer"] else 0.0) for k in recipe["options"]}}
 
 
-def label_for(outcomes: Outcomes, recipe: dict, values_cfg: dict) -> dict:
-    """질문 하나의 정답(조리법 = 질문 생성기의 내부 기록)."""
+def label_for(outcomes: Outcomes, recipe: dict, values_cfg: dict, exact: dict | None = None) -> dict:
+    """질문 하나의 정답(조리법 = 질문 생성기의 내부 기록). ``exact`` = 닫힌 꼴 정답(posterior.exact_labels) — 있으면 그 값을 쓴다."""
     kind = recipe["kind"]
     if kind == "action":
-        return action_label(outcomes, recipe["options"], costs_for(values_cfg, recipe.get("criterion")), values_cfg["tau"])
+        return action_label(outcomes, recipe["options"], _model_for(outcomes, values_cfg, recipe.get("criterion")), values_cfg["tau"])
     if kind == "noul":
-        return noul_label(outcomes, recipe)
+        return noul_label(outcomes, recipe, exact)
     if kind == "score":
         return score_label(outcomes, recipe)
     if kind == "state":
-        return state_label(outcomes, recipe)
+        return state_label(outcomes, recipe, exact)
     if kind == "rule":
         return rule_label(recipe)
     raise ValueError(kind)
@@ -144,8 +210,7 @@ def realized(true_outcomes: Outcomes, recipe: dict, values_cfg: dict):
     """참 세계(K = 1)에서 실제로 일어난 것 — 평가용 기록."""
     kind = recipe["kind"]
     if kind == "action":
-        costs = costs_for(values_cfg, recipe.get("criterion"))
-        per_world = world_costs(true_outcomes, costs)[:, 0]
+        per_world = world_costs(true_outcomes, _model_for(true_outcomes, values_cfg, recipe.get("criterion")))[:, 0]
         realized_costs = {key: round(float(per_world[true_outcomes.index(canon)]), 4) for key, canon in recipe["options"].items()}
         best = min(realized_costs, key=realized_costs.get)
         return {"costs": realized_costs, "best": best}

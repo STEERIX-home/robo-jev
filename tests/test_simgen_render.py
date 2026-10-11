@@ -11,6 +11,7 @@ from robo_jev.simgen.catalog import default_config
 from robo_jev.simgen.narrate import RenderPlan, compute_hint, render_state
 from robo_jev.simgen.phrases import option_short
 from robo_jev.simgen.rollout import available_options
+from robo_jev.simgen.skins import entry_text
 from robo_jev.simgen.spec import Reading, stream
 
 HINT_OPENINGS = ("Estimated stopping distance", "At their current pace", "At its current pace", "Free width", "Sideways acceleration")
@@ -106,7 +107,7 @@ def test_sample_texts_carry_recommendation_hint_and_distractors_as_flagged():
         assert has_rec == rec["present"], r["id"]
         assert any(opening in state for opening in HINT_OPENINGS) == meta["hint"], r["id"]
         card = cfg.domain(meta["domain"])
-        assert sum(d in state for d in card["distractors"]) == meta["distractors"], r["id"]
+        assert sum(entry_text(d) in state for d in card["distractors"]) == meta["distractors"], r["id"]
 
 
 def test_state_lengths_are_mostly_400_to_1500_characters():

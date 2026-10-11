@@ -27,8 +27,9 @@ class AgentObs:
     """움직이는 상대의 관측.
 
     ``track``은 위치 보고(한 개 또는 두 개)이고 ``track_ages``는 각 보고의 나이(초 전)다. 어느 축의 위치인지는 장면이 정한다:
-    p1_step_in = 진로 중심선에서의 옆 위치(+ = 로봇의 왼쪽), p1_crossing = 상대 중심에서 로봇 진로 중심선까지의 거리,
-    p1_head_on = 앞쪽 거리. 두 개면 속도를 주지 않고(``speed`` = None) 위치 두 개와 시각만 준다(지시서 §3.5).
+    p1_step_in = 진로 중심선에서의 옆 위치(+ = 로봇의 왼쪽), p1_crossing = 로봇 진로 가장자리에서 상대의 가까운 면까지 거리,
+    p1_head_on = **그 시각의** 둘 사이 간격(면 사이; 리뷰 1 C1). 두 개면 속도를 주지 않고(``speed`` = None) 위치 두 개와 시각만 준다
+    (지시서 §3.5) — head_on에서 그 차이는 다가오는 속도(상대 + 로봇)다.
     """
 
     kind: str
@@ -96,6 +97,7 @@ class SkinText:
     body_name: str
     task: str
     distractors: tuple[str, ...]
+    carry_where: str = ""             # 용기를 어디에 실었나('on your forks', 'on the cargo platform you are towing' …)
 
 
 @dataclass(frozen=True)
@@ -103,7 +105,7 @@ class Formatting:
     """단위 표기(관측 쪽에서 정한다 — 서술기와 규칙 질문이 같은 표기를 쓴다)."""
 
     distance_unit: str                # 'm' | 'cm' | 'mm'
-    speed_unit: str                   # 'm/s' | 'km/h' | 'cm/s'
+    speed_unit: str                   # 'm/s' | 'km/h' | 'mm/s'
     time_unit: str                    # 's' | 'ms'
 
 

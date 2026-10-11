@@ -1,22 +1,32 @@
-# 상황 옷 카드 v0 — 분야 10개의 의미 층 (docs/12 §2 ①·§8, Task v0a 지시서 §3.10).
+# 상황 옷 카드 v0.1 — 분야 10개의 의미 층 (docs/12 §2 ①·§8, Task v0a 지시서 §3.10, 리뷰 1 m1 반영).
 #
 # 이 카드가 "LLM이 입히는 의미"다: 누가·어디서·무슨 일을 하나, 어떤 사람·차량·물체가 나오나, 무엇을 들고 있나, 상관없는 사실은
-# 무엇인가. 물리 값은 여기 없다 — 단어는 catalog-v0의 종류(agent kind, container kind)를 통해서만 판단에 영향을 준다(docs/12 §4).
-# 그래서 묘사(descriptor)에는 의도나 움직임을 암시하는 말을 쓰지 않는다("뛰어가는", "통화 중인" 같은 말은 단서 표가 맡는다).
+# 무엇인가. 물리 값은 여기 없다 — 단어는 catalog의 종류(agent kind, container kind)를 통해서만 판단에 영향을 준다(docs/12 §4).
+# 묘사(descriptor)에는 의도나 움직임을 암시하는 말을 쓰지 않는다("뛰어가는", "통화 중인" 같은 말은 단서 표가 맡는다).
 # 카트를 미는 사람의 ref는 사람이다(단서 "…에 정신이 팔려 있다"는 사람의 것; 카트에 닿으면 사람 닿음으로 센다).
 #
-# 자리 표시: {container} = 용기 문구, {Ref}/{ref} = 상대를 가리키는 말(대문자로 시작/소문자). 문구를 바꾸면 `version`을 올린다.
-# 용기 문구에는 목적지를 넣지 않는다('…for the shift lead') — 과제 문구의 목적지와 부딪힌다. 막힘·가림 문구는 단수(… is right beside you).
-version: skins-v0
+# **의미 일관성(v0.1).** 장면 틀은 먼저 상황(settings 하나)을 고른다 — 상황에 bodies가 있으면 그 몸일 때만 고른다(약국·백화점·지하철
+# 승강장에 지게차가 없게). 상황에는 주제 태그가 있고, 목록의 항목은 다음 제약을 가질 수 있다:
+#   tags   — 상황 태그와 하나라도 겹쳐야 쓴다(없으면 어느 상황에나)
+#   bodies — 그 몸일 때만 쓴다(예: 배터리 문구는 고정 팔에 없다)
+#   scenes — 그 장면일 때만 쓴다(예: 과일 따는 팔은 비커를 나르지 않는다)
+# 몸 이름(body_names)은 carry(용기를 어디에 실었나 — 견인차는 포크가 아니다)와 자기만의 tasks·carry_tasks를 가질 수 있다(그 몸의
+# 일이 이름에 묶여 있을 때). 시험(test_simgen_catalog·test_simgen_skins)이 모든 (상황 × 몸 × 장면) 조합에 쓸 항목이 있는지,
+# 알려진 어긋남(식품 공장 + 에폭시·나사 조임, 고정 팔 + 배터리, 견인차 + 포크 …)이 나오지 않는지 본다.
+#
+# 자리 표시: {container} = 용기 문구, {Ref}/{ref} = 상대를 가리키는 말(대문자로 시작/소문자). 용기 문구에는 목적지를 넣지 않는다
+# ('…for the shift lead' — 과제 문구의 목적지와 부딪힌다). 막힘·가림 문구는 단수다(… is right beside you). 문구를 바꾸면 `version`을 올린다.
+version: skins-v0.1
 
-# 몸의 일반 이름(분야 카드에 없을 때)
+# 몸의 일반 이름과 기본 carry(분야 카드에 없을 때)
 body_names:
   mobile_base: ["a wheeled service robot", "a small autonomous mobile robot"]
   humanoid: ["a humanoid robot", "a bipedal humanoid robot"]
   forklift_amr: ["an autonomous forklift", "a driverless pallet mover"]
   arm: ["a fixed robot arm", "a collaborative robot arm"]
+carry_default: {arm: "in your gripper", forklift_amr: "on your forks", humanoid: "in your hands", mobile_base: "on your top deck"}
 
-# 단서 문구 — catalog-v0의 cues 표와 같은 키. 단서 하나가 관측이고, 문구는 그 단서만 말한다(의도를 말하지 않는다).
+# 단서 문구 — catalog의 cues 표와 같은 키. 단서 하나가 관측이고, 문구는 그 단서만 말한다(의도를 말하지 않는다).
 cue_phrases:
   person:
     slowing: ["{Ref} has been slowing down over the last half second.", "{Ref}'s steps have become shorter.", "{Ref} has lost some pace in the last moment."]
@@ -60,28 +70,32 @@ domains:
     side_obstacle_prior: 0.50     # 가려진 옆 공간에 무언가 있을 사전 확률 (랙·팔레트가 빽빽함)
     tilt_sd_deg: 0.5              # 바닥 기울기 σ (도크 경사로 근처)
     bodies: {forklift_amr: 0.35, mobile_base: 0.35, humanoid: 0.15, arm: 0.15}
+    settings:
+      - {text: "Night shift in a large distribution warehouse.", tags: []}
+      - {text: "A busy morning in the fulfilment centre; trucks are being loaded.", tags: []}
+      - {text: "Inventory week in a cold-storage warehouse.", tags: [cold]}
+      - {text: "Peak season at a parcel sorting warehouse.", tags: [parcel]}
     body_names:
-      mobile_base: ["a tote-carrying mobile robot", "a small autonomous delivery cart"]
+      mobile_base: [{text: "a tote-carrying mobile robot", carry: "on your top deck"}, {text: "a small autonomous delivery cart", carry: "on your cargo deck"}]
       humanoid: ["a humanoid picking robot", "a bipedal warehouse robot"]
       forklift_amr: ["an autonomous forklift", "a driverless pallet mover"]
-      arm: ["a robot arm at the pack-out bench", "a fixed picking arm"]
-    settings: ["Night shift in a large distribution warehouse.", "A busy morning in the fulfilment centre; trucks are being loaded.", "Inventory week in a cold-storage warehouse.", "Peak season at a parcel sorting warehouse."]
+      arm: ["a robot arm at the pack-out bench", "a fixed packing arm"]
     places:
       floor: ["in the main aisle between racks 14 and 15", "along the staging lane next to the loading docks", "in a cross-aisle near the packing area", "past the end of the bulk-storage rows"]
       corridor: ["a narrow picking aisle between two rows of shelving", "the single-lane passage beside the mezzanine stairs", "the aisle between pallet racks C and D"]
       turn: ["the corner at the end of the rack row", "the bend into the staging lane", "the turn past the charging station"]
       crossing: ["where a cross-aisle meets your aisle", "at the intersection by the loading-dock doors", "where the pedestrian walkway crosses your lane"]
-      bench: ["the pack-out bench", "the labelling station"]
+      bench: ["the pack-out bench", "the carton-sealing station"]
     tasks:
       mobile_base: ["taking a tote of small parts to packing station 3", "returning an empty tote to the induction point", "delivering a stack of shipping labels to dock 6"]
       humanoid: ["walking a picked order to the consolidation shelf", "heading to aisle 22 to pick a case"]
-      forklift_amr: ["moving a pallet of bottled water to dock 4", "returning to the charging area with empty forks", "bringing a pallet of flat-packed boxes to staging"]
+      forklift_amr: ["moving a pallet of bottled water to dock 4", "returning to the charging area with empty forks", {text: "moving a pallet of frozen peas into the blast freezer", tags: [cold]}]
       arm: ["placing picked items into a shipping box", "moving a box from the scale to the conveyor"]
     carry_tasks:
       mobile_base: ["carrying {container} to the maintenance corner", "bringing {container} to the cleaning crew at dock 2"]
       humanoid: ["carrying {container} to the break room", "bringing {container} to the supervisor's desk"]
-      forklift_amr: ["moving {container} on the forks to the wash bay", "taking {container} to the hazardous-materials cage"]
-      arm: ["moving {container} across the pack-out bench", "passing {container} to the end of the station"]
+      forklift_amr: ["moving {container} to the wash bay", "taking {container} to the hazardous-materials cage"]
+      arm: ["moving {container} from the glue dispenser to the carton line", "carrying {container} across the pack-out bench"]
     agents:
       step_in: {adult: 0.45, forklift: 0.20, cart: 0.15, other_robot: 0.20}
       crossing: {adult: 0.35, forklift: 0.35, cart: 0.10, other_robot: 0.20}
@@ -107,18 +121,26 @@ domains:
         - {np: "an operator's hand", ref: "the operator's hand"}
     containers:
       - {kind: bucket, content: other, phrases: ["a bucket of mop water", "a pail of soapy water"]}
-      - {kind: bucket, content: chemical, phrases: ["an open pail of floor sealant", "a bucket of degreaser"]}
+      - {kind: bucket, content: chemical, phrases: ["a pail of floor sealant", "a bucket of degreaser"]}
       - {kind: open_tote, content: other, phrases: ["a tote of rinse water"]}
       - {kind: open_tote, content: chemical, phrases: ["a tote of battery-wash solution"]}
-      - {kind: shallow_tray, content: other, phrases: ["a drip tray full of condensate"]}
-      - {kind: mug, content: hot, phrases: ["a mug of black coffee"]}
-      - {kind: takeaway_cup, content: hot, phrases: ["a paper cup of hot tea"]}
-      - {kind: beaker_250, content: chemical, phrases: ["a 250 ml beaker of fluid from a leaking drum"]}
+      - {kind: shallow_tray, content: other, phrases: ["a drip tray full of condensate"], tags: [cold]}
+      - {kind: mug, content: hot, phrases: ["a mug of black coffee"], bodies: [mobile_base, humanoid]}
+      - {kind: takeaway_cup, content: hot, phrases: ["a paper cup of hot tea"], bodies: [mobile_base, humanoid]}
+      - {kind: beaker_250, content: chemical, phrases: ["a 250 ml beaker of fluid from a leaking drum"], bodies: [mobile_base, humanoid]}
+      - {kind: glue_pot, content: chemical, phrases: ["a pot of carton glue", "a pot of water-based packing glue"]}
     obstacles: ["a pallet left sticking out into the aisle", "the closed roll-up door to the dock", "a stack of empty totes", "a yellow safety barrier"]
     bench_obstacles: ["the side wall of the shipping box", "the edge of the conveyor", "a roll of tape left on the bench"]
     occluders: ["a pallet stack", "a rack upright", "a parked pallet jack"]
     blockers: ["a full pallet", "the rack itself", "a row of stacked totes"]
-    distractors: ["The overhead lights in this zone are on a motion timer.", "A truck is reversing at dock 3, its alarm beeping.", "The temperature here is 14 °C.", "A radio in the break room is playing pop music.", "Your battery is at 61 %.", "The warehouse system has just released a new wave of orders."]
+    distractors:
+      - "The overhead lights in this zone are on a motion timer."
+      - "A truck is reversing at dock 3, its alarm beeping."
+      - "A radio in the break room is playing pop music."
+      - "The warehouse system has just released a new wave of orders."
+      - {text: "Your battery is at 61 %.", bodies: [mobile_base, humanoid, forklift_amr]}
+      - {text: "The temperature in here is 2 °C.", tags: [cold]}
+      - {text: "A parcel jam is being cleared on the sorter.", tags: [parcel]}
 
   # ------------------------------------------------------------------------------------------------------------
   factory:
@@ -127,28 +149,36 @@ domains:
     side_obstacle_prior: 0.50
     tilt_sd_deg: 0.3
     bodies: {arm: 0.40, mobile_base: 0.25, forklift_amr: 0.20, humanoid: 0.15}
+    settings:
+      - {text: "Second shift on an automotive sub-assembly line.", tags: [auto]}
+      - {text: "An electronics assembly hall; the line is running at full rate.", tags: [electronics]}
+      - {text: "A metal-fabrication shop floor during a changeover.", tags: [metal]}
+      - {text: "Morning shift at a food-packaging plant.", tags: [food]}
     body_names:
-      mobile_base: ["a parts-delivery AMR", "a tugger robot"]
-      humanoid: ["a humanoid line-assistant robot", "a humanoid robot doing kitting runs"]
-      forklift_amr: ["an autonomous forklift", "a driverless tow tractor"]
-      arm: ["a collaborative robot arm on the assembly line", "a six-axis arm in the screwdriving cell"]
-    settings: ["Second shift on an automotive sub-assembly line.", "An electronics assembly hall; the line is running at full rate.", "A metal-fabrication shop floor during a changeover.", "Morning shift at a food-packaging plant."]
+      mobile_base: [{text: "a parts-delivery AMR", tags: [auto, electronics, metal]}, {text: "an ingredient-delivery AMR", tags: [food]}, {text: "a tugger robot", carry: "on the cart you are towing"}]
+      humanoid: ["a humanoid line-assistant robot", {text: "a humanoid robot doing kitting runs", tags: [auto, electronics, metal]}]
+      forklift_amr: ["an autonomous forklift", {text: "a driverless tow tractor", carry: "on the trailer you are towing"}]
+      arm:
+        - {text: "a collaborative robot arm on the assembly line", tags: [auto, electronics]}
+        - {text: "a six-axis arm in the screwdriving cell", tags: [auto, electronics]}
+        - {text: "a handling arm in the welding cell", tags: [metal]}
+        - {text: "a pick-and-place arm on the packing line", tags: [food]}
     places:
-      floor: ["along the aisle beside line 2", "past the quality-inspection booth", "between the press area and the kitting racks", "on the marked AMR lane next to the conveyor"]
-      corridor: ["the narrow gap between two machine guards", "the walkway between the paint booth and the parts racks", "the lane behind the stamping presses"]
-      turn: ["the corner by the tool crib", "the turn at the end of line 3", "the bend in front of the paint shop"]
-      crossing: ["where the pedestrian walkway crosses the vehicle lane", "at the junction in front of the press shop", "where the lane from goods-in meets the main aisle"]
-      bench: ["the screwdriving fixture", "the inspection station", "the glue-dispensing cell"]
+      floor: ["along the aisle beside line 2", "past the quality-inspection booth", {text: "between the press area and the kitting racks", tags: [auto, metal]}, "on the marked AMR lane next to the conveyor", {text: "past the washdown station", tags: [food]}]
+      corridor: ["the narrow gap between two machine guards", {text: "the walkway between the paint booth and the parts racks", tags: [auto]}, {text: "the lane behind the stamping presses", tags: [auto, metal]}, {text: "the passage between the cold room and the packing line", tags: [food]}]
+      turn: [{text: "the corner by the tool crib", tags: [auto, electronics, metal]}, "the turn at the end of line 3", {text: "the bend in front of the paint shop", tags: [auto]}, {text: "the corner by the ingredient store", tags: [food]}]
+      crossing: ["where the pedestrian walkway crosses the vehicle lane", {text: "at the junction in front of the press shop", tags: [auto, metal]}, "where the lane from goods-in meets the main aisle"]
+      bench: [{text: "the screwdriving fixture", tags: [auto, electronics]}, "the inspection station", {text: "the glue-dispensing cell", tags: [auto, electronics]}, {text: "the weld-prep table", tags: [metal]}, {text: "the tray-sealing station", tags: [food]}, {text: "the fill-check table", tags: [food]}]
     tasks:
-      mobile_base: ["delivering a bin of fasteners to station 7", "returning empty bins to the supermarket rack"]
-      humanoid: ["carrying a kit of parts to station 4", "walking a replacement tool to the line lead"]
-      forklift_amr: ["moving a steel coil to the press", "bringing a crate of castings to machining"]
-      arm: ["moving a housing from the fixture to the outfeed conveyor", "carrying a screw tray to the next station"]
+      mobile_base: [{text: "delivering a bin of fasteners to station 7", tags: [auto, electronics, metal]}, "returning empty bins to the supermarket rack", {text: "delivering a crate of empty tubs to line 1", tags: [food]}]
+      humanoid: [{text: "carrying a kit of parts to station 4", tags: [auto, electronics, metal]}, "walking a replacement tool to the line lead", {text: "bringing a box of hairnets to the hygiene station", tags: [food]}]
+      forklift_amr: [{text: "moving a steel coil to the press", tags: [auto, metal]}, {text: "bringing a crate of castings to machining", tags: [auto, metal]}, "returning an empty pallet to goods-in", {text: "moving a pallet of sealed trays to dispatch", tags: [food]}]
+      arm: [{text: "moving a housing from the fixture to the outfeed conveyor", tags: [auto, electronics]}, {text: "carrying a screw tray to the next station", tags: [auto, electronics]}, {text: "moving a bracket onto the weld fixture", tags: [metal]}, {text: "placing sealed tubs onto the outfeed belt", tags: [food]}]
     carry_tasks:
       mobile_base: ["carrying {container} to the maintenance bay", "bringing {container} to line 2"]
       humanoid: ["carrying {container} to the lab window", "bringing {container} to the supervisor's office"]
-      forklift_amr: ["moving {container} on the forks to the waste-fluid station", "taking {container} to the wash bay"]
-      arm: ["moving {container} from the dispensing nozzle to the test rig", "bringing {container} to the inspection station"]
+      forklift_amr: ["moving {container} to the waste-fluid station", "taking {container} to the wash bay"]
+      arm: [{text: "moving {container} from the dispensing nozzle to the test rig", tags: [auto, electronics]}, "bringing {container} to the inspection station", {text: "moving {container} from the filler to the check-weigher", tags: [food]}, {text: "moving {container} from the coolant tap to the gauge bench", tags: [metal]}]
     agents:
       step_in: {adult: 0.50, forklift: 0.20, cart: 0.15, other_robot: 0.15}
       crossing: {adult: 0.40, forklift: 0.30, cart: 0.15, other_robot: 0.15}
@@ -159,12 +189,15 @@ domains:
         - {np: "a line worker in safety glasses", ref: "the line worker"}
         - {np: "a maintenance technician carrying a toolbox", ref: "the technician"}
         - {np: "a quality inspector with a tablet", ref: "the inspector"}
+        - {np: "a worker in a hairnet and apron", ref: "the worker", tags: [food]}
       forklift:
         - {np: "a forklift driven by a material handler", ref: "the forklift"}
         - {np: "a tow tractor pulling two carts", ref: "the tow tractor"}
       cart:
-        - {np: "a worker pushing a parts trolley", ref: "the worker"}
-        - {np: "an operator wheeling a scrap bin", ref: "the operator"}
+        - {np: "a worker pushing a parts trolley", ref: "the worker", tags: [auto, electronics, metal]}
+        - {np: "an operator wheeling a scrap bin", ref: "the operator", tags: [auto, metal]}
+        - {np: "a worker pushing a rack of trays", ref: "the worker", tags: [food]}
+        - {np: "a cleaner pushing a waste trolley", ref: "the cleaner"}
       other_robot:
         - {np: "another AMR", ref: "the other AMR"}
         - {np: "a tugger robot with a train of carts", ref: "the tugger"}
@@ -172,17 +205,32 @@ domains:
         - {np: "an operator's gloved hand", ref: "the operator's hand"}
         - {np: "a technician's hand", ref: "the technician's hand"}
     containers:
-      - {kind: bucket, content: chemical, phrases: ["a bucket of cutting fluid", "a pail of used coolant"]}
-      - {kind: open_tote, content: chemical, phrases: ["a tote of degreasing-bath liquid"]}
-      - {kind: shallow_tray, content: other, phrases: ["a drip tray of water from the leak test"]}
-      - {kind: beaker_250, content: chemical, phrases: ["a 250 ml beaker of epoxy hardener", "a beaker of solder flux"]}
-      - {kind: beaker_600, content: chemical, phrases: ["a 600 ml beaker of cleaning solvent"]}
-      - {kind: mug, content: hot, phrases: ["a mug of coffee"]}
-    obstacles: ["a parts cart parked across the lane", "the closed fire door", "a pallet of castings", "the end-of-lane bumper"]
-    bench_obstacles: ["the edge of the test rig", "a part sitting on the fixture", "the guard around the dispensing nozzle"]
+      - {kind: bucket, content: chemical, phrases: ["a bucket of cutting fluid", "a pail of used coolant"], tags: [auto, metal]}
+      - {kind: open_tote, content: chemical, phrases: ["a tote of degreasing-bath liquid"], tags: [auto, metal]}
+      - {kind: shallow_tray, content: other, phrases: ["a drip tray of water from the leak test"], tags: [auto, electronics]}
+      - {kind: beaker_250, content: chemical, phrases: ["a 250 ml beaker of epoxy hardener"], tags: [auto, electronics]}
+      - {kind: beaker_250, content: chemical, phrases: ["a beaker of solder flux"], tags: [electronics]}
+      - {kind: beaker_600, content: chemical, phrases: ["a 600 ml beaker of cleaning solvent"], tags: [auto, electronics, metal]}
+      - {kind: beaker_250, content: chemical, phrases: ["a 250 ml beaker of coolant sample"], tags: [metal]}
+      - {kind: mug, content: hot, phrases: ["a mug of coffee"], bodies: [mobile_base, humanoid]}
+      - {kind: bucket, content: other, phrases: ["a bucket of brine", "a pail of sugar syrup"], tags: [food]}
+      - {kind: open_tote, content: other, phrases: ["a tote of wash water"], tags: [food]}
+      - {kind: beaker_600, content: chemical, phrases: ["a beaker of food-grade sanitiser"], tags: [food]}
+      - {kind: takeaway_cup, content: hot, phrases: ["a sample cup of hot soup from the filler"], tags: [food]}
+      - {kind: bucket, content: chemical, phrases: ["a bucket of floor degreaser"]}
+    obstacles: ["a parts cart parked across the lane", "the closed fire door", {text: "a pallet of castings", tags: [auto, metal]}, "the end-of-lane bumper", {text: "a stack of empty crates", tags: [food]}]
+    bench_obstacles: [{text: "the edge of the test rig", tags: [auto, electronics]}, {text: "a part sitting on the fixture", tags: [auto, electronics, metal]}, {text: "the guard around the dispensing nozzle", tags: [auto, electronics]}, {text: "the lip of the sealing tray", tags: [food]}, {text: "a tub left on the belt", tags: [food]}, "the end stop of the transfer rail"]
     occluders: ["a machine guard", "a stack of crates", "a building column"]
     blockers: ["the conveyor frame", "a machine guard", "a parked cart"]
-    distractors: ["The line is running at 42 parts per hour.", "A pneumatic press is cycling nearby.", "The andon light at station 5 is green.", "Shift change is in 20 minutes.", "The air compressor just kicked on.", "Your battery is at 72 %."]
+    distractors:
+      - "The line is running at 42 units per hour."
+      - "The andon light at station 5 is green."
+      - "Shift change is in 20 minutes."
+      - "The air compressor just kicked on."
+      - "A label printer at the end of line 2 is jammed."
+      - {text: "A pneumatic press is cycling nearby.", tags: [auto, metal]}
+      - {text: "The washdown crew is hosing down line 1.", tags: [food]}
+      - {text: "Your battery is at 72 %.", bodies: [mobile_base, humanoid, forklift_amr]}
 
   # ------------------------------------------------------------------------------------------------------------
   cafe:
@@ -191,11 +239,15 @@ domains:
     side_obstacle_prior: 0.45
     tilt_sd_deg: 0.3
     bodies: {mobile_base: 0.50, humanoid: 0.25, arm: 0.25}
+    settings:
+      - {text: "It is the lunch rush in a busy café.", tags: []}
+      - {text: "A quiet weekday morning in a neighbourhood coffee shop.", tags: []}
+      - {text: "Dinner service at a crowded bistro.", tags: []}
+      - {text: "Weekend brunch at a family restaurant.", tags: []}
     body_names:
-      mobile_base: ["a wheeled serving robot", "a tray-carrying delivery robot"]
+      mobile_base: [{text: "a wheeled serving robot", carry: "on your tray"}, {text: "a tray-carrying delivery robot", carry: "on your tray"}]
       humanoid: ["a humanoid waiter robot", "a humanoid server"]
       arm: ["a barista robot arm behind the counter", "a coffee-making robot arm"]
-    settings: ["It is the lunch rush in a busy café.", "A quiet weekday morning in a neighbourhood coffee shop.", "Dinner service at a crowded bistro.", "Weekend brunch at a family restaurant."]
     places:
       floor: ["between the window tables", "along the aisle past the pastry case", "in the gap between two booths", "across the open floor near the entrance"]
       corridor: ["the narrow passage between the bar and the booths", "the service corridor to the kitchen", "the gap between the counter and the queue rail"]
@@ -259,10 +311,14 @@ domains:
     side_obstacle_prior: 0.35
     tilt_sd_deg: 0.2
     bodies: {mobile_base: 0.60, humanoid: 0.40}
+    settings:
+      - {text: "Early morning on a surgical ward.", tags: []}
+      - {text: "Visiting hours on a busy medical floor.", tags: []}
+      - {text: "Night shift in an emergency-department corridor.", tags: []}
+      - {text: "Afternoon on a geriatric ward.", tags: []}
     body_names:
-      mobile_base: ["a hospital delivery robot", "an autonomous medication cart"]
+      mobile_base: [{text: "a hospital delivery robot", carry: "in your open top tray"}, {text: "an autonomous medication cart", carry: "on your top shelf"}]
       humanoid: ["a humanoid care-assistant robot", "a humanoid porter robot"]
-    settings: ["Early morning on a surgical ward.", "Visiting hours on a busy medical floor.", "Night shift in an emergency-department corridor.", "Afternoon on a geriatric ward."]
     places:
       floor: ["in the corridor outside room 214", "past the nurses' station", "near the lift lobby on level 3", "in the hallway by the waiting area"]
       corridor: ["the narrow corridor to the imaging department", "the passage between two parked bed bays", "the service corridor behind the pharmacy"]
@@ -313,10 +369,14 @@ domains:
     side_obstacle_prior: 0.50
     tilt_sd_deg: 0.2
     bodies: {arm: 0.65, mobile_base: 0.35}
+    settings:
+      - {text: "A chemistry teaching lab during a practical session.", tags: [chem]}
+      - {text: "A clinical lab processing the morning's samples.", tags: [clinical]}
+      - {text: "A biology research lab late in the evening.", tags: [bio]}
+      - {text: "A quality-control lab at a pharmaceutical plant.", tags: [pharma]}
     body_names:
-      mobile_base: ["a lab-supply mobile robot", "a sample-transport robot"]
+      mobile_base: [{text: "a lab-supply mobile robot", carry: "on your carrying deck"}, {text: "a sample-transport robot", carry: "in your open sample tray"}]
       arm: ["a liquid-handling robot arm on the lab bench", "a collaborative arm in the sample-prep cell"]
-    settings: ["A chemistry teaching lab during a practical session.", "A clinical lab processing the morning's samples.", "A biology research lab late in the evening.", "A quality-control lab at a pharmaceutical plant."]
     places:
       floor: ["in the aisle between benches 3 and 4", "past the fume hoods", "near the autoclave-room door", "along the central walkway"]
       corridor: ["the narrow gap between the fume hood and the island bench", "the passage beside the cold room"]
@@ -337,7 +397,7 @@ domains:
     descriptors:
       adult:
         - {np: "a researcher in a lab coat", ref: "the researcher"}
-        - {np: "a student wearing goggles", ref: "the student"}
+        - {np: "a student wearing goggles", ref: "the student", tags: [chem]}
         - {np: "a technician carrying a sample box", ref: "the technician"}
       cart:
         - {np: "a technician pushing a sample trolley", ref: "the technician"}
@@ -346,13 +406,17 @@ domains:
         - {np: "another sample-transport robot", ref: "the other robot"}
       hand:
         - {np: "a technician's gloved hand", ref: "the technician's hand"}
-        - {np: "a student's hand", ref: "the student's hand"}
+        - {np: "a student's hand", ref: "the student's hand", tags: [chem]}
         - {np: "a researcher's hand holding a pipette", ref: "the researcher's hand"}
     containers:
-      - {kind: beaker_250, content: chemical, phrases: ["a 250 ml beaker of dilute hydrochloric acid", "a beaker of staining solution"]}
-      - {kind: beaker_600, content: chemical, phrases: ["a 600 ml beaker of buffer solution", "a beaker of ethanol"]}
-      - {kind: specimen_cup, content: chemical, phrases: ["a sample cup of solvent", "a cup of cell-culture medium"]}
-      - {kind: tall_glass, content: other, phrases: ["a measuring cylinder of distilled water"]}
+      - {kind: beaker_250, content: chemical, phrases: ["a 250 ml beaker of dilute hydrochloric acid"], tags: [chem, pharma]}
+      - {kind: beaker_250, content: chemical, phrases: ["a beaker of staining solution"], tags: [clinical, bio]}
+      - {kind: beaker_600, content: chemical, phrases: ["a 600 ml beaker of buffer solution"], tags: [bio, pharma, clinical]}
+      - {kind: beaker_600, content: chemical, phrases: ["a beaker of ethanol"]}
+      - {kind: specimen_cup, content: chemical, phrases: ["a sample cup of solvent"], tags: [chem, pharma]}
+      - {kind: specimen_cup, content: chemical, phrases: ["a cup of cell-culture medium"], tags: [bio]}
+      - {kind: specimen_cup, content: chemical, phrases: ["a urine sample cup"], tags: [clinical]}
+      - {kind: measuring_cylinder, content: other, phrases: ["a measuring cylinder of distilled water"]}
     obstacles: ["a closed lab door", "a step stool left in the aisle", "a gas-cylinder trolley"]
     bench_obstacles: ["the edge of the sample rack", "a pipette left on the deck", "the rim of the stir plate"]
     occluders: ["a fume-hood sash", "a shelf of reagent bottles", "the centrifuge"]
@@ -366,10 +430,14 @@ domains:
     side_obstacle_prior: 0.30
     tilt_sd_deg: 1.5              # 보도는 배수 경사·턱이 있다
     bodies: {mobile_base: 0.70, humanoid: 0.30}
+    settings:
+      - {text: "A busy city sidewalk at lunchtime.", tags: []}
+      - {text: "A quiet residential street on a Sunday morning.", tags: []}
+      - {text: "Outside a train station at rush hour.", tags: []}
+      - {text: "A shopping street in light rain.", tags: []}
     body_names:
-      mobile_base: ["a six-wheeled sidewalk delivery robot", "a food-delivery robot"]
+      mobile_base: [{text: "a six-wheeled sidewalk delivery robot", carry: "in your open cargo bin"}, {text: "a food-delivery robot", carry: "in your cargo compartment"}]
       humanoid: ["a humanoid courier robot", "a humanoid robot carrying a delivery box"]
-    settings: ["A busy city sidewalk at lunchtime.", "A quiet residential street on a Sunday morning.", "Outside a train station at rush hour.", "A shopping street in light rain."]
     places:
       floor: ["on the sidewalk outside a bakery", "along the pavement past a bus stop", "on a stretch of sidewalk next to parked scooters", "by the entrance of a supermarket"]
       corridor: ["a narrow stretch of sidewalk between a wall and a row of bollards", "the gap between scaffolding and the kerb", "a footpath squeezed by outdoor café tables"]
@@ -425,11 +493,15 @@ domains:
     side_obstacle_prior: 0.45
     tilt_sd_deg: 0.2
     bodies: {mobile_base: 0.40, humanoid: 0.35, arm: 0.25}
+    settings:
+      - {text: "A family kitchen at breakfast time.", tags: []}
+      - {text: "A living room on a rainy Saturday afternoon.", tags: []}
+      - {text: "An open-plan apartment in the evening.", tags: []}
+      - {text: "A small flat where an older person lives alone.", tags: []}
     body_names:
-      mobile_base: ["a home-assistant robot on wheels", "a small household robot"]
+      mobile_base: [{text: "a home-assistant robot on wheels", carry: "on your tray"}, {text: "a small household robot", carry: "on your carrying tray"}]
       humanoid: ["a humanoid home robot", "a household humanoid"]
       arm: ["a kitchen robot arm mounted over the counter", "a countertop cooking arm"]
-    settings: ["A family kitchen at breakfast time.", "A living room on a rainy Saturday afternoon.", "An open-plan apartment in the evening.", "A small flat where an older person lives alone."]
     places:
       floor: ["between the kitchen island and the fridge", "across the living-room rug", "in the hallway by the front door", "past the dining table"]
       corridor: ["the narrow hallway to the bedrooms", "the gap between the sofa and the coffee table", "the galley kitchen"]
@@ -488,24 +560,28 @@ domains:
     side_obstacle_prior: 0.50
     tilt_sd_deg: 0.2
     bodies: {mobile_base: 0.50, humanoid: 0.30, forklift_amr: 0.20}
+    settings:
+      - {text: "A supermarket on a Saturday morning.", tags: [supermarket]}
+      - {text: "A hardware store an hour before closing.", tags: [hardware]}
+      - {text: "A department store during a sale.", tags: [department], bodies: [mobile_base, humanoid]}
+      - {text: "A pharmacy with a short queue at the counter.", tags: [pharmacy], bodies: [mobile_base, humanoid]}
     body_names:
-      mobile_base: ["an inventory-scanning robot", "a shelf-restocking robot"]
+      mobile_base: [{text: "an inventory-scanning robot", carry: "on your top deck"}, {text: "a shelf-restocking robot", carry: "on your loading deck"}]
       humanoid: ["a humanoid store-assistant robot", "a humanoid robot stocking shelves"]
       forklift_amr: ["an autonomous pallet truck", "a driverless stocking forklift"]
-    settings: ["A supermarket on a Saturday morning.", "A hardware store an hour before closing.", "A department store during a sale.", "A pharmacy with a short queue at the counter."]
     places:
-      floor: ["in the cereal aisle", "past the checkout lanes", "along the end-caps near the entrance", "in the garden-centre section"]
-      corridor: ["a narrow aisle between two gondola shelves", "the gap between a promotional stand and the freezer cabinets", "the stock-room passage"]
-      turn: ["the corner by the bakery counter", "the turn at the end of aisle 7", "the bend into the stock room"]
+      floor: [{text: "in the cereal aisle", tags: [supermarket]}, "past the checkout lanes", "along the end-caps near the entrance", {text: "in the garden-centre section", tags: [hardware]}, {text: "in the paint aisle", tags: [hardware]}, {text: "past the cosmetics counter", tags: [department, pharmacy]}, {text: "near the prescription counter", tags: [pharmacy]}, {text: "past the frozen-food cabinets", tags: [supermarket]}]
+      corridor: ["a narrow aisle between two gondola shelves", {text: "the gap between a promotional stand and the freezer cabinets", tags: [supermarket]}, "the stock-room passage"]
+      turn: [{text: "the corner by the bakery counter", tags: [supermarket]}, "the turn at the end of aisle 7", "the bend into the stock room"]
       crossing: ["where the main aisle crosses aisle 5", "at the end of the checkout lanes", "where the stock-room doors open onto the sales floor"]
     tasks:
       mobile_base: ["scanning shelf labels in aisle 4", "carrying a tote of returns to customer service"]
-      humanoid: ["restocking canned goods in aisle 9", "fetching a box from the stock room"]
-      forklift_amr: ["moving a pallet of bottled drinks to aisle 2", "returning an empty pallet to the stock room"]
+      humanoid: [{text: "restocking canned goods in aisle 9", tags: [supermarket]}, "fetching a box from the stock room", {text: "restocking paint tins in aisle 12", tags: [hardware]}, {text: "restocking the vitamins shelf", tags: [pharmacy, department]}]
+      forklift_amr: [{text: "moving a pallet of bottled drinks to aisle 2", tags: [supermarket]}, "returning an empty pallet to the stock room", {text: "moving a pallet of fertiliser sacks to the garden centre", tags: [hardware]}]
     carry_tasks:
       mobile_base: ["carrying {container} to the staff room", "bringing {container} to the customer-service desk"]
       humanoid: ["carrying {container} to the staff room", "bringing {container} to the back of the store"]
-      forklift_amr: ["moving {container} on a pallet to the cleaning area", "taking {container} to the loading bay"]
+      forklift_amr: ["moving {container} to the cleaning area", "taking {container} to the loading bay"]
     agents:
       step_in: {adult: 0.45, child: 0.20, cart: 0.25, elder_walker: 0.10}
       crossing: {adult: 0.35, child: 0.20, cart: 0.30, other_robot: 0.15}
@@ -527,15 +603,26 @@ domains:
         - {np: "a floor-scrubbing robot", ref: "the scrubber"}
         - {np: "another inventory robot", ref: "the other robot"}
     containers:
-      - {kind: takeaway_cup, content: hot, phrases: ["a sample cup of coffee", "a paper cup of hot soup"]}
+      - {kind: takeaway_cup, content: hot, phrases: ["a sample cup of coffee"], tags: [supermarket, department]}
+      - {kind: takeaway_cup, content: hot, phrases: ["a paper cup of hot soup"], tags: [supermarket]}
       - {kind: bucket, content: other, phrases: ["a mop bucket", "a bucket of water"]}
       - {kind: bucket, content: chemical, phrases: ["a bucket of floor-cleaning concentrate"]}
-      - {kind: shallow_tray, content: other, phrases: ["a drip tray of meltwater"]}
-      - {kind: deli_tub, content: hot, phrases: ["a tub of hot mac and cheese"]}
+      - {kind: shallow_tray, content: other, phrases: ["a drip tray of meltwater"], tags: [supermarket]}
+      - {kind: deli_tub, content: hot, phrases: ["a tub of hot mac and cheese"], tags: [supermarket]}
+      - {kind: paint_can, content: chemical, phrases: ["a can of wood stain", "a tin of paint"], tags: [hardware]}
+      - {kind: tall_glass, content: other, phrases: ["a cup of water for a customer"], tags: [pharmacy]}
     obstacles: ["a pallet of stock left in the aisle", "a promotional stand", "the closed stock-room door", "a wet-floor sign"]
     occluders: ["a gondola end", "a stack of boxes", "a promotional banner"]
     blockers: ["a freezer cabinet", "a shelf", "a display table"]
-    distractors: ["A price check was just announced over the PA.", "Background music is playing.", "Aisle 3 has a two-for-one offer on pasta.", "The automatic doors keep opening and closing.", "There is a queue at checkout 4.", "Your battery is at 55 %."]
+    distractors:
+      - "A price check was just announced over the PA."
+      - "Background music is playing."
+      - "The automatic doors keep opening and closing."
+      - "There is a queue at checkout 4."
+      - "Your battery is at 55 %."
+      - {text: "Aisle 3 has a two-for-one offer on pasta.", tags: [supermarket]}
+      - {text: "The paint-mixing machine is shaking a can.", tags: [hardware]}
+      - {text: "A customer is asking how long prescriptions take.", tags: [pharmacy]}
 
   # ------------------------------------------------------------------------------------------------------------
   greenhouse:
@@ -544,25 +631,33 @@ domains:
     side_obstacle_prior: 0.40
     tilt_sd_deg: 1.0
     bodies: {mobile_base: 0.45, arm: 0.30, humanoid: 0.25}
+    settings:
+      - {text: "A tomato greenhouse in the early morning.", tags: [tomato]}
+      - {text: "A strawberry polytunnel during harvest.", tags: [strawberry]}
+      - {text: "A hydroponic lettuce greenhouse.", tags: [lettuce]}
+      - {text: "A nursery greenhouse full of potted seedlings.", tags: [nursery]}
     body_names:
-      mobile_base: ["a greenhouse transport robot", "an autonomous harvest cart"]
+      mobile_base: [{text: "a greenhouse transport robot", carry: "on your carrying deck"}, {text: "an autonomous harvest cart", carry: "in your crate bay"}]
       humanoid: ["a humanoid farmhand robot", "a humanoid greenhouse worker"]
-      arm: ["a fruit-picking robot arm", "a seedling-transplanting arm"]
-    settings: ["A tomato greenhouse in the early morning.", "A strawberry polytunnel during harvest.", "A hydroponic lettuce greenhouse.", "A nursery greenhouse full of potted seedlings."]
+      arm:
+        - {text: "a fruit-picking robot arm", tags: [tomato, strawberry], scenes: [p1_step_in, p1_crossing], tasks: ["placing picked fruit into a crate", "reaching for ripe fruit along the row"]}
+        - {text: "a seedling-transplanting arm", tags: [nursery], scenes: [p1_step_in, p1_crossing], tasks: ["moving seedling plugs into pots"]}
+        - {text: "a nutrient-dosing robot arm", tasks: ["topping up the dosing reservoir", "rinsing the dosing nozzles"],
+           carry_tasks: ["moving {container} from the mixing station to the tray rack", "carrying {container} across the dosing bench"]}
     places:
-      floor: ["on the main concrete path", "between the rows of tomato plants", "near the packing-shed door", "along the irrigation manifold"]
-      corridor: ["a narrow path between two growing gutters", "the gap between the seedling benches", "the passage beside the water tanks"]
+      floor: ["on the main concrete path", {text: "between the rows of tomato plants", tags: [tomato]}, "near the packing-shed door", "along the irrigation manifold", {text: "between the raised strawberry beds", tags: [strawberry]}, {text: "past the hydroponic channels", tags: [lettuce]}, {text: "between the seedling benches", tags: [nursery]}]
+      corridor: [{text: "a narrow path between two growing gutters", tags: [tomato, strawberry, lettuce]}, {text: "the gap between the seedling benches", tags: [nursery]}, "the passage beside the water tanks"]
       turn: ["the corner at the end of row 12", "the turn into the packing shed", "the bend around the fertiliser-mixing station"]
       crossing: ["where the main path crosses a row", "at the head of row 7", "where the path to the packing shed crosses your route"]
-      bench: ["the potting bench", "the sorting table", "the seed-tray station"]
+      bench: [{text: "the potting bench", tags: [nursery]}, "the sorting table", {text: "the seed-tray station", tags: [nursery]}, "the nutrient-mixing station"]
     tasks:
-      mobile_base: ["carrying crates of tomatoes to the packing shed", "returning empty crates to row 9"]
-      humanoid: ["carrying a crate of strawberries", "walking a tray of seedlings to bench 4"]
-      arm: ["placing picked fruit into a crate", "moving seedling plugs into pots"]
+      mobile_base: [{text: "carrying crates of tomatoes to the packing shed", tags: [tomato]}, "returning empty crates to row 9", {text: "carrying trays of strawberries to the cold store", tags: [strawberry]}, {text: "moving lettuce rafts to the harvest line", tags: [lettuce]}, {text: "moving trays of seedlings to bench 4", tags: [nursery]}]
+      humanoid: [{text: "carrying a crate of strawberries", tags: [strawberry]}, {text: "walking a tray of seedlings to bench 4", tags: [nursery]}, "checking the irrigation drippers", {text: "tying up tomato vines", tags: [tomato]}]
+      arm: ["sorting harvested produce on the table"]
     carry_tasks:
       mobile_base: ["carrying {container} to row 14", "bringing {container} to the seedling benches"]
       humanoid: ["carrying {container} to the potting bench", "bringing {container} to the drip line"]
-      arm: ["moving {container} from the mixing station to the tray rack", "carrying {container} across the potting bench"]
+      arm: ["carrying {container} across the dosing bench"]
     agents:
       step_in: {adult: 0.50, cart: 0.30, other_robot: 0.20}
       crossing: {adult: 0.40, cart: 0.30, other_robot: 0.30}
@@ -574,8 +669,9 @@ domains:
         - {np: "a grower inspecting leaves", ref: "the grower"}
         - {np: "a seasonal worker carrying a crate", ref: "the worker"}
       cart:
-        - {np: "a worker pushing a pipe-rail trolley", ref: "the worker"}
+        - {np: "a worker pushing a pipe-rail trolley", ref: "the worker", tags: [tomato]}
         - {np: "a picker pulling a harvest cart", ref: "the picker"}
+        - {np: "a grower pushing a trolley of seedling trays", ref: "the grower", tags: [nursery]}
       other_robot:
         - {np: "a spraying robot", ref: "the spraying robot"}
         - {np: "another transport robot", ref: "the other robot"}
@@ -585,15 +681,15 @@ domains:
     containers:
       - {kind: bucket, content: other, phrases: ["a bucket of irrigation water", "a pail of rainwater"]}
       - {kind: bucket, content: chemical, phrases: ["a bucket of nutrient concentrate", "a pail of diluted fungicide"]}
-      - {kind: shallow_tray, content: other, phrases: ["a seedling tray standing in water"]}
+      - {kind: shallow_tray, content: other, phrases: ["a seedling tray standing in water"], tags: [nursery]}
       - {kind: beaker_600, content: chemical, phrases: ["a beaker of mixed fertiliser solution"]}
       - {kind: beaker_250, content: chemical, phrases: ["a 250 ml beaker of pH-adjusting acid"]}
-      - {kind: mug, content: hot, phrases: ["a mug of tea"]}
+      - {kind: mug, content: hot, phrases: ["a mug of tea"], bodies: [mobile_base, humanoid]}
     obstacles: ["a stack of empty crates", "a hose reel", "a closed sliding door", "a parked trolley"]
-    bench_obstacles: ["the rim of the crate", "a pot on the bench", "the edge of the tray rack"]
-    occluders: ["a row of tall tomato plants", "a stack of crates", "a water tank"]
-    blockers: ["the growing gutter", "a heating pipe", "a seedling bench"]
-    distractors: ["The misting system just switched on.", "The temperature inside is 26 °C.", "Bumblebees are working the flowers.", "The roof vents are opening.", "A radio is playing in the packing shed.", "Row 3 was harvested yesterday."]
+    bench_obstacles: ["the rim of the dosing tray", "a pot on the bench", "the edge of the tray rack"]
+    occluders: ["a stack of crates", "a water tank", {text: "a row of tall tomato plants", tags: [tomato]}, {text: "a stack of seedling trays", tags: [nursery]}]
+    blockers: ["a heating pipe", {text: "the growing gutter", tags: [tomato, strawberry, lettuce]}, {text: "a seedling bench", tags: [nursery]}, "a stack of crates"]
+    distractors: ["The misting system just switched on.", "The temperature inside is 26 °C.", "The roof vents are opening.", "A radio is playing in the packing shed.", {text: "Bumblebees are working the flowers.", tags: [tomato, strawberry]}, {text: "Row 3 was harvested yesterday.", tags: [tomato, strawberry, lettuce]}, {text: "The seedlings were potted on yesterday.", tags: [nursery]}]
 
   # ------------------------------------------------------------------------------------------------------------
   transit:
@@ -602,24 +698,28 @@ domains:
     side_obstacle_prior: 0.30
     tilt_sd_deg: 0.2
     bodies: {mobile_base: 0.55, humanoid: 0.30, forklift_amr: 0.15}
+    settings:
+      - {text: "The departure hall of an international airport in the morning peak.", tags: [airport]}
+      - {text: "A main-line railway-station concourse at rush hour.", tags: [rail]}
+      - {text: "A quiet airport gate area late at night.", tags: [airport], bodies: [mobile_base, humanoid]}
+      - {text: "The platform level of a metro station.", tags: [rail], bodies: [mobile_base, humanoid]}
     body_names:
-      mobile_base: ["an airport guide robot", "a luggage-carrying robot"]
+      mobile_base: [{text: "a guide robot", carry: "on your tray"}, {text: "a luggage-carrying robot", carry: "on your luggage deck"}]
       humanoid: ["a humanoid information robot", "a humanoid porter robot"]
-      forklift_amr: ["an autonomous baggage tug", "a driverless luggage-cart tractor"]
-    settings: ["The departure hall of an international airport in the morning peak.", "A main-line railway-station concourse at rush hour.", "A quiet airport gate area late at night.", "The platform level of a metro station."]
+      forklift_amr: [{text: "an autonomous baggage tug", carry: "on the cargo platform you are towing", tags: [airport]}, {text: "a driverless luggage-cart tractor", carry: "on the luggage cart you are towing"}]
     places:
-      floor: ["in the concourse near gate B12", "past the departure boards", "along the moving-walkway exit", "outside the security checkpoint"]
-      corridor: ["the narrow passage between two rows of seats at gate 23", "the corridor to the baggage-claim lifts", "the gap between a pillar and the ticket machines"]
-      turn: ["the corner toward the platforms", "the turn at the end of the duty-free shop", "the bend past the information desk"]
-      crossing: ["where the passage from the platforms crosses the concourse", "at the exit of the moving walkway", "where the queue for security crosses your route"]
+      floor: [{text: "in the concourse near gate B12", tags: [airport]}, "past the departure boards", {text: "along the moving-walkway exit", tags: [airport]}, {text: "outside the security checkpoint", tags: [airport]}, {text: "on the concourse near platform 4", tags: [rail]}, {text: "beside the ticket barriers", tags: [rail]}]
+      corridor: [{text: "the narrow passage between two rows of seats at gate 23", tags: [airport]}, {text: "the corridor to the baggage-claim lifts", tags: [airport]}, "the gap between a pillar and the ticket machines", {text: "the narrow passage behind the platform kiosks", tags: [rail]}]
+      turn: [{text: "the corner toward the platforms", tags: [rail]}, {text: "the turn at the end of the duty-free shop", tags: [airport]}, "the bend past the information desk"]
+      crossing: [{text: "where the passage from the platforms crosses the concourse", tags: [rail]}, {text: "at the exit of the moving walkway", tags: [airport]}, {text: "where the queue for security crosses your route", tags: [airport]}, "where the corridor from the toilets meets the concourse"]
     tasks:
-      mobile_base: ["guiding a traveller to gate 31", "returning to the charging bay", "carrying a suitcase to the taxi rank"]
+      mobile_base: [{text: "guiding a traveller to gate 31", tags: [airport]}, "returning to the charging bay", {text: "guiding a traveller to platform 9", tags: [rail]}, "carrying a suitcase to the taxi rank"]
       humanoid: ["walking to the information desk", "carrying a lost-property bag to the office"]
-      forklift_amr: ["towing a baggage cart to stand 4", "returning empty dollies to the baggage hall"]
+      forklift_amr: [{text: "towing a baggage cart to stand 4", tags: [airport]}, {text: "towing a parcels cart to platform 2", tags: [rail]}, "returning empty dollies to the depot"]
     carry_tasks:
-      mobile_base: ["carrying {container} to a traveller at gate 14", "bringing {container} to the lounge"]
+      mobile_base: [{text: "carrying {container} to a traveller at gate 14", tags: [airport]}, {text: "carrying {container} to a passenger on platform 6", tags: [rail]}, "bringing {container} to the lounge"]
       humanoid: ["carrying {container} to the lounge reception", "bringing {container} to a passenger in a wheelchair"]
-      forklift_amr: ["towing {container} to the cleaning depot", "taking {container} to the de-icing store"]
+      forklift_amr: ["towing {container} to the cleaning depot", {text: "taking {container} to the de-icing store", tags: [airport]}]
     agents:
       step_in: {adult: 0.45, child: 0.15, elder_walker: 0.10, cart: 0.20, other_robot: 0.10}
       crossing: {adult: 0.35, child: 0.10, elder_walker: 0.10, cart: 0.25, forklift: 0.10, other_robot: 0.10}
@@ -628,7 +728,8 @@ domains:
       adult:
         - {np: "a traveller pulling a carry-on", ref: "the traveller"}
         - {np: "a businessman in a grey suit", ref: "the businessman"}
-        - {np: "a member of ground staff in a hi-vis vest", ref: "the staff member"}
+        - {np: "a member of ground staff in a hi-vis vest", ref: "the staff member", tags: [airport]}
+        - {np: "a station attendant in a hi-vis vest", ref: "the attendant", tags: [rail]}
         - {np: "a backpacker", ref: "the backpacker"}
       child:
         - {np: "a child holding a teddy bear", ref: "the child"}
@@ -639,19 +740,27 @@ domains:
         - {np: "a passenger pushing a luggage trolley", ref: "the passenger"}
         - {np: "a cleaner pushing a cleaning cart", ref: "the cleaner"}
       forklift:
-        - {np: "a baggage tug driven by ground staff", ref: "the baggage tug"}
+        - {np: "a baggage tug driven by ground staff", ref: "the baggage tug", tags: [airport]}
         - {np: "an electric passenger buggy", ref: "the buggy"}
+        - {np: "a parcels tractor driven by station staff", ref: "the parcels tractor", tags: [rail]}
       other_robot:
         - {np: "another guide robot", ref: "the other robot"}
         - {np: "a floor-cleaning robot", ref: "the cleaning robot"}
     containers:
       - {kind: takeaway_cup, content: hot, phrases: ["a paper cup of black coffee", "a paper cup of hot tea"]}
-      - {kind: tall_glass, content: other, phrases: ["a glass of orange juice", "a glass of sparkling water"]}
-      - {kind: mug, content: hot, phrases: ["a mug of hot chocolate"]}
+      - {kind: tall_glass, content: other, phrases: ["a glass of orange juice", "a glass of sparkling water"], tags: [airport]}
+      - {kind: mug, content: hot, phrases: ["a mug of hot chocolate"], tags: [airport]}
       - {kind: soup_bowl, content: hot, phrases: ["a bowl of noodle soup"]}
-      - {kind: open_tote, content: chemical, phrases: ["a tote of de-icing fluid"]}
+      - {kind: open_tote, content: chemical, phrases: ["a tote of de-icing fluid"], tags: [airport]}
       - {kind: bucket, content: other, phrases: ["a bucket of mop water"]}
     obstacles: ["a queue-barrier tape", "a closed glass door", "an unattended suitcase", "a cleaning sign"]
     occluders: ["a pillar", "an advertising display", "a row of luggage lockers"]
     blockers: ["a row of seats", "a ticket machine", "a glass wall"]
-    distractors: ["Boarding for flight LH 718 has just been announced.", "The departure board shows a 20-minute delay for the 14:05 train.", "A baby is crying nearby.", "The air conditioning is humming loudly.", "Your battery is at 48 %.", "A group of tourists is taking photos."]
+    distractors:
+      - "A baby is crying nearby."
+      - "The air conditioning is humming loudly."
+      - "Your battery is at 48 %."
+      - "A group of tourists is taking photos."
+      - "An announcement asks passengers to keep their luggage with them."
+      - {text: "Boarding for flight LH 718 has just been announced.", tags: [airport]}
+      - {text: "The departure board shows a 20-minute delay for the 14:05 train.", tags: [rail]}

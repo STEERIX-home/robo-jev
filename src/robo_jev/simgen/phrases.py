@@ -148,15 +148,26 @@ ACTION_INSTRUCTIONS = {
     "p1_head_on": ["You and {ref} are about to meet in this aisle. What do you do?", "How do you handle the oncoming {ref_bare}?", "Choose how to pass (or not pass) {ref}."],
     "p5_braking": ["You have to stop before {obstacle}. How do you brake?", "Choose how hard to brake.", "Pick a braking strength for this stop."],
     "p5_turning": ["How fast do you take the corner?", "Choose a speed for the upcoming turn.", "Pick your speed through the bend."],
-    "p1p5_step_in_carrying": ["{Ref} {entered} {lane} while you are carrying {cref}. What do you do?", "Choose how to respond, keeping both {ref} and {cref} in mind.", "How do you react, given what is ahead of you and the open container you carry?"],
+    "p1p5_step_in_carrying": ["{Ref} {entered} {lane} while you are carrying {cref}. What do you do?", "Choose how to respond, keeping both {ref} and {cref} in mind.", "How do you react, given what is ahead of you and the liquid you carry?"],
 }
 
+# 기준 문구는 비용 덮어쓰기와 같은 뜻이어야 한다(리뷰 1 m4): avoid_contact는 닿음 항목 전부(상대·옆의 숨은 장애물·넘어섬)를 1000으로
+# 올리고 나머지(쏟아짐·지연)는 그대로 — "{ref}든 무엇이든 닿지 말 것, 그 밖은 평소대로". avoid_spill은 쏟아짐만 1000 — "그 밖의 위험과
+# 지연은 평소대로". time_critical은 지연 1초를 3배로, 위험의 비용은 그대로 — "안전이 먼저"가 아니라 "위험은 평소대로 따진다".
 CRITERION_INSTRUCTIONS = {
-    "avoid_contact": ["Choose the quickest option that does not touch {ref}.", "Among the options that avoid any contact with {ref}, pick the fastest.", "Rule for this question: never touch {ref}; apart from that, lose as little time as possible. Which option?"],
-    "avoid_spill": ["Choose the fastest option that does not spill anything from {cref}.", "Pick the quickest option that keeps {cref} from spilling.", "Spilling is not acceptable here; apart from that, minimise delay. Which option?"],
+    "avoid_contact": [
+        "Choose the quickest option that does not touch {ref} or anything else; any other risk counts as usual.",
+        "Among the options that avoid all contact (with {ref} or with anything else), pick the best one, weighing other risks and delay as usual.",
+        "Rule for this question: touching {ref} or anything else is not acceptable; apart from that, weigh risks and delay as usual. Which option?",
+    ],
+    "avoid_spill": [
+        "Choose the fastest option that does not spill anything from {cref}; any other risk counts as usual.",
+        "Pick the quickest option that keeps {cref} from spilling, weighing any other risk as usual.",
+        "Spilling is not acceptable here; apart from that, weigh risks and delay as usual. Which option?",
+    ],
     "time_critical": [
-        "This run is urgent: each second of delay counts three times as much as usual, but safety still comes first. What do you do?",
-        "You are running late, so time matters more than usual (though never more than safety). Choose an action.",
-        "Time-critical job: weigh every second of delay heavily, without taking safety risks. Which action?",
+        "This run is urgent: each second of delay counts three times as much as usual, while the cost of any accident is unchanged. What do you do?",
+        "You are running late, so every second of delay weighs three times the usual; risks are weighed as usual. Choose an action.",
+        "Time-critical job: count each second of delay three times as heavily as usual, with accidents costed as usual. Which action?",
     ],
 }

@@ -4,7 +4,7 @@
 구조(확률 표의 합, 분야 카드가 갖춰야 할 문구, 몸·장면·여유 설계의 짝)를 검사한다 — :func:`config_errors` 가 오류 목록을
 돌려주고 :func:`load_config` 는 오류가 있으면 거절한다. 현실 범위 검사(지시서 표와 대조)는 tests/test_simgen_catalog.py가 한다.
 
-이 모듈은 다른 simgen 모듈을 import하지 않는다(맨 아래 층).
+이 모듈은 :mod:`~robo_jev.simgen.skins` (항목 고르기 규칙)만 import한다(맨 아래 층).
 """
 
 from __future__ import annotations
@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+
+from robo_jev.simgen.skins import compatible, entry_text, setting_allows
 
 __all__ = [
     "AGENT_FAMILIES",
@@ -29,17 +31,20 @@ __all__ = [
     "SCENE_PHENOMENA",
     "SKINS_PATH",
     "VALUES_PATH",
+    "VALUES_V01_PATH",
     "SimgenConfig",
     "config_errors",
     "default_config",
     "load_config",
+    "reaction_probability",
 ]
 
 REPO = Path(__file__).resolve().parents[3]
 CONFIG_DIR = REPO / "configs" / "simgen"
-CATALOG_PATH = CONFIG_DIR / "catalog-v0.yaml"
-SKINS_PATH = CONFIG_DIR / "skins-v0.yaml"
+CATALOG_PATH = CONFIG_DIR / "catalog-v0.1.yaml"
+SKINS_PATH = CONFIG_DIR / "skins-v0.1.yaml"
 VALUES_PATH = CONFIG_DIR / "values-v0.yaml"
+VALUES_V01_PATH = CONFIG_DIR / "values-v0.1.yaml"
 
 #: 분야 10개 (지시서 §3.10의 순서: 창고, 공장 라인, 카페·식당, 병원 복도, 실험대, 보도·거리, 가정, 매장, 온실·농장, 공항·역).
 DOMAINS = ("warehouse", "factory", "cafe", "hospital", "lab", "sidewalk", "home", "retail", "greenhouse", "transit")
@@ -117,6 +122,14 @@ class SimgenConfig:
         return "arm" if body == "arm" else family
 
 
+def reaction_probability(config: SimgenConfig, kind: str, cue: str | None) -> float:
+    """가로지르는 상대가 로봇이 자기 줄을 막고 있을 때 늦게라도 설 확률: 갈래 기본값 × 단서 배수(최대 max). 공은 0."""
+    spec = config.catalog["crossing_reaction"]
+    base = spec["base"][config.agent(kind)["group"]]
+    factor = spec["cue_factor"].get(cue, 1.0) if cue else 1.0
+    return float(min(spec["max"], base * factor))
+
+
 def _read_yaml(path: Path) -> dict:
     with path.open(encoding="utf-8") as handle:
         return yaml.safe_load(handle)
@@ -131,10 +144,10 @@ def load_config(catalog_path: Path = CATALOG_PATH, skins_path: Path = SKINS_PATH
     return config
 
 
-@functools.lru_cache(maxsize=1)
-def default_config() -> SimgenConfig:
-    """저장소의 v0 설정(한 프로세스에서 한 번만 읽는다)."""
-    return load_config()
+@functools.lru_cache(maxsize=4)
+def default_config(values_path: Path = VALUES_PATH) -> SimgenConfig:
+    """저장소의 설정(한 프로세스에서 한 번만 읽는다). 가치표는 values-v0가 기본이다(사용자가 고르기 전까지)."""
+    return load_config(values_path=values_path)
 
 
 def _is_range(value: Any) -> bool:
@@ -202,7 +215,26 @@ def _catalog_errors(catalog: dict) -> list[str]:
     return errors
 
 
+_CARRY_SCENES = ("p5_braking", "p5_turning", "p1p5_step_in_carrying")
+_PLACE_KEY = {"p1_crossing": "crossing", "p1_head_on": "corridor", "p5_turning": "turn"}
+
+
+def _all_tags(card: dict) -> set[str]:
+    return {t for e in card.get("settings", []) if isinstance(e, dict) for t in e.get("tags", [])}
+
+
+def _entries(card: dict):
+    """카드의 모든 제약 항목(태그 오타 검사용)."""
+    places = card.get("places", {})
+    lists = [card.get(k, []) for k in ("obstacles", "bench_obstacles", "occluders", "blockers", "distractors", "containers")]
+    lists += list(places.values()) + list(card.get("tasks", {}).values()) + list(card.get("carry_tasks", {}).values())
+    lists += list(card.get("descriptors", {}).values()) + list(card.get("body_names", {}).values())
+    for entries in lists:
+        yield from (e for e in entries if isinstance(e, dict))
+
+
 def _skins_errors(config: SimgenConfig) -> list[str]:
+    """분야 카드 구조와 의미 일관성: 모든 (상황 × 몸 × 장면) 조합에 쓸 항목이 목록마다 있는가."""
     catalog, skins = config.catalog, config.skins
     errors: list[str] = []
     domains = skins.get("domains", {})
@@ -223,60 +255,81 @@ def _skins_errors(config: SimgenConfig) -> list[str]:
             errors.append(f"{where}: floor must be a distribution over catalog floors")
         if not 0.0 <= card.get("side_obstacle_prior", -1) <= 1.0:
             errors.append(f"{where}: side_obstacle_prior must be in [0, 1]")
-        for key in ("settings", "distractors", "obstacles", "occluders", "blockers"):
-            if not card.get(key):
-                errors.append(f"{where}: {key} is empty")
-        places = card.get("places", {})
-        for key in ("floor", "turn", "crossing"):
-            if not places.get(key):
-                errors.append(f"{where}: places.{key} is empty")
-        for body, weight in bodies.items():
-            if weight <= 0:
-                continue
-            if not card.get("tasks", {}).get(body):
-                errors.append(f"{where}: tasks.{body} is empty")
-            carry = card.get("carry_tasks", {}).get(body, [])
-            if not carry or not all("{container}" in t for t in carry):
-                errors.append(f"{where}: carry_tasks.{body} must be non-empty with {{container}}")
-            scenes = catalog.get("scenes_by_body", {}).get(body, {})
-            if body == "arm":
-                if not places.get("bench") or not card.get("bench_obstacles"):
-                    errors.append(f"{where}: arm needs places.bench and bench_obstacles")
-            elif "p1_head_on" in scenes and not places.get("corridor"):
-                errors.append(f"{where}: places.corridor is empty")
-            for scene in scenes:
-                family = config.agent_family(scene, body)
-                if family is not None:
-                    errors.extend(_family_errors(config, domain, family))
-            if any(s in scenes for s in _P5_SCENES):
-                fits = [c for c in card.get("containers", []) if body in catalog["containers"].get(c.get("kind"), {}).get("bodies", [])]
-                if not fits:
-                    errors.append(f"{where}: no container a {body} can carry")
+        settings = card.get("settings", [])
+        if len(settings) < 3 or not all(isinstance(e, dict) and e.get("text") and isinstance(e.get("tags"), list) for e in settings):
+            errors.append(f"{where}: settings must be >= 3 entries of {{text, tags}}")
+            continue
+        known = _all_tags(card)
+        for entry in _entries(card):
+            unknown = set(entry.get("tags", [])) - known
+            if unknown:
+                errors.append(f"{where}: unknown tags {sorted(unknown)} in {entry}")
         for entry in card.get("containers", []):
             if entry.get("kind") not in catalog.get("containers", {}) or entry.get("content") not in CONTENTS or not entry.get("phrases"):
                 errors.append(f"{where}: bad container entry {entry}")
+        for body, weight in bodies.items():
+            if weight > 0 and not any(setting_allows(s, body) for s in settings):
+                errors.append(f"{where}: no setting allows {body}")
+        for index, setting in enumerate(settings):
+            tags = tuple(setting["tags"])
+            if not set(setting.get("bodies") or []) <= set(BODIES):
+                errors.append(f"{where} setting {index}: unknown bodies {setting.get('bodies')}")
+            for body, weight in bodies.items():
+                if weight <= 0 or not setting_allows(setting, body):
+                    continue
+                for scene in catalog.get("scenes_by_body", {}).get(body, {}):
+                    errors.extend(_combination_errors(config, domain, card, tags, body, scene, f"{where} setting {index} {body} {scene}"))
     return sorted(set(errors))
 
 
-def _family_errors(config: SimgenConfig, domain: str, family: str) -> list[str]:
-    card = config.skins["domains"][domain]
-    weights = card.get("agents", {}).get(family)
-    where = f"domain {domain} agents.{family}"
-    if not weights or not _sums_to_one(weights):
-        return [f"{where}: must be a distribution"]
-    errors = []
-    for kind, weight in weights.items():
-        spec = config.catalog["agents"].get(kind)
-        if spec is None:
-            errors.append(f"{where}: unknown agent {kind}")
-            continue
-        if (family == "arm") != (spec["group"] == "hand"):
-            errors.append(f"{where}: {kind} does not fit (arm ↔ hand only)")
-        if family in ("crossing", "head_on", "step_in") and spec["group"] != "ball" and family not in spec.get("intent_prior", {}):
-            errors.append(f"{where}: {kind} has no intent prior for {family}")
-        descriptors = card.get("descriptors", {}).get(kind, [])
-        if weight > 0 and (not descriptors or not all(d.get("np") and d.get("ref") for d in descriptors)):
-            errors.append(f"{where}: descriptors.{kind} missing np/ref")
+def _combination_errors(config: SimgenConfig, domain: str, card: dict, tags, body: str, scene: str, where: str) -> list[str]:
+    errors: list[str] = []
+    carry = scene in _CARRY_SCENES
+
+    def need(entries, what: str, at_least: int = 1):
+        ok = compatible(entries or [], tags, body, scene)
+        if len(ok) < at_least:
+            errors.append(f"{where}: {what} has {len(ok)} usable entries (need {at_least})")
+        return ok
+
+    names = need(card.get("body_names", {}).get(body) or config.skins["body_names"][body], "body_names")
+    for name in names:
+        own = name.get("carry_tasks" if carry else "tasks") if isinstance(name, dict) else None
+        tasks = own if own else card.get("carry_tasks" if carry else "tasks", {}).get(body, [])
+        usable = need(tasks, f"{'carry_tasks' if carry else 'tasks'} for {entry_text(name)!r}")
+        if carry and not all("{container}" in entry_text(t) for t in usable):
+            errors.append(f"{where}: carry task without {{container}}")
+    places = card.get("places", {})
+    need(places.get("bench") if body == "arm" else places.get(_PLACE_KEY.get(scene, "floor")), "places")
+    family = config.agent_family(scene, body)
+    if family is not None:
+        weights = card.get("agents", {}).get(family)
+        if not weights or not _sums_to_one(weights):
+            errors.append(f"{where}: agents.{family} must be a distribution")
+        else:
+            for kind, weight in weights.items():
+                spec = config.catalog["agents"].get(kind)
+                if spec is None:
+                    errors.append(f"{where}: unknown agent {kind}")
+                    continue
+                if (family == "arm") != (spec["group"] == "hand"):
+                    errors.append(f"{where}: {kind} does not fit (arm ↔ hand only)")
+                if family in INTENTS and spec["group"] != "ball" and family not in spec.get("intent_prior", {}):
+                    errors.append(f"{where}: {kind} has no intent prior for {family}")
+                if weight > 0:
+                    usable = need(card.get("descriptors", {}).get(kind), f"descriptors.{kind}")
+                    if not all(d.get("np") and d.get("ref") for d in usable):
+                        errors.append(f"{where}: descriptors.{kind} missing np/ref")
+    if carry:
+        containers = [c for c in compatible(card.get("containers", []), tags, body, scene) if body in config.catalog["containers"][c["kind"]]["bodies"]]
+        if not containers:
+            errors.append(f"{where}: no container a {body} can carry")
+    if scene == "p5_braking":
+        need(card.get("bench_obstacles") if body == "arm" else card.get("obstacles"), "obstacles")
+    if scene in ("p1_step_in", "p1p5_step_in_carrying") and config.catalog["bodies"][body]["can_sidestep"]:
+        need(card.get("occluders"), "occluders", 2)
+        need(card.get("blockers"), "blockers", 2)
+    need(card.get("distractors"), "distractors", 3)
     return errors
 
 
@@ -285,6 +338,11 @@ def _values_errors(values: dict) -> list[str]:
     costs = values.get("costs", {})
     if values.get("tau", 0) <= 0:
         errors.append("values: tau must be positive")
+    speed = values.get("contact_speed", {})
+    if set(speed.get("v_ref", {})) != set(BODIES) or not 0.0 < speed.get("floor", 0.0) <= 1.0:
+        errors.append("values: contact_speed needs v_ref for every body and 0 < floor <= 1")
+    if set(values.get("hard_brake_cost", {})) != set(BODIES) | {"forklift_amr_loaded"}:
+        errors.append("values: hard_brake_cost needs every body and forklift_amr_loaded")
     for name, override in values.get("criteria", {}).items():
         if not set(override) <= set(costs):
             errors.append(f"values: criterion {name} overrides unknown costs")

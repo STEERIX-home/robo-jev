@@ -1,8 +1,9 @@
 """수치 표기: 단위·자릿수 흔들기 (Task v0a 지시서 §3.8 '단위·숫자 표기 흔들기').
 
 관측(:class:`~robo_jev.simgen.observation.Formatting`)이 단위를 정하고, 자릿수는 보고 해상도가 정한다 — 서술기는 값을 더 반올림하지
-않는다(m ↔ cm ↔ mm는 정확히 바뀐다; km/h만 소수 한 자리로 반올림된다). 규칙 적용 질문은 :func:`shown_si` 로 **글에 보인 수**를 SI로
-되돌려 규칙에 넣는다 — 정답이 글과 어긋나지 않는다.
+않는다(m ↔ cm ↔ mm는 정확히 바뀐다). km/h는 소수 두 자리로 쓴다: 속도 격자 0.05 m/s = 0.18 km/h, 0.1 m/s = 0.36 km/h라 두 자리면
+격자 위의 값이 정확히 보인다(리뷰 1 m6 — 한 자리면 1.35 m/s가 4.9 km/h = 1.361 m/s로 읽혔다). 규칙 적용 질문은 :func:`shown_si` 로
+**글에 보인 수**를 SI로 되돌려 규칙에 넣는다 — 정답이 글과 어긋나지 않는다.
 """
 
 from __future__ import annotations
@@ -28,7 +29,7 @@ def _in_unit(value: float, resolution: float, unit: str) -> tuple[str, float]:
         value = round(value / resolution) * resolution
     decimals = decimals_for(resolution * scale) if resolution > 0 else 2
     if unit == "km/h":
-        decimals = 1
+        decimals = 2
     text = number(value * scale, decimals)
     return text, float(text) / scale
 

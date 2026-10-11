@@ -4,7 +4,9 @@
 
 * 첫 1~2문장은 상황 옷: 누가·어디서·무슨 일(분야 카드).
 * 수치는 관측의 값 그대로(:mod:`~robo_jev.simgen.textfmt`), 단위는 관측의 표기 선택.
-* 거리는 면 사이 간격이다: 로봇 앞면 → 상대(장애물)의 가까운 면, 로봇 진로 가장자리 → 상대의 가까운 면.
+* 거리는 면 사이 간격이다: 로봇 앞면 → 상대(장애물)의 가까운 면, 로봇 진로 가장자리 → 상대의 가까운 면. 마주 옴(head-on)의 위치
+  보고는 **그 시각의** 둘 사이 간격이다(리뷰 1 C1 — 글이 정본).
+* 바닥에 붙은 보고(``Reading.censored``)는 "… or less"로 쓴다(검열된 관측 — 사후가 그렇게 다룬다).
 * 계획기 권고(:class:`RenderPlan` ``recommendation``)와 계산된 힌트(``hint``)는 생성기가 정해 넘긴다 — 서술기는 쓰기만 한다.
 """
 
@@ -35,8 +37,12 @@ class RenderPlan:
 # ----------------------------------------------------------------------------------------------------------------
 
 
+def _or_less(reading, text: str) -> str:
+    return f"{text} or less" if reading.censored else text
+
+
 def _dist(obs: Observation, reading) -> str:
-    return textfmt.distance(reading.value, reading.resolution, obs.fmt.distance_unit)
+    return _or_less(reading, textfmt.distance(reading.value, reading.resolution, obs.fmt.distance_unit))
 
 
 def _len(obs: Observation, value: float, resolution: float = 0.01) -> str:
@@ -53,7 +59,7 @@ def _ago(obs: Observation, age: float) -> str:
 
 
 def _speed(obs: Observation, reading) -> str:
-    return textfmt.speed(reading.value, reading.resolution, obs.fmt.speed_unit)
+    return _or_less(reading, textfmt.speed(reading.value, reading.resolution, obs.fmt.speed_unit))
 
 
 def _side_of(obs: Observation, reading, axis: str) -> str:
@@ -81,7 +87,8 @@ def _poss(obs: Observation) -> str:
 
 
 def _carry_where(obs: Observation) -> str:
-    return {"arm": "in your gripper", "forklift_amr": "on your forks", "humanoid": "in your hands", "mobile_base": "on your tray"}[obs.body]
+    """용기를 실은 곳 — 몸 이름 항목이 정한 말(견인차는 '끄는 짐칸 위' 등), 없으면 몸의 기본값(skins carry_default)."""
+    return obs.skin.carry_where
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -89,8 +96,9 @@ def _carry_where(obs: Observation) -> str:
 # ----------------------------------------------------------------------------------------------------------------
 
 
-def compute_hint(obs: Observation, nominal_agent_radius: float | None = None) -> str | None:
-    """계획기가 계산해 둔 듯한 수치 하나(관측값과 명목 매개변수로). 장면에 맞는 것이 없으면 None."""
+def compute_hint(obs: Observation, nominal_agent_radius: float | None = None, *, k_ref: float = 1.3, g: float = 9.81) -> str | None:
+    """계획기가 계산해 둔 듯한 수치 하나(관측값과 명목 매개변수로). 장면에 맞는 것이 없으면 None. ``k_ref``·``g``는 속성 목록의
+    값을 생성기가 넘긴다(리뷰 1 m9)."""
     r = obs.robot
     if obs.scene in ("p1_step_in", "p1p5_step_in_carrying", "p5_braking"):
         stop = r.speed * r.latency + r.speed**2 / (2.0 * r.decel_moderate)
@@ -99,7 +107,7 @@ def compute_hint(obs: Observation, nominal_agent_radius: float | None = None) ->
         text = f"Estimated stopping distance {how}, reaction included: {_len(obs, stop, 0.005 if arm else 0.01)}."
         if obs.scene == "p1p5_step_in_carrying" and obs.container is not None and obs.container.fill_mode == "percent":
             c = obs.container
-            rise = 1.3 * (c.diameter / 2.0) * r.decel_moderate / 9.81
+            rise = k_ref * (c.diameter / 2.0) * r.decel_moderate / g
             free = max(c.height * (1.0 - c.fill.value), 0.0)
             when = "a normal pause" if arm else "firm braking"
             text += f" Nominal liquid rise under {when}: {_len(obs, rise, 0.001)} against about {_len(obs, free, 0.001)} of headroom."
@@ -200,7 +208,7 @@ def _container_fact(obs: Observation, u: np.ndarray) -> _Fact:
         f"{cap(c.phrase)} is {where}, {fill}; {lid}.",
         f"You are carrying {c.phrase} {where}. It is {fill}, and {lid}.",
     ][int(u[2] * 2)]
-    lid_short = {"open": "none", "lid": "on", "unknown": "not visible"}[c.lid]
+    lid_short = {"open": "none", "lid": "on", "unknown": "cannot tell (not visible)"}[c.lid]
     fill_short = fill if c.fill_mode == "phrase" else f"~{textfmt.percent(c.fill.value)}"
     return _Fact(bullet, sentence, "ROBOT", f"payload: {c.phrase} {where}; fill {fill_short}; lid {lid_short}")
 
@@ -211,7 +219,9 @@ def _agent_facts(obs: Observation, u: np.ndarray) -> list[_Fact]:
     facts: list[_Fact] = []
     two_fix = a.speed is None
     if obs.scene in ("p1_step_in", "p1p5_step_in_carrying"):
-        verb = "is rolling across your lane" if a.group == "ball" else ("is reaching into the tool's path" if obs.body == "arm" else "is stepping into your lane")
+        verb = {"ball": "is rolling across your lane", "vehicle": "is pulling into your lane", "robot": "is moving into your lane"}.get(a.group, "is stepping into your lane")
+        if obs.body == "arm":
+            verb = "is reaching into the tool's path"
         gap = _dist(obs, a.ahead)
         axis = "the tool path" if obs.body == "arm" else "your centreline"
         heading = f"toward your {a.heading}"

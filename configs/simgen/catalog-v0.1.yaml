@@ -1,9 +1,11 @@
-# 속성 목록 v0 — 의미(몸·움직이는 주체·용기·감각)를 물리 값의 분포로 잇는 다리 (docs/12 §4, Task v0a 지시서 §3).
+# 속성 목록 v0.1 — 의미(몸·움직이는 주체·용기·감각)를 물리 값의 분포로 잇는 다리 (docs/12 §4, Task v0a 지시서 §3).
+# v0.1(리뷰 1 반영): 몸별 회전 감속 하한(comfort_decel)·정지 허용치(stop_tolerance)·끼어듦 마지막 위치 상한(last_fix_max), 가로지르는
+# 상대의 늦은 반응(crossing_reaction), 뚜껑 보임 약 5 %(lid_view), 용기 셋 추가(measuring_cylinder, glue_pot, paint_can).
 #
 # 범위는 [하한, 상한]이고 균등분포로 뽑는다(따로 적지 않으면). 값의 근거는 항목마다 주석에 적었다. 이 파일의 값을 바꾸면
 # `version`을 올린다 — 레코드의 `generator.catalog`가 이 문자열이고, (생성기 버전, 속성 목록 버전, seed)로 레코드를 다시 만든다.
 # 범위 검사는 tests/test_simgen_catalog.py가 한다(지시서 §3.2 표·§3.3 주체 목록의 범위 안인지).
-version: catalog-v0
+version: catalog-v0.1
 
 g: 9.81                 # m/s²
 horizon_s: 3.0          # 갈라 굴리기 지평 H (지시서 §3.3)
@@ -29,6 +31,9 @@ bodies:
     passing_clearance: 0.20       # head-on에서 필요한 폭 = 벽 여유 0.05 × 2 + 지나침 여유 0.10 m
     turn_radius: [0.5, 3.0]       # 실내 회전 반경(지도에서 읽는 값)
     turn_approach: [1.0, 3.0]     # 회전 시작까지 거리 m
+    comfort_decel: 0.2            # 회전 전 감속의 하한(필요한 감속이 이보다 작아도 이 정도로 줄인다) m/s²
+    stop_tolerance: 0.05          # p5_braking: 목표(장애물 앞) 정지 허용치 — 이보다 더 일찍 서면 다시 다가가야 한다 m
+    last_fix_max: 2.0             # step_in: 마지막 위치 보고가 진로 중심선에서 이보다 멀지 않게(나이를 줄여 맞춘다) m
     range_max: 8.0                # 이 거리 밖의 상대는 장면에 두지 않는다(감각 범위)
     gap_min: 0.10                 # 끼어든 상대와의 최소 간격 m (이미 닿아 있지 않게)
     speed_resolution: 0.05        # 자기 속도 보고 해상도 m/s
@@ -47,6 +52,9 @@ bodies:
     passing_clearance: 0.20
     turn_radius: [0.5, 2.5]
     turn_approach: [1.0, 3.0]
+    comfort_decel: 0.15
+    stop_tolerance: 0.05
+    last_fix_max: 2.0
     range_max: 8.0
     gap_min: 0.10
     speed_resolution: 0.05
@@ -65,6 +73,9 @@ bodies:
     passing_clearance: 0.30
     turn_radius: [1.5, 6.0]
     turn_approach: [2.0, 5.0]
+    comfort_decel: 0.15
+    stop_tolerance: 0.10
+    last_fix_max: 2.0
     range_max: 15.0
     gap_min: 0.20
     speed_resolution: 0.05
@@ -83,6 +94,9 @@ bodies:
     retract: {speed: [0.1, 0.3]}  # 'retract' = moderate로 멈춘 뒤 gentle로 뒤로 가속해 이 속도로 물러남
     turn_radius: [0.15, 0.8]      # 끝점이 도는 호의 반지름
     turn_approach: [0.10, 0.40]
+    comfort_decel: 0.5
+    stop_tolerance: 0.01          # 팔은 목표에서 1 cm 안에 서야 한다
+    last_fix_max: 0.5
     range_max: 1.2
     gap_min: 0.02
     speed_resolution: 0.01
@@ -231,6 +245,15 @@ intent_motion:
   keep: {standoff: [0.3, 0.8]}       # 줄이 겹치면 이만큼 앞에서 서도록 늦게라도 감속한다(reactive 주체)
   arm_scale: 0.15
 
+# 가로지르는 상대의 늦은 반응(리뷰 1 질문 4): 사람·로봇·손은 로봇이 자기 줄을 막고 있으면 늦게라도 감속해 선다 — 그럴 확률은 갈래의
+# 기본값 × 단서 배수(정신이 팔렸으면 낮게, 로봇을 봤으면 높게), 최대 0.98. 공은 반응하지 않는다. 'yield' 의도는 반응과 따로 진로 앞에서 선다.
+crossing_reaction:
+  base: {person: 0.75, vehicle: 0.80, robot: 0.95, hand: 0.60, ball: 0.0}
+  cue_factor: {glance: 1.25, distracted: 0.4, steady: 1.0, rushing: 0.6, brake_lights: 1.2, horn: 0.7, amber: 1.0, green: 1.0,
+               priority_light: 0.5, reaching: 1.0, hesitating: 1.3, quick_motion: 0.6}
+  max: 0.98
+  standoff: [0.2, 0.6]            # 로봇 몸 앞 이만큼에서 서려 한다(손이면 arm_scale을 곱한다) m
+
 # 바닥 재질별 공의 구름 저항 계수 μ_r (감속 = μ_r·g). 단단한 바닥은 작고 카펫·흙은 크다(구름 저항 측정 범위).
 floors:
   hard: [0.01, 0.04]
@@ -240,7 +263,7 @@ floors:
 
 # ---------------------------------------------------------------------------------------------------------------
 # 단서 가능도 P(단서 | 의도) — 의도마다 단서들에 대한 분포(각 의도의 열 합 = 1, 시험이 검사). 단서 하나를 관측으로 주고 사후 의도는
-# 사전 × 가능도로 정확히 갱신한다(지시서 §3.5). 단서 문구는 skins-v0.yaml의 cue_phrases.
+# 사전 × 가능도로 정확히 갱신한다(지시서 §3.5). 단서 문구는 skins-v0.1.yaml의 cue_phrases.
 # ---------------------------------------------------------------------------------------------------------------
 cues:
   person:
@@ -320,13 +343,17 @@ containers:
   shallow_tray: {diameter: 0.400, height: 0.050, fill: [0.30, 1.0], transparent: false, lid_prior: 0.02, bodies: [mobile_base, humanoid, forklift_amr]}
   bucket: {diameter: 0.280, height: 0.300, fill: [0.30, 1.0], transparent: false, lid_prior: 0.10, bodies: [mobile_base, humanoid, forklift_amr]}
   open_tote: {diameter: 0.500, height: 0.300, fill: [0.30, 1.0], transparent: false, lid_prior: 0.10, bodies: [forklift_amr]}
+  measuring_cylinder: {diameter: 0.055, height: 0.250, fill: [0.30, 1.0], transparent: true, lid_prior: 0.03, bodies: [mobile_base, humanoid, arm]}
+  glue_pot: {diameter: 0.100, height: 0.090, fill: [0.30, 0.90], transparent: false, lid_prior: 0.30, bodies: [mobile_base, humanoid, arm]}
+  paint_can: {diameter: 0.170, height: 0.190, fill: [0.30, 1.0], transparent: false, lid_prior: 0.40, bodies: [mobile_base, humanoid, forklift_amr]}
 
 slosh_k: [1.0, 1.6]       # 정적 액면 근사 위의 출렁임 계수 k (숨은 값; 지시서 §3.4)
 fill_sigma: {opaque: 0.10, transparent: 0.04}   # 채움 관측 잡음 σ_f (불투명 용기는 위에서 비스듬히 봐서 거칠다)
-# 뚜껑 관측 모형: 참 뚜껑 ~ Bernoulli(lid_prior[용기]); 뚜껑이 있으면 'lid'(보임) 0.6 / 'unknown' 0.4, 없으면 'open'(보임) 0.75 / 'unknown' 0.25.
-# 'unknown'이면 사후 P(뚜껑) = p·0.4 / (p·0.4 + (1 − p)·0.25) — 설거지 그릇에 뚜껑이 보이는 일은 드물고 테이크아웃 컵은 흔하다.
+# 뚜껑 관측 모형: 참 뚜껑 ~ Bernoulli(lid_prior[용기]); 뚜껑이 있으면 'lid'(보임) 0.35 / 'unknown' 0.65, 없으면 'open'(보임) 0.75 /
+# 'unknown' 0.25. 'unknown'이면 사후 P(뚜껑) = p·0.65 / (p·0.65 + (1 − p)·0.25). 뚜껑이 보이는 레코드는 약 5 %(리뷰 1 질문 7:
+# 쏟아짐 질문이 늘 0이 되는 쉬운 음성 — 줄이고, 그때는 쏟아짐 대신 '뚜껑까지 차오르나'를 묻는다).
 lid_view:
-  given_lid: {lid: 0.6, unknown: 0.4}
+  given_lid: {lid: 0.35, unknown: 0.65}
   given_open: {open: 0.75, unknown: 0.25}
 
 # ---------------------------------------------------------------------------------------------------------------

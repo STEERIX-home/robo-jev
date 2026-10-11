@@ -33,10 +33,12 @@ def within(inner, outer) -> bool:
     return outer[0] - 1e-12 <= inner[0] <= inner[1] <= outer[1] + 1e-12
 
 
-def test_config_versions_are_the_v0_files(config):
-    assert config.catalog["version"] == "catalog-v0"
-    assert config.skins["version"] == "skins-v0"
+def test_config_versions_are_the_fix_round_1_files(config):
+    """리뷰 1 수정: 속성 목록·상황 옷은 v0.1(몸별 허용치·반응 확률·카드 태그), 가치표는 사용자가 고르기 전까지 values-v0."""
+    assert config.catalog["version"] == "catalog-v0.1"
+    assert config.skins["version"] == "skins-v0.1"
     assert config.values["version"] == "values-v0"
+    assert cat.load_config(values_path=cat.VALUES_V01_PATH).values["version"] == "values-v0.1"
 
 
 def test_body_ranges_stay_inside_the_brief_table(config):

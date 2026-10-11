@@ -6,6 +6,10 @@
 요청당 3~8개: 행동 choice 1개(25 %는 하나 더), 핵심 noul 1개(장면의 결정 여유를 묻는 것 — 통계의 '핵심 noul'), noul 0~2개 더,
 score 1~2개, 상태 choice(50 %), 규칙 적용 choice(35 %). 행동 choice의 약 20 %는 지시문에 기준을 적고 그 기준의 비용 덮어쓰기를
 조리법에 넣는다. 선택지 열쇠 문체(단어 / 짧은 코드 / 동사형)는 레코드마다, 선택지 순서와 질문 순서는 섞는다.
+
+뚜껑이 보이는 용기(약 5 %)에서는 쏟아짐이 늘 0이라 쏟아짐 질문 대신 '액면이 뚜껑까지 차오르나'(사건 rim_reached)를 묻고, avoid_spill
+기준을 쓰지 않는다(리뷰 1 질문 7). 지연 score는 그 지연의 정의(장면마다)를 지시문에 적는다(리뷰 1 m3): P1은 '앞으로 3초 동안 잃는
+진행', 감속(P5)은 '목표 앞에 일찍 서서 남은 거리를 다시 다가가는 시간', 회전은 '회전을 마치는 시각이 늦어지는 만큼'.
 """
 
 from __future__ import annotations
@@ -65,6 +69,14 @@ _OPT_NAME = {
 }  # fmt: skip
 
 
+def _entered(agent, arm: bool) -> str:
+    """끼어듦의 동사 — 몸·상대 갈래에 맞게(사람은 걸어 들어오고, 차량은 끼어들고, 공은 굴러 들어온다)."""
+    if arm:
+        return "has just reached into"
+    group = agent.group if agent is not None else None
+    return {"ball": "has rolled into", "vehicle": "has just pulled into", "robot": "has just moved into"}.get(group, "has just stepped into")
+
+
 class _Ctx:
     """질문 문구에 채울 말과 난수."""
 
@@ -84,7 +96,7 @@ class _Ctx:
             "ref": self.ref, "Ref": cap(self.ref), "cref": self.cref, "obstacle": self.obstacle, "ref_bare": ref_bare,
             "lane": "the tool's path" if arm else "your lane",
             "poss": "their" if agent is not None and agent.group == "person" else "its",
-            "entered": "has rolled into" if agent is not None and agent.group == "ball" else ("has just reached into" if arm else "has just stepped into"),
+            "entered": _entered(agent, arm),
             **extra,
         }  # fmt: skip
         return text.format(**values)
@@ -135,12 +147,19 @@ def _state_keys(canons: list[str], style: str, prefix: str) -> list[str]:
 # ----------------------------------------------------------------------------------------------------------------
 
 
-def _criteria_for_scene(scene: str) -> list[str]:
+def _lid_visible(obs: Observation) -> bool:
+    return obs.container is not None and obs.container.lid == "lid"
+
+
+def _criteria_for_scene(obs: Observation) -> list[str]:
+    scene = obs.scene
     if scene == "p1p5_step_in_carrying":
-        return ["avoid_contact", "avoid_spill", "time_critical"]
-    if scene.startswith("p5"):
-        return ["avoid_spill", "time_critical"]
-    return ["avoid_contact", "time_critical"]
+        out = ["avoid_contact", "avoid_spill", "time_critical"]
+    elif scene.startswith("p5"):
+        out = ["avoid_spill", "time_critical"]
+    else:
+        out = ["avoid_contact", "time_critical"]
+    return [c for c in out if not (c == "avoid_spill" and _lid_visible(obs))]
 
 
 def _action_question(c: _Ctx, options: tuple[str, ...], style: str, prefix: str, criterion: str | None) -> Question:
@@ -218,6 +237,15 @@ def _key_noul(c: _Ctx) -> Question:
 
 def _spill_noul(c: _Ctx, option: str) -> Question:
     action = option_short(option, c.obs)
+    if _lid_visible(c.obs):
+        # 뚜껑이 보이면 쏟아짐은 늘 0 — 대신 액면이 뚜껑(림)까지 차오르나를 묻는다.
+        templates = [
+            "If you {action}, will the liquid in {cref} surge up against the lid?",
+            "Does the surface in {cref} climb all the way to the lid if you {action}?",
+            "Suppose you {action}. Does the liquid in {cref} reach the lid?",
+        ]
+        name = c.name(f"reaches_lid_if_{_OPT_NAME[option]}", f"lid_wet_{_OPT_NAME[option]}")
+        return _noul(c, name, templates, {"source": "event", "event": "rim_reached", "option": option}, action=action)
     templates = [
         "If you {action}, will anything spill from {cref}?",
         "Does liquid slop over the rim of {cref} if you {action}?",
@@ -292,6 +320,28 @@ def _extra_nouls(c: _Ctx, options: tuple[str, ...]) -> list:
 # ----------------------------------------------------------------------------------------------------------------
 
 
+def _delay_templates(obs: Observation) -> list[str]:
+    """지연 score의 지시문 — 그 장면의 지연 정의를 그대로 말한다(리뷰 1 m3)."""
+    if obs.scene == "p5_braking":
+        return [
+            "If you {action}, how much time do you lose because you stop short of the spot right in front of {obstacle} and have to creep up the rest of the way?",
+            "Rate the time lost if you {action}: stopping early means closing the remaining gap to {obstacle} again at a gentle pace.",
+            "If you {action}, how long does it take to make up the distance you leave before {obstacle}, compared with stopping right at it?",
+        ]
+    if obs.scene == "p5_turning":
+        return [
+            "How much later do you come out of the turn if you {action} than if you took it without slowing?",
+            "Rate the delay if you {action}, counting the slowdown, the slower arc and getting back up to speed, against not slowing at all.",
+            "If you {action}, how much time does the turn cost you compared with taking it at your current speed?",
+        ]
+    reference = "going now" if obs.variant == "stopped" else "keeping your current speed"
+    return [
+        f"Over the next 3 seconds, how much progress do you lose if you {{action}}, compared with {reference}?",
+        f"Rate the delay if you {{action}}: the progress you give up during the next 3 s relative to {reference}.",
+        f"If you {{action}}, how far behind {reference} are you after 3 seconds, measured in seconds of travel?",
+    ]
+
+
 def _score_candidates(c: _Ctx, options: tuple[str, ...]) -> list:
     obs = c.obs
     cands = []
@@ -317,19 +367,25 @@ def _score_candidates(c: _Ctx, options: tuple[str, ...]) -> list:
                               "Rate how close the liquid in {cref} comes to the rim if you {action}.",
                               "If you {action}, how near does the surface in {cref} climb to the rim?"]), action=a),
                 ["0 = the surface barely moves", "1 = it reaches the rim (or spills)"], {"kind": "score", "source": "quantity", "name": "headroom", "option": o}))  # fmt: skip
-            cands.append(lambda o=option, a=action, s=short: Question(
-                c.name(f"spill_risk_{s}", f"spill_chance_{s}"), "score",
-                c.fmt(c.pick(["How likely is a spill from {cref} if you {action}?", "Rate the chance that {cref} spills if you {action}.",
-                              "What is the risk of spilling from {cref} if you {action}?"]), action=a),
-                ["0 = no chance of a spill", "1 = a spill is certain"], {"kind": "score", "source": "event", "name": "spill", "option": o}))  # fmt: skip
-        reference = "going now" if obs.variant == "stopped" else "keeping your current speed"
+            if _lid_visible(obs):
+                cands.append(lambda o=option, a=action, s=short: Question(
+                    c.name(f"lid_reach_risk_{s}", f"reaches_lid_chance_{s}"), "score",
+                    c.fmt(c.pick(["How likely is the liquid in {cref} to surge up to the lid if you {action}?",
+                                  "Rate the chance that the surface in {cref} reaches the lid if you {action}.",
+                                  "If you {action}, what is the chance that the liquid in {cref} touches the lid?"]), action=a),
+                    ["0 = it certainly stays below the lid", "1 = it certainly reaches the lid"],
+                    {"kind": "score", "source": "event", "name": "rim_reached", "option": o}))  # fmt: skip
+            else:
+                cands.append(lambda o=option, a=action, s=short: Question(
+                    c.name(f"spill_risk_{s}", f"spill_chance_{s}"), "score",
+                    c.fmt(c.pick(["How likely is a spill from {cref} if you {action}?", "Rate the chance that {cref} spills if you {action}.",
+                                  "What is the risk of spilling from {cref} if you {action}?"]), action=a),
+                    ["0 = no chance of a spill", "1 = a spill is certain"], {"kind": "score", "source": "event", "name": "spill", "option": o}))  # fmt: skip
         if option not in ("continue", "go_now", "turn_100"):
-            cands.append(lambda o=option, a=action, s=short, ref=reference: Question(
-                c.name(f"delay_{s}", f"time_cost_{s}"), "score",
-                c.fmt(c.pick(["How much time does it cost to {action}, compared with {reference}?",
-                              "Rate the delay if you {action}, relative to {reference}.",
-                              "If you {action}, how much later do you get where you are going than by {reference}?"]), action=a, reference=ref),
-                ["0 = no delay", "1 = 3 seconds or more"], {"kind": "score", "source": "quantity", "name": "delay", "option": o, "transform": "per_3s"}))  # fmt: skip
+            templates = _delay_templates(obs)
+            cands.append(lambda o=option, a=action, s=short, t=templates: Question(
+                c.name(f"delay_{s}", f"time_cost_{s}"), "score", c.fmt(c.pick(t), action=a),
+                ["0 = no time lost", "1 = 3 seconds or more"], {"kind": "score", "source": "quantity", "name": "delay", "option": o, "transform": "per_3s"}))  # fmt: skip
         if obs.scene == "p5_braking" and option != "continue":
             cands.append(lambda o=option, a=action, s=short: Question(
                 c.name(f"overrun_risk_{s}", f"hit_risk_{s}"), "score",
@@ -598,7 +654,7 @@ def write_questions(cfg: SimgenConfig, obs: Observation, options: tuple[str, ...
     c = _Ctx(cfg, obs, rng)
     style = KEY_STYLES[int(rng.integers(len(KEY_STYLES)))]
     share = cfg.values["criterion_share"]
-    criteria = _criteria_for_scene(obs.scene)
+    criteria = _criteria_for_scene(obs)
 
     def criterion() -> str | None:
         return c.pick(criteria) if rng.random() < share else None

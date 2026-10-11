@@ -27,3 +27,29 @@ def moment(seed: int, domain: str, **forced):
 
 def with_reading(reading, value: float):
     return replace(reading, value=value)
+
+
+def numeric_view(obs):
+    """관측에서 상황 옷 문구(장소·과제·묘사·단서 문장·용기 문구·장애물 이름·방해 문구)를 지운 것 — 수치·상태·단위만 남는다."""
+    agent = obs.agent
+    if agent is not None:
+        agent = replace(agent, descriptor=None, cue_phrase=None)
+    container = obs.container
+    if container is not None:
+        container = replace(container, phrase=None)
+    env = replace(obs.env, place=None, obstacle=None)
+    if env.sides is not None:
+        env = replace(env, sides=tuple(replace(s, phrase=None) for s in env.sides))
+    return replace(obs, agent=agent, container=container, env=env, skin=None)
+
+
+def skin_strings(obs) -> list[str]:
+    """글에 들어가는 상황 옷 문구 전부(긴 것부터)."""
+    out = [obs.skin.setting, obs.skin.body_name, obs.skin.task, obs.skin.carry_where, *obs.skin.distractors, obs.env.place, obs.env.obstacle or ""]
+    if obs.agent is not None:
+        out += [obs.agent.descriptor.np, obs.agent.descriptor.ref, obs.agent.cue_phrase or ""]
+    if obs.container is not None:
+        out.append(obs.container.phrase)
+    if obs.env.sides is not None:
+        out += [s.phrase or "" for s in obs.env.sides]
+    return sorted((t for t in out if t), key=len, reverse=True)

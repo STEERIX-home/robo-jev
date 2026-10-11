@@ -4,5 +4,6 @@
 사후 세계에서 선택지마다 갈라 굴린 결과로 확률 정답을 붙인다. 레코드 형식은 `simgen-request/0`(README.md).
 """
 
-GENERATOR_VERSION = "v0a"
+GENERATOR_VERSION = "v0a.1"   # 리뷰 1 수정(참 세계 = 사후 표본, 마주 옴 간격 뜻, 회전·감속 지연, 권고 …)
+ID_PREFIX = "v0a"             # 레코드 id 앞머리(버전과 따로 — 같은 과제의 묶음)
 SCHEMA = "simgen-request/0"

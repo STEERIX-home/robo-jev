@@ -28,6 +28,8 @@ __all__ = [
     "spills",
     "stopping_distance",
     "turn_delay",
+    "turn_slowdown",
+    "first_contact",
 ]
 
 G = 9.81
@@ -122,20 +124,58 @@ def lateral_accel(speed, radius):
     return np.asarray(speed, dtype=float) ** 2 / radius
 
 
+def _segment_distances(dx: np.ndarray, dy: np.ndarray) -> np.ndarray:
+    """상대 위치 표본 사이를 직선으로 이은 각 구간의 최소 거리 (…, T − 1)."""
+    ddx, ddy = np.diff(dx, axis=-1), np.diff(dy, axis=-1)
+    x0, y0 = dx[..., :-1], dy[..., :-1]
+    length2 = ddx * ddx + ddy * ddy
+    with np.errstate(divide="ignore", invalid="ignore"):
+        s = np.where(length2 > 0.0, -(x0 * ddx + y0 * ddy) / np.where(length2 > 0.0, length2, 1.0), 0.0)
+    s = np.clip(s, 0.0, 1.0)
+    return np.hypot(x0 + s * ddx, y0 + s * ddy)
+
+
 def min_distance(xr, yr, xa, ya):
-    """두 궤적의 중심 사이 최소 거리(마지막 축 = 시간)."""
-    return np.min(np.hypot(np.asarray(xa) - np.asarray(xr), np.asarray(ya) - np.asarray(yr)), axis=-1)
+    """두 궤적의 중심 사이 최소 거리(마지막 축 = 시간). 표본 사이는 직선으로 보고 구간마다 가장 가까운 점을 찾는다 — 0.05 s 간격이
+    팔·손처럼 짧은 거리에서 지나가는 가까움을 놓치지 않게(리뷰 1 m5)."""
+    dx = np.asarray(xa, dtype=float) - np.asarray(xr, dtype=float)
+    dy = np.asarray(ya, dtype=float) - np.asarray(yr, dtype=float)
+    dx, dy = np.broadcast_arrays(dx, dy)
+    if dx.shape[-1] < 2:
+        return np.hypot(dx, dy)[..., 0]
+    return np.min(_segment_distances(dx, dy), axis=-1)
 
 
-def turn_delay(v0, v, approach, radius, angle_rad, decel, accel):
-    """회전을 속도 v로 돌 때 v0 그대로 도는 것보다 늦는 시간(s)과 실제로 쓴 진행 방향 감속(m/s²).
+def first_contact(xr, yr, xa, ya, radius_sum, dt: float):
+    """(닿았나, 처음 닿는 구간의 상대 속도 — 안 닿았으면 0, 최소 거리). 상대 속도는 그 구간의 평균이다."""
+    dx = np.asarray(xa, dtype=float) - np.asarray(xr, dtype=float)
+    dy = np.asarray(ya, dtype=float) - np.asarray(yr, dtype=float)
+    dx, dy = np.broadcast_arrays(dx, dy)
+    seg = _segment_distances(dx, dy)
+    touching = seg < np.asarray(radius_sum, dtype=float)[..., None]
+    hit = touching.any(axis=-1)
+    first = np.argmax(touching, axis=-1)
+    rel = np.hypot(np.diff(dx, axis=-1), np.diff(dy, axis=-1)) / dt
+    speed = np.take_along_axis(rel, first[..., None], axis=-1)[..., 0]
+    return hit, np.where(hit, speed, 0.0), seg.min(axis=-1)
 
-    회전 시작까지 approach 동안 decel로 v까지 줄이되(모자라면 필요한 만큼 세게), 호 r·θ를 v로 돌고, 다시 accel로 v0까지 올린다.
-    비교는 같은 거리(접근 + 호 + 재가속 거리)를 v0로 가는 시간이다.
-    """
+
+def turn_slowdown(v0: float, v: float, approach: float, comfort: float, hard: float) -> tuple[float, float]:
+    """회전 전 감속 계획: (들어가는 속도, 쓰는 감속). 접근 구간 전체에 걸친 필요한 감속 (v0² − v²)/(2·접근)으로 줄이되 편안함 하한
+    `comfort`보다 작으면 하한으로(일찍 끝내고 v로 간다), 최대 감속 `hard`로도 모자라면 hard로 줄여 더 빠르게 들어간다(리뷰 1 I2)."""
     if v >= v0:
-        return 0.0, 0.0
-    a_long = max(decel, (v0 * v0 - v * v) / (2.0 * approach))
+        return float(v0), 0.0
+    needed = (v0 * v0 - v * v) / (2.0 * approach)
+    if needed > hard:
+        return float(np.sqrt(max(0.0, v0 * v0 - 2.0 * hard * approach))), float(hard)
+    return float(v), float(max(needed, comfort))
+
+
+def turn_delay(v0, v, approach, radius, angle_rad, a_long, accel):
+    """회전을 속도 v로 돌 때 v0 그대로 도는 것보다 늦는 시간(s). 회전 시작까지 approach 안에서 감속 a_long으로 v까지 줄이고(먼저 v0로
+    가다가), 호 r·θ를 v로 돌고, 다시 accel로 v0까지 올린다. 비교는 같은 거리(접근 + 호 + 재가속 거리)를 v0로 가는 시간이다."""
+    if v >= v0:
+        return 0.0
     s1 = (v0 * v0 - v * v) / (2.0 * a_long)
     t1 = (v0 - v) / a_long
     arc = radius * angle_rad
@@ -143,4 +183,4 @@ def turn_delay(v0, v, approach, radius, angle_rad, decel, accel):
     t3 = (v0 - v) / accel
     taken = (approach - s1) / v0 + t1 + arc / v + t3
     reference = (approach + arc + s3) / v0
-    return float(taken - reference), float(a_long)
+    return float(taken - reference)

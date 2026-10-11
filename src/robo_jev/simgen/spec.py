@@ -64,16 +64,25 @@ def round_to(x: float, resolution: float) -> float:
 
 @dataclass(frozen=True)
 class Reading:
-    """글에 쓰이는 수치 하나: 보고된 값(반올림 끝), 감각 잡음 σ, 보고 해상도."""
+    """글에 쓰이는 수치 하나: 보고된 값(반올림 끝), 감각 잡음 σ, 보고 해상도, 보고 바닥.
+
+    ``floor``가 있으면 날 값이 바닥보다 작을 때 바닥으로 보고한다(속도 0.00 m/s·간격 0.00 m 같은 글이 나오지 않게, 리뷰 1 m7).
+    바닥에 붙은 보고는 '그 이하'라는 검열된 관측이다 — 사후 표본이 그렇게 다룬다(:attr:`censored`)."""
 
     value: float
     sigma: float
     resolution: float
+    floor: float | None = None
 
     @property
     def sigma_eff(self) -> float:
         """사후 표본의 σ: 감각 잡음과 반올림(균등, 분산 res²/12)을 합친 것."""
         return math.sqrt(self.sigma * self.sigma + self.resolution * self.resolution / 12.0)
+
+    @property
+    def censored(self) -> bool:
+        """보고가 바닥에 붙었나(날 값 ≤ 바닥 + 해상도/2였다)."""
+        return self.floor is not None and self.value <= self.floor + 1e-9
 
 
 @dataclass(frozen=True)

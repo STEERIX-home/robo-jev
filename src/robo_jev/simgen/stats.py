@@ -2,8 +2,9 @@
 
 정답 균형은 질문 종류마다 본다: noul의 p_yes 분포(0 근처·1 근처·가운데), 핵심 noul의 평균(지시서 §5: 0.3~0.7), 행동 choice의 최고 확률·
 엔트로피·argmax 선택지, 상태 choice의 최고 확률, 규칙 답의 갈래. **참 결과 대조**는 noul 정답(사후 확률)을 같은 구간끼리 묶어 참 세계에서
-실제로 일어난 비율과 나란히 놓는다 — 사후 표본이 생성 모형과 어긋나면 여기서 보인다(학습 정답의 보정 점검; 완전히 같을 필요는 없다:
-참 세계는 여유 표본기에서, 사후는 국소적으로 평평한 사전에서 나온다).
+실제로 일어난 비율과 나란히 놓는다. 참 세계는 정답의 사후에서 뽑으므로(리뷰 1 I4) 이 표는 구성상 보정되어야 한다 — 어긋나면 표본·굴리기
+갈래가 어긋난 것이다(사후 자체가 맞는지는 시험의 순방향 SBC가 본다: 속성 목록 사전에서 세계를 뽑아 관측 → 정답 → 그 세계의 결과).
+권고는 그 순간 가능한 모든 행동으로 다시 잰다(meta.recommendation.costs — 맞는 권고의 최선과의 차 ≤ τ, 틀린 권고 ≥ 2τ).
 """
 
 from __future__ import annotations
@@ -83,6 +84,8 @@ def dataset_stats(records: list[dict], cfg: SimgenConfig, seconds: float | None 
         "hint_share": round(float(np.mean([m["hint"] for m in meta])), 4),
         "recommendation_share": {s: round(float(np.mean([m["recommendation"]["present"] for m in meta if m["style"] == s])), 4) for s in ("facts", "prose", "planner")},
         "wrong_recommendation_share_of_present": round(float(np.mean([m["recommendation"]["wrong"] for m in meta if m["recommendation"]["present"]])), 4) if any(rec_present) else None,
+        "recommendation": _recommendation_stats(meta, cfg),
+        "exact_label_share": round(sum(len(m.get("exact_labels", [])) for m in meta) / max(1, sum(len(r["labels"]) for r in records)), 4),
         "criterion_share_of_action_questions": round(float(np.mean([c is not None for m in meta for c in m["criteria"].values()])), 4),
         "criteria": _shares(c for m in meta for c in m["criteria"].values() if c is not None),
         "pairs": _shares(m["pair"]["kind"] for m in meta if m["pair"]),
@@ -98,6 +101,27 @@ def dataset_stats(records: list[dict], cfg: SimgenConfig, seconds: float | None 
     out["text_length"]["share_400_to_1500"] = round(float(np.mean([400 <= len(r["request"]["state"]) <= 1500 for r in records])), 4)
     out["truth_check"] = _truth_check(records)
     return out
+
+
+def _recommendation_stats(meta: list[dict], cfg: SimgenConfig) -> dict:
+    """권고를 그 순간 가능한 모든 행동(기본 비용표)으로 다시 잰 값: 틀린 비율, 최선과의 차, 기본 질문에 없는 권고의 비율."""
+    present = [m["recommendation"] for m in meta if m["recommendation"]["present"]]
+    if not present:
+        return {"present": 0}
+    tau = float(cfg.values["tau"])
+    gap_correct = [r["gap"] for r in present if not r["wrong"]]
+    gap_wrong = [r["gap"] for r in present if r["wrong"]]
+    pool = [any(c - min(r["costs"].values()) >= 2.0 * tau for c in r["costs"].values()) for r in present]
+    return {
+        "present": len(present),
+        "wrong_share": round(float(np.mean([r["wrong"] for r in present])), 4),
+        "wrong_possible_share": round(float(np.mean(pool)), 4),
+        "correct_gap_to_best": _summary(gap_correct),
+        "correct_within_tau": round(float(np.mean([g <= tau + 1e-9 for g in gap_correct])), 4) if gap_correct else None,
+        "wrong_gap_to_best": _summary(gap_wrong),
+        "wrong_at_least_2tau": round(float(np.mean([g >= 2.0 * tau - 1e-9 for g in gap_wrong])), 4) if gap_wrong else None,
+        "not_in_primary_question": round(float(np.mean([r["option"] is None for r in present])), 4),
+    }
 
 
 def _question_stats(records: list[dict]) -> dict:
@@ -153,24 +177,29 @@ def _label_stats(records: list[dict]) -> dict:
 
 
 def _margin_stats(records: list[dict], cfg: SimgenConfig) -> dict:
+    """닻 세계의 여유(meta.margins — 관측을 만든 설계 목표)와 참 세계(사후에서 뽑은 세계)의 여유. 앞의 것이 설계 분포를 따라야 하고,
+    뒤의 것은 관측의 불확실성만큼 퍼진다(경계 집중이 관측에 걸려 있다는 뜻)."""
     by_name: dict[str, list] = defaultdict(list)
     for r in records:
         m = r["meta"]
         if (m["pair"] and m["pair"]["role"] == "variant") or m["margin_redraws"]:
             continue
         for name, value in m["margins"].items():
-            by_name[name].append((value, m["body"]))
+            by_name[name].append((value, m["body"], r["truth"]["world"]["margins"].get(name)))
     out = {}
     for name, rows in sorted(by_name.items()):
-        values = [v for v, _ in rows]
-        normalized = [v / cfg.catalog["margins"][name]["sigma"][b] for v, b in rows]
+        values = [v for v, _, _ in rows]
+        normalized = [v / cfg.catalog["margins"][name]["sigma"][b] for v, b, _ in rows]
+        truth = [t / cfg.catalog["margins"][name]["sigma"][b] for _, b, t in rows if t is not None]
         out[name] = {
             "unit": cfg.catalog["margins"][name]["unit"],
             "summary": _summary(values),
             "normalized_by_sigma": _summary(normalized),
             "share_abs_below_1.5_sigma": round(float(np.mean(np.abs(normalized) < 1.5)), 4),
-            "design_share_abs_below_1.5_sigma": round(float(np.mean([_design_share(cfg, name, b) for _, b in rows])), 4),
+            "design_share_abs_below_1.5_sigma": round(float(np.mean([_design_share(cfg, name, b) for _, b, _ in rows])), 4),
             "share_negative": round(float(np.mean(np.array(values) < 0)), 4),
+            "truth_share_abs_below_1.5_sigma": round(float(np.mean(np.abs(truth) < 1.5)), 4) if truth else None,
+            "truth_share_negative": round(float(np.mean(np.array(truth) < 0)), 4) if truth else None,
         }
     return out
 

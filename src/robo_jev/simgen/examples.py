@@ -1,11 +1,14 @@
-"""사용자 검수용 예시 20개 (Task v0a 지시서 §6): 분야 10개 × 2, P1 단독·P5 단독·조합(6개 이상), 문체 고르게, 사실 하나 바꾼 쌍 하나.
+"""사용자 검수용 예시 20개 (Task v0a 지시서 §6): 분야 10개 × 2, P1 단독·P5 단독·조합(6개 이상), 마주 옴 1개 이상, 문체 고르게,
+사실 하나 바꾼 쌍 하나.
 
 예시는 정해 둔 칸(:data:`PLAN`)마다 장면·몸·문체를 강제하고, seed를 차례로 시도해 **정답이 한쪽으로 다 쏠리지 않은**(기본 행동 질문의 최고
-확률 ≤ 0.97, 핵심 noul ∈ [0.03, 0.97]) 첫 레코드를 고른다 — 칸의 요구(틀린 권고·힌트·기준·상태·규칙 질문)도 그 조건에 더한다. 고른 seed는
-레코드의 `generator`에 남으므로 그대로 다시 만들 수 있다. 쌍은 numeric 변형이 기본 행동의 argmax를 바꾸는 seed를 고른다.
+확률 ≤ 0.97, 핵심 noul ∈ [0.03, 0.97]) 첫 레코드를 고른다 — 칸의 요구(틀린 권고·힌트·기준·상태·규칙 질문·보이는 뚜껑)도 그 조건에 더한다.
+**고르는 판단은 K = 2048로 다시 계산한 정답으로 한다**(리뷰 1 m8: K = 256 정답의 몬테카를로 잡음으로 고르면 보여 주는 정답이 그 잡음
+쪽으로 치우친다). 고른 seed는 레코드의 `generator`에 남으므로 그대로 다시 만들 수 있다. 쌍은 numeric 변형이 기본 행동의 argmax를 바꾸는
+seed를 고른다.
 
-마크다운은 예시마다: 틀(분야·몸·장면·문체·표시), 모델이 받는 글(상태 + 질문) 그대로, 정답(확률·기대 비용), 숨은 참값과 실제로 일어난 것,
-계산 과정 한 문단.
+마크다운은 예시마다: 틀(분야·몸·장면·문체·표시), 모델이 받는 글(상태 + 질문) 그대로, 정답(확률·기대 비용), 참 세계(정답의 사후에서 뽑은
+세계)와 실제로 일어난 것, 계산 과정 한 문단.
 """
 
 from __future__ import annotations
@@ -22,10 +25,11 @@ _SCENE_NAMES = {
     "p1_step_in": "someone steps into the path (P1)",
     "p1_crossing": "crossing paths (P1)",
     "p1_head_on": "meeting head-on in an aisle (P1)",
-    "p5_braking": "braking with an open container (P5)",
-    "p5_turning": "turning with an open container (P5)",
-    "p1p5_step_in_carrying": "someone steps in while you carry an open container (P1+P5)",
+    "p5_braking": "braking while carrying liquid (P5)",
+    "p5_turning": "turning while carrying liquid (P5)",
+    "p1p5_step_in_carrying": "someone steps in while you carry liquid (P1+P5)",
 }
+SELECTION_K = 2048
 
 
 @dataclass(frozen=True)
@@ -36,13 +40,13 @@ class Slot:
     style: str
     variant: str | None = None
     agent_kind: str | None = None
-    needs: tuple[str, ...] = ()      # wrong_rec / hint / criterion / state / rule / two_fix / pair_flip
+    needs: tuple[str, ...] = ()      # wrong_rec / hint / criterion / state / rule / two_fix / lid_visible
     pair: bool = False                # 이 칸과 다음 칸이 쌍(다음 칸은 numeric 변형)
     seed_base: int = 0
     notes: dict = field(default_factory=dict)
 
 
-#: 20칸: 분야마다 둘, 조합 8 · P1 단독 7 · P5 단독 5, 문체 facts 6 · prose 7 · planner 7, 쌍 하나(19·20).
+#: 20칸: 분야마다 둘, 조합 8 · P1 단독 7(마주 옴 2) · P5 단독 5, 문체 facts 6 · prose 7 · planner 7, 쌍 하나(19·20).
 PLAN: tuple[Slot, ...] = (
     Slot("cafe", "p1p5_step_in_carrying", "mobile_base", "prose", agent_kind="adult", needs=("state",), seed_base=1000),
     Slot("cafe", "p5_braking", "arm", "planner", needs=("hint",), seed_base=2000),
@@ -59,7 +63,7 @@ PLAN: tuple[Slot, ...] = (
     Slot("home", "p5_turning", "mobile_base", "prose", needs=("criterion",), seed_base=13000),
     Slot("home", "p1_step_in", "humanoid", "prose", agent_kind="ball", seed_base=14000),
     Slot("retail", "p1p5_step_in_carrying", "humanoid", "facts", agent_kind="cart", needs=("rule",), seed_base=15000),
-    Slot("retail", "p5_braking", "forklift_amr", "prose", seed_base=16000),
+    Slot("retail", "p5_braking", "forklift_amr", "prose", needs=("lid_visible",), seed_base=16000),
     Slot("greenhouse", "p1_crossing", "mobile_base", "prose", variant="moving", agent_kind="other_robot", needs=("state",), seed_base=17000),
     Slot("greenhouse", "p5_turning", "arm", "facts", seed_base=18000),
     Slot("transit", "p1p5_step_in_carrying", "mobile_base", "planner", agent_kind="adult", pair=True, seed_base=19000),
@@ -80,6 +84,7 @@ def _primary(record: dict) -> dict:
 
 
 def _informative(record: dict, needs: tuple[str, ...]) -> bool:
+    """칸의 조건 — ``record``는 고르기용(K = SELECTION_K)으로 계산한 레코드다."""
     label = _primary(record)
     key = record["labels"][record["meta"]["key_question"]]["p_yes"]
     if max(label["probabilities"].values()) > 0.97 or not 0.03 <= key <= 0.97:
@@ -92,11 +97,12 @@ def _informative(record: dict, needs: tuple[str, ...]) -> bool:
         "state": "state" in kinds,
         "rule": "rule" in kinds,
         "two_fix": bool(meta["agent"]) and meta["agent"]["velocity_mode"] == "two_fix",
+        "lid_visible": bool(meta["container"]) and meta["container"]["lid_view"] == "lid",
     }
     return all(checks[n] for n in needs)
 
 
-def build_examples(cfg: SimgenConfig | None = None, git: str | None = None, id_prefix: str = "v0a-ex", max_tries: int = 400) -> list[dict]:
+def build_examples(cfg: SimgenConfig | None = None, git: str | None = None, id_prefix: str = "v0a-ex", max_tries: int = 600) -> list[dict]:
     """PLAN의 20개(쌍은 두 레코드)를 만든다."""
     cfg = cfg or default_config()
     records: list[dict] = []
@@ -106,21 +112,25 @@ def build_examples(cfg: SimgenConfig | None = None, git: str | None = None, id_p
         for t in range(max_tries):
             seed = slot.seed_base + t
             moment = build_moment(cfg, seed, slot.domain, forced)
-            record = assemble(cfg, moment, len(records), git=git, id_prefix=id_prefix, forced=forced)
-            if not _informative(record, slot.needs):
+            if not _informative(assemble(cfg, moment, len(records), git=git, id_prefix=id_prefix, forced=forced, k=SELECTION_K), slot.needs):
                 continue
+            record = assemble(cfg, moment, len(records), git=git, id_prefix=id_prefix, forced=forced)
             if slot.pair:
                 variant = build_moment(cfg, seed, slot.domain, forced, "numeric")
                 if variant.variant != "numeric" or variant.flipped != "step_in":
                     continue
-                twin = assemble(cfg, variant, len(records) + 1, git=git, id_prefix=id_prefix, forced=forced)
-                a, b = _primary(record), _primary(twin)
+                selection = assemble(cfg, variant, len(records) + 1, git=git, id_prefix=id_prefix, forced=forced, k=SELECTION_K)
+                a = _primary(assemble(cfg, moment, len(records), git=git, id_prefix=id_prefix, forced=forced, k=SELECTION_K))
+                b = _primary(selection)
                 if max(a["probabilities"], key=a["probabilities"].get) == max(b["probabilities"], key=b["probabilities"].get):
                     continue
                 ids = (f"{id_prefix}-{len(records):06d}", f"{id_prefix}-{len(records) + 1:06d}")
                 record = assemble(cfg, moment, len(records), git=git, id_prefix=id_prefix, forced=forced, pair={"of": ids[1], "kind": "numeric", "role": "base"})
                 twin = assemble(cfg, variant, len(records) + 1, git=git, id_prefix=id_prefix, forced=forced,
                                 pair={"of": ids[0], "kind": "numeric", "role": "variant", "flipped": variant.flipped})  # fmt: skip
+                a, b = _primary(record), _primary(twin)
+                if max(a["probabilities"], key=a["probabilities"].get) == max(b["probabilities"], key=b["probabilities"].get):
+                    continue  # 보여 주는 K에서도 기본 행동이 바뀌어야 한다
                 chosen = [record, twin]
             else:
                 chosen = [record]
@@ -177,7 +187,8 @@ def _label_block(record: dict) -> list[str]:
             out.append("")
         elif label["type"] == "noul":
             what = f"{basis.get('event')}" + (f" if {basis['option']}" if basis.get("option") else "")
-            out.append(f"**`{name}`** — noul (P(yes) = frequency of `{what}` over the posterior worlds): **{_fmt_p(label['p_yes'])}**")
+            how = "exact posterior probability of" if name in record["meta"].get("exact_labels", []) else "frequency over the posterior worlds of"
+            out.append(f"**`{name}`** — noul (P(yes) = {how} `{what}`): **{_fmt_p(label['p_yes'])}**")
             out.append("")
         else:
             what = f"{basis.get('name')}" + (f" if {basis['option']}" if basis.get("option") else "")
@@ -189,38 +200,41 @@ def _label_block(record: dict) -> list[str]:
 _HIDDEN_KEYS = {
     "gap": "centre-to-centre distance along your path (m)", "lat0": "lateral position now, + = your left (m)", "u0": "lateral speed now (m/s)",
     "ra": "agent radius (m)", "stay_s": "how long it would stay (s)", "cross_speed": "speed it would cross at (m/s)",
-    "back_speed": "speed it would back off at (m/s)", "roll_decel": "ball rolling deceleration (m/s²)", "dist": "distance (m)",
+    "back_speed": "speed it would back off at (m/s)", "roll_decel": "ball rolling deceleration (m/s²)", "dist": "distance, agent centre to your path centreline (m)",
     "ahead": "crossing line, robot centre to agent line (m)", "va": "agent speed (m/s)", "yield_standoff": "where it would stop short of your path (m)",
     "hurry_factor": "speed-up factor if hurrying", "width": "true aisle width (m)", "lat_a": "agent lateral position (m)",
     "aside_speed": "sideways speed if moving aside (m/s)", "keep_standoff": "standoff it keeps if it stops for you (m)",
     "obstacle": "obstacle distance from your centre (m)", "fill": "true fill fraction", "k": "slosh factor k (1.0–1.6)",
     "tilt_deg": "floor tilt (deg)", "lid": "lid present (1 = yes)", "intent": "intent now",
+    "reacts": "would brake late for you if you block its line (1 = yes)", "react_standoff": "where it would stop if it reacts (m)",
 }  # fmt: skip
 
 
 def _truth_block(record: dict) -> list[str]:
     world = record["truth"]["world"]
     v = world["values"]
-    lines = []
-    at = world["at_observation"]
+    lines = ["The true world below is **one more draw from the same posterior** the labels use (not the world the observation was generated from),",
+             "so over many records the realized outcomes are calibrated against the labels.", ""]  # fmt: skip
     if "intent" in v and v["intent"] is not None:
-        changed = at.get("intent_obs") not in (None, v["intent"])
-        lines.append(f"- **intent now: `{v['intent']}`**" + (f" (it was `{at['intent_obs']}` when observed — it changed since)" if changed else " (same as when observed)"))
-    is_ball = (world.get("agent_kind") == "ball")
+        lines.append(f"- **intent: `{v['intent']}`**")
+    is_ball = world.get("agent_kind") == "ball"
     for key in ("gap", "dist", "ahead", "lat0", "lat_a", "u0", "va", "ra", "width", "stay_s", "cross_speed", "back_speed", "yield_standoff",
-                "hurry_factor", "aside_speed", "roll_decel", "obstacle", "fill", "k", "tilt_deg", "lid"):  # fmt: skip
+                "hurry_factor", "aside_speed", "keep_standoff", "reacts", "react_standoff", "roll_decel", "obstacle", "fill", "k", "tilt_deg", "lid"):  # fmt: skip
         if key not in v or (key == "roll_decel" and not is_ball):
             continue
-        if is_ball and key in ("stay_s", "cross_speed", "back_speed", "yield_standoff", "hurry_factor", "aside_speed", "keep_standoff"):
+        if is_ball and key in ("stay_s", "cross_speed", "back_speed", "yield_standoff", "hurry_factor", "aside_speed", "keep_standoff", "reacts", "react_standoff"):
             continue
-        lines.append(f"- {_HIDDEN_KEYS[key]}: {round(v[key], 3)}")
+        label = "centre-to-centre distance along the aisle now (m)" if key == "dist" and record["meta"]["scene"] == "p1_head_on" else _HIDDEN_KEYS[key]
+        lines.append(f"- {label}: {round(v[key], 3)}")
+    views = record["meta"].get("sides")
     for i, side in enumerate(("left", "right")):
-        views = at.get("sides")
         if views and views[i] in ("occluded", "blocked"):
             present = v.get(f"side_{side}", 0.0) > 0.5
             text = "visibly blocked" if views[i] == "blocked" else ("hidden from view — something IS there" if present else "hidden from view — it is actually free")
             lines.append(f"- {side} side: {text}")
-    lines.append(f"- decision margins (true world): {', '.join(f'{k} = {m:+.3f}' for k, m in world['margins'].items())}")
+    anchor = record["meta"]["margins"]
+    lines.append(f"- decision margins: observation generated at {', '.join(f'{k} = {m:+.3f}' for k, m in anchor.items())} (design target); "
+                 f"this true world {', '.join(f'{k} = {m:+.3f}' for k, m in world['margins'].items())}")  # fmt: skip
     lines.append("- what actually happened in the true world:")
     for name, outcome in record["truth"]["realized"].items():
         if isinstance(outcome, dict):
@@ -236,7 +250,9 @@ def _flags(record: dict) -> str:
     rec = meta["recommendation"]
     bits = []
     if rec["present"]:
-        bits.append(f"planner recommendation `{rec['option']}` ({'WRONG — physically worse than the best' if rec['wrong'] else 'correct'})")
+        shown = f"`{rec['option']}`" if rec["option"] else f"`{rec['canonical']}` (not among the options of `{rec['question']}`)"
+        verdict = f"WRONG — {rec['gap']:.1f} worse than the best available action" if rec["wrong"] else f"correct — within τ of the best ({rec['gap']:.2f})"
+        bits.append(f"planner recommendation {shown} ({verdict})")
     if meta["hint"]:
         bits.append("computed hint in the text")
     crit = [c for c in meta["criteria"].values() if c]
@@ -257,23 +273,34 @@ def _flags(record: dict) -> str:
 def render_markdown(records: list[dict], cfg: SimgenConfig | None = None) -> str:
     cfg = cfg or default_config()
     costs = cfg.values["costs"]
+    speed = cfg.values.get("contact_speed", {})
+    mechanisms = (
+        "contact costs scaled by impact speed (floor {:g}), hard-braking cost {}".format(speed.get("floor", 1.0), cfg.values.get("hard_brake_cost"))
+        if speed.get("enabled") else "contact cost independent of impact speed, no cost for hard braking itself"
+    )
     out = [
-        "# simgen v0a — 20 examples for review",
+        "# simgen v0a (fix round 1) — 20 examples for review",
         "",
         "Each example is one judgment moment: what the model receives (**state + questions**, verbatim), the **labels** (posterior",
-        "probabilities, and expected costs for action choices), the **hidden truth** that produced the observation, and the computation in one",
+        "probabilities, and expected costs for action choices), a **true world** with what actually happened in it, and the computation in one",
         "paragraph. The model sees only the state and the questions.",
         "",
         "How the labels are defined (docs/12 §5, corrected):",
         "",
-        "- **noul** = share of the K = 256 posterior worlds (sampled from what the robot can see) in which the event happens.",
+        "- **noul** = probability of the event over the posterior given what the robot can see: the share of K = 256 posterior worlds, or the",
+        "  exact value where it has a closed form (stop-short, room to pass).",
         "- **score** = mean of a [0, 1] quantity over the same worlds (a probability, closeness, share of the rim headroom used, or delay / 3 s).",
         "- **action choice** = softmax(−(E[cost] − min E[cost]) / τ), τ = {:g}. The highest probability is always the lowest expected cost. Costs"
-        " (values-v0, to be tuned by you): person {} · child/elder {} · vehicle {} · object {} · spill hot {} / chemical {} / other {} · delay {}/s.".format(
-            cfg.values["tau"], costs["contact_person"], costs["contact_vulnerable"], costs["contact_vehicle"], costs["contact_object"],
-            costs["spill_hot"], costs["spill_chemical"], costs["spill_other"], costs["delay_per_s"]),
-        "- **state choice** = posterior share of each discrete state (intent, fill range, lid). **rule choice** = the stated rule applied to the number as printed.",
-        "- Distances in the text are surface gaps (your front → their nearest side). Hidden values never appear in the model input.",
+        " ({}, to be tuned by you): person {} · child/elder {} · vehicle {} · object {} · spill hot {} / chemical {} / other {} · delay {}/s; {}.".format(
+            cfg.values["tau"], cfg.versions["values"], costs["contact_person"], costs["contact_vulnerable"], costs["contact_vehicle"],
+            costs["contact_object"], costs["spill_hot"], costs["spill_chemical"], costs["spill_other"], costs["delay_per_s"], mechanisms),
+        "- **state choice** = posterior probability of each discrete state (intent, fill range, lid — exact). **rule choice** = the stated rule applied to the number as printed.",
+        "- **planner recommendation** = chosen over every action available at that moment with the default costs: a correct one is within τ of the",
+        "  best, a wrong one at least 2τ worse.",
+        "- Distances in the text are surface gaps (your front → their nearest side). In an aisle (head-on) a reported gap is the gap **at the time",
+        "  of the report**; both of you have moved since. Hidden values never appear in the model input.",
+        "- The **true world** is one more draw from the same posterior the labels use (fix round 1): the world the observation was generated from",
+        "  only sets the observation, so realized outcomes are calibrated against the labels.",
         "",
         "| # | id | domain | body | scene | style | notes |",
         "|---|---|---|---|---|---|---|",
@@ -313,7 +340,7 @@ def render_markdown(records: list[dict], cfg: SimgenConfig | None = None) -> str
             "### Labels",
             "",
             *_label_block(r),
-            "### Hidden truth",
+            "### True world (a posterior draw) and what happened",
             "",
             *_truth_block(r),
             "",
