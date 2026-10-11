@@ -242,6 +242,7 @@ uv run python scripts/launch_run.py finish  --manifest …   # 중단·--no-watc
 uv run python scripts/launch_run.py down    --manifest …   # 지금 지운다 (가져오지 않는다)
 uv run python scripts/launch_run.py pods                   # 읽기 전용: 남은 pod·볼륨이 없는지 ("clean": true)
 uv run python scripts/launch_run.py ledger                 # 단계 장부
+uv run python scripts/launch_run.py ledger --reconcile     # 읽기 전용: RunPod 청구 기록을 장부에 (추정과 청구 중 큰 쪽을 센다)
 ```
 pod에 가는 코드는 **커밋된 것**(`git archive <ref>`)뿐이다 — 고치는 중인 파일은 가지 않는다(작업 트리가 깨끗하지 않으면 `--allow-dirty` 없이는 거절). v0d 학습기가 main에 병합되기 전에는 `--code-ref`에 병합한 커밋을 준다(이번 시운전 묶음 `41db4a6` = task-cloud1 `b556622` + task-v0d `7668b8b`, 브랜치에 올리지 않은 커밋).
 
