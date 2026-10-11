@@ -238,6 +238,22 @@ def test_full_fine_tuning_in_bf16_trains_every_parameter_through_fp32_masters(tm
         assert torch.equal(p, m.to(torch.bfloat16))
 
 
+def test_a_bf16_adapter_computes_in_bf16_and_updates_through_fp32_masters(tmp_path, fixtures):
+    trainer = make_trainer(tmp_path, fixtures, lora_dtype="bfloat16", lr=5e-3)
+    lora = [(n, p) for n, p in trainer.backbone.text.named_parameters() if "lora_" in n]
+    assert lora and all(p.dtype == torch.bfloat16 and p.requires_grad for _, p in lora)
+    assert isinstance(trainer.optimizer, MasterWeightAdamW) and len(trainer.optimizer.master_pairs) == len(lora)
+    assert trainer.manifest["model"]["lora_dtype"] == "bfloat16"
+    path = trainer.run()["checkpoint"]
+    for _, p, m in trainer.optimizer.master_pairs:
+        assert m.dtype == torch.float32 and torch.equal(p, m.to(torch.bfloat16))
+    assert any(torch.count_nonzero(p) > 0 for n, p in lora if "lora_B" in n)
+    fresh = QwenBackbone.tiny(seed=4, vocab_size=tokenizer().get_vocab_size())
+    T.apply_checkpoint(fresh, path, tokenizer_sha256=trainer.manifest["tokenizer"]["sha256"])
+    loaded = {n: p for n, p in fresh.text.named_parameters() if "lora_" in n}
+    assert all(loaded[n].dtype == torch.float32 and torch.equal(loaded[n], p.float()) for n, p in lora)  # 평가는 fp32 adapter (같은 값)
+
+
 def test_the_learning_rate_follows_warmup_then_cosine(tmp_path, fixtures):
     trainer = make_trainer(tmp_path, fixtures, epochs=2, lr=1e-3, warmup_ratio=0.25)
     seen = []
@@ -279,11 +295,13 @@ def test_a_finished_run_writes_a_standard_checkpoint_and_marks_completion(tmp_pa
     assert len(metrics["steps"]) == trainer.max_steps and metrics["summary"]["last_loss"] == metrics["steps"][-1]["loss"]
 
 
-@pytest.mark.parametrize("mode", ["lora", "full"])
+@pytest.mark.parametrize("mode", ["lora", "lora-bf16", "full"])
 def test_resuming_from_a_checkpoint_is_bit_identical_to_an_uninterrupted_run(tmp_path, fixtures, mode):
-    extra = {"mode": mode, "epochs": 2, "lr": 2e-3}
+    extra = {"mode": mode.split("-")[0], "epochs": 2, "lr": 2e-3}
     if mode == "full":
         extra["dtype"] = "bfloat16"
+    if mode == "lora-bf16":
+        extra["lora_dtype"] = "bfloat16"
     straight = make_trainer(tmp_path / "straight", fixtures, **extra)
     straight.run()
     first = make_trainer(tmp_path / "split", fixtures, stop_after_steps=3, **extra)

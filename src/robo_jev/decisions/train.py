@@ -12,6 +12,9 @@
 * ``lora`` (기본) — 저장소의 :func:`robo_jev.train.attach_lora` (peft 0.21 ``inject_adapter_in_model``, adapter는 fp32, 나머지 고정)로
   attention(full attention의 q·k·v·o, DeltaNet의 in_proj_qkv·in_proj_z·out_proj)과 MLP(gate·up·down) 투영에 r = 32, α = 64.
   LM head(= embedding, 묶인 가중치)는 고정이다. optimizer는 평범한 AdamW(fp32 파라미터 — master 사본이 필요 없다).
+  ``lora_dtype: bfloat16``(선택)은 adapter를 bf16으로 계산하고 fp32 master 사본(:class:`robo_jev.train.MasterWeightAdamW`)으로 갱신한다 —
+  fp32 adapter는 peft가 모듈마다 입력을 fp32로 바꾸고 넓은 출력(최대 [토큰, 6144])을 fp32로 곱하고 더하는 원소별 연산이 많아, 대역폭이 낮은
+  GB10에서 step의 ≈ 30 %를 쓴다(보고서의 측정). 평가 적재(:func:`apply_checkpoint`)는 adapter를 언제나 fp32로 계산한다(같은 값, 더 정밀).
 * ``full`` — text 모델 전체(묶인 embedding/LM head 포함)를 BF16으로 계산하고 저장소의 :class:`robo_jev.train.MasterWeightAdamW`
   (fp32 master 사본에서 갱신, bf16에는 반올림만)로 갱신한다 — 이것 없이 BF16에 직접 더하면 작은 갱신이 반올림에 사라진다(P2).
   gradient 누적은 bf16 ``.grad``에서 일어난다(저장소의 T1 학습과 같다; 보고서).
@@ -126,6 +129,7 @@ DEFAULTS: dict[str, Any] = {
     "run_name": None,
     "mode": "lora",
     "lora": DEFAULT_LORA,
+    "lora_dtype": "float32",  # adapter 파라미터의 계산 dtype — bfloat16이면 fp32 master(MasterWeightAdamW)로 갱신한다 (모듈 설명)
     "format": "chat",
     "augment": True,
     "questions_per_request": DEFAULT_QUESTIONS_PER_REQUEST,
@@ -199,6 +203,7 @@ def resolve_config(config: dict[str, Any]) -> dict[str, Any]:
     _need(_is_int(lora["r"]) and lora["r"] >= 1 and _is_number(lora["alpha"]) and lora["alpha"] > 0, "lora: r ≥ 1 정수, alpha > 0")
     _need(_is_number(lora["dropout"]) and 0.0 <= lora["dropout"] < 1.0, "lora.dropout: [0, 1)")
     _need(isinstance(lora["targets"], list) and lora["targets"] and all(isinstance(t, str) for t in lora["targets"]), "lora.targets: 이름 목록")
+    _need(out["lora_dtype"] in DTYPES, f"lora_dtype: {list(DTYPES)} 중 하나 (받은 값: {out['lora_dtype']!r})")
     out["lora"] = lora
     _need(_is_int(out["questions_per_request"]) and out["questions_per_request"] >= 1, "questions_per_request: 1 이상의 정수")
     weights = out["type_weights"]
@@ -352,6 +357,10 @@ def _trainable(backbone: Any, config: dict[str, Any]) -> list[tuple[str, torch.T
     """학습 대상을 정한다 — LoRA는 adapter만(fp32), 전체는 Qwen3_5ForCausalLM의 모든 파라미터(묶인 가중치는 한 번). (이름, 파라미터)."""
     if config["mode"] == "lora":
         attach_lora(backbone, config["lora"])
+        if config["lora_dtype"] != "float32":  # bf16 adapter: 계산은 bf16, 갱신은 fp32 master (_optimizer가 MasterWeightAdamW를 고른다)
+            for name, p in backbone.text.named_parameters():
+                if "lora_" in name:
+                    p.data = p.data.to(DTYPES[config["lora_dtype"]])
         return [(name, p) for name, p in backbone.text.named_parameters() if p.requires_grad]
     backbone.model.requires_grad_(True)
     return list(backbone.model.named_parameters())
@@ -481,7 +490,8 @@ class DecisionTrainer:
         self.manifest = {
             "kind": TRAIN_KIND,
             "model": {
-                "id": cfg["model_id"], "mode": cfg["mode"], "lora": cfg["lora"] if cfg["mode"] == "lora" else None, "base": self.base,
+                "id": cfg["model_id"], "mode": cfg["mode"], "lora": cfg["lora"] if cfg["mode"] == "lora" else None,
+                "lora_dtype": cfg["lora_dtype"] if cfg["mode"] == "lora" else None, "base": self.base,
                 "trainable_parameters": int(sum(p.numel() for _, p in self.trainable)),
                 "total_parameters": int(sum(p.numel() for p in self.backbone.model.parameters())),
                 "state_scope": "text_model_lora" if cfg["mode"] == "lora" else "causal_lm_state_dict",
