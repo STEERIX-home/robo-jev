@@ -67,12 +67,12 @@ mkdir -p "$R/run/logs" "$R/repo"
 if ! command -v rsync >/dev/null 2>&1; then (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq rsync) >/dev/null 2>&1 || true; fi
 command -v rsync >/dev/null 2>&1 || { echo "BOOTSTRAP_FAIL=rsync"; exit 3; }
 UV=$(command -v uv || true)
-for c in /usr/local/bin/uv "$HOME/.local/bin/uv"; do [ -z "$UV" ] && [ -x "$c" ] && UV="$c"; done
+for c in /usr/local/bin/uv "$HOME/.local/bin/uv"; do if [ -z "$UV" ] && [ -x "$c" ]; then UV="$c"; fi; done
 if [ -z "$UV" ]; then
   (curl -LsSf https://astral.sh/uv/{uv_version}/install.sh | env UV_INSTALL_DIR=/usr/local/bin INSTALLER_NO_MODIFY_PATH=1 sh) >/dev/null 2>&1 \
     || python3 -m pip install -q "uv=={uv_version}" >/dev/null 2>&1 || true
   UV=$(command -v uv || true)
-  for c in /usr/local/bin/uv "$HOME/.local/bin/uv"; do [ -z "$UV" ] && [ -x "$c" ] && UV="$c"; done
+  for c in /usr/local/bin/uv "$HOME/.local/bin/uv"; do if [ -z "$UV" ] && [ -x "$c" ]; then UV="$c"; fi; done
 fi
 [ -n "$UV" ] || { echo "BOOTSTRAP_FAIL=uv"; exit 3; }
 PY=$("$UV" python find 3.11 2>/dev/null || true)

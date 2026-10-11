@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from robo_jev.launch.cloud import start_script, watchdog_script
+from robo_jev.launch.cloud import DEFAULT_BOOTSTRAP, UV_VERSION, _parse_markers, start_script, watchdog_script
 from robo_jev.launch.manifest import REPO
 
 WATCHDOG = REPO / "infra" / "runpod-watchdog.sh"
@@ -186,3 +186,33 @@ def test_the_watchdog_is_posix_sh_and_names_its_four_routes():
 @pytest.mark.parametrize("name", ["ROBOJEV_TERMINATE_AT", "ROBOJEV_START_GRACE", "ROBOJEV_DONE_GRACE", "RUNPOD_POD_ID"])
 def test_the_watchdog_reads_its_rules_from_the_pod_environment(name):
     assert name in WATCHDOG.read_text(encoding="utf-8")
+
+
+def test_the_default_bootstrap_reports_tools_the_pod_clock_and_whether_the_watchdog_is_armed(tmp_path):
+    """pod에서 처음 도는 부트스트랩(진짜 스크립트) — 가짜 uv·nvidia-smi로: uv·python 3.11·시계·GPU·감시 표지를 낸다(`set -e`에서도 끝까지)."""
+    import shlex
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "uv").write_text('#!/bin/sh\nif [ "$1 $2" = "python find" ]; then echo /usr/bin/python3; exit 0; fi\nexit 1\n', encoding="utf-8")
+    (bin_dir / "nvidia-smi").write_text('#!/bin/sh\necho "NVIDIA H100 80GB HBM3, 580.65.06, 81559 MiB"\n', encoding="utf-8")
+    for name in ("uv", "nvidia-smi"):
+        (bin_dir / name).chmod(0o755)
+    root = tmp_path / "root"
+    script = DEFAULT_BOOTSTRAP.replace("{root}", shlex.quote(str(root))).replace("{uv_version}", UV_VERSION)
+    env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(tmp_path)}
+    sleeper = subprocess.Popen(["sleep", "30"])
+    try:
+        missing = subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True, check=False)
+        root.mkdir(exist_ok=True)
+        (root / "watchdog.pid").write_text(str(sleeper.pid), encoding="utf-8")
+        armed = subprocess.run(["sh", "-c", script], env=env, capture_output=True, text=True, check=False)
+    finally:
+        sleeper.kill()
+        sleeper.wait()
+    assert missing.returncode == 0 and _parse_markers(missing.stdout)["WATCHDOG"] == "missing"
+    markers = _parse_markers(armed.stdout)
+    assert armed.returncode == 0, armed.stderr
+    assert markers["UV"] == str(bin_dir / "uv") and markers["PY311"] == "/usr/bin/python3" and markers["WATCHDOG"] == "armed"
+    assert abs(int(markers["NOW"]) - time.time()) < 30 and markers["GPU"].startswith("NVIDIA H100")
+    assert (root / "run" / "logs").is_dir() and (root / "repo").is_dir()
