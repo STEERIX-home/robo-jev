@@ -1,0 +1,656 @@
+# 상황 옷 카드 v0 — 분야 10개의 의미 층 (docs/12 §2 ①·§8, Task v0a 지시서 §3.10).
+#
+# 이 카드가 "LLM이 입히는 의미"다: 누가·어디서·무슨 일을 하나, 어떤 사람·차량·물체가 나오나, 무엇을 들고 있나, 상관없는 사실은
+# 무엇인가. 물리 값은 여기 없다 — 단어는 catalog-v0의 종류(agent kind, container kind)를 통해서만 판단에 영향을 준다(docs/12 §4).
+# 그래서 묘사(descriptor)에는 의도나 움직임을 암시하는 말을 쓰지 않는다("뛰어가는", "통화 중인" 같은 말은 단서 표가 맡는다).
+# 카트를 미는 사람의 ref는 사람이다(단서 "…에 정신이 팔려 있다"는 사람의 것; 카트에 닿으면 사람 닿음으로 센다).
+#
+# 자리 표시: {container} = 용기 문구, {Ref}/{ref} = 상대를 가리키는 말(대문자로 시작/소문자). 문구를 바꾸면 `version`을 올린다.
+version: skins-v0
+
+# 몸의 일반 이름(분야 카드에 없을 때)
+body_names:
+  mobile_base: ["a wheeled service robot", "a small autonomous mobile robot"]
+  humanoid: ["a humanoid robot", "a bipedal humanoid robot"]
+  forklift_amr: ["an autonomous forklift", "a driverless pallet mover"]
+  arm: ["a fixed robot arm", "a collaborative robot arm"]
+
+# 단서 문구 — catalog-v0의 cues 표와 같은 키. 단서 하나가 관측이고, 문구는 그 단서만 말한다(의도를 말하지 않는다).
+cue_phrases:
+  person:
+    slowing: ["{Ref} has been slowing down over the last half second.", "{Ref}'s steps have become shorter.", "{Ref} has lost some pace in the last moment."]
+    steady: ["{Ref} is moving at a steady pace.", "{Ref} has not changed pace.", "{Ref} is still mid-stride."]
+    glance: ["{Ref} glanced toward you.", "{Ref} looked up at you.", "{Ref} turned their head toward you."]
+    distracted: ["{Ref} is looking down at a phone.", "{Ref}'s attention seems to be on something off to the side.", "{Ref} is talking to someone and not looking your way."]
+    rushing: ["{Ref} is taking quick, hurried steps.", "{Ref} is moving briskly, almost jogging.", "{Ref} seems to be in a hurry."]
+    drift_left: ["{Ref} is drifting toward your left.", "{Ref} has started edging over to your left."]
+    drift_right: ["{Ref} is drifting toward your right.", "{Ref} has started edging over to your right."]
+    straight: ["{Ref} is holding a straight line down the middle.", "{Ref} is coming straight down the centre."]
+  vehicle:
+    brake_lights: ["{Ref}'s brake lights are on.", "{Ref}'s brake lights just lit up."]
+    steady: ["{Ref} is holding a steady speed.", "{Ref} has not slowed."]
+    reverse_alarm: ["{Ref}'s reversing alarm is beeping.", "{Ref} has its reverse beeper going."]
+    horn: ["{Ref} sounded its horn.", "{Ref} gave a short honk."]
+    drift_left: ["{Ref} is easing toward your left.", "{Ref} has started steering over to your left."]
+    drift_right: ["{Ref} is easing toward your right.", "{Ref} has started steering over to your right."]
+    straight: ["{Ref} is holding the middle of the aisle.", "{Ref} is coming straight down the centre."]
+  robot:
+    amber: ["{Ref}'s status light has turned amber, its yield signal.", "{Ref} is showing an amber yield light."]
+    green: ["{Ref}'s status light is green (proceeding).", "{Ref} is showing a steady green light."]
+    reverse_light: ["{Ref}'s white reversing light is on.", "{Ref} is showing its reversing light."]
+    priority_light: ["{Ref} is flashing its blue priority-transit light.", "{Ref} has its priority light flashing."]
+    drift_left: ["{Ref} is edging toward your left.", "{Ref} has started shifting over to your left."]
+    drift_right: ["{Ref} is edging toward your right.", "{Ref} has started shifting over to your right."]
+    straight: ["{Ref} is holding the centre line.", "{Ref} is coming straight down the middle."]
+  hand:
+    holding_part: ["{Ref} is holding something close to the work surface.", "{Ref} is gripping an item near the fixture."]
+    reaching_across: ["{Ref} is extended toward the far side of the cell.", "{Ref} is stretched out across the work area."]
+    pulling_back: ["The elbow behind {ref} is bending back toward the person.", "{Ref}'s wrist is turning back toward the person."]
+    still: ["{Ref} is not moving at the moment.", "{Ref} has been motionless for a moment."]
+    reaching: ["{Ref} is reaching steadily across the bench.", "{Ref} is sweeping across at an even pace."]
+    hesitating: ["{Ref} paused for a moment mid-reach.", "{Ref} hesitated briefly."]
+    quick_motion: ["{Ref} is moving quickly.", "{Ref} darted forward."]
+
+domains:
+  # ------------------------------------------------------------------------------------------------------------
+  warehouse:
+    name: warehouse
+    floor: {hard: 1.0}
+    side_obstacle_prior: 0.50     # 가려진 옆 공간에 무언가 있을 사전 확률 (랙·팔레트가 빽빽함)
+    tilt_sd_deg: 0.5              # 바닥 기울기 σ (도크 경사로 근처)
+    bodies: {forklift_amr: 0.35, mobile_base: 0.35, humanoid: 0.15, arm: 0.15}
+    body_names:
+      mobile_base: ["a tote-carrying mobile robot", "a small autonomous delivery cart"]
+      humanoid: ["a humanoid picking robot", "a bipedal warehouse robot"]
+      forklift_amr: ["an autonomous forklift", "a driverless pallet mover"]
+      arm: ["a robot arm at the pack-out bench", "a fixed picking arm"]
+    settings: ["Night shift in a large distribution warehouse.", "A busy morning in the fulfilment centre; trucks are being loaded.", "Inventory week in a cold-storage warehouse.", "Peak season at a parcel sorting warehouse."]
+    places:
+      floor: ["in the main aisle between racks 14 and 15", "along the staging lane next to the loading docks", "in a cross-aisle near the packing area", "past the end of the bulk-storage rows"]
+      corridor: ["a narrow picking aisle between two rows of shelving", "the single-lane passage beside the mezzanine stairs", "the aisle between pallet racks C and D"]
+      turn: ["the corner at the end of the rack row", "the bend into the staging lane", "the turn past the charging station"]
+      crossing: ["where a cross-aisle meets your aisle", "at the intersection by the loading-dock doors", "where the pedestrian walkway crosses your lane"]
+      bench: ["the pack-out bench", "the labelling station"]
+    tasks:
+      mobile_base: ["taking a tote of small parts to packing station 3", "returning an empty tote to the induction point", "delivering a stack of shipping labels to dock 6"]
+      humanoid: ["walking a picked order to the consolidation shelf", "heading to aisle 22 to pick a case"]
+      forklift_amr: ["moving a pallet of bottled water to dock 4", "returning to the charging area with empty forks", "bringing a pallet of flat-packed boxes to staging"]
+      arm: ["placing picked items into a shipping box", "moving a box from the scale to the conveyor"]
+    carry_tasks:
+      mobile_base: ["carrying {container} to the maintenance corner", "bringing {container} to the cleaning crew at dock 2"]
+      humanoid: ["carrying {container} to the break room", "bringing {container} to the supervisor's desk"]
+      forklift_amr: ["moving {container} on the forks to the wash bay", "taking {container} to the hazardous-materials cage"]
+      arm: ["moving {container} across the pack-out bench", "passing {container} to the end of the station"]
+    agents:
+      step_in: {adult: 0.45, forklift: 0.20, cart: 0.15, other_robot: 0.20}
+      crossing: {adult: 0.35, forklift: 0.35, cart: 0.10, other_robot: 0.20}
+      head_on: {adult: 0.35, forklift: 0.25, cart: 0.20, other_robot: 0.20}
+      arm: {hand: 1.0}
+    descriptors:
+      adult:
+        - {np: "a picker in a high-visibility vest", ref: "the picker"}
+        - {np: "a worker carrying a clipboard", ref: "the worker"}
+        - {np: "a supervisor with a handheld scanner", ref: "the supervisor"}
+        - {np: "an associate wearing a headset", ref: "the associate"}
+      forklift:
+        - {np: "a reach truck with an operator aboard", ref: "the reach truck"}
+        - {np: "a counterbalance forklift driven by an operator", ref: "the forklift"}
+      cart:
+        - {np: "a worker pulling a pallet jack", ref: "the worker"}
+        - {np: "a picker pushing a roll cage", ref: "the picker"}
+      other_robot:
+        - {np: "another tote robot", ref: "the other robot"}
+        - {np: "a shelf-lifting drive unit", ref: "the drive unit"}
+      hand:
+        - {np: "a packer's gloved hand", ref: "the packer's hand"}
+        - {np: "an operator's hand", ref: "the operator's hand"}
+    containers:
+      - {kind: bucket, content: other, phrases: ["a bucket of mop water", "a pail of soapy water"]}
+      - {kind: bucket, content: chemical, phrases: ["an open pail of floor sealant", "a bucket of degreaser"]}
+      - {kind: open_tote, content: other, phrases: ["a tote of rinse water"]}
+      - {kind: open_tote, content: chemical, phrases: ["a tote of battery-wash solution"]}
+      - {kind: shallow_tray, content: other, phrases: ["a drip tray full of condensate"]}
+      - {kind: mug, content: hot, phrases: ["a mug of coffee for the shift lead"]}
+      - {kind: takeaway_cup, content: hot, phrases: ["a paper cup of hot tea from the break room"]}
+      - {kind: beaker_250, content: chemical, phrases: ["a 250 ml sample from a leaking drum"]}
+    obstacles: ["a pallet left sticking out into the aisle", "the closed roll-up door to the dock", "a stack of empty totes", "a yellow safety barrier"]
+    bench_obstacles: ["the side wall of the shipping box", "the edge of the conveyor", "a roll of tape left on the bench"]
+    occluders: ["a pallet stack", "a rack upright", "a parked pallet jack"]
+    blockers: ["a full pallet", "the rack itself", "a row of stacked totes"]
+    distractors: ["The overhead lights in this zone are on a motion timer.", "A truck is reversing at dock 3, its alarm beeping.", "The temperature here is 14 °C.", "A radio in the break room is playing pop music.", "Your battery is at 61 %.", "The warehouse system has just released a new wave of orders."]
+
+  # ------------------------------------------------------------------------------------------------------------
+  factory:
+    name: factory line
+    floor: {hard: 1.0}
+    side_obstacle_prior: 0.50
+    tilt_sd_deg: 0.3
+    bodies: {arm: 0.40, mobile_base: 0.25, forklift_amr: 0.20, humanoid: 0.15}
+    body_names:
+      mobile_base: ["a parts-delivery AMR", "a tugger robot"]
+      humanoid: ["a humanoid line-assistant robot", "a humanoid robot doing kitting runs"]
+      forklift_amr: ["an autonomous forklift", "a driverless tow tractor"]
+      arm: ["a collaborative robot arm on the assembly line", "a six-axis arm in the screwdriving cell"]
+    settings: ["Second shift on an automotive sub-assembly line.", "An electronics assembly hall; the line is running at full rate.", "A metal-fabrication shop floor during a changeover.", "Morning shift at a food-packaging plant."]
+    places:
+      floor: ["along the aisle beside line 2", "past the quality-inspection booth", "between the press area and the kitting racks", "on the marked AMR lane next to the conveyor"]
+      corridor: ["the narrow gap between two machine guards", "the walkway between the paint booth and the parts racks", "the lane behind the stamping presses"]
+      turn: ["the corner by the tool crib", "the turn at the end of line 3", "the bend in front of the paint shop"]
+      crossing: ["where the pedestrian walkway crosses the vehicle lane", "at the junction in front of the press shop", "where the lane from goods-in meets the main aisle"]
+      bench: ["the screwdriving fixture", "the inspection station", "the glue-dispensing cell"]
+    tasks:
+      mobile_base: ["delivering a bin of fasteners to station 7", "returning empty bins to the supermarket rack"]
+      humanoid: ["carrying a kit of parts to station 4", "walking a replacement tool to the line lead"]
+      forklift_amr: ["moving a steel coil to the press", "bringing a crate of castings to machining"]
+      arm: ["moving a housing from the fixture to the outfeed conveyor", "carrying a screw tray to the next station"]
+    carry_tasks:
+      mobile_base: ["carrying {container} to the maintenance bay", "bringing {container} to line 2"]
+      humanoid: ["carrying {container} to the lab window", "bringing {container} to the supervisor's office"]
+      forklift_amr: ["moving {container} on the forks to the waste-fluid station", "taking {container} to the wash bay"]
+      arm: ["moving {container} from the dispensing nozzle to the test rig", "bringing {container} to the inspection station"]
+    agents:
+      step_in: {adult: 0.50, forklift: 0.20, cart: 0.15, other_robot: 0.15}
+      crossing: {adult: 0.40, forklift: 0.30, cart: 0.15, other_robot: 0.15}
+      head_on: {adult: 0.40, forklift: 0.20, cart: 0.20, other_robot: 0.20}
+      arm: {hand: 1.0}
+    descriptors:
+      adult:
+        - {np: "a line worker in safety glasses", ref: "the line worker"}
+        - {np: "a maintenance technician carrying a toolbox", ref: "the technician"}
+        - {np: "a quality inspector with a tablet", ref: "the inspector"}
+      forklift:
+        - {np: "a forklift driven by a material handler", ref: "the forklift"}
+        - {np: "a tow tractor pulling two carts", ref: "the tow tractor"}
+      cart:
+        - {np: "a worker pushing a parts trolley", ref: "the worker"}
+        - {np: "an operator wheeling a scrap bin", ref: "the operator"}
+      other_robot:
+        - {np: "another AMR", ref: "the other AMR"}
+        - {np: "a tugger robot with a train of carts", ref: "the tugger"}
+      hand:
+        - {np: "an operator's gloved hand", ref: "the operator's hand"}
+        - {np: "a technician's hand", ref: "the technician's hand"}
+    containers:
+      - {kind: bucket, content: chemical, phrases: ["a bucket of cutting fluid", "a pail of used coolant"]}
+      - {kind: open_tote, content: chemical, phrases: ["a tote of degreasing-bath liquid"]}
+      - {kind: shallow_tray, content: other, phrases: ["a drip tray of water from the leak test"]}
+      - {kind: beaker_250, content: chemical, phrases: ["a 250 ml beaker of epoxy hardener", "a beaker of solder flux"]}
+      - {kind: beaker_600, content: chemical, phrases: ["a 600 ml beaker of cleaning solvent"]}
+      - {kind: mug, content: hot, phrases: ["a mug of coffee for the shift supervisor"]}
+    obstacles: ["a parts cart parked across the lane", "the closed fire door", "a pallet of castings", "the end-of-lane bumper"]
+    bench_obstacles: ["the edge of the test rig", "a part sitting on the fixture", "the guard around the dispensing nozzle"]
+    occluders: ["a machine guard", "a stack of crates", "a building column"]
+    blockers: ["the conveyor frame", "a machine guard", "a parked cart"]
+    distractors: ["The line is running at 42 parts per hour.", "A pneumatic press is cycling nearby.", "The andon light at station 5 is green.", "Shift change is in 20 minutes.", "The air compressor just kicked on.", "Your battery is at 72 %."]
+
+  # ------------------------------------------------------------------------------------------------------------
+  cafe:
+    name: café / restaurant
+    floor: {hard: 1.0}
+    side_obstacle_prior: 0.45
+    tilt_sd_deg: 0.3
+    bodies: {mobile_base: 0.50, humanoid: 0.25, arm: 0.25}
+    body_names:
+      mobile_base: ["a wheeled serving robot", "a tray-carrying delivery robot"]
+      humanoid: ["a humanoid waiter robot", "a humanoid server"]
+      arm: ["a barista robot arm behind the counter", "a coffee-making robot arm"]
+    settings: ["It is the lunch rush in a busy café.", "A quiet weekday morning in a neighbourhood coffee shop.", "Dinner service at a crowded bistro.", "Weekend brunch at a family restaurant."]
+    places:
+      floor: ["between the window tables", "along the aisle past the pastry case", "in the gap between two booths", "across the open floor near the entrance"]
+      corridor: ["the narrow passage between the bar and the booths", "the service corridor to the kitchen", "the gap between the counter and the queue rail"]
+      turn: ["the corner by the coffee bar", "the turn into the back dining room", "the bend around the host stand"]
+      crossing: ["where the queue crosses your route", "at the gap between the counter and the tables", "where the corridor from the restrooms opens into the dining room"]
+      bench: ["the pickup shelf", "the espresso station", "the milk-steaming counter"]
+    tasks:
+      mobile_base: ["delivering an order to table 12", "bringing clean cutlery to the side station", "returning to the kitchen pass"]
+      humanoid: ["walking an order to table 5", "clearing plates from table 9"]
+      arm: ["placing a finished drink on the pickup shelf", "moving a cup from the machine to the counter"]
+    carry_tasks:
+      mobile_base: ["carrying {container} to table 7", "bringing {container} to the corner booth"]
+      humanoid: ["carrying {container} to table 3", "bringing {container} to a guest by the window"]
+      arm: ["moving {container} from the machine to the pickup shelf", "handing {container} over to the counter"]
+    agents:
+      step_in: {adult: 0.45, child: 0.20, elder_walker: 0.10, cart: 0.10, other_robot: 0.10, ball: 0.05}
+      crossing: {adult: 0.45, child: 0.25, elder_walker: 0.10, other_robot: 0.10, ball: 0.10}
+      head_on: {adult: 0.50, child: 0.15, elder_walker: 0.10, cart: 0.15, other_robot: 0.10}
+      arm: {hand: 1.0}
+    descriptors:
+      adult:
+        - {np: "a customer carrying a tray", ref: "the customer"}
+        - {np: "a man in a rain jacket", ref: "the man"}
+        - {np: "a woman with a laptop bag", ref: "the woman"}
+        - {np: "a server balancing two plates", ref: "the server"}
+      child:
+        - {np: "a small boy", ref: "the boy"}
+        - {np: "a girl of about six", ref: "the girl"}
+      elder_walker:
+        - {np: "an older woman using a walker", ref: "the woman with the walker"}
+        - {np: "an elderly man with a rollator", ref: "the elderly man"}
+      cart:
+        - {np: "a busser pushing a dish cart", ref: "the busser"}
+        - {np: "a server wheeling a dessert trolley", ref: "the server"}
+      other_robot:
+        - {np: "another serving robot", ref: "the other robot"}
+        - {np: "a floor-cleaning robot", ref: "the cleaning robot"}
+      ball:
+        - {np: "a child's rubber ball", ref: "the ball"}
+        - {np: "a small foam ball", ref: "the ball"}
+      hand:
+        - {np: "a barista's hand", ref: "the barista's hand"}
+        - {np: "a customer's hand reaching for a cup", ref: "the customer's hand"}
+    containers:
+      - {kind: mug, content: hot, phrases: ["a mug of hot cocoa", "a ceramic mug of drip coffee"]}
+      - {kind: espresso_cup, content: hot, phrases: ["a double espresso", "an espresso in a small porcelain cup"]}
+      - {kind: tall_glass, content: other, phrases: ["a tall glass of iced tea", "a glass of sparkling water"]}
+      - {kind: soup_bowl, content: hot, phrases: ["a bowl of tomato soup", "a bowl of hot ramen broth"]}
+      - {kind: takeaway_cup, content: hot, phrases: ["a paper cup of chai latte", "a takeaway flat white"]}
+      - {kind: pitcher, content: other, phrases: ["a jug of water for the table", "a pitcher of lemonade"]}
+    obstacles: ["a chair someone pushed out into the aisle", "the closed swing door to the kitchen", "a high chair parked at the end of a table", "a wet-floor sign"]
+    bench_obstacles: ["the edge of the pickup shelf", "a saucer left on the counter", "the drip tray of the machine"]
+    occluders: ["a pillar", "a tall potted plant", "the coat rack"]
+    blockers: ["a table", "the pastry case", "a row of chairs"]
+    distractors: ["Soft jazz is playing over the speakers.", "The espresso machine is steaming milk.", "Table 4 has asked for the bill.", "It is raining outside.", "The daily special is pumpkin soup.", "The card reader at the till is beeping."]
+
+  # ------------------------------------------------------------------------------------------------------------
+  hospital:
+    name: hospital corridor
+    floor: {hard: 1.0}
+    side_obstacle_prior: 0.35
+    tilt_sd_deg: 0.2
+    bodies: {mobile_base: 0.60, humanoid: 0.40}
+    body_names:
+      mobile_base: ["a hospital delivery robot", "an autonomous medication cart"]
+      humanoid: ["a humanoid care-assistant robot", "a humanoid porter robot"]
+    settings: ["Early morning on a surgical ward.", "Visiting hours on a busy medical floor.", "Night shift in an emergency-department corridor.", "Afternoon on a geriatric ward."]
+    places:
+      floor: ["in the corridor outside room 214", "past the nurses' station", "near the lift lobby on level 3", "in the hallway by the waiting area"]
+      corridor: ["the narrow corridor to the imaging department", "the passage between two parked bed bays", "the service corridor behind the pharmacy"]
+      turn: ["the corner by the nurses' station", "the turn into the east wing", "the bend outside the lift lobby"]
+      crossing: ["where the corridor from the wards meets the main hallway", "at the junction in front of the lifts", "where the waiting-area aisle opens onto your corridor"]
+    tasks:
+      mobile_base: ["delivering medication to the nurses' station", "returning empty specimen boxes to the lab", "bringing clean linen to room 8"]
+      humanoid: ["taking supplies to the treatment room", "walking a set of patient files to the ward clerk"]
+    carry_tasks:
+      mobile_base: ["carrying {container} to room 112", "taking {container} to the sluice room"]
+      humanoid: ["carrying {container} to a patient in bed 4", "bringing {container} to the nurses' station"]
+    agents:
+      step_in: {adult: 0.45, elder_walker: 0.25, cart: 0.20, other_robot: 0.10}
+      crossing: {adult: 0.40, elder_walker: 0.20, cart: 0.25, other_robot: 0.15}
+      head_on: {adult: 0.35, elder_walker: 0.20, cart: 0.30, other_robot: 0.15}
+    descriptors:
+      adult:
+        - {np: "a nurse in blue scrubs", ref: "the nurse"}
+        - {np: "a visitor holding flowers", ref: "the visitor"}
+        - {np: "a doctor reading a chart", ref: "the doctor"}
+        - {np: "a porter in a grey uniform", ref: "the porter"}
+      elder_walker:
+        - {np: "an elderly patient using a walking frame", ref: "the patient"}
+        - {np: "an older man pushing a rollator", ref: "the older man"}
+      cart:
+        - {np: "a porter pushing an empty bed", ref: "the porter"}
+        - {np: "a nurse pushing a medication cart", ref: "the nurse"}
+        - {np: "an orderly with a linen trolley", ref: "the orderly"}
+      other_robot:
+        - {np: "another delivery robot", ref: "the other robot"}
+        - {np: "a UV-disinfection robot", ref: "the disinfection robot"}
+    containers:
+      - {kind: tall_glass, content: other, phrases: ["a glass of water for a patient", "a cup of diluted juice"]}
+      - {kind: soup_bowl, content: hot, phrases: ["a bowl of hot broth on a meal tray", "a bowl of porridge"]}
+      - {kind: specimen_cup, content: chemical, phrases: ["a urine specimen cup", "a specimen cup of wound-irrigation fluid"]}
+      - {kind: basin, content: other, phrases: ["a wash basin of warm water", "a basin of saline"]}
+      - {kind: pitcher, content: other, phrases: ["a jug of water for the ward"]}
+      - {kind: mug, content: hot, phrases: ["a mug of tea for the night nurse"]}
+    obstacles: ["a closed fire door", "an empty wheelchair parked in the corridor", "a linen cart left in the middle of the corridor", "a wet-floor sign"]
+    occluders: ["a privacy curtain", "a parked bed", "a supply cabinet"]
+    blockers: ["a parked bed", "a row of chairs", "a vital-signs monitor on a stand"]
+    distractors: ["A call bell is ringing in room 209.", "The corridor lights are dimmed for the night.", "A PA announcement is asking for a porter to ward 6.", "The hand-sanitiser dispenser next to you is empty.", "Your next delivery is due in 12 minutes.", "There is a faint smell of disinfectant."]
+
+  # ------------------------------------------------------------------------------------------------------------
+  lab:
+    name: laboratory bench
+    floor: {hard: 1.0}
+    side_obstacle_prior: 0.50
+    tilt_sd_deg: 0.2
+    bodies: {arm: 0.65, mobile_base: 0.35}
+    body_names:
+      mobile_base: ["a lab-supply mobile robot", "a sample-transport robot"]
+      arm: ["a liquid-handling robot arm on the lab bench", "a collaborative arm in the sample-prep cell"]
+    settings: ["A chemistry teaching lab during a practical session.", "A clinical lab processing the morning's samples.", "A biology research lab late in the evening.", "A quality-control lab at a pharmaceutical plant."]
+    places:
+      floor: ["in the aisle between benches 3 and 4", "past the fume hoods", "near the autoclave-room door", "along the central walkway"]
+      corridor: ["the narrow gap between the fume hood and the island bench", "the passage beside the cold room"]
+      turn: ["the corner at the end of bench row B", "the turn by the safety shower"]
+      crossing: ["where the walkway from the fume hoods crosses your route", "at the end of bench 2"]
+      bench: ["the pipetting deck", "the balance table", "the sample rack"]
+    tasks:
+      mobile_base: ["delivering a box of pipette tips to bench 5", "taking samples to the freezer room"]
+      arm: ["moving a tube rack from the centrifuge to the deck", "placing a sample plate in the reader"]
+    carry_tasks:
+      mobile_base: ["carrying {container} to the analysis room", "taking {container} to the waste station"]
+      arm: ["moving {container} from the balance to the stir plate", "carrying {container} to the fume-hood rack", "bringing {container} to the dispensing station"]
+    agents:
+      step_in: {adult: 0.50, cart: 0.30, other_robot: 0.20}
+      crossing: {adult: 0.50, cart: 0.30, other_robot: 0.20}
+      head_on: {adult: 0.50, cart: 0.30, other_robot: 0.20}
+      arm: {hand: 1.0}
+    descriptors:
+      adult:
+        - {np: "a researcher in a lab coat", ref: "the researcher"}
+        - {np: "a student wearing goggles", ref: "the student"}
+        - {np: "a technician carrying a sample box", ref: "the technician"}
+      cart:
+        - {np: "a technician pushing a sample trolley", ref: "the technician"}
+        - {np: "a cleaner with a waste cart", ref: "the cleaner"}
+      other_robot:
+        - {np: "another sample-transport robot", ref: "the other robot"}
+      hand:
+        - {np: "a technician's gloved hand", ref: "the technician's hand"}
+        - {np: "a student's hand", ref: "the student's hand"}
+        - {np: "a researcher's hand holding a pipette", ref: "the researcher's hand"}
+    containers:
+      - {kind: beaker_250, content: chemical, phrases: ["a 250 ml beaker of dilute hydrochloric acid", "a beaker of staining solution"]}
+      - {kind: beaker_600, content: chemical, phrases: ["a 600 ml beaker of buffer solution", "a beaker of ethanol"]}
+      - {kind: specimen_cup, content: chemical, phrases: ["a sample cup of solvent", "a cup of cell-culture medium"]}
+      - {kind: tall_glass, content: other, phrases: ["a measuring cylinder of distilled water"]}
+    obstacles: ["a closed lab door", "a step stool left in the aisle", "a gas-cylinder trolley"]
+    bench_obstacles: ["the edge of the sample rack", "a pipette left on the deck", "the rim of the stir plate"]
+    occluders: ["a fume-hood sash", "a shelf of reagent bottles", "the centrifuge"]
+    blockers: ["the island bench", "a fridge", "a waste bin"]
+    distractors: ["The fume hood reads normal airflow.", "A centrifuge is spinning down nearby.", "The lab radio is playing quietly.", "The next sample batch is due at 14:30.", "A timer on bench 2 is counting down.", "The room is kept at 21 °C."]
+
+  # ------------------------------------------------------------------------------------------------------------
+  sidewalk:
+    name: sidewalk / street
+    floor: {pavement: 1.0}
+    side_obstacle_prior: 0.30
+    tilt_sd_deg: 1.5              # 보도는 배수 경사·턱이 있다
+    bodies: {mobile_base: 0.70, humanoid: 0.30}
+    body_names:
+      mobile_base: ["a six-wheeled sidewalk delivery robot", "a food-delivery robot"]
+      humanoid: ["a humanoid courier robot", "a humanoid robot carrying a delivery box"]
+    settings: ["A busy city sidewalk at lunchtime.", "A quiet residential street on a Sunday morning.", "Outside a train station at rush hour.", "A shopping street in light rain."]
+    places:
+      floor: ["on the sidewalk outside a bakery", "along the pavement past a bus stop", "on a stretch of sidewalk next to parked scooters", "by the entrance of a supermarket"]
+      corridor: ["a narrow stretch of sidewalk between a wall and a row of bollards", "the gap between scaffolding and the kerb", "a footpath squeezed by outdoor café tables"]
+      turn: ["the corner onto Elm Street", "the curve of the path around the fountain", "the turn into the courtyard"]
+      crossing: ["where a driveway crosses the sidewalk", "at the mouth of an alley", "where the bike lane crosses the footpath"]
+    tasks:
+      mobile_base: ["delivering a grocery order to number 18", "heading back to the depot after a delivery"]
+      humanoid: ["delivering a parcel to the flower shop", "carrying a bag of groceries to a doorstep"]
+    carry_tasks:
+      mobile_base: ["carrying {container} to a customer two blocks away", "delivering {container} to the office on the corner"]
+      humanoid: ["carrying {container} to a customer waiting outside", "bringing {container} to the bus stop"]
+    agents:
+      step_in: {adult: 0.35, child: 0.20, cyclist: 0.15, elder_walker: 0.10, ball: 0.10, other_robot: 0.10}
+      crossing: {adult: 0.30, child: 0.15, cyclist: 0.30, elder_walker: 0.05, ball: 0.10, other_robot: 0.10}
+      head_on: {adult: 0.40, child: 0.10, cyclist: 0.20, elder_walker: 0.10, cart: 0.10, other_robot: 0.10}
+    descriptors:
+      adult:
+        - {np: "a jogger in a red jacket", ref: "the jogger"}
+        - {np: "a man in a business suit", ref: "the man"}
+        - {np: "a woman carrying shopping bags", ref: "the woman"}
+        - {np: "a courier with a backpack", ref: "the courier"}
+      child:
+        - {np: "a boy holding a scooter", ref: "the boy"}
+        - {np: "a girl in a school uniform", ref: "the girl"}
+      cyclist:
+        - {np: "a cyclist", ref: "the cyclist"}
+        - {np: "a teenager on a bicycle", ref: "the cyclist"}
+      elder_walker:
+        - {np: "an older man with a walking frame", ref: "the older man"}
+        - {np: "an elderly woman with a rollator", ref: "the elderly woman"}
+      ball:
+        - {np: "a football", ref: "the ball"}
+        - {np: "a tennis ball", ref: "the ball"}
+      other_robot:
+        - {np: "another delivery robot", ref: "the other robot"}
+        - {np: "a street-sweeping robot", ref: "the sweeper"}
+      cart:
+        - {np: "a vendor pushing a handcart", ref: "the vendor"}
+        - {np: "a postal worker pushing a mail trolley", ref: "the postal worker"}
+    containers:
+      - {kind: takeaway_cup, content: hot, phrases: ["a coffee order in a paper cup", "a hot chocolate in a takeaway cup"]}
+      - {kind: deli_tub, content: hot, phrases: ["a tub of hot noodle soup", "a container of chili"]}
+      - {kind: tall_glass, content: other, phrases: ["a smoothie in a clear cup", "an iced latte in a clear cup"]}
+    obstacles: ["a closed gate", "an e-scooter lying across the path", "a café sign board", "a raised bollard"]
+    occluders: ["a parked van", "a bus shelter", "a hedge"]
+    blockers: ["the kerb and the road", "a row of parked bicycles", "a shop wall"]
+    distractors: ["A bus is pulling away from the stop.", "Church bells are ringing.", "It started to drizzle a minute ago.", "A shop is playing loud music.", "Your delivery is two minutes ahead of schedule.", "A pigeon flew off the pavement."]
+
+  # ------------------------------------------------------------------------------------------------------------
+  home:
+    name: home (kitchen / living room)
+    floor: {hard: 0.5, carpet: 0.5}
+    side_obstacle_prior: 0.45
+    tilt_sd_deg: 0.2
+    bodies: {mobile_base: 0.40, humanoid: 0.35, arm: 0.25}
+    body_names:
+      mobile_base: ["a home-assistant robot on wheels", "a small household robot"]
+      humanoid: ["a humanoid home robot", "a household humanoid"]
+      arm: ["a kitchen robot arm mounted over the counter", "a countertop cooking arm"]
+    settings: ["A family kitchen at breakfast time.", "A living room on a rainy Saturday afternoon.", "An open-plan apartment in the evening.", "A small flat where an older person lives alone."]
+    places:
+      floor: ["between the kitchen island and the fridge", "across the living-room rug", "in the hallway by the front door", "past the dining table"]
+      corridor: ["the narrow hallway to the bedrooms", "the gap between the sofa and the coffee table", "the galley kitchen"]
+      turn: ["the corner from the kitchen into the hallway", "the turn around the end of the sofa", "the doorway into the dining room"]
+      crossing: ["where the hallway opens into the living room", "at the kitchen doorway", "between the sofa and the TV"]
+      bench: ["the kitchen counter", "the stovetop", "the sink"]
+    tasks:
+      mobile_base: ["bringing the TV remote to the sofa", "returning to the charging dock", "carrying the mail to the desk"]
+      humanoid: ["carrying folded laundry to the bedroom", "tidying toys into the toy box"]
+      arm: ["moving a plate from the counter to the dish rack", "placing ingredients next to the stove"]
+    carry_tasks:
+      mobile_base: ["carrying {container} to the sofa", "bringing {container} to the dining table"]
+      humanoid: ["carrying {container} to the person in the armchair", "bringing {container} to the kitchen table"]
+      arm: ["moving {container} from the kettle to the counter", "moving {container} from the sink to the drying rack"]
+    agents:
+      step_in: {adult: 0.40, child: 0.30, elder_walker: 0.10, ball: 0.10, other_robot: 0.10}
+      crossing: {adult: 0.30, child: 0.30, ball: 0.20, other_robot: 0.20}
+      head_on: {adult: 0.50, child: 0.30, other_robot: 0.20}
+      arm: {hand: 1.0}
+    descriptors:
+      adult:
+        - {np: "a parent carrying a laundry basket", ref: "the parent"}
+        - {np: "a teenager with headphones on", ref: "the teenager"}
+        - {np: "a guest holding a glass of wine", ref: "the guest"}
+      child:
+        - {np: "a toddler", ref: "the toddler"}
+        - {np: "a seven-year-old in pyjamas", ref: "the child"}
+      elder_walker:
+        - {np: "a grandparent using a walker", ref: "the grandparent"}
+      ball:
+        - {np: "a soft toy ball", ref: "the ball"}
+        - {np: "a rubber ball", ref: "the ball"}
+      other_robot:
+        - {np: "the robot vacuum", ref: "the robot vacuum"}
+        - {np: "a small robotic pet", ref: "the robotic pet"}
+      hand:
+        - {np: "a person's hand reaching for the salt", ref: "the hand"}
+        - {np: "the cook's hand", ref: "the cook's hand"}
+    containers:
+      - {kind: mug, content: hot, phrases: ["a mug of tea", "a mug of hot coffee"]}
+      - {kind: tall_glass, content: other, phrases: ["a glass of orange juice", "a glass of milk"]}
+      - {kind: soup_bowl, content: hot, phrases: ["a bowl of soup", "a bowl of hot porridge"]}
+      - {kind: pot, content: hot, phrases: ["a pot of pasta water", "a saucepan of hot stock"]}
+      - {kind: pitcher, content: other, phrases: ["a pitcher of lemonade", "a jug of water"]}
+      - {kind: basin, content: other, phrases: ["a washing-up bowl of soapy water"]}
+    obstacles: ["a closed bedroom door", "a laundry basket on the floor", "the dog's water bowl", "a pile of shoes"]
+    bench_obstacles: ["the edge of the cutting board", "a jar on the counter", "the rim of the sink"]
+    occluders: ["the back of the sofa", "the kitchen island", "an open cupboard door"]
+    blockers: ["the wall", "the dining table", "a bookshelf"]
+    distractors: ["The washing machine is on its spin cycle.", "A cartoon is playing on the TV.", "The doorbell rang a minute ago.", "The oven timer shows 8 minutes left.", "It is 7:45 in the morning.", "A cat is asleep on the windowsill."]
+
+  # ------------------------------------------------------------------------------------------------------------
+  retail:
+    name: store
+    floor: {hard: 1.0}
+    side_obstacle_prior: 0.50
+    tilt_sd_deg: 0.2
+    bodies: {mobile_base: 0.50, humanoid: 0.30, forklift_amr: 0.20}
+    body_names:
+      mobile_base: ["an inventory-scanning robot", "a shelf-restocking robot"]
+      humanoid: ["a humanoid store-assistant robot", "a humanoid robot stocking shelves"]
+      forklift_amr: ["an autonomous pallet truck", "a driverless stocking forklift"]
+    settings: ["A supermarket on a Saturday morning.", "A hardware store an hour before closing.", "A department store during a sale.", "A pharmacy with a short queue at the counter."]
+    places:
+      floor: ["in the cereal aisle", "past the checkout lanes", "along the end-caps near the entrance", "in the garden-centre section"]
+      corridor: ["a narrow aisle between two gondola shelves", "the gap between a promotional stand and the freezer cabinets", "the stock-room passage"]
+      turn: ["the corner by the bakery counter", "the turn at the end of aisle 7", "the bend into the stock room"]
+      crossing: ["where the main aisle crosses aisle 5", "at the end of the checkout lanes", "where the stock-room doors open onto the sales floor"]
+    tasks:
+      mobile_base: ["scanning shelf labels in aisle 4", "carrying a tote of returns to customer service"]
+      humanoid: ["restocking canned goods in aisle 9", "fetching a box from the stock room"]
+      forklift_amr: ["moving a pallet of bottled drinks to aisle 2", "returning an empty pallet to the stock room"]
+    carry_tasks:
+      mobile_base: ["carrying {container} to the staff room", "bringing {container} to the customer-service desk"]
+      humanoid: ["carrying {container} to a customer at the deli counter", "bringing {container} to the cashier"]
+      forklift_amr: ["moving {container} on a pallet to the cleaning area", "taking {container} to the loading bay"]
+    agents:
+      step_in: {adult: 0.45, child: 0.20, cart: 0.25, elder_walker: 0.10}
+      crossing: {adult: 0.35, child: 0.20, cart: 0.30, other_robot: 0.15}
+      head_on: {adult: 0.35, cart: 0.35, child: 0.10, elder_walker: 0.10, other_robot: 0.10}
+    descriptors:
+      adult:
+        - {np: "a shopper reading a label", ref: "the shopper"}
+        - {np: "a store clerk with a price gun", ref: "the clerk"}
+        - {np: "a man carrying a basket", ref: "the man"}
+      child:
+        - {np: "a child holding a toy", ref: "the child"}
+        - {np: "a boy of about eight", ref: "the boy"}
+      cart:
+        - {np: "a shopper pushing a full trolley", ref: "the shopper"}
+        - {np: "a clerk pushing a stocking cart", ref: "the clerk"}
+      elder_walker:
+        - {np: "an elderly shopper with a walker", ref: "the elderly shopper"}
+      other_robot:
+        - {np: "a floor-scrubbing robot", ref: "the scrubber"}
+        - {np: "another inventory robot", ref: "the other robot"}
+    containers:
+      - {kind: takeaway_cup, content: hot, phrases: ["a sample cup of coffee from the demo stand", "a cup of hot soup from the deli counter"]}
+      - {kind: bucket, content: other, phrases: ["a mop bucket", "a bucket of water for the flower display"]}
+      - {kind: bucket, content: chemical, phrases: ["a bucket of floor-cleaning concentrate"]}
+      - {kind: shallow_tray, content: other, phrases: ["a drip tray from the freezer cabinet"]}
+      - {kind: deli_tub, content: hot, phrases: ["a tub of hot mac and cheese"]}
+    obstacles: ["a pallet of stock left in the aisle", "a promotional stand", "the closed stock-room door", "a wet-floor sign"]
+    occluders: ["a gondola end", "a stack of boxes", "a promotional banner"]
+    blockers: ["the freezer cabinets", "a shelf", "a display table"]
+    distractors: ["A price check was just announced over the PA.", "Background music is playing.", "Aisle 3 has a two-for-one offer on pasta.", "The automatic doors keep opening and closing.", "There is a queue at checkout 4.", "Your battery is at 55 %."]
+
+  # ------------------------------------------------------------------------------------------------------------
+  greenhouse:
+    name: greenhouse / farm
+    floor: {hard: 0.5, soil: 0.5}
+    side_obstacle_prior: 0.40
+    tilt_sd_deg: 1.0
+    bodies: {mobile_base: 0.45, arm: 0.30, humanoid: 0.25}
+    body_names:
+      mobile_base: ["a greenhouse transport robot", "an autonomous harvest cart"]
+      humanoid: ["a humanoid farmhand robot", "a humanoid greenhouse worker"]
+      arm: ["a fruit-picking robot arm", "a seedling-transplanting arm"]
+    settings: ["A tomato greenhouse in the early morning.", "A strawberry polytunnel during harvest.", "A hydroponic lettuce greenhouse.", "A nursery greenhouse full of potted seedlings."]
+    places:
+      floor: ["on the main concrete path", "between the rows of tomato plants", "near the packing-shed door", "along the irrigation manifold"]
+      corridor: ["a narrow path between two growing gutters", "the gap between the seedling benches", "the passage beside the water tanks"]
+      turn: ["the corner at the end of row 12", "the turn into the packing shed", "the bend around the fertiliser-mixing station"]
+      crossing: ["where the main path crosses a row", "at the head of row 7", "where the path to the packing shed crosses your route"]
+      bench: ["the potting bench", "the sorting table", "the seed-tray station"]
+    tasks:
+      mobile_base: ["carrying crates of tomatoes to the packing shed", "returning empty crates to row 9"]
+      humanoid: ["carrying a crate of strawberries", "walking a tray of seedlings to bench 4"]
+      arm: ["placing picked fruit into a crate", "moving seedling plugs into pots"]
+    carry_tasks:
+      mobile_base: ["carrying {container} to row 14", "bringing {container} to the seedling benches"]
+      humanoid: ["carrying {container} to the potting bench", "bringing {container} to the drip line"]
+      arm: ["moving {container} from the mixing station to the tray rack", "carrying {container} across the potting bench"]
+    agents:
+      step_in: {adult: 0.50, cart: 0.30, other_robot: 0.20}
+      crossing: {adult: 0.40, cart: 0.30, other_robot: 0.30}
+      head_on: {adult: 0.40, cart: 0.35, other_robot: 0.25}
+      arm: {hand: 1.0}
+    descriptors:
+      adult:
+        - {np: "a picker wearing a sun hat", ref: "the picker"}
+        - {np: "a grower inspecting leaves", ref: "the grower"}
+        - {np: "a seasonal worker carrying a crate", ref: "the worker"}
+      cart:
+        - {np: "a worker pushing a pipe-rail trolley", ref: "the worker"}
+        - {np: "a picker pulling a harvest cart", ref: "the picker"}
+      other_robot:
+        - {np: "a spraying robot", ref: "the spraying robot"}
+        - {np: "another transport robot", ref: "the other robot"}
+      hand:
+        - {np: "a picker's hand", ref: "the picker's hand"}
+        - {np: "a grower's gloved hand", ref: "the grower's hand"}
+    containers:
+      - {kind: bucket, content: other, phrases: ["a bucket of irrigation water", "a pail of rainwater"]}
+      - {kind: bucket, content: chemical, phrases: ["a bucket of nutrient concentrate", "a pail of diluted fungicide"]}
+      - {kind: shallow_tray, content: other, phrases: ["a seedling tray standing in water"]}
+      - {kind: beaker_600, content: chemical, phrases: ["a beaker of mixed fertiliser solution"]}
+      - {kind: beaker_250, content: chemical, phrases: ["a 250 ml beaker of pH-adjusting acid"]}
+      - {kind: mug, content: hot, phrases: ["a mug of tea for the grower"]}
+    obstacles: ["a stack of empty crates", "a hose reel", "a closed sliding door", "a parked trolley"]
+    bench_obstacles: ["the rim of the crate", "a pot on the bench", "the edge of the tray rack"]
+    occluders: ["a row of tall tomato plants", "a stack of crates", "a water tank"]
+    blockers: ["the growing gutter", "a heating pipe", "a seedling bench"]
+    distractors: ["The misting system just switched on.", "The temperature inside is 26 °C.", "Bumblebees are working the flowers.", "The roof vents are opening.", "A radio is playing in the packing shed.", "Row 3 was harvested yesterday."]
+
+  # ------------------------------------------------------------------------------------------------------------
+  transit:
+    name: airport / train station
+    floor: {hard: 0.7, carpet: 0.3}
+    side_obstacle_prior: 0.30
+    tilt_sd_deg: 0.2
+    bodies: {mobile_base: 0.55, humanoid: 0.30, forklift_amr: 0.15}
+    body_names:
+      mobile_base: ["an airport guide robot", "a luggage-carrying robot"]
+      humanoid: ["a humanoid information robot", "a humanoid porter robot"]
+      forklift_amr: ["an autonomous baggage tug", "a driverless luggage-cart tractor"]
+    settings: ["The departure hall of an international airport in the morning peak.", "A main-line railway-station concourse at rush hour.", "A quiet airport gate area late at night.", "The platform level of a metro station."]
+    places:
+      floor: ["in the concourse near gate B12", "past the departure boards", "along the moving-walkway exit", "outside the security checkpoint"]
+      corridor: ["the narrow passage between two rows of seats at gate 23", "the corridor to the baggage-claim lifts", "the gap between a pillar and the ticket machines"]
+      turn: ["the corner toward the platforms", "the turn at the end of the duty-free shop", "the bend past the information desk"]
+      crossing: ["where the passage from the platforms crosses the concourse", "at the exit of the moving walkway", "where the queue for security crosses your route"]
+    tasks:
+      mobile_base: ["guiding a traveller to gate 31", "returning to the charging bay", "carrying a suitcase to the taxi rank"]
+      humanoid: ["walking to the information desk", "carrying a lost-property bag to the office"]
+      forklift_amr: ["towing a baggage cart to stand 4", "returning empty dollies to the baggage hall"]
+    carry_tasks:
+      mobile_base: ["carrying {container} to a traveller at gate 14", "bringing {container} to the lounge"]
+      humanoid: ["carrying {container} to the lounge reception", "bringing {container} to a passenger in a wheelchair"]
+      forklift_amr: ["towing {container} to the cleaning depot", "taking {container} to the de-icing store"]
+    agents:
+      step_in: {adult: 0.45, child: 0.15, elder_walker: 0.10, cart: 0.20, other_robot: 0.10}
+      crossing: {adult: 0.35, child: 0.10, elder_walker: 0.10, cart: 0.25, forklift: 0.10, other_robot: 0.10}
+      head_on: {adult: 0.40, cart: 0.30, elder_walker: 0.10, child: 0.10, other_robot: 0.10}
+    descriptors:
+      adult:
+        - {np: "a traveller pulling a carry-on", ref: "the traveller"}
+        - {np: "a businessman in a grey suit", ref: "the businessman"}
+        - {np: "a member of ground staff in a hi-vis vest", ref: "the staff member"}
+        - {np: "a backpacker", ref: "the backpacker"}
+      child:
+        - {np: "a child holding a teddy bear", ref: "the child"}
+        - {np: "a boy wearing a backpack", ref: "the boy"}
+      elder_walker:
+        - {np: "an elderly passenger using a walker", ref: "the elderly passenger"}
+      cart:
+        - {np: "a passenger pushing a luggage trolley", ref: "the passenger"}
+        - {np: "a cleaner pushing a cleaning cart", ref: "the cleaner"}
+      forklift:
+        - {np: "a baggage tug driven by ground staff", ref: "the baggage tug"}
+        - {np: "an electric passenger buggy", ref: "the buggy"}
+      other_robot:
+        - {np: "another guide robot", ref: "the other robot"}
+        - {np: "a floor-cleaning robot", ref: "the cleaning robot"}
+    containers:
+      - {kind: takeaway_cup, content: hot, phrases: ["a coffee for a passenger", "a paper cup of hot tea"]}
+      - {kind: tall_glass, content: other, phrases: ["a glass of orange juice from the lounge bar", "a glass of sparkling water"]}
+      - {kind: mug, content: hot, phrases: ["a mug of hot chocolate from the lounge"]}
+      - {kind: soup_bowl, content: hot, phrases: ["a bowl of noodle soup from the food court"]}
+      - {kind: open_tote, content: chemical, phrases: ["a tote of de-icing fluid"]}
+      - {kind: bucket, content: other, phrases: ["a bucket of mop water"]}
+    obstacles: ["a queue-barrier tape", "a closed glass door", "an unattended suitcase", "a cleaning sign"]
+    occluders: ["a pillar", "an advertising display", "a row of luggage lockers"]
+    blockers: ["a row of seats", "the ticket machines", "a glass wall"]
+    distractors: ["Boarding for flight LH 718 has just been announced.", "The departure board shows a 20-minute delay for the 14:05 train.", "A baby is crying nearby.", "The air conditioning is humming loudly.", "Your battery is at 48 %.", "A group of tourists is taking photos."]
