@@ -248,6 +248,21 @@ def _parse_markers(text: str) -> dict[str, str]:
     return out
 
 
+def _wait_ssh(backend: Backend, ctx: PodContext, *, deadline: float, poll: float = 5.0) -> int:
+    """RUNNING이 된 뒤에도 sshd는 몇 초 늦게 뜬다(이미지의 /start.sh가 PUBLIC_KEY로 띄운다) — 첫 접속 실패로 pod를 버리지 않게 기다린다.
+
+    돌려주는 것은 시도 횟수. 기한까지 안 되면 RuntimeError (호출자의 finally가 지운다)."""
+    attempt = 0
+    while True:
+        attempt += 1
+        result = backend.shell("true", timeout=30)
+        if result.ok:
+            return attempt
+        if ctx.clock() >= deadline:
+            raise RuntimeError(f"SSH가 {attempt}번 시도 동안 열리지 않았다 ({result.stderr.strip()[:200]})")
+        ctx.sleep(poll)
+
+
 def _bootstrap(backend: Backend, manifest: dict[str, Any], ctx: PodContext) -> dict[str, str]:
     provider = manifest["provider"]
     script = provider.get("bootstrap") or DEFAULT_BOOTSTRAP
@@ -502,6 +517,7 @@ def launch_pod(
             backend = ctx.backend_factory(view, manifest)
             for key in ("host", "user", "port"):
                 manifest["backend"][key] = getattr(backend, key, None)
+            pod["ssh_attempts"] = _wait_ssh(backend, ctx, deadline=requested + boot_timeout + 300.0)
             markers = _bootstrap(backend, manifest, ctx)
             pod["bootstrap"] = {k: markers.get(k) for k in ("UV", "PY311", "NOW", "GPU", "WATCHDOG")}
             pod["bootstrap_seconds"] = round(ctx.clock() - requested - pod["ready_seconds"], 1)

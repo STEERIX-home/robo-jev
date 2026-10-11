@@ -602,6 +602,27 @@ def test_prepare_defaults_the_dollar_cap_to_what_remains_of_the_phase_and_refuse
         _prepared(pod_world, _unique("cloud1-over"), budget={"max_usd": 20.0, "max_wall_hours": 10})
 
 
+def test_a_late_sshd_is_waited_for_not_mistaken_for_a_dead_pod(pod_world, monkeypatch):
+    """RUNNING 직후엔 sshd가 아직 없다 — 처음 몇 번의 접속 실패로 pod를 지우지 않는다."""
+    manifest, path = _prepared(pod_world, _unique("cloud1-ssh"))
+    real_shell = LocalBackend.shell
+    refused = {"n": 0}
+
+    def flaky_shell(self, line, *, timeout=None):
+        if line == "true" and refused["n"] < 2:
+            refused["n"] += 1
+            from robo_jev.launch.providers.base import Exec
+
+            return Exec(argv=["ssh"], returncode=255, stdout="", stderr="ssh: connect to host port 40022: Connection refused")
+        return real_shell(self, line, timeout=timeout)
+
+    monkeypatch.setattr(LocalBackend, "shell", flaky_shell)
+    pod_world["ctx"].sleep = lambda s: None
+    launch_pod(manifest, manifest_path=path, ctx=pod_world["ctx"], yes=True, dest=pod_world["tmp"] / "f")
+    saved = load_manifest(path)
+    assert saved["state"] == "completed" and saved["provider"]["pod"]["ssh_attempts"] == 3
+
+
 def test_a_pod_without_an_armed_watchdog_is_deleted_without_working(pod_world):
     bootstrap = FAKE_BOOTSTRAP.replace('echo "WATCHDOG=armed"', 'echo "WATCHDOG=missing"')
     manifest, path = _prepared(pod_world, _unique("cloud1-nowd"), provider={"bootstrap": bootstrap})
