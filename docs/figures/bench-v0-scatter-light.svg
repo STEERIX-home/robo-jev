@@ -1,0 +1,56 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="820" height="560" viewBox="0 0 820 560" role="img" aria-labelledby="t d" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif'>
+<title id="t">Physical judgment vs general reading — bench-v0</title>
+<desc id="d">Scatter plot, one point per model. x: physics skill on the unseen sets T2–T4 (1 minus Brier over Brier of always 0.5, yes/no and score questions). y: accuracy on G2 (public BoolQ + MultiNLI). Up and to the right is better. Qwen3.5-2B (untrained): skill -0.148, G2 0.739; robojev v0 (2B): skill 0.777, G2 0.650</desc>
+<rect x="0.5" y="0.5" width="819" height="559" rx="8" fill="#fcfcfb" stroke="rgba(11,11,11,0.10)"/>
+<text x="24" y="34" font-size="17" font-weight="600" fill="#0b0b0b">Physical judgment vs general reading — bench-v0</text>
+<text x="24" y="56" font-size="12.5" fill="#52514e">x: physics skill on the unseen sets T2–T4 = 1 − Brier / Brier of “always 0.5” (yes/no + score questions)</text>
+<text x="24" y="74" font-size="12.5" fill="#52514e">y: G2 reading accuracy (public BoolQ + MultiNLI, 1,000 questions) · up and to the right is better</text>
+<circle cx="30" cy="98" r="5" fill="#2a78d6"/>
+<text x="41" y="102" font-size="12.5" fill="#52514e">robojev (ours, 2B)</text>
+<circle cx="199.0" cy="98" r="5" fill="#fcfcfb" stroke="#52514e" stroke-width="2"/>
+<text x="210.0" y="102" font-size="12.5" fill="#52514e">Qwen3.5-2B untrained (reference)</text>
+<line x1="74.0" y1="132" x2="74.0" y2="468" stroke="#e1e0d9" stroke-width="1"/>
+<text x="74.0" y="486" text-anchor="middle" font-size="11.5" fill="#898781" style="font-variant-numeric: tabular-nums">-0.2</text>
+<line x1="193.7" y1="132" x2="193.7" y2="468" stroke="#e1e0d9" stroke-width="1"/>
+<text x="193.7" y="486" text-anchor="middle" font-size="11.5" fill="#898781" style="font-variant-numeric: tabular-nums">0.0</text>
+<line x1="313.3" y1="132" x2="313.3" y2="468" stroke="#e1e0d9" stroke-width="1"/>
+<text x="313.3" y="486" text-anchor="middle" font-size="11.5" fill="#898781" style="font-variant-numeric: tabular-nums">0.2</text>
+<line x1="433.0" y1="132" x2="433.0" y2="468" stroke="#e1e0d9" stroke-width="1"/>
+<text x="433.0" y="486" text-anchor="middle" font-size="11.5" fill="#898781" style="font-variant-numeric: tabular-nums">0.4</text>
+<line x1="552.7" y1="132" x2="552.7" y2="468" stroke="#e1e0d9" stroke-width="1"/>
+<text x="552.7" y="486" text-anchor="middle" font-size="11.5" fill="#898781" style="font-variant-numeric: tabular-nums">0.6</text>
+<line x1="672.3" y1="132" x2="672.3" y2="468" stroke="#e1e0d9" stroke-width="1"/>
+<text x="672.3" y="486" text-anchor="middle" font-size="11.5" fill="#898781" style="font-variant-numeric: tabular-nums">0.8</text>
+<line x1="792.0" y1="132" x2="792.0" y2="468" stroke="#e1e0d9" stroke-width="1"/>
+<text x="792.0" y="486" text-anchor="middle" font-size="11.5" fill="#898781" style="font-variant-numeric: tabular-nums">1.0</text>
+<line x1="74" y1="468.0" x2="792" y2="468.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="66" y="472.0" text-anchor="end" font-size="11.5" fill="#898781" style="font-variant-numeric: tabular-nums">0.3</text>
+<line x1="74" y1="412.0" x2="792" y2="412.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="66" y="416.0" text-anchor="end" font-size="11.5" fill="#898781" style="font-variant-numeric: tabular-nums">0.4</text>
+<line x1="74" y1="356.0" x2="792" y2="356.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="66" y="360.0" text-anchor="end" font-size="11.5" fill="#898781" style="font-variant-numeric: tabular-nums">0.5</text>
+<line x1="74" y1="300.0" x2="792" y2="300.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="66" y="304.0" text-anchor="end" font-size="11.5" fill="#898781" style="font-variant-numeric: tabular-nums">0.6</text>
+<line x1="74" y1="244.0" x2="792" y2="244.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="66" y="248.0" text-anchor="end" font-size="11.5" fill="#898781" style="font-variant-numeric: tabular-nums">0.7</text>
+<line x1="74" y1="188.0" x2="792" y2="188.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="66" y="192.0" text-anchor="end" font-size="11.5" fill="#898781" style="font-variant-numeric: tabular-nums">0.8</text>
+<line x1="74" y1="132.0" x2="792" y2="132.0" stroke="#e1e0d9" stroke-width="1"/>
+<text x="66" y="136.0" text-anchor="end" font-size="11.5" fill="#898781" style="font-variant-numeric: tabular-nums">0.9</text>
+<line x1="74" y1="468" x2="792" y2="468" stroke="#c3c2b7" stroke-width="1"/>
+<line x1="193.7" y1="132" x2="193.7" y2="468" stroke="#c3c2b7" stroke-width="1.5"/>
+<text x="198.7" y="144" font-size="11" fill="#898781">always 0.5</text>
+<line x1="74" y1="402.7" x2="792" y2="402.7" stroke="#c3c2b7" stroke-width="1.5"/>
+<text x="788" y="397.7" text-anchor="end" font-size="11" fill="#898781">chance 0.42</text>
+<text x="433" y="506" text-anchor="middle" font-size="12.5" fill="#52514e">Physics skill on unseen sets T2–T4 →</text>
+<text x="20" y="300" text-anchor="middle" font-size="12.5" fill="#52514e" transform="rotate(-90 20 300)">G2 reading accuracy →</text>
+<defs><marker id="arrow-light" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#898781"/></marker></defs>
+<line x1="114.1" y1="222.8" x2="648.7" y2="271.3" stroke="#898781" stroke-width="1.5" marker-end="url(#arrow-light)"/>
+<line x1="105.1" y1="222.0" x2="111.1" y2="208.0" stroke="#e1e0d9" stroke-width="1"/>
+<circle cx="105.1" cy="222.0" r="5.5" fill="#fcfcfb" stroke="#52514e" stroke-width="2"><title>Qwen3.5-2B (untrained) — physics skill T2–T4 -0.148, G2 accuracy 0.739</title></circle>
+<text x="114.1" y="212.0" text-anchor="start" font-size="12" fill="#52514e">Qwen3.5-2B (untrained)</text>
+<circle cx="658.7" cy="272.2" r="5.5" fill="#2a78d6" stroke="#fcfcfb" stroke-width="2"><title>robojev v0 (2B) — physics skill T2–T4 0.777, G2 accuracy 0.650</title></circle>
+<text x="667.7" y="276.2" text-anchor="start" font-size="12" fill="#0b0b0b" font-weight="600">robojev v0 (2B)</text>
+<text x="24" y="544" font-size="11" fill="#898781">OpenRouter models: one Decisions API call per request, stored option order · ours: expectation over balanced option orders</text>
+<text x="24" y="529" font-size="11" fill="#898781">bench-v0 · evaluated 2026-10-12 · home ground: T1–T7 come from our own physics generator</text>
+</svg>

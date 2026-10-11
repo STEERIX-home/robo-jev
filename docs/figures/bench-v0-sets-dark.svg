@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1044" height="244" viewBox="0 0 1044 244" role="img" aria-labelledby="t d" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif'>
+<title id="t">Per-set results — bench-v0</title>
+<desc id="d">Bars per model and set. robojev v0 (2B): T1 0.029, T2 0.062, T3 0.045, T4 0.025, T5 0.033, T6 0.042, T7 0.035, G1 0.429, G2 0.650; Qwen3.5-2B (untrained): T1 0.181, T2 0.171, T3 0.169, T4 0.196, T5 0.190, T6 0.189, T7 0.181, G1 0.484, G2 0.739</desc>
+<rect x="0.5" y="0.5" width="1043" height="243" rx="8" fill="#1a1a19" stroke="rgba(255,255,255,0.10)"/>
+<text x="24" y="34" font-size="17" font-weight="600" fill="#ffffff">Per-set results — bench-v0</text>
+<text x="24" y="55" font-size="12.5" fill="#c3c2b7">T1–T7: yes/no Brier against the simulated outcome probability (lower is better; thin vertical tick = always answering 0.5) · G1, G2: reading accuracy (higher is better)</text>
+<rect x="24" y="72" width="12" height="12" rx="3" fill="#3987e5"/>
+<text x="42" y="82" font-size="12.5" fill="#c3c2b7">robojev (ours, 2B)</text>
+<rect x="194.0" y="72" width="12" height="12" rx="3" fill="#6b6a65"/>
+<text x="212.0" y="82" font-size="12.5" fill="#c3c2b7">Qwen3.5-2B untrained (reference)</text>
+<text x="290" y="124" font-size="12.5" font-weight="600" fill="#ffffff">T1</text>
+<line x1="290" y1="132" x2="290" y2="180" stroke="#383835" stroke-width="1"/>
+<line x1="323.0" y1="132" x2="323.0" y2="180" stroke="#2c2c2a" stroke-width="1"/>
+<text x="290" y="195" font-size="10.5" fill="#898781">0</text>
+<text x="323.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
+<line x1="323.7" y1="132" x2="323.7" y2="180" stroke="#c3c2b7" stroke-width="1.5"><title>T1: always 0.5 scores 0.153</title></line>
+<path d="M290.0,140.0 h3.1 a3.1,3.1 0 0 1 3.1,3.1 v7.7 a3.1,3.1 0 0 1 -3.1,3.1 h-3.1 z" fill="#3987e5"><title>robojev v0 (2B) — T1 yes/no Brier 0.029</title></path>
+<text x="299.3" y="151" font-size="10.5" font-weight="600" fill="#ffffff" stroke="#1a1a19" stroke-width="3" paint-order="stroke">0.029</text>
+<path d="M290.0,162.0 h35.8 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-35.8 z" fill="#6b6a65"><title>Qwen3.5-2B (untrained) — T1 yes/no Brier 0.181</title></path>
+<text x="370" y="124" font-size="12.5" font-weight="600" fill="#ffffff">T2</text>
+<line x1="370" y1="132" x2="370" y2="180" stroke="#383835" stroke-width="1"/>
+<line x1="403.0" y1="132" x2="403.0" y2="180" stroke="#2c2c2a" stroke-width="1"/>
+<text x="370" y="195" font-size="10.5" fill="#898781">0</text>
+<text x="403.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
+<line x1="403.3" y1="132" x2="403.3" y2="180" stroke="#c3c2b7" stroke-width="1.5"><title>T2: always 0.5 scores 0.151</title></line>
+<path d="M370.0,140.0 h9.7 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-9.7 z" fill="#3987e5"><title>robojev v0 (2B) — T2 yes/no Brier 0.062</title></path>
+<text x="386.7" y="151" font-size="10.5" font-weight="600" fill="#ffffff" stroke="#1a1a19" stroke-width="3" paint-order="stroke">0.062</text>
+<path d="M370.0,162.0 h33.5 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-33.5 z" fill="#6b6a65"><title>Qwen3.5-2B (untrained) — T2 yes/no Brier 0.171</title></path>
+<text x="450" y="124" font-size="12.5" font-weight="600" fill="#ffffff">T3</text>
+<line x1="450" y1="132" x2="450" y2="180" stroke="#383835" stroke-width="1"/>
+<line x1="483.0" y1="132" x2="483.0" y2="180" stroke="#2c2c2a" stroke-width="1"/>
+<text x="450" y="195" font-size="10.5" fill="#898781">0</text>
+<text x="483.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
+<line x1="483.1" y1="132" x2="483.1" y2="180" stroke="#c3c2b7" stroke-width="1.5"><title>T3: always 0.5 scores 0.151</title></line>
+<path d="M450.0,140.0 h6.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-6.0 z" fill="#3987e5"><title>robojev v0 (2B) — T3 yes/no Brier 0.045</title></path>
+<text x="463.0" y="151" font-size="10.5" font-weight="600" fill="#ffffff" stroke="#1a1a19" stroke-width="3" paint-order="stroke">0.045</text>
+<path d="M450.0,162.0 h33.1 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-33.1 z" fill="#6b6a65"><title>Qwen3.5-2B (untrained) — T3 yes/no Brier 0.169</title></path>
+<text x="530" y="124" font-size="12.5" font-weight="600" fill="#ffffff">T4</text>
+<line x1="530" y1="132" x2="530" y2="180" stroke="#383835" stroke-width="1"/>
+<line x1="563.0" y1="132" x2="563.0" y2="180" stroke="#2c2c2a" stroke-width="1"/>
+<text x="530" y="195" font-size="10.5" fill="#898781">0</text>
+<text x="563.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
+<line x1="572.9" y1="132" x2="572.9" y2="180" stroke="#c3c2b7" stroke-width="1.5"><title>T4: always 0.5 scores 0.195</title></line>
+<path d="M530.0,140.0 h2.7 a2.7,2.7 0 0 1 2.7,2.7 v8.5 a2.7,2.7 0 0 1 -2.7,2.7 h-2.7 z" fill="#3987e5"><title>robojev v0 (2B) — T4 yes/no Brier 0.025</title></path>
+<text x="538.5" y="151" font-size="10.5" font-weight="600" fill="#ffffff" stroke="#1a1a19" stroke-width="3" paint-order="stroke">0.025</text>
+<path d="M530.0,162.0 h39.2 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-39.2 z" fill="#6b6a65"><title>Qwen3.5-2B (untrained) — T4 yes/no Brier 0.196</title></path>
+<text x="610" y="124" font-size="12.5" font-weight="600" fill="#ffffff">T5</text>
+<line x1="610" y1="132" x2="610" y2="180" stroke="#383835" stroke-width="1"/>
+<line x1="643.0" y1="132" x2="643.0" y2="180" stroke="#2c2c2a" stroke-width="1"/>
+<text x="610" y="195" font-size="10.5" fill="#898781">0</text>
+<text x="643.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
+<line x1="644.2" y1="132" x2="644.2" y2="180" stroke="#c3c2b7" stroke-width="1.5"><title>T5: always 0.5 scores 0.155</title></line>
+<path d="M610.0,140.0 h3.6 a3.6,3.6 0 0 1 3.6,3.6 v6.7 a3.6,3.6 0 0 1 -3.6,3.6 h-3.6 z" fill="#3987e5"><title>robojev v0 (2B) — T5 yes/no Brier 0.033</title></path>
+<text x="620.3" y="151" font-size="10.5" font-weight="600" fill="#ffffff" stroke="#1a1a19" stroke-width="3" paint-order="stroke">0.033</text>
+<path d="M610.0,162.0 h37.8 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-37.8 z" fill="#6b6a65"><title>Qwen3.5-2B (untrained) — T5 yes/no Brier 0.190</title></path>
+<text x="690" y="124" font-size="12.5" font-weight="600" fill="#ffffff">T6</text>
+<line x1="690" y1="132" x2="690" y2="180" stroke="#383835" stroke-width="1"/>
+<line x1="723.0" y1="132" x2="723.0" y2="180" stroke="#2c2c2a" stroke-width="1"/>
+<text x="690" y="195" font-size="10.5" fill="#898781">0</text>
+<text x="723.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
+<line x1="729.1" y1="132" x2="729.1" y2="180" stroke="#c3c2b7" stroke-width="1.5"><title>T6: always 0.5 scores 0.178</title></line>
+<path d="M690.0,140.0 h5.3 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-5.3 z" fill="#3987e5"><title>robojev v0 (2B) — T6 yes/no Brier 0.042</title></path>
+<text x="702.3" y="151" font-size="10.5" font-weight="600" fill="#ffffff" stroke="#1a1a19" stroke-width="3" paint-order="stroke">0.042</text>
+<path d="M690.0,162.0 h37.7 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-37.7 z" fill="#6b6a65"><title>Qwen3.5-2B (untrained) — T6 yes/no Brier 0.189</title></path>
+<text x="770" y="124" font-size="12.5" font-weight="600" fill="#ffffff">T7</text>
+<line x1="770" y1="132" x2="770" y2="180" stroke="#383835" stroke-width="1"/>
+<line x1="803.0" y1="132" x2="803.0" y2="180" stroke="#2c2c2a" stroke-width="1"/>
+<text x="770" y="195" font-size="10.5" fill="#898781">0</text>
+<text x="803.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
+<line x1="803.5" y1="132" x2="803.5" y2="180" stroke="#c3c2b7" stroke-width="1.5"><title>T7: always 0.5 scores 0.152</title></line>
+<path d="M770.0,140.0 h3.9 a3.9,3.9 0 0 1 3.9,3.9 v6.2 a3.9,3.9 0 0 1 -3.9,3.9 h-3.9 z" fill="#3987e5"><title>robojev v0 (2B) — T7 yes/no Brier 0.035</title></path>
+<text x="780.8" y="151" font-size="10.5" font-weight="600" fill="#ffffff" stroke="#1a1a19" stroke-width="3" paint-order="stroke">0.035</text>
+<path d="M770.0,162.0 h35.9 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-35.9 z" fill="#6b6a65"><title>Qwen3.5-2B (untrained) — T7 yes/no Brier 0.181</title></path>
+<text x="868" y="124" font-size="12.5" font-weight="600" fill="#ffffff">G1</text>
+<line x1="868" y1="132" x2="868" y2="180" stroke="#383835" stroke-width="1"/>
+<line x1="901.0" y1="132" x2="901.0" y2="180" stroke="#2c2c2a" stroke-width="1"/>
+<text x="868" y="195" font-size="10.5" fill="#898781">0</text>
+<text x="901.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.5</text>
+<path d="M868.0,140.0 h24.3 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-24.3 z" fill="#3987e5"><title>robojev v0 (2B) — G1 accuracy 0.429</title></path>
+<path d="M868.0,162.0 h28.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-28.0 z" fill="#6b6a65"><title>Qwen3.5-2B (untrained) — G1 accuracy 0.484</title></path>
+<text x="896.0" y="173" text-anchor="end" font-size="10.5" font-weight="600" fill="#ffffff">0.484</text>
+<text x="948" y="124" font-size="12.5" font-weight="600" fill="#ffffff">G2</text>
+<line x1="948" y1="132" x2="948" y2="180" stroke="#383835" stroke-width="1"/>
+<line x1="981.0" y1="132" x2="981.0" y2="180" stroke="#2c2c2a" stroke-width="1"/>
+<text x="948" y="195" font-size="10.5" fill="#898781">0</text>
+<text x="981.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.5</text>
+<path d="M948.0,140.0 h38.9 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-38.9 z" fill="#3987e5"><title>robojev v0 (2B) — G2 accuracy 0.650</title></path>
+<path d="M948.0,162.0 h44.8 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-44.8 z" fill="#6b6a65"><title>Qwen3.5-2B (untrained) — G2 accuracy 0.739</title></path>
+<text x="992.8" y="173" text-anchor="end" font-size="10.5" font-weight="600" fill="#ffffff">0.739</text>
+<text x="276" y="151" text-anchor="end" font-size="12" fill="#ffffff" font-weight="600">robojev v0 (2B)</text>
+<text x="276" y="173" text-anchor="end" font-size="12" fill="#c3c2b7">Qwen3.5-2B (untrained)</text>
+<text x="290" y="104" font-size="11.5" fill="#898781">yes/no Brier ↓ (lower is better) · the number marks the best model in each column</text>
+<text x="868" y="104" font-size="11.5" fill="#898781">accuracy ↑</text>
+<text x="24" y="228" font-size="11" fill="#898781">bench-v0 · 2026-10-12 · single-order reading · T1–T7 are home ground (our generator)</text>
+</svg>
