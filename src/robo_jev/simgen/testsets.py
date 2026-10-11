@@ -24,7 +24,7 @@ from pathlib import Path
 
 from robo_jev.simgen import ID_PREFIX
 from robo_jev.simgen.catalog import DOMAINS, SCENE_BODIES, SCENE_GROUP, TRAIN_GROUPS, SimgenConfig
-from robo_jev.simgen.generate import HeldOutError, Moment, assemble, build_moment, plan_units, split_spec
+from robo_jev.simgen.generate import HeldOutError, Moment, assemble, build_moment, pair_records, plan_units, split_spec
 from robo_jev.simgen.holdout import TRAIN_STYLES, Holdout, Split, load_holdout, split_for
 from robo_jev.simgen.perturb import (
     MIRROR_SCENES_EXCLUDED,
@@ -160,13 +160,9 @@ def _t5(cfg: SimgenConfig, n_pairs: int, git, holdout: Holdout, used: list[int])
     for unit in plan_units(2 * n_pairs, 0, groups=TRAIN_GROUPS, seed_start=0, pair_share=1.0):
         forced = {"group": unit["group"]}
         base = _moment(cfg, seeds, seeds.main(unit["seed"]), unit["domain"], forced, split)
-        variant = build_moment(cfg, base.seed, unit["domain"], forced, unit["pair_kind"], split)
-        i, j = unit["indices"]
-        ids = (f"{prefix}-{i:06d}", f"{prefix}-{j:06d}")
-        kind = variant.variant
-        common = {"git": git, "id_prefix": prefix, "forced": forced, "split_spec": split_spec(split)}
-        yield assemble(cfg, base, i, pair={"of": ids[1], "kind": kind, "role": "base"}, **common)
-        yield assemble(cfg, variant, j, pair={"of": ids[0], "kind": kind, "role": "variant", "flipped": variant.flipped}, **common)
+        # 학습 세트의 쌍과 같은 규칙(수정 1 I4): 핵심이 묻는 변수 하나, 기준의 권고 그대로, 핵심 정답이 0.5를 넘는 것만
+        yield from pair_records(cfg, base, unit["domain"], forced, unit["pair_kind"], split, unit["indices"], git=git, id_prefix=prefix, forced=forced,
+                                split_spec=split_spec(split))  # fmt: skip
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -240,12 +236,15 @@ def _t6_variant(cfg: SimgenConfig, moment: Moment, base: dict, variant: str, ind
     record = assemble(cfg, use, index, git=git, id_prefix=f"{ID_PREFIX}-T6-{variant}", forced=forced, surface=surface or None, split_spec=split_spec(split),
                       t6=t6)  # fmt: skip
     record["meta"]["t6"]["map"] = question_map(base, record, mirrored=variant == "mirror")
+    record["meta"]["t6"]["identical_to_base"] = json.dumps(record["request"], ensure_ascii=False) == json.dumps(base["request"], ensure_ascii=False)
     return record
 
 
 def _t6(cfg: SimgenConfig, n_bases: int, git, holdout: Holdout, used: list[int], stride: int = len(DOMAINS)):
-    """T6: 기준 n_bases개(T1 분포 — 마주 옴은 빼고) × 12 변형, 기준 자신도 쓴다(meta.t6.variant = 'base'). ``stride``: 묶음을 바꾸는 단위 수
-    (기본: 분야 한 바퀴 — 분야 × 묶음 층화; 시험은 1로 묶음을 고루)."""
+    """T6: 기준 n_bases개(T1 분포) × 12 변형, 기준 자신도 쓴다(meta.t6.variant = 'base'). 마주 옴은 좌우가 다른 사전이라 거울상만 뺀다
+    (11 변형 — 기준의 meta.t6.not_applicable = ['mirror'], 수정 1 결정). 기준과 요청이 글자 그대로 같은 변형(옆이 없는 장면의 거울상 등)은
+    meta.t6.identical_to_base = True(불변성 점수에서 뺄 수 있게 — 수정 1 M4). ``stride``: 묶음을 바꾸는 단위 수(기본: 분야 한 바퀴 —
+    분야 × 묶음 층화; 시험은 1로 묶음을 고루)."""
     split = split_for("T6", holdout)
     seeds = _Seeds(holdout, "T6", used)
     made = unit = 0
@@ -258,14 +257,14 @@ def _t6(cfg: SimgenConfig, n_bases: int, git, holdout: Holdout, used: list[int],
             moment = build_moment(cfg, seed, domain, forced, None, split)
         except HeldOutError:
             continue
-        if moment.ctx.scene in MIRROR_SCENES_EXCLUDED:
-            continue
         seeds.used.append(seed)
+        skip = ("mirror",) if moment.ctx.scene in MIRROR_SCENES_EXCLUDED else ()
         base = assemble(cfg, moment, made, git=git, id_prefix=f"{ID_PREFIX}-T6-base", forced=forced, split_spec=split_spec(split),
-                        t6={"meta": {"base": None, "variant": "base"}})  # fmt: skip
+                        t6={"meta": {"base": None, "variant": "base", "not_applicable": list(skip)}})  # fmt: skip
         yield base
         for variant in VARIANTS:
-            yield _t6_variant(cfg, moment, base, variant, made, git, split)
+            if variant not in skip:
+                yield _t6_variant(cfg, moment, base, variant, made, git, split)
         made += 1
 
 
@@ -278,9 +277,12 @@ _DEFINITIONS = {
     "T2": "every record has >= 1 held-out axis: style 'log', the domain's held-out fifth setting, the held-out paraphrase pool (each axis on with p = 0.6)",
     "T3": "every record is on the test side of exactly one T3 range cell (equal records per cell; other cells on the training side)",
     "T4": "held-out combination P1+P3 only",
-    "T5": "minimal pairs (numeric: one decision margin moved across its boundary; wording: same facts, different skin text), T1 distribution",
-    "T6": "300 bases (T1 distribution, p1_head_on excluded — not mirror-symmetric) x 12 perturbations + the base; labels invariant (mirror mapped)",
-    "T7": f"calibration set, T1 distribution, K = {T7_K} (closed forms where available)",
+    "T5": "minimal pairs, T1 distribution (numeric: the decision variable the key question asks about moved across its boundary, kept only when the key "
+          "label crosses 0.5, the base's planner recommendation shown unchanged and rule thresholds placed at the base's values — the two requests differ "
+          "only in that value and what is derived from it; wording: same facts, different skin text)",
+    "T6": "300 bases (T1 distribution) x 12 perturbations + the base; p1_head_on bases skip the mirror (not mirror-symmetric, 11 perturbations); labels "
+          "invariant (mirror mapped); variants whose request is byte-identical to the base are flagged meta.t6.identical_to_base",
+    "T7": f"calibration set, T1 distribution, K = {T7_K} (all labels of a record from one weighted batch, calibrated to the closed forms where available)",
 }
 
 

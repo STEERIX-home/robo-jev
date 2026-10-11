@@ -189,17 +189,39 @@ def test_values_v0_has_both_mechanisms_off_and_values_v01_has_them_on():
 # ----------------------------------------------------------------------------------------------------------------
 
 
-def test_exact_values_replace_sample_frequencies_where_given():
-    world = Outcomes(("x",))
-    world.world_events = {"stops_short": np.array([True, False, False, False])}
-    world.states = {"intent": np.array([0.0, 0.0, 0.0, 1.0]), "lid": np.array([1.0, 1.0, 0.0, 0.0])}
-    exact = {"stops_short": 0.9, "intent": np.array([0.2, 0.5, 0.3]), "lid": 0.1}
+def test_calibration_makes_the_batch_match_the_closed_forms():
+    """수정 1 M5: 닫힌 꼴은 정답에 직접 쓰지 않고 표본의 무게를 그 값에 맞춘다 — 그 뒤 noul·상태 정답(같은 무게의 빈도)이 닫힌 꼴과 같고,
+    행동의 기대 비용도 같은 무게를 쓴다(한 레코드 안에서 닫힌 꼴과 K개 빈도를 섞지 않는다)."""
+    import itertools
+
+    grid = np.array(list(itertools.product((0, 1), (0, 1, 2), (0, 1), (0, 1))), dtype=float)   # 세계 24개 = 모든 조합(맞출 수 있다)
+    world = Outcomes(("risky", "safe"))
+    world.world_events = {"stops_short": grid[:, 0] > 0.5}
+    world.states = {"intent": grid[:, 1], "lid": grid[:, 2]}
+    world.events = {"contact": np.array([grid[:, 3] > 0.5, np.zeros(24, dtype=bool)])}
+    world.quantities = {"delay": np.array([np.zeros(24), np.full(24, 2.0)])}
+    world.cost_items = {"contact": "contact_person"}
+    exact = {"stops_short": 0.9, "intent": np.array([0.2, 0.5, 0.3]), "lid": 0.1, "contact|risky": 0.25, "unknown_key": 0.5}
+    result = lb.calibrate(world, exact)
+    assert result == {"matched": ["contact|risky", "intent", "lid", "stops_short"], "unmatched": [], "trimmed": {}}
     noul = {"kind": "noul", "source": "world", "event": "stops_short"}
-    assert lb.noul_label(world, noul, exact)["p_yes"] == 0.9
-    assert lb.noul_label(world, {**noul, "negate": True}, exact)["p_yes"] == pytest.approx(0.1)
-    assert lb.noul_label(world, noul)["p_yes"] == 0.25
-    intent = lb.state_label(world, {"state": "intent", "options": {"a": [0.0], "b": [1.0, 2.0]}}, exact)
-    assert intent["probabilities"] == {"a": 0.2, "b": 0.8}
-    lid = lb.state_label(world, {"state": "lid", "options": {"has_lid": [1.0], "open": [0.0]}}, exact)
-    assert lid["probabilities"] == {"has_lid": 0.1, "open": 0.9}
-    assert lb.uses_exact({"kind": "noul", **noul}, exact) and not lb.uses_exact({"kind": "noul", "source": "event", "event": "contact", "option": "x"}, exact)
+    assert lb.noul_label(world, noul)["p_yes"] == 0.9
+    assert lb.noul_label(world, {**noul, "negate": True})["p_yes"] == pytest.approx(0.1)
+    assert lb.state_label(world, {"state": "intent", "options": {"a": [0.0], "b": [1.0, 2.0]}})["probabilities"] == {"a": 0.2, "b": 0.8}
+    assert lb.state_label(world, {"state": "lid", "options": {"has_lid": [1.0], "open": [0.0]}})["probabilities"] == {"has_lid": 0.1, "open": 0.9}
+    # 행동의 기대 비용 = 같은 무게: P(닿음 | risky) 0.25 × 비용(그 밖 0) — 닫힌 꼴의 확률이 그대로 들어간다
+    model = {"costs": {"contact_person": 10.0, "delay_per_s": 1.0}, "speed_scaled": False, "v_ref": 1.0, "floor": 1.0, "overridden": frozenset(), "hard_brake": 0.0}
+    assert lb.expected_costs(world, model)[0] == pytest.approx(2.5)
+    assert lb.uses_exact({"kind": "noul", **noul}, result["matched"]) and not lb.uses_exact({"kind": "noul", "source": "event", "event": "contact", "option": "safe"}, result["matched"])
+
+
+def test_a_class_with_no_sample_is_trimmed_and_recorded_and_the_label_stays_the_batch_frequency():
+    """표본이 하나도 없는 범주(꼬리)는 0으로 두고 나머지를 다시 나눠 맞춘다 — 잘라 낸 질량을 적는다; 모든 범주가 비면 맞추지 않는다."""
+    world = Outcomes(("x",))
+    world.world_events = {"passable": np.array([False, False, False, False])}
+    world.states = {"intent": np.array([0.0, 0.0, 1.0, 1.0])}
+    result = lb.calibrate(world, {"passable": 0.003, "intent": np.array([0.5, 0.3, 0.2])})
+    assert result == {"matched": ["intent", "passable"], "unmatched": [], "trimmed": {"intent": 0.2, "passable": 0.003}}
+    assert lb.noul_label(world, {"source": "world", "event": "passable"})["p_yes"] == 0.0
+    assert lb.state_label(world, {"state": "intent", "options": {"a": [0.0], "b": [1.0], "c": [2.0]}})["probabilities"] == {"a": 0.625, "b": 0.375, "c": 0.0}
+    assert lb.calibrate(world, {"passable": 1.0}) == {"matched": [], "unmatched": ["passable"], "trimmed": {}}

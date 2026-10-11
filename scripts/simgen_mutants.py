@@ -34,7 +34,7 @@ MUTANTS = {
     # v0b — v0a 재검증의 시험 없는 수정 경로(m-a)·m-b·m-c·끼어듦 전제
     "Ma1": ("src/robo_jev/simgen/scenes.py", 'coord_now, rate = v["dist"] - r_sum, v["va"] + r.speed', 'coord_now, rate = v["dist"] - r_sum, v["va"]',
             "head-on observation side reverted (fix = now + agent speed only)"),
-    "Ma2": ("src/robo_jev/simgen/generate.py", "    exact = exact_labels(cfg, obs)\n", "    exact = {}\n", "closed-form labels switched off"),
+    "Ma2": ("src/robo_jev/simgen/generate.py", "    exact = exact_labels(cfg, obs)\n", "    exact = {}\n", "closed-form calibration of the batch switched off"),
     "Ma3": ("src/robo_jev/simgen/scenes.py", "    if age > age_max:\n", "    if False:\n", "step-in last-fix cap removed"),
     "Mb": ("src/robo_jev/simgen/rollout.py", "np.array(contact) | np.array(side_contact)", "np.array(contact)", "side-obstacle hits do not spill"),
     "Mc": ("duplicate questions allowed", [
@@ -67,6 +67,44 @@ MUTANTS = {
     "Mjosa": ("src/robo_jev/simgen/korean.py", "    return with_final if final else without\n", "    return with_final\n", "Korean particles ignore the final sound"),
     "Mimpact": ("src/robo_jev/simgen/questions.py", '    return obs.scene == "p3p5_carrying_mixed" and obs.env.maneuver == "brake"\n', "    return False\n",
                 "spill wording for P3+P5 braking stops naming the collision"),
+    # 리뷰 1(v0b)의 살아남은 변이체 넷 — 같은 변경(수정 1 M3)
+    "MR1": ("src/robo_jev/simgen/perturb.py", '    return _DECIMAL.sub(lambda m: m.group(1) + ("." + m.group(2) if m.group(2) else ""), text)',
+            "    return _DECIMAL.sub(lambda m: m.group(1), text)", "T6 number notation drops all decimals (values change)"),
+    "MR2": ("src/robo_jev/simgen/narrate_ko.py", '            text = f"라이다는 약 {dist} 앞 {where}에 물체가 있다고 보고하지만, 카메라에는 그곳에 아무것도 보이지 않습니다."',
+            '            text = f"카메라는 약 {dist} 앞 {where}에 물체가 있다고 보고하지만, 라이다는 그곳에서 반사를 받지 못합니다."',
+            "Korean sensor-conflict sentence names the wrong sensor"),
+    "MR4": ("src/robo_jev/simgen/p4.py", "            means[i, j], sds[i, j] = post_mean, math.sqrt(post_var + se**2)", "            means[i, j], sds[i, j] = post_mean, se",
+            "P4 re-measurement predictive ignores the posterior uncertainty"),
+    "MR6": ("src/robo_jev/simgen/p6.py", '        p_seen = np.where(still, look["detect"], look["false_alarm"])', '        p_seen = np.where(still, look["detect"], look["detect"])',
+            "stale-track look made uninformative"),
+    # 수정 1의 고침 — 되돌리면 떨어져야 한다
+    "Mrobotcut": ("I1 reverted: range cells only in their listed scenes", [
+        ("src/robo_jev/simgen/holdout.py", "        if value is not None and cell.in_test(value, body) and holdout.reported_under(cell, scene):",
+         "        if value is not None and cell.in_test(value, body) and holdout.reported_under(cell, scene) and scene in cell.scenes:"),
+        ("src/robo_jev/simgen/holdout.py", "        elif split.train_ranges:\n            narrow(cell.var, cell.train_bounds(body))",
+         "        elif split.train_ranges and scene in cell.scenes:\n            narrow(cell.var, cell.train_bounds(body))"),
+    ]),
+    "Mfallimpact": ("src/robo_jev/simgen/questions.py", '    return obs.scene in ("p3_carrying_tall", "p3p5_carrying_mixed") and obs.env.maneuver == "brake"\n',
+                    "    return False\n", "I2 reverted (text): P3 braking fall questions stop naming the collision / motion-only qualifier"),
+    "Mfallmotion": ("src/robo_jev/simgen/p3.py", "        motion.append(t_l | t_s | off_l | off_s)", "        motion.append(t_l | t_s | off_l | off_s | hit)",
+                    "I2 reverted (label): the motion-only fall counts the collision"),
+    "Mbrakekey": ("src/robo_jev/simgen/p3.py", '    return {"brake": "stop_hard", "turn": "turn_100", "start": "start_quick"}[maneuver]',
+                  '    return {"brake": "stop_moderate", "turn": "turn_100", "start": "start_quick"}[maneuver]', "I2: braking key back to the firm stop"),
+    "Mstatic": ("I3 reverted: a stationary robot is walked into as often as a moving one", [
+        ("configs/simgen/catalog-v0.2.yaml", "  fail: {attentive: 0.01, distracted: 0.05}", "  fail: {attentive: 0.25, distracted: 0.25}"),
+        ("configs/simgen/catalog-v0.2.yaml", "  fail_close: {attentive: 0.05, distracted: 0.50}", "  fail_close: {attentive: 0.25, distracted: 0.25}"),
+    ]),
+    "Mstopbefore": ("src/robo_jev/simgen/p6.py", "    room = ahead_reported - r.speed * r.latency - _BEFORE_BUFFER", "    room = ahead_reported + 0.3",
+                    "I3: stop-before-the-corner forgets the reaction distance and buffer"),
+    "Mpairkeep": ("src/robo_jev/simgen/generate.py", '            cand = assemble(cfg, moment, j, id_prefix=id_prefix, t6={"recommendation": keep}, threshold_obs=base.obs, **common)',
+                  "            cand = assemble(cfg, moment, j, id_prefix=id_prefix, threshold_obs=base.obs, **common)", "I4: pair variants recompute the recommendation"),
+    "Mpaircross": ("src/robo_jev/simgen/generate.py", "            if p1 is not None and (p0 - 0.5) * (p1 - 0.5) < 0:", "            if p1 is not None:",
+                   "I4: pairs kept even when the key label does not cross 0.5"),
+    "Mthreshold": ("src/robo_jev/simgen/questions.py", "    c.tobs = threshold_obs or obs", "    c.tobs = obs", "I4: pair variants place rule thresholds at their own values"),
+    "Mhedge": ("src/robo_jev/simgen/narrate.py", 'HEDGED_CUES = ("glass", "black")', "HEDGED_CUES = ()", "M2 reverted: glass/black cues asserted as objects"),
+    "Midentical": ("src/robo_jev/simgen/testsets.py",
+                   '    record["meta"]["t6"]["identical_to_base"] = json.dumps(record["request"], ensure_ascii=False) == json.dumps(base["request"], ensure_ascii=False)',
+                   '    record["meta"]["t6"]["identical_to_base"] = False', "M4: identical T6 variants not flagged"),
 }  # fmt: skip
 
 

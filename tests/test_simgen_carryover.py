@@ -2,7 +2,8 @@
 끼어듦의 글 전제를 쓰는 사후(리뷰 1 재검증의 끼어듦 잔여).
 
 * m-a ① 마주 옴의 관측 쪽(C1): 글에서 읽은 수로 계산한 지금 간격 − 닻 세계의 참 지금 간격의 평균 ≈ 0 (관측 쪽을 되돌리면 −v·나이만큼 치우친다).
-* m-a ② 닫힌 꼴 정답: 닫힌 꼴이 있는 질문은 모두 `meta.exact_labels`에 있고 정답이 `exact_labels(관측)`와 같다(닫힌 꼴을 끄면 떨어진다).
+* m-a ② 닫힌 꼴 정답: 닫힌 꼴이 있는 질문은 맞출 수 있으면(`meta.calibration.matched`) 모두 `meta.exact_labels`에 있고 정답이
+  `exact_labels(관측)`와 같다 — 수정 1 M5부터는 표본의 무게를 닫힌 꼴에 맞춘 같은 표본의 빈도로(닫힌 꼴 맞추기를 끄면 떨어진다).
 * m-a ③ 끼어듦의 마지막 위치 상한: 닻 세계의 가장 최근 위치 보고가 진로 중심선에서 `last_fix_max` 안(상한을 지우면 떨어진다).
 * m-b 비켜서다 옆의 숨은 장애물에 닿으면 열린 용기가 쏟아진다(뚜껑이 있으면 아니다).
 * m-c 한 요청 안의 질문은 묻는 것의 정체(`questions.identity`)가 모두 다르다.
@@ -75,27 +76,34 @@ def test_head_on_text_gap_matches_the_anchor_worlds_current_gap(cfg):
 
 
 def test_every_question_with_a_closed_form_uses_it(cfg):
-    checked = 0
+    checked, unmatched, trimmed = 0, 0, 0
     for record in sample_records()[:300]:
         obs = _moment_of(cfg, record).obs
         exact = exact_labels(cfg, obs)
         meta = record["meta"]
+        assert set(meta["calibration"]["matched"]) | set(meta["calibration"]["unmatched"]) <= set(exact), record["id"]
         for name, label in record["labels"].items():
             recipe = {**meta["basis"][name], **({"options": meta["options"][name]} if name in meta["options"] else {})}
             if recipe["kind"] not in ("noul", "state") or not uses_exact(recipe, exact):
                 continue
+            if not uses_exact(recipe, meta["calibration"]["matched"]):
+                unmatched += 1      # 끝내 맞추지 못한 닫힌 꼴(없어야 한다) — 정답은 같은 표본의 빈도
+                continue
             assert name in meta["exact_labels"], (record["id"], name)
+            key = recipe["state"] if recipe["kind"] == "state" else (recipe["event"] if recipe["source"] == "world" else f"{recipe['event']}|{recipe['option']}")
+            # 표본이 없는 꼬리 범주를 잘라 냈으면 그 질량만큼까지 다를 수 있다(적혀 있다); 아니면 같다
+            slack = meta["calibration"]["trimmed"].get(key, 0.0) + 1e-6
             if recipe["kind"] == "noul":
-                key = recipe["event"] if recipe["source"] == "world" else f"{recipe['event']}|{recipe['option']}"
                 p = float(exact[key])
-                assert label["p_yes"] == round(1.0 - p if recipe.get("negate") else p, 6), (record["id"], name)
+                assert abs(label["p_yes"] - (1.0 - p if recipe.get("negate") else p)) <= slack, (record["id"], name)
             else:
                 value = exact[recipe["state"]]
                 dist = np.array([1.0 - value, value]) if recipe["state"] == "lid" else np.asarray(value)
-                for key, accepted in recipe["options"].items():
-                    assert label["probabilities"][key] == round(float(sum(dist[int(x)] for x in accepted)), 8), (record["id"], name, key)
+                for option, accepted in recipe["options"].items():
+                    assert abs(label["probabilities"][option] - float(sum(dist[int(x)] for x in accepted))) <= slack, (record["id"], name, option)
             checked += 1
-    assert checked >= 150
+            trimmed += key in meta["calibration"]["trimmed"]
+    assert checked >= 150 and unmatched == 0 and trimmed <= 0.25 * checked, (checked, unmatched, trimmed)
 
 
 # ----------------------------------------------------------------------------------------------------------------

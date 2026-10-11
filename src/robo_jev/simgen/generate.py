@@ -31,7 +31,7 @@ import numpy as np
 
 from robo_jev.simgen import GENERATOR_VERSION, ID_PREFIX, SCHEMA
 from robo_jev.simgen.catalog import DOMAINS, INTENTS, SCENE_FAMILY, SCENE_GROUP, SCENE_PHENOMENA, SimgenConfig, default_config
-from robo_jev.simgen.labels import cost_model, expected_costs, label_for, realized, uses_exact
+from robo_jev.simgen.labels import calibrate, cost_model, expected_costs, label_for, realized, uses_exact
 from robo_jev.simgen.narrate import RenderPlan, compute_hint, render_state
 from robo_jev.simgen.observation import Observation
 from robo_jev.simgen.posterior import exact_labels, sample_posterior
@@ -101,9 +101,12 @@ class HeldOutError(RuntimeError):
     """나눔이 만들 수 없는 칸만 나왔다(생성 시점 거절이 끝내 통과하지 못함)."""
 
 
-def build_moment(cfg: SimgenConfig, seed: int, domain: str, forced: dict | None = None, variant: str | None = None, split=None, holdout=None) -> Moment:
+def build_moment(cfg: SimgenConfig, seed: int, domain: str, forced: dict | None = None, variant: str | None = None, split=None, holdout=None,
+                 *, pair_skip: int = 0) -> Moment:  # fmt: skip
     """틀 → 여유 → 닻 세계 → (쌍이면 변형) → 관측. **나눔(split)이 만들 수 없는 칸이면 닻 세계를 다시 뽑는다**(생성 시점 거절 — holdout:
-    학습은 빼 둔 문체·상황·묶음·조합을 고를 수 없고, 변수 범위는 뽑는 범위를 좁힌 뒤 보고값으로 한 번 더 검사한다)."""
+    학습은 빼 둔 문체·상황·묶음·조합을 고를 수 없고, 변수 범위는 뽑는 범위를 좁힌 뒤 보고값으로 한 번 더 검사한다).
+    숫자 쌍의 변형은 받아들일 수 있는(관측이 바뀌고 나눔 안인) 후보 가운데 ``pair_skip``번째 — 쌍 단위가 핵심 정답이 0.5를 넘는 후보를 찾을
+    때까지 다음 것을 본다(:func:`pair_records`); 더 없으면 단어 쌍이 된다."""
     from robo_jev.simgen.holdout import cells_hit, load_holdout, split_for, violations
 
     holdout = holdout or load_holdout()
@@ -148,11 +151,14 @@ def build_moment(cfg: SimgenConfig, seed: int, domain: str, forced: dict | None 
         # 그 관측도 나눔 안이어야 한다.
         base_obs = look(world, 0)
         moved = None
+        skip = int(pair_skip)
         for w, name in flip_numeric(cfg, world, stream(seed, "pair")):
             o = look(w, 0)
             if o != base_obs and not violations(holdout, split, o, ctx.style, ctx.setting, pool):
-                moved = (w, name)
-                break
+                if skip == 0:
+                    moved = (w, name)
+                    break
+                skip -= 1
         if moved is None:
             variant = "wording"
         else:
@@ -299,8 +305,11 @@ def assemble(
     surface: dict | None = None,
     split_spec: dict | None = None,
     t6: dict | None = None,
+    threshold_obs: Observation | None = None,
 ) -> dict:
     """판단 순간 하나 → 레코드(dict).
+
+    ``threshold_obs``(숫자 쌍의 변형): 규칙 질문의 문턱을 이 관측(기준)의 값에 놓는다 — 쌍의 두 요청이 옮긴 사실 말고는 같게(수정 1 I4).
 
     ``t6``(교란 세트의 변형 — testsets): ``style``(서술 문체 바꾸기), ``fact_seed``(사실 순서 섞기), ``state_post``·``request_post``(글·요청의
     뒤처리), ``extra_question``(한 가지 더 정하기), ``recommendation``(기준 레코드의 권고를 그대로 — 정식 선택지·있음·틀림),
@@ -312,7 +321,7 @@ def assemble(
     k = int(k or cfg.catalog["posterior_k"])
     options = tuple(t6.get("options") or available_options(obs))
     surface_obj = Surface(lang=ctx.lang, pool=moment.pool, **(surface or {}))
-    qset = write_questions(cfg, obs, options, stream(seed, "questions"), surface_obj)
+    qset = write_questions(cfg, obs, options, stream(seed, "questions"), surface_obj, threshold_obs=threshold_obs)
     if t6.get("extra_question"):
         from robo_jev.simgen.questions import candidates, identity
 
@@ -330,13 +339,20 @@ def assemble(
         batch = transform(batch)
     out: Outcomes = rollout(cfg, obs, batch, options)
     exact = exact_labels(cfg, obs)
-    labels = {q.name: label_for(out, q.recipe, cfg.values, exact) for q in qset.questions}
+    # 한 레코드의 정답은 모두 이 무게의 같은 표본에서 — 닫힌 꼴은 표본의 무게를 그 값에 맞추는 데 쓴다(수정 1 M5)
+    calibration = calibrate(out, exact)
+    labels = {q.name: label_for(out, q.recipe, cfg.values) for q in qset.questions}
     primary = next(q for q in qset.questions if q.name == qset.primary_action)
     recommendation = recommend(cfg, seed, style, out)
     if "recommendation" in t6:
         keep = t6["recommendation"]
         recommendation.update(present=keep["present"], canonical=keep["canonical"], wrong=keep["wrong"])
         recommendation["gap"] = None if keep["canonical"] is None else round(recommendation["costs"][keep["canonical"]] - min(recommendation["costs"].values()), 4)
+        if keep.get("kept"):
+            # 쌍의 변형: 기준의 권고를 그대로 보이고(사실 하나만 바뀐다), 틀림은 이 순간의 비용으로 다시 잰다(최선보다 2τ 이상 나쁘면 틀림)
+            recommendation["kept"] = True
+            if keep["canonical"] is not None:
+                recommendation["wrong"] = bool(recommendation["gap"] >= float(cfg.values["wrong_recommendation_min_gap"]))
     rec_key = next((key for key, canon in primary.recipe["options"].items() if canon == recommendation["canonical"]), None)
     hint = _hint(cfg, seed, obs)
     plan = RenderPlan(style, options, recommendation["canonical"], hint, t6.get("fact_seed"))
@@ -384,7 +400,8 @@ def assemble(
         "basis": {q.name: {k2: v for k2, v in q.recipe.items() if k2 not in ("options", "answer")} for q in qset.questions},
         "options": {q.name: q.recipe["options"] for q in qset.questions if q.recipe["kind"] in ("action", "state", "voi")},
         "posterior_k": k,
-        "exact_labels": [q.name for q in qset.questions if uses_exact(q.recipe, exact)],
+        "exact_labels": [q.name for q in qset.questions if uses_exact(q.recipe, calibration["matched"])],
+        "calibration": calibration,
         "sides": None if obs.env.sides is None else [s.status for s in obs.env.sides],
         "margin_redraws": moment.margin_redraws,
         "margin_fallback": list(anchor.parts.get("inexact", ())),
@@ -492,14 +509,45 @@ def generate_unit(cfg: SimgenConfig, unit: dict, *, split=None, forced: dict | N
     if unit["pair_kind"] is None:
         return [assemble(cfg, build_moment(cfg, seed, domain, forced, None, split), unit["indices"][0], **common)]
     base = build_moment(cfg, seed, domain, forced, None, split)
-    variant = build_moment(cfg, seed, domain, forced, unit["pair_kind"], split)
-    kind = variant.variant  # numeric으로 못 옮기면 wording 쌍이 된다
-    i, j = unit["indices"]
+    return pair_records(cfg, base, domain, forced, unit["pair_kind"], split, unit["indices"], **common)
+
+
+#: 숫자 쌍의 변형 후보를 몇 개까지 볼까(핵심 정답이 0.5를 넘는 첫 후보 — 없으면 단어 쌍)
+PAIR_TRIES = 5
+
+
+def pair_records(cfg: SimgenConfig, base: Moment, domain: str, moment_forced: dict, kind: str, split, indices, *, id_prefix: str = ID_PREFIX, **common) -> list[dict]:
+    """쌍 단위(기준 + 변형) 두 레코드 — 학습 세트와 T5가 같이 쓴다(수정 1 I4).
+
+    숫자 쌍: 핵심 질문이 묻는 결정 변수(:func:`~robo_jev.simgen.catalog.pair_targets`) 하나만 경계 너머로 옮기고, 변형은 기준의 계획기 권고를
+    그대로 보이며(틀림·간격만 그 순간의 비용으로 — ``meta.recommendation.kept``), 규칙 질문의 문턱도 기준의 값에 둔다 — 그래서 두 요청은 옮긴
+    값(과 그에 딸린 표시값) 말고는 같다. 핵심 질문의 정답이 0.5를 실제로 넘는 후보만 받는다(``meta.pair.target`` = 그 핵심 질문); 넘는 후보가
+    없으면 단어 쌍(같은 사실·다른 상황 문구)."""
+    i, j = indices
     ids = (f"{id_prefix}-{i:06d}", f"{id_prefix}-{j:06d}")
-    return [
-        assemble(cfg, base, i, pair={"of": ids[1], "kind": kind, "role": "base"}, **common),
-        assemble(cfg, variant, j, pair={"of": ids[0], "kind": kind, "role": "variant", "flipped": variant.flipped}, **common),
-    ]
+    base_rec = assemble(cfg, base, i, id_prefix=id_prefix, **common)
+    key = base_rec["meta"]["key_question"]
+    p0 = base_rec["labels"][key]["p_yes"]
+    rec = base_rec["meta"]["recommendation"]
+    keep = {"present": rec["present"], "canonical": rec["canonical"], "wrong": rec["wrong"], "kept": True}
+    variant_rec, variant = None, None
+    if kind == "numeric":
+        for skip in range(PAIR_TRIES):
+            moment = build_moment(cfg, base.seed, domain, moment_forced, "numeric", split, pair_skip=skip)
+            if moment.variant != "numeric":
+                break
+            cand = assemble(cfg, moment, j, id_prefix=id_prefix, t6={"recommendation": keep}, threshold_obs=base.obs, **common)
+            p1 = cand["labels"][key]["p_yes"] if cand["meta"]["key_question"] == key else None
+            if p1 is not None and (p0 - 0.5) * (p1 - 0.5) < 0:
+                variant_rec, variant = cand, moment
+                break
+    if variant_rec is None:
+        variant = build_moment(cfg, base.seed, domain, moment_forced, "wording", split)
+        variant_rec = assemble(cfg, variant, j, id_prefix=id_prefix, **common)
+    kind = variant.variant
+    base_rec["meta"]["pair"] = {"of": ids[1], "kind": kind, "role": "base"}
+    variant_rec["meta"]["pair"] = {"of": ids[0], "kind": kind, "role": "variant", "flipped": variant.flipped, "target": key if kind == "numeric" else None}
+    return [base_rec, variant_rec]
 
 
 def generate_batch(n: int, base_seed: int = 0, *, cfg: SimgenConfig | None = None, git: str | None = None, k: int | None = None, id_prefix: str = ID_PREFIX,

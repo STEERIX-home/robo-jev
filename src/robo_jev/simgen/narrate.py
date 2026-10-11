@@ -24,7 +24,7 @@ from robo_jev.simgen.observation import Observation
 from robo_jev.simgen.phrases import cap, option_short, speed_text
 from robo_jev.simgen.spec import FILL_BINS, fill_bin_index
 
-__all__ = ["RenderPlan", "compute_hint", "render_state"]
+__all__ = ["HEDGED_CUES", "RenderPlan", "compute_hint", "render_state"]
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,10 @@ class RenderPlan:
     recommendation: str | None = None     # 계획기 권고(정식 선택지)
     hint: str | None = None               # 계산된 힌트 문장
     fact_seed: int | None = None          # 사실 순서 섞기(교란 T6 '사실 순서') — None이면 정해진 순서
+
+
+#: 센서 불일치의 단서 가운데 물체 자체일 수 있는 것(유리·검은 표면) — '있을 수 있다'로 쓴다(수정 1 M2; 먼지·눈부심·김은 그 자리의 상태라 그대로)
+HEDGED_CUES = ("glass", "black")
 
 
 def ordered(facts: list, plan: RenderPlan) -> list:
@@ -521,8 +525,13 @@ def _v0b_facts(obs: Observation, u: np.ndarray) -> list[_Fact]:
             text = f"Your camera reports an object about {dist} away, {where}; your lidar gets no return there."
             line = f"camera: object at about {dist} ({where}); lidar: nothing"
         out.append(_Fact(text, text, "PERCEIVED", line))
-        text = f"{cap(c.phrase)} is in that direction."
-        out.append(_Fact(text, text, "PERCEIVED", f"in that direction: {c.phrase}"))
+        if c.cue in HEDGED_CUES:
+            # 유리·검은 물체 단서는 그 물체가 바로 '앞에 있는 것'일 수 있다 — 있다고 단정하지 않는다(수정 1 M2)
+            text = f"There may be {c.phrase} in that direction."
+            out.append(_Fact(text, text, "PERCEIVED", f"possibly in that direction: {c.phrase}"))
+        else:
+            text = f"{cap(c.phrase)} is in that direction."
+            out.append(_Fact(text, text, "PERCEIVED", f"in that direction: {c.phrase}"))
         if env.detour_s is not None:
             t = _time(obs, env.detour_s, 1.0)
             text = f"Going around that spot would add about {t}."

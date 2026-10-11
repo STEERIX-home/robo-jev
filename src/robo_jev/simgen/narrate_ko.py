@@ -11,7 +11,7 @@ import numpy as np
 
 from robo_jev.simgen import textfmt
 from robo_jev.simgen.korean import has_batchim, kfmt
-from robo_jev.simgen.narrate import RenderPlan, _Fact, _len, _time, ordered, render_log
+from robo_jev.simgen.narrate import HEDGED_CUES, RenderPlan, _Fact, _len, _time, ordered, render_log
 from robo_jev.simgen.observation import Observation
 from robo_jev.simgen.phrases import speed_text
 from robo_jev.simgen.spec import fill_bin_index
@@ -399,8 +399,12 @@ def _v0b_facts(obs: Observation, u: np.ndarray) -> list[_Fact]:
             text = f"카메라는 약 {dist} 앞 {where}에 물체가 있다고 보고하지만, 라이다는 그곳에서 반사를 받지 못합니다."
             line = f"카메라: 약 {dist} 앞에 물체 ({where}); 라이다: 없음"
         out.append(_Fact(text, text, "PERCEIVED", line))
-        text = _k("그 방향에 {phrase:이} 있습니다.", phrase=c.phrase)
-        out.append(_Fact(text, text, "PERCEIVED", f"그 방향: {c.phrase}"))
+        if c.cue in HEDGED_CUES:
+            text = _k("그 방향에 {phrase:이} 있을 수 있습니다.", phrase=c.phrase)      # 물체 자체일 수 있는 단서는 단정하지 않는다(수정 1 M2)
+            out.append(_Fact(text, text, "PERCEIVED", f"그 방향에 있을 수 있음: {c.phrase}"))
+        else:
+            text = _k("그 방향에 {phrase:이} 있습니다.", phrase=c.phrase)
+            out.append(_Fact(text, text, "PERCEIVED", f"그 방향: {c.phrase}"))
         if env.detour_s is not None:
             t = _time(obs, env.detour_s, 1.0)
             text = _k("그 자리를 돌아가면 약 {t:이} 더 걸립니다.", t=t)

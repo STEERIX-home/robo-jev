@@ -151,3 +151,40 @@ def test_the_korean_skin_table_covers_every_english_skin_phrase():
     cfg = default_config()
     assert ko_skins().missing(cfg.skins) == {}
     assert sum(len(v) for v in card_strings(cfg.skins).values()) > 1000
+
+
+@pytest.mark.parametrize("style", ["facts", "prose", "planner", "log"])
+def test_sensor_conflict_sentences_name_the_reporting_sensor_and_hedge_object_cues_in_both_languages(style):
+    """수정 1 M3·M2: 센서 불일치의 글이 '있다'고 보고한 센서를 바르게 말한다(리뷰의 MR2 — 한국어 문장의 센서를 바꾼 변이체가 수만 비교하는
+    시험을 통과했다) — 영어와 한국어 각각 관측(라이다가 봤나)과 대조; 유리·검은 물체 단서는 '있을 수 있다'로(단정하지 않음), 먼지·눈부심·김은
+    그 자리의 상태라 그대로."""
+    from dataclasses import replace
+
+    from robo_jev.simgen.generate import build_moment
+    from robo_jev.simgen.holdout import split_for
+    from robo_jev.simgen.narrate import HEDGED_CUES, RenderPlan, render_state
+    from robo_jev.simgen.rollout import available_options
+    from robo_jev.simgen.spec import stream
+
+    cfg = default_config()
+    split = split_for("T2", styles=("facts", "prose", "planner", "log"))
+    seen = Counter()
+    for i, domain in enumerate(("warehouse", "hospital", "retail", "factory")):
+        for lang in ("en", "ko"):
+            m = build_moment(cfg, 9_400 + i, domain, {"scene": "p6_sensor_conflict", "style": style, "lang": lang}, None, split)
+            for lidar in (True, False):
+                for cue in ("glass", "black", "dust", "glare", "steam"):
+                    obs = replace(m.obs, conflict=replace(m.obs.conflict, lidar=lidar, camera=not lidar, cue=cue))
+                    text = render_state(obs, RenderPlan(style, available_options(obs)), stream(1, "render"))
+                    if lang == "en":
+                        says_lidar = re.search(r"lidar(?: reports|: object)", text, re.I) is not None
+                        says_camera = re.search(r"camera(?: reports|: object)", text, re.I) is not None
+                        hedged = f"may be {obs.conflict.phrase}" in text or f"possibly in that direction: {obs.conflict.phrase}" in text
+                    else:
+                        says_lidar = re.search(r"라이다(?:는[^,]*물체가 있다고 보고|: 약 [^;]*물체)", text) is not None
+                        says_camera = re.search(r"카메라(?:는[^,]*물체가 있다고 보고|: 약 [^;]*물체)", text) is not None
+                        hedged = "있을 수 있" in text
+                    assert (says_lidar, says_camera) == (lidar, not lidar), (lang, style, lidar, text)
+                    assert hedged == (cue in HEDGED_CUES), (lang, style, cue, text)
+                    seen[lang] += 1
+    assert seen["en"] == seen["ko"] == 40

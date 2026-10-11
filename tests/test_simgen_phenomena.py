@@ -153,6 +153,28 @@ def test_stack_closed_forms_match_a_large_sample(cfg, seed, domain, body):
         assert float(out.states["weight_toward"].mean()) == pytest.approx(exact["weight_toward"][1], abs=0.012)
 
 
+@pytest.mark.parametrize(("seed", "domain", "body"), [(44, "warehouse", "humanoid"), (45, "factory", "arm"), (46, "retail", "forklift_amr")])
+def test_a_stack_record_prices_its_actions_with_the_closed_form_topple_probability(cfg, seed, domain, body):
+    """수정 1 M5 (리뷰: noul은 닫힌 꼴, 행동의 기대 비용은 K개 빈도 — 쌓기 행동의 argmax가 2 % 바뀜): 레코드의 모든 정답은 같은 무게의 같은
+    표본에서 나오고, 그 무게에서 넘어짐 빈도가 닫힌 꼴과 같다 — 그래서 행동의 기대 비용도 닫힌 꼴의 확률을 쓴다."""
+    from robo_jev.simgen.generate import assemble, build_moment
+    from robo_jev.simgen.labels import calibrate, cost_model, expected_costs
+
+    m = build_moment(cfg, seed, domain, {"scene": "p3_place_stack", "body": body})
+    record = assemble(cfg, m, 0)
+    obs = m.obs
+    out = rollout(cfg, obs, sample_posterior(cfg, obs, cfg.catalog["posterior_k"], stream(m.seed, "posterior")), available_options(obs))
+    exact = exact_labels(cfg, obs)
+    assert calibrate(out, exact) == record["meta"]["calibration"]
+    for option in ("place_now", "recentre"):
+        slack = record["meta"]["calibration"]["trimmed"].get(f"topple|{option}", 0.0) + 1e-9
+        assert abs(float(wmean(out.events["topple"][out.index(option)], out)) - exact[f"topple|{option}"]) <= slack
+    for name, criterion in record["meta"]["criteria"].items():
+        ec = expected_costs(out, cost_model(cfg.values, criterion, out.body, out.loaded))
+        for key, canon in record["meta"]["options"][name].items():
+            assert record["labels"][name]["expected_cost"][key] == round(float(ec[out.index(canon)]), 4), (name, key)
+
+
 # ----------------------------------------------------------------------------------------------------------------
 # P4
 # ----------------------------------------------------------------------------------------------------------------
@@ -355,6 +377,86 @@ def test_look_again_label_is_look_time_plus_the_best_after_looking(cfg, seed, do
     assert look_cost - delay_cost <= base_best + 1e-6
     per_world = world_costs(out, model)
     assert float(wmean(per_world[out.index(look)], out)) == pytest.approx(look_cost, abs=1e-6)
+
+
+def _log_binorm(x1, x2, mu, sd2, se2):
+    """log N2((x1, x2); (mu, mu), [[sd2 + se2, sd2], [sd2, sd2 + se2]]) — 같은 참값 x를 공유하는 두 보고."""
+    a = sd2 + se2
+    det = a * a - sd2 * sd2
+    d1, d2 = x1 - mu, x2 - mu
+    return -0.5 * (a * d1 * d1 - 2 * sd2 * d1 * d2 + a * d2 * d2) / det - 0.5 * np.log((2 * math.pi) ** 2 * det)
+
+
+@pytest.mark.parametrize(("seed", "domain", "scene"), [(71, "lab", "p4_place_check"), (74, "factory", "p4_insert"), (75, "warehouse", "p4_place_check")])
+def test_p4_look_again_cost_matches_an_independent_simulation_of_the_remeasurement(cfg, seed, domain, scene):
+    """수정 1 M3 (리뷰의 MR4 — 다시 재기의 예측 분포에서 사후 불확실성을 빼도(sds = σ_e) 떨어지는 시험이 없었다): 다시 보기의 기대 비용을
+    독립 모의로 — 세계 ~ 사후 무게, 참 x | 상태·지금 보고 ~ 조건부 정규, 새 보고 m' = x + 잡음, 본 뒤의 결정은 (m, m')의 결합 우도(같은 x를
+    공유하는 이변량 정규) × 사전으로(코드의 예측 분포 N(사후 평균, 사후 분산 + σ_e²)를 쓰지 않는다). 코드의 값과 4 SE + 0.01 안에서 같다."""
+    from robo_jev.simgen.labels import cost_model, expected_costs, world_costs
+
+    obs = moment(seed, domain, scene=scene).obs
+    assert not obs.place.ages                     # 오래된 카메라가 아닌 순간(그 경우는 바뀜 세계가 섞인다 — 같은 식, 여기서는 단순한 쪽)
+    options = available_options(obs)
+    batch = sample_posterior(cfg, obs, 256, stream(seed, "posterior"))
+    out = rollout(cfg, obs, batch, options)
+    model = cost_model(cfg.values, None, out.body, out.loaded)
+    code = float(expected_costs(out, model)[out.index("look_again")])
+    smod = p4._model_of(cfg, obs)
+    dims = [d for d in smod.dims if d in obs.place.readings]
+    w = np.asarray(out.weights, dtype=float) / float(np.sum(out.weights))
+    state = batch["state"].astype(int)
+    costs = world_costs(out, model)[[out.index(o) for o in out.voi.base]]       # (B, 세계)
+    rng = np.random.default_rng(seed)
+    n = 40_000
+    idx = rng.choice(len(w), size=n, p=w)
+    loglik = np.tile(np.log(smod.prior[state])[None, :], (n, 1))
+    for d in dims:
+        j = smod.dims.index(d)
+        m, se2 = obs.place.readings[d].value, obs.place.readings[d].sigma_eff ** 2
+        mu, sd2 = smod.mean[state, j], smod.sd[state, j] ** 2
+        post_var = 1.0 / (1.0 / sd2[idx] + 1.0 / se2)
+        x = post_var * (mu[idx] / sd2[idx] + m / se2) + np.sqrt(post_var) * rng.standard_normal(n)
+        m2 = x + np.sqrt(se2) * rng.standard_normal(n)
+        loglik += _log_binorm(m, m2[:, None], mu[None, :], sd2[None, :], se2)
+    post = np.exp(loglik - loglik.max(axis=1, keepdims=True))
+    post /= post.sum(axis=1, keepdims=True)
+    choice = np.argmin(post @ costs.T, axis=1)
+    realized = costs[choice, idx]
+    mc = float(realized.mean()) + model["costs"]["delay_per_s"] * out.voi.time
+    se_mc = float(realized.std()) / math.sqrt(n)
+    assert abs(code - mc) < 4.0 * se_mc + 0.01, (code, mc, se_mc)
+
+
+def test_a_stale_track_look_signal_follows_the_catalog_and_never_hurts(cfg):
+    """수정 1 M3 (리뷰의 MR6 — 다시 봤을 때 '보인다'의 확률을 있음·없음에서 같게 만들어도 떨어지는 시험이 없었다): 오래된 추적의 다시 보기
+    신호는 아직 그 자리에 있으면 detect, 없으면 false_alarm(속성 목록)의 확률로 '보인다'이고(세계마다 대조), 본 뒤의 기대 비용은 지금 최선보다
+    크지 않다; 두 경우의 보인다 확률이 같으면(정보 없음) 본 뒤의 기대 비용이 지금 최선과 정확히 같다(대조). (이 장면에서 보는 것이 결정을
+    바꾸는 경우는 드물다 — 다시 보기의 값이 대개 0이다: 리뷰 M1, 보고서의 미룬 항목.)"""
+    from dataclasses import replace
+
+    from robo_jev.simgen.labels import cost_model, expected_costs, voi_decision, world_costs
+
+    look = cfg.catalog["p6"]["stale"]["look"]
+    assert look["detect"] - look["false_alarm"] > 0.5
+    gains = []
+    for seed, domain in ((81, "hospital"), (86, "lab"), (87, "warehouse"), (88, "retail")):
+        obs = moment(seed, domain, scene="p6_stale_track").obs
+        batch = sample_posterior(cfg, obs, 512, stream(seed, "p"))
+        out = rollout(cfg, obs, batch, available_options(obs))
+        still = (batch["present"] > 0.5) & (batch["t_leave"] > obs.env.look_s)
+        seen = out.voi.likelihood[0]
+        assert np.allclose(seen[still], look["detect"]) and np.allclose(seen[~still], look["false_alarm"])
+        model = cost_model(cfg.values, None, out.body, out.loaded)
+        base = [out.index(o) for o in out.voi.base]
+        now = float(min(expected_costs(out, model)[base]))
+        after = float(wmean(world_costs(out, model)[out.index("look_again")], out)) - model["costs"]["delay_per_s"] * out.voi.time
+        gains.append(now - after)
+        flat = replace(out.voi, likelihood=np.vstack([np.full(batch.size, 0.5), np.full(batch.size, 0.5)]))
+        out_flat = replace(out, voi=flat)
+        decision = voi_decision(out_flat, model)
+        after_flat = float(wmean(flat.after(world_costs(out_flat, model)[base], decision), out_flat))
+        assert after_flat == pytest.approx(now, abs=1e-9)
+    assert all(g >= -1e-9 for g in gains), gains
 
 
 # ----------------------------------------------------------------------------------------------------------------

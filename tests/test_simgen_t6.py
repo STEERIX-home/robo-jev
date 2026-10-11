@@ -65,11 +65,37 @@ def _same_label(base: dict, b_name: str, variant: dict, v_name: str, mirrored: b
 
 
 def test_every_base_has_all_twelve_variants(groups):
+    """마주 옴 기준도 넣고 거울상만 뺀다(좌우가 다른 사전 — 수정 1 결정): 그 기준은 11 변형이고 meta.t6.not_applicable = ['mirror']."""
     assert len(groups) == N_BASES
+    head_on = 0
     for base_id, members in groups.items():
-        assert set(members) == {"base", *VARIANTS}, base_id
-        assert all(m["meta"]["scene"] != "p1_head_on" for m in members.values())
+        if members["base"]["meta"]["scene"] == "p1_head_on":
+            head_on += 1
+            assert set(members) == {"base", *VARIANTS} - {"mirror"}, base_id
+            assert members["base"]["meta"]["t6"]["not_applicable"] == ["mirror"]
+        else:
+            assert set(members) == {"base", *VARIANTS}, base_id
+            assert members["base"]["meta"]["t6"]["not_applicable"] == []
     assert len({m["base"]["meta"]["group"] for m in groups.values()}) == 9
+    assert head_on >= 1
+
+
+def test_variants_identical_to_their_base_are_flagged(groups):
+    """수정 1 M4: 요청이 기준과 글자 그대로 같은 변형(옆이 없는 장면의 거울상, 바꿀 수가 없는 숫자 표기 …)은 identical_to_base로 표시해
+    불변성 점수에서 뺄 수 있다 — 표시는 정확하다(같으면 True, 다르면 False)."""
+    import json
+
+    flagged = Counter()
+    for members in groups.values():
+        base = members["base"]
+        for variant, record in members.items():
+            if variant == "base":
+                continue
+            same = json.dumps(record["request"], ensure_ascii=False) == json.dumps(base["request"], ensure_ascii=False)
+            assert record["meta"]["t6"]["identical_to_base"] is same, (variant, record["id"])
+            flagged[variant] += same
+    for variant in ("state_paraphrase", "instruction_paraphrase", "key_change", "units"):
+        assert flagged[variant] == 0, (variant, flagged)
 
 
 def test_labels_are_invariant_under_every_variant(groups):
@@ -122,8 +148,18 @@ def test_number_notation_only_drops_trailing_zeros(groups):
     for members in groups.values():
         base, record = members["base"], members["number_notation"]
         assert record["request"]["state"] == strip_trailing_zeros(base["request"]["state"])
+        # 값은 그대로다(리뷰의 MR1 — 소수점 아래를 통째로 지우는 변이체가 자기 자신과 비교하는 시험을 통과했다): 수의 목록이 값으로 같다
+        before = [float(x) for x in re.findall(r"(?<![\d.])\d+(?:\.\d+)?", base["request"]["state"])]
+        after = [float(x) for x in re.findall(r"(?<![\d.])\d+(?:\.\d+)?", record["request"]["state"])]
+        assert before == after, (record["id"], [(a, b) for a, b in zip(before, after, strict=False) if a != b][:3])
         changed += record["request"]["state"] != base["request"]["state"]
     assert changed >= N_BASES // 2
+
+
+def test_number_notation_hand_cases():
+    """손으로 쓴 사례(수정 1 M3): 뒤의 0만 빠지고 값은 그대로 — '1.20 m' → '1.2 m', '2.0 s' → '2 s', 0이 아닌 끝자리는 그대로."""
+    text = "speed 1.20 m/s, gap 0.50 m, wait 2.0 s, 12 %, 1.25 m, 10 m, 3.05 m, 100.0 kg"
+    assert strip_trailing_zeros(text) == "speed 1.2 m/s, gap 0.5 m, wait 2 s, 12 %, 1.25 m, 10 m, 3.05 m, 100 kg"
 
 
 def _words(text: str) -> list[str]:
@@ -169,6 +205,8 @@ def test_paraphrase_variants_change_the_wording(groups):
 
 def test_the_mirror_flips_every_side(groups):
     for members in groups.values():
+        if "mirror" not in members:          # 마주 옴(거울상 해당 없음)
+            continue
         base, record = members["base"], members["mirror"]
         bm, mm = base["meta"], record["meta"]
         if bm["sides"] is not None:

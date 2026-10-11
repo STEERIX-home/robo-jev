@@ -793,8 +793,8 @@ def _rule_two(c: _Ctx, shown: float, step: float, margin: float) -> tuple[float,
     return threshold, above
 
 
-def _distance_reading(c: _Ctx, what: dict) -> tuple[Reading, str] | None:
-    obs = c.obs
+def _distance_reading(c: _Ctx, what: dict, obs: Observation | None = None) -> tuple[Reading, str] | None:
+    obs = obs or c.obs
     if obs.scene in _STEP_IN_SCENES:
         return obs.agent.ahead, c.fill(what["gap"])
     if obs.scene == "p1_crossing":
@@ -812,9 +812,11 @@ def _distance_reading(c: _Ctx, what: dict) -> tuple[Reading, str] | None:
     return None
 
 
-def _two_way_rule(c: _Ctx, style: str, r: dict, names: list[str], classes: tuple[str, str], value: float, step: float, margin: float, kind: str, unit: str, above_class: str, strict_above: bool = True):
-    """두 갈래 규칙 질문 하나: 보인 값 ``value``가 문턱보다 크면(또는 작으면) ``above_class``."""
-    threshold, _ = _rule_two(c, value, step, margin)
+def _two_way_rule(c: _Ctx, style: str, r: dict, names: list[str], classes: tuple[str, str], value: float, step: float, margin: float, kind: str, unit: str, above_class: str,
+                  strict_above: bool = True, basis: float | None = None):  # fmt: skip
+    """두 갈래 규칙 질문 하나: 보인 값 ``value``가 문턱보다 크면(또는 작으면) ``above_class``. 문턱은 ``basis``(기본 = value — 쌍의 변형은
+    기준의 값) 둘레에 놓는다."""
+    threshold, _ = _rule_two(c, value if basis is None else basis, step, margin)
     t_text, threshold = _threshold_text(threshold, kind, unit)
     above = value > threshold if strict_above else value >= threshold
     other = classes[1] if above_class == classes[0] else classes[0]
@@ -826,6 +828,7 @@ def _rule_candidates(c: _Ctx, style: str) -> list:
     from robo_jev.simgen.rule_text import rule_texts
 
     obs = c.obs
+    tobs = getattr(c, "tobs", obs)        # 문턱을 놓는 관측(쌍의 변형은 기준 — 수정 1 I4); 답은 obs의 값
     rt = rule_texts(c.lang)
     cands = []
     dist_unit = obs.fmt.distance_unit
@@ -836,22 +839,25 @@ def _rule_candidates(c: _Ctx, style: str) -> list:
         return dist_unit if c.rng.random() < 0.7 else c.pick([u for u in alt_units if u != dist_unit] or [dist_unit])
 
     found = _distance_reading(c, rt["what"])
-    if found is not None:
+    found_t = _distance_reading(c, rt["what"], tobs)
+    if found is not None and found_t is not None:
         reading, what = found
+        reading_t = found_t[0]
 
         def distance_rule():
             shown = textfmt.shown_si(reading, dist_unit)
+            basis = textfmt.shown_si(reading_t, dist_unit)
             step = 0.01 if arm else 0.1
-            margin = max(reading.resolution, step / 2)
+            margin = max(reading_t.resolution, step / 2)
             cls = c.pick(["far", "near", "close"])
             if cls == "far":
-                hi = _nice(shown - margin - float(c.rng.random()) * 2 * step, step, up=False)
+                hi = _nice(basis - margin - float(c.rng.random()) * 2 * step, step, up=False)
                 lo = _nice(hi - step * (1 + int(c.rng.integers(3))), step, up=False)
             elif cls == "near":
-                lo = _nice(shown - margin - float(c.rng.random()) * 2 * step, step, up=False)
-                hi = _nice(shown + margin + float(c.rng.random()) * 2 * step, step, up=True)
+                lo = _nice(basis - margin - float(c.rng.random()) * 2 * step, step, up=False)
+                hi = _nice(basis + margin + float(c.rng.random()) * 2 * step, step, up=True)
             else:
-                lo = _nice(shown + margin + float(c.rng.random()) * 2 * step, step, up=True)
+                lo = _nice(basis + margin + float(c.rng.random()) * 2 * step, step, up=True)
                 hi = _nice(lo + step * (1 + int(c.rng.integers(3))), step, up=True)
             if lo <= 0:
                 return None
@@ -864,19 +870,24 @@ def _rule_candidates(c: _Ctx, style: str) -> list:
             return _rule_question(c, ["distance_class", "gap_rule", "range_category"], instructions, ["far", "near", "close"], descriptions, answer, style)
 
         cands.append(distance_rule)
-    age = obs.agent.age if obs.agent is not None else (obs.stale.age if obs.stale is not None else None)
-    if age is not None:
-        cands.append(lambda: _two_way_rule(c, style, rt["age"], ["track_age_rule", "staleness"], ("stale", "fresh"), age, 0.1, 0.05, "time", obs.fmt.time_unit, "stale"))
+    def _age_of(o: Observation):
+        return o.agent.age if o.agent is not None else (o.stale.age if o.stale is not None else None)
+
+    age, age_t = _age_of(obs), _age_of(tobs)
+    if age is not None and age_t is not None:
+        cands.append(lambda: _two_way_rule(c, style, rt["age"], ["track_age_rule", "staleness"], ("stale", "fresh"), age, 0.1, 0.05, "time", obs.fmt.time_unit, "stale",
+                                           basis=age_t))  # fmt: skip
     if obs.robot.speed > 0:
         resolution = 0.01 if arm else 0.05
         shown_speed = textfmt.shown_si(Reading(obs.robot.speed, 0.0, resolution), obs.fmt.speed_unit)
+        basis_speed = textfmt.shown_si(Reading(tobs.robot.speed, 0.0, resolution), obs.fmt.speed_unit)
         cands.append(lambda: _two_way_rule(c, style, rt["speed"], ["speed_rule", "zone_limit"], ("over_limit", "within_limit"), shown_speed, 0.05 if arm else 0.1, resolution,
-                                           "speed", obs.fmt.speed_unit, "over_limit"))  # fmt: skip
-    if obs.container is not None and obs.container.fill_mode == "percent":
+                                           "speed", obs.fmt.speed_unit, "over_limit", basis=basis_speed))  # fmt: skip
+    if obs.container is not None and obs.container.fill_mode == "percent" and tobs.container is not None and tobs.container.fill_mode == "percent":
 
         def fill_rule():
             shown = obs.container.fill.value
-            threshold, _ = _rule_two(c, shown, 0.05, 0.05)
+            threshold, _ = _rule_two(c, tobs.container.fill.value, 0.05, 0.05)
             t_text, threshold = _threshold_text(min(threshold, 0.95), "percent", "%")
             answer = "reduced" if shown > threshold else "normal"
             r = rt["fill"]
@@ -888,7 +899,8 @@ def _rule_candidates(c: _Ctx, style: str) -> list:
 
         def width_rule():
             shown = textfmt.shown_si(obs.env.corridor_width, dist_unit)
-            threshold, _ = _rule_two(c, shown, 0.1, obs.env.corridor_width.resolution)
+            basis = textfmt.shown_si(tobs.env.corridor_width, dist_unit) if tobs.env.corridor_width is not None else shown
+            threshold, _ = _rule_two(c, basis, 0.1, obs.env.corridor_width.resolution)
             t_text, threshold = _threshold_text(threshold, "distance", unit_for_rule())
             answer = "single_file" if shown < threshold else "two_way"
             r = rt["width"]
@@ -901,7 +913,7 @@ def _rule_candidates(c: _Ctx, style: str) -> list:
         def turn_rule():
             radius = obs.env.turn_radius
             step = 0.05 if arm else 0.1
-            threshold, _ = _rule_two(c, radius, step, step / 2)
+            threshold, _ = _rule_two(c, tobs.env.turn_radius if tobs.env.turn_radius is not None else radius, step, step / 2)
             t_text, threshold = _threshold_text(threshold, "distance", unit_for_rule())
             answer = "sharp" if radius < threshold else "gentle"
             r = rt["turn"]
@@ -911,16 +923,21 @@ def _rule_candidates(c: _Ctx, style: str) -> list:
         cands.append(turn_rule)
     if obs.load is not None:
         aspect = obs.load.aspect_shown()
-        cands.append(lambda: _two_way_rule(c, style, rt["aspect"], ["load_rule", "tall_load_rule"], ("secure", "as_is"), aspect, 0.5, 0.2, "plain", "", "secure"))
+        aspect_t = tobs.load.aspect_shown() if tobs.load is not None else aspect
+        cands.append(lambda: _two_way_rule(c, style, rt["aspect"], ["load_rule", "tall_load_rule"], ("secure", "as_is"), aspect, 0.5, 0.2, "plain", "", "secure",
+                                           basis=aspect_t))  # fmt: skip
     if obs.env.ramp_angle_deg is not None:
         angle = obs.env.ramp_angle_deg
-        cands.append(lambda: _two_way_rule(c, style, rt["ramp"], ["ramp_rule", "slope_class"], ("steep", "normal"), angle, 0.5, 0.5, "angle", "", "steep"))
+        angle_t = tobs.env.ramp_angle_deg if tobs.env.ramp_angle_deg is not None else angle
+        cands.append(lambda: _two_way_rule(c, style, rt["ramp"], ["ramp_rule", "slope_class"], ("steep", "normal"), angle, 0.5, 0.5, "angle", "", "steep", basis=angle_t))
     if obs.place is not None:
         name, reading = obs.place.primary()
+        reading_t = tobs.place.primary()[1] if tobs.place is not None else reading
         step = 0.1 if obs.place.cls == "fine" else (0.5 if obs.place.cls == "medium" else 1.0)
         r = dict(rt["p4"])
         r["instructions"] = r[f"instructions_{name}"]
-        cands.append(lambda: _two_way_rule(c, style, r, ["reading_rule", "tolerance_rule"], ("recheck", "accept"), abs(reading.value), step, step / 2, "mm", "", "recheck"))
+        cands.append(lambda: _two_way_rule(c, style, r, ["reading_rule", "tolerance_rule"], ("recheck", "accept"), abs(reading.value), step, step / 2, "mm", "", "recheck",
+                                           basis=abs(reading_t.value)))  # fmt: skip
     return cands
 
 
@@ -939,10 +956,12 @@ def candidates(cfg: SimgenConfig, obs: Observation, options: tuple[str, ...], rn
     return _extra_nouls(c, options) + _score_candidates(c, options) + _state_candidates(c, style)
 
 
-def write_questions(cfg: SimgenConfig, obs: Observation, options: tuple[str, ...], rng: np.random.Generator, surface: Surface | None = None) -> QuestionSet:
-    """요청 하나의 질문들(3~8개)."""
+def write_questions(cfg: SimgenConfig, obs: Observation, options: tuple[str, ...], rng: np.random.Generator, surface: Surface | None = None,
+                    threshold_obs: Observation | None = None) -> QuestionSet:  # fmt: skip
+    """요청 하나의 질문들(3~8개). ``threshold_obs``: 규칙 질문의 문턱을 놓을 관측(숫자 쌍의 변형은 기준의 관측 — 답은 이 관측의 값으로)."""
     surface = surface or Surface()
     c = _Ctx(cfg, obs, rng, surface)
+    c.tobs = threshold_obs or obs
     style = KEY_STYLES[int(rng.integers(len(KEY_STYLES)))]
     style = surface.key_style or style
     share = cfg.values["criterion_share"]

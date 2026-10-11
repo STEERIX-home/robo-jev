@@ -131,11 +131,80 @@ def test_numeric_pairs_move_one_margin_across_the_boundary(records):
     assert pairs
     for base, variant in pairs:
         name = variant["meta"]["pair"]["flipped"]
-        before, after = base["meta"]["margins"][name], variant["meta"]["margins"][name]
-        assert np.sign(before) != np.sign(after) or before == 0.0, (variant["id"], name, before, after)
+        if name in base["meta"]["margins"]:     # 오래된 추적의 나이(age)는 설계 여유가 아니다 — 핵심 정답이 넘는 것으로 본다(아래 시험)
+            before, after = base["meta"]["margins"][name], variant["meta"]["margins"][name]
+            assert np.sign(before) != np.sign(after) or before == 0.0, (variant["id"], name, before, after)
         others = {k: v for k, v in base["meta"]["margins"].items() if k != name}
         assert others == {k: v for k, v in variant["meta"]["margins"].items() if k != name}
         assert base["request"]["state"] != variant["request"]["state"]
+
+
+_SKELETON = re.compile(r"\d+(?:[.,]\d+)?")
+
+
+def _skeleton(text: str) -> str:
+    """수를 '#'로, 채움을 말로 보고한 구간(옮긴 사실 자체의 표시 — 영어·한국어)을 '~'로."""
+    from robo_jev.simgen.narrate_ko import FILL_KO
+    from robo_jev.simgen.spec import FILL_BINS
+
+    for phrase in sorted([b[2] for b in FILL_BINS] + [p for pair in FILL_KO for p in pair], key=len, reverse=True):
+        text = text.replace(phrase, "~")
+    # 부호 있는 측정(P4 — 옮긴 주 측정 자체)의 방향 말: 기준보다 위/아래, 덜/더 들어감
+    for phrase in ("above nominal", "below nominal", "short of fully home", "past the fully-home mark", "높음(", "낮음(", "모자람(", "더 들어감("):
+        text = text.replace(phrase, "^" + ("(" if phrase.endswith("(") else ""))
+    return _SKELETON.sub("#", text)
+
+
+def _request_texts(record) -> dict[str, str]:
+    out = {"state": record["request"]["state"]}
+    for name, q in record["request"]["questions"].items():
+        out[name] = q["instructions"] + " | " + repr(q.get("criteria"))
+    return out
+
+
+@pytest.fixture(scope="module")
+def forced_pairs():
+    """숫자 쌍 단위를 묶음마다 고르게(학습 세트의 쌍과 같은 경로 generate_unit)."""
+    from robo_jev.simgen.generate import generate_unit
+
+    cfg = default_config()
+    out = []
+    for i in range(48):
+        unit = {"seed": 6_100_000 + i, "domain": DOMAINS[i % len(DOMAINS)], "group": TRAIN_GROUPS[i % len(TRAIN_GROUPS)], "indices": [2 * i, 2 * i + 1],
+                "pair_kind": "numeric"}  # fmt: skip
+        out.append(generate_unit(cfg, unit))
+    return out
+
+
+def test_numeric_pairs_change_only_the_flipped_fact_and_cross_the_key(forced_pairs):
+    """수정 1 I4: 숫자 쌍은 핵심 질문이 묻는 결정 변수 하나만 옮기고(``meta.pair.target`` = 핵심 질문, ``flipped`` ∈ 그 장면의 쌍 변수),
+    핵심 정답이 0.5를 넘으며, 변형은 기준의 계획기 권고를 그대로 보인다(사실 둘이 바뀌지 않게) — 두 요청은 수를 지운 뼈대가 글자 그대로
+    같고(질문 이름·글·선택지 설명까지), 다른 수는 몇 개뿐이다(옮긴 값과 그에 딸린 표시값)."""
+    from robo_jev.simgen.catalog import pair_targets
+
+    numeric = 0
+    for base, variant in forced_pairs:
+        bm, vm = base["meta"], variant["meta"]
+        assert bm["pair"]["kind"] == vm["pair"]["kind"] and bm["pair"]["of"] == variant["id"] and vm["pair"]["of"] == base["id"]
+        if vm["pair"]["kind"] != "numeric":
+            assert vm["pair"].get("target") is None
+            continue
+        numeric += 1
+        key = bm["key_question"]
+        assert vm["key_question"] == key and vm["pair"]["target"] == key
+        assert vm["pair"]["flipped"] in pair_targets(bm["scene"]), (variant["id"], vm["pair"]["flipped"])
+        p0, p1 = base["labels"][key]["p_yes"], variant["labels"][key]["p_yes"]
+        assert (p0 - 0.5) * (p1 - 0.5) < 0, (variant["id"], p0, p1)
+        rb, rv = bm["recommendation"], vm["recommendation"]
+        assert (rv["present"], rv["canonical"], rv["option"]) == (rb["present"], rb["canonical"], rb["option"]) and rv.get("kept") is True
+        tb, tv = _request_texts(base), _request_texts(variant)
+        assert tb.keys() == tv.keys(), variant["id"]
+        changed = 0
+        for part in tb:
+            assert _skeleton(tb[part]) == _skeleton(tv[part]), (variant["id"], part, tb[part][:300], tv[part][:300])
+            changed += sum(a != b for a, b in zip(_SKELETON.findall(tb[part]), _SKELETON.findall(tv[part]), strict=True))
+        assert changed <= 8 and tb["state"] != tv["state"], (variant["id"], changed)     # 말로 보고한 채움은 수가 아니라 구간 말이 바뀐다
+    assert numeric >= 30, numeric
 
 
 def test_planner_style_always_carries_a_recommendation_and_others_about_half(records):
@@ -150,14 +219,18 @@ def test_wrong_recommendations_are_about_a_quarter_and_judged_over_every_availab
     """권고는 그 순간 가능한 모든 행동(계획표의 '가능한 동작' 전부)을 기본 비용표로 비교해 정한다: 맞는 권고는 최선에서 τ 안쪽,
     틀린 권고는 2τ 이상 나쁘다(리뷰 1 I5 — 옛 판정은 기본 질문의 일부 선택지와 그 질문의 기준만 봤다)."""
     tau = default_config().values["tau"]
-    present = [r for r in records if r["meta"]["recommendation"]["present"]]
+    present = [r for r in records if r["meta"]["recommendation"]["present"] and not r["meta"]["recommendation"].get("kept")]
     wrong = [r for r in present if r["meta"]["recommendation"]["wrong"]]
     assert 0.18 <= len(wrong) / len(present) <= 0.32
-    for r in present:
+    kept = [r for r in records if r["meta"]["recommendation"]["present"] and r["meta"]["recommendation"].get("kept")]
+    for r in present + kept:
         rec = r["meta"]["recommendation"]
         costs = rec["costs"]
         gap = costs[rec["canonical"]] - min(costs.values())
         assert gap == pytest.approx(rec["gap"], abs=1e-3)
+        if rec.get("kept"):     # 쌍의 변형: 기준의 권고를 그대로 — 틀림은 이 순간의 비용으로(2τ 이상 나쁘면)
+            assert rec["wrong"] == (gap >= 2 * tau - 1e-9), r["id"]
+            continue
         assert (gap >= 2 * tau - 1e-6) if rec["wrong"] else (gap <= tau + 1e-6), r["id"]
         assert set(r["meta"]["options"][rec["question"]].values()) <= set(costs)  # 기본 질문의 선택지는 모두 가능한 행동이다
         if rec["option"] is not None:

@@ -29,7 +29,17 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from robo_jev.simgen import physics as ph
-from robo_jev.simgen.catalog import GROUPS, INTENTS, SCENE_BODIES, SimgenConfig, distraction_probability, reaction_probability, scene_kind, scene_margins
+from robo_jev.simgen.catalog import (
+    GROUPS,
+    INTENTS,
+    SCENE_BODIES,
+    SimgenConfig,
+    distraction_probability,
+    pair_targets,
+    reaction_probability,
+    scene_kind,
+    scene_margins,
+)
 from robo_jev.simgen.observation import (
     AgentObs,
     ContainerObs,
@@ -643,16 +653,21 @@ def _with_margins(cfg: SimgenConfig, world: World) -> World:
 
 
 def flip_numeric(cfg: SimgenConfig, world: World, rng: np.random.Generator):
-    """결정 변수 하나만 경계 너머로 옮긴 세계와 그 여유 이름의 후보들(앞의 것부터 — 생성기가 관측이 실제로 바뀌는 첫 후보를 고른다).
-    다른 값은 그대로다. 옮길 수 없으면 아무것도 내지 않는다."""
-    names = list(scene_margins(world.scene, world.parts.get("maneuver")))
-    name = names[int(rng.integers(len(names)))]
-    if world.scene not in ("p1_step_in", "p1_crossing", "p1_head_on", "p5_braking", "p5_turning", "p1p5_step_in_carrying"):
-        from robo_jev.simgen import p3_world, p4_world, p6_world
+    """결정 변수 하나만 경계 너머로 옮긴 세계와 그 여유 이름의 후보들(앞의 것부터 — 생성기가 관측이 실제로 바뀌고 핵심 정답이 0.5를 넘는
+    첫 후보를 고른다). 옮기는 변수는 핵심 질문이 묻는 여유다(:func:`~robo_jev.simgen.catalog.pair_targets` — 수정 1 I4). 다른 값은 그대로다.
+    옮길 수 없으면 아무것도 내지 않는다."""
+    for name in pair_targets(world.scene):
+        if world.scene not in ("p1_step_in", "p1_crossing", "p1_head_on", "p5_braking", "p5_turning", "p1p5_step_in_carrying"):
+            from robo_jev.simgen import p3_world, p4_world, p6_world
 
-        module = {"p3": p3_world, "p4": p4_world, "p6": p6_world}[scene_kind(world.scene)]
-        yield from module.flip(cfg, world, name, rng)
-        return
+            module = {"p3": p3_world, "p4": p4_world, "p6": p6_world}[scene_kind(world.scene)]
+            yield from module.flip(cfg, world, name, rng)
+        else:
+            yield from _flip_v0a(cfg, world, name)
+
+
+def _flip_v0a(cfg: SimgenConfig, world: World, name: str):
+    """v0a 장면(P1·P5)의 결정 변수 하나: 간격(step_in)·장애물 거리(stop)·상대 거리(crossing)·통로 폭(head_on)·채움(spill)."""
     m = world.margins[name]
     sigma = cfg.catalog["margins"][name]["sigma"][world.robot.body]
     sign = 1.0 if m >= 0 else -1.0

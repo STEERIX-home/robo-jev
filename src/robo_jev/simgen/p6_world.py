@@ -229,12 +229,39 @@ def margins_of(cfg: SimgenConfig, world: World) -> dict[str, float]:
     return {"step_in": v["gap"] - ph.stopping_distance(r.speed, r.latency, r.decel_moderate) - (r.radius + v["ra"])}
 
 
+def _age_for(cfg: SimgenConfig, kind: str, target: float) -> float | None:
+    """'아직 그 자리에 있을 확률'이 target이 되는 나이(초) — 확률은 나이에 따라 줄어든다(이분법)."""
+    from robo_jev.simgen.p6 import stay_probability
+
+    lo, hi = 0.0, 600.0
+    if not stay_probability(cfg, kind, hi) < target < stay_probability(cfg, kind, 1e-6):
+        return None
+    for _ in range(80):
+        mid = 0.5 * (lo + hi)
+        lo, hi = (mid, hi) if stay_probability(cfg, kind, mid) > target else (lo, mid)
+    return 0.5 * (lo + hi)
+
+
 def flip(cfg: SimgenConfig, world: World, name: str, rng):
-    """보이는 거리(sight), 모퉁이까지 거리(corner), 로봇 속도(late — 숨은 d_late는 그대로), 간격(step_in) 하나만 경계 너머로."""
+    """보이는 거리(sight), 모퉁이까지 거리(corner), 로봇 속도(late — 숨은 d_late는 그대로), 간격(step_in), 본 지 지난 시간(age — 오래된
+    추적의 핵심 '아직 있나'를 정한다, 수정 1 I4: 그 확률이 0.5의 반대쪽 같은 거리(0.15~0.85로 자름)가 되는 나이, 0.1 s 단위) 하나만 경계 너머로."""
     from dataclasses import replace
 
     from robo_jev.simgen.scenes import _with_margins
 
+    if name == "age":
+        from robo_jev.simgen.p6 import stay_probability
+
+        p = stay_probability(cfg, world.agent_kind, world.parts["age"])
+        far = 1.0 - p if abs(p - 0.5) >= 0.1 else (0.4 if p > 0.5 else 0.6)
+        for target in (min(max(far, 0.15), 0.85), 0.35 if p > 0.5 else 0.65, 0.25 if p > 0.5 else 0.75):
+            age = _age_for(cfg, world.agent_kind, target)
+            if age is None:
+                continue
+            age = round_to(age, 0.1)
+            if age > 0.05 and (stay_probability(cfg, world.agent_kind, age) - 0.5) * (p - 0.5) < 0:
+                yield _with_margins(cfg, replace(world, parts={**world.parts, "age": age})), name
+        return
     m = world.margins[name]
     sigma = cfg.catalog["margins"][name]["sigma"][world.robot.body]
     sign = 1.0 if m >= 0 else -1.0

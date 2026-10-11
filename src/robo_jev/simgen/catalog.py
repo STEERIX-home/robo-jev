@@ -166,6 +166,22 @@ def scene_kind(scene: str) -> str | None:
     return _KIND.get(scene.split("_")[0])
 
 
+#: 숫자 쌍이 옮기는 결정 변수(앞의 것부터) — 핵심 질문이 묻는 것을 정하는 여유(수정 1 I4: 라운드 0은 장면의 여유 가운데 하나를 무작위로
+#: 옮겨, 핵심이 묻지 않는 여유를 옮긴 쌍(쏟아짐을 옮겼는데 핵심은 멈춤)·핵심 정답이 그대로인 쌍이 있었다). 오래된 추적의 핵심(아직 있나)은
+#: 본 지 얼마나 됐나(나이)가 정한다; 센서 불일치의 핵심(정말 있나)은 이산 보고(단서·두 센서)만 정해 숫자 하나로 넘길 수 없다 — 단어 쌍만.
+PAIR_TARGETS = {
+    "p1_step_in": ("step_in",), "p1_crossing": ("crossing",), "p1_head_on": ("head_on",), "p5_braking": ("spill", "stop"), "p5_turning": ("spill",),
+    "p1p5_step_in_carrying": ("step_in",), "p3_carrying_tall": ("tip",), "p3p5_carrying_mixed": ("tip",), "p3_ramp": ("tip",),
+    "p3_place_stack": ("stack",), "p4_place_check": ("seat",), "p4_insert": ("seat",), "p4p6_stale_check": ("seat",), "p6_stale_track": ("age",),
+    "p6_blind_corner": ("corner",), "p6_sensor_conflict": (), "p1p6_emerging_step_in": ("step_in",), "p1p3_step_in_carrying_tall": ("step_in",),
+}  # fmt: skip
+
+
+def pair_targets(scene: str) -> tuple[str, ...]:
+    """숫자 쌍이 옮길 결정 변수(핵심 질문이 묻는 여유) — 비면 그 장면은 단어 쌍만."""
+    return PAIR_TARGETS[scene]
+
+
 def scene_margins(scene: str, maneuver: str | None = None) -> tuple[str, ...]:
     """장면(과 움직임 갈래)이 정의하는 결정 여유 이름 — 첫 것이 쌍(사실 하나 바꾸기)의 기본 변수다."""
     if (scene, maneuver) in _MANEUVER_MARGINS:

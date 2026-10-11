@@ -83,12 +83,15 @@ def dataset_stats(records: list[dict], cfg: SimgenConfig, seconds: float | None 
     out["flags"] = {
         "hint_share": round(float(np.mean([m["hint"] for m in meta])), 4),
         "recommendation_share": {s: round(float(np.mean([m["recommendation"]["present"] for m in meta if m["style"] == s])), 4) for s in ("facts", "prose", "planner")},
-        "wrong_recommendation_share_of_present": round(float(np.mean([m["recommendation"]["wrong"] for m in meta if m["recommendation"]["present"]])), 4) if any(rec_present) else None,
+        "wrong_recommendation_share_of_present": round(float(np.mean([m["recommendation"]["wrong"] for m in meta if m["recommendation"]["present"]
+                                                                     and not m["recommendation"].get("kept")])), 4) if any(rec_present) else None,
         "recommendation": _recommendation_stats(meta, cfg),
         "exact_label_share": round(sum(len(m.get("exact_labels", [])) for m in meta) / max(1, sum(len(r["labels"]) for r in records)), 4),
+        "calibration": _calibration_stats(meta),
         "criterion_share_of_action_questions": round(float(np.mean([c is not None for m in meta for c in m["criteria"].values()])), 4),
         "criteria": _shares(c for m in meta for c in m["criteria"].values() if c is not None),
         "pairs": _shares(m["pair"]["kind"] for m in meta if m["pair"]),
+        "numeric_pair_flipped": _shares(m["pair"]["flipped"] for m in meta if m["pair"] and m["pair"]["kind"] == "numeric" and m["pair"]["role"] == "variant"),
         "paired_record_share": round(sum(1 for m in meta if m["pair"]) / n, 4),
         "margin_redraw_share": round(float(np.mean([m["margin_redraws"] > 0 for m in meta])), 4),
     }
@@ -103,9 +106,20 @@ def dataset_stats(records: list[dict], cfg: SimgenConfig, seconds: float | None 
     return out
 
 
+def _calibration_stats(meta: list[dict]) -> dict:
+    """닫힌 꼴에 표본의 무게를 맞춘 결과(수정 1 M5): 맞춘 열쇠 수, 표본 없는 꼬리 범주를 잘라 낸 열쇠의 비율·잘라 낸 질량, 맞추지 못한 열쇠."""
+    matched = [k for m in meta for k in (m.get("calibration") or {}).get("matched", [])]
+    trimmed = [v for m in meta for v in (m.get("calibration") or {}).get("trimmed", {}).values()]
+    unmatched = [k for m in meta for k in (m.get("calibration") or {}).get("unmatched", [])]
+    return {"matched_keys": len(matched), "trimmed_keys": len(trimmed), "trimmed_mass": _summary(trimmed) if trimmed else None,
+            "unmatched_keys": dict(Counter(unmatched))}  # fmt: skip
+
+
 def _recommendation_stats(meta: list[dict], cfg: SimgenConfig) -> dict:
-    """권고를 그 순간 가능한 모든 행동(기본 비용표)으로 다시 잰 값: 틀린 비율, 최선과의 차, 기본 질문에 없는 권고의 비율."""
-    present = [m["recommendation"] for m in meta if m["recommendation"]["present"]]
+    """권고를 그 순간 가능한 모든 행동(기본 비용표)으로 다시 잰 값: 틀린 비율, 최선과의 차, 기본 질문에 없는 권고의 비율. 쌍의 변형이
+    기준의 권고를 그대로 쓴 것(``kept`` — 수정 1 I4)은 권고 정책의 통계에서 빼고 따로 센다."""
+    kept = [m["recommendation"] for m in meta if m["recommendation"]["present"] and m["recommendation"].get("kept")]
+    present = [m["recommendation"] for m in meta if m["recommendation"]["present"] and not m["recommendation"].get("kept")]
     if not present:
         return {"present": 0}
     tau = float(cfg.values["tau"])
@@ -121,6 +135,8 @@ def _recommendation_stats(meta: list[dict], cfg: SimgenConfig) -> dict:
         "wrong_gap_to_best": _summary(gap_wrong),
         "wrong_at_least_2tau": round(float(np.mean([g >= 2.0 * tau - 1e-9 for g in gap_wrong])), 4) if gap_wrong else None,
         "not_in_primary_question": round(float(np.mean([r["option"] is None for r in present])), 4),
+        "kept_in_pair_variants": len(kept),
+        "kept_wrong_share": round(float(np.mean([r["wrong"] for r in kept])), 4) if kept else None,
     }
 
 
