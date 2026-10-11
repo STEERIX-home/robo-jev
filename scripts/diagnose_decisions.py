@@ -1,18 +1,22 @@
 #!/usr/bin/env python
 """Task v0c — 판단 요청 진단: 학습 없는 Qwen이 `simgen-request/0` 요청에 내는 확률을 읽고 사후 확률 정답과 비교한다.
 
-    # 채점 (GPU — artifacts/scratch/v0c/gpu.sh로만): 2B·4B, 바로 답(direct) / 생각하고 답(reasoning)
+    # 채점 (GPU — artifacts/scratch/v0c/gpu.sh로만): 2B·4B, 바로 답(direct) / 설명 뒤 답(reasoning, v0c-p2)
     uv run python scripts/diagnose_decisions.py --model Qwen/Qwen3.5-2B --mode direct --input artifacts/simgen/v0a/sample-2000.jsonl \\
         --limit 300 --seed 0 --out artifacts/reports/v0c-preview-2b-direct.json --preview
     uv run python scripts/diagnose_decisions.py --model Qwen/Qwen3.5-2B --mode reasoning --input … --limit 100 --seed 0 --out … --preview
-    # 저장한 예측에서 요약만 다시 (CPU)
-    uv run python scripts/diagnose_decisions.py --rescore <run>.predictions.jsonl --input … --out <rescored>.json
-    # 같은 기록의 두 run 비교 — 차 a − b, 짝지은 레코드 bootstrap (CPU)
+    # 저장한 예측에서 요약만 다시 (CPU) — 옛 seed run 여럿은 질문마다 서로 다른 배치로 합친다
+    uv run python scripts/diagnose_decisions.py --rescore <run>.predictions.jsonl [<run>.predictions.seed2.jsonl …] --input … --out <rescored>.json
+    # 같은 기록의 두 run 비교 — 두 읽기, 차 a − b, 짝지은 레코드 bootstrap (CPU)
     uv run python scripts/diagnose_decisions.py --compare <a>.predictions.jsonl <b>.predictions.jsonl --labels "2B direct" "2B reasoning" --input … --out <cmp>.json
 
-산출물(`--out X.json`): ``X.json``(설정·검증·실행·요약), ``X.predictions.jsonl``(레코드마다 모델 답 — 정답은 넣지 않는다),
-``X.md``(사람이 읽는 표). 형식이 틀린 기록(:func:`robo_jev.decisions.records.validate_record`)은 세고 건너뛴다. `--limit`은 쌍을
-깨지 않는 무작위 표본(`--seed`)이고, 선택지 순서는 `--shuffle-seed`로 섞는다.
+배치(`--orders`): ``counterbalanced``(기본 — 질문마다 결정적 균형 배치 모두: choice는 순환 이동 n개, noul·score는 정순·역순)와
+``seeded``(seed 배치 하나; ``--shuffle-seeds``를 여럿 주면 run을 여러 번 돌려 서로 다른 배치로 합친다 — 옛 방식). 요약은 두 읽기 —
+한 순서(배포 조건, 배치별 지표의 평균)와 순서 평균(배치 평균 답의 지표) — 와 기준선(언제나 0.5 / 무작위 고르기) 대비 짝지은 구간을 낸다.
+
+산출물(`--out X.json`): ``X.json``(설정·검증·실행·요약), ``X.predictions.jsonl``(레코드마다 모델 답 — 질문마다 배치들과 배치 평균;
+정답은 넣지 않는다), ``X.md``(사람이 읽는 표). 형식이 틀린 기록과 겹친 id(:func:`robo_jev.decisions.records.validate_record`)는 세고
+건너뛴다. `--limit`은 쌍을 깨지 않는 무작위 표본(`--seed`)이다.
 
 GPU 규칙(GB10 통합 메모리): 첫 CUDA 할당 전에 울타리(`--gpu-memory-fraction`, 기본 0.6), 적재 전에 여유 확인(2B ≥ 20 GiB,
 4B ≥ 30 GiB — 근거는 :data:`robo_jev.decisions.zero_shot.MIN_FREE_BYTES`), 처음과 끝의 메모리 보고. ``--model tiny``는 검사 전용의
@@ -35,7 +39,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from robo_jev.gpu import DEFAULT_FRACTION, limit_gpu_memory, memory_report, require_free  # noqa: E402
 
-SCRIPT_VERSION = "v0c-diagnose-1"
+SCRIPT_VERSION = "v0c-diagnose-2"
 TINY = "tiny"
 #: 모르는 모델 id의 적재 전 여유 (보수적으로 4B의 값).
 FALLBACK_MIN_FREE = 30 * 2**30
@@ -68,38 +72,44 @@ def _read_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def _load_valid(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """형식 검사를 통과하고 id가 처음 나온 기록만 (겹친 id는 뒤의 것을 문제로 적고 건너뛴다 — 예측이 조용히 섞이지 않게; 리뷰 1 Minor 7)."""
     from robo_jev.decisions.records import validate_record
 
     records = _read_jsonl(path)
-    valid, problems = [], {}
+    valid, problems, seen = [], {}, set()
     for record in records:
         found = validate_record(record)
+        rid = str(record.get("id"))
+        if rid in seen:
+            found = found + [f"duplicate id {rid!r} (an earlier record has it)"]
         if found:
             if len(problems) < 20:
-                problems[str(record.get("id"))] = found[:5]
+                problems.setdefault(rid, []).extend(found[:5])
             continue
+        seen.add(rid)
         valid.append(record)
     return valid, {"read": len(records), "invalid": len(records) - len(valid), "problems": problems}
 
 
 def _parser() -> argparse.ArgumentParser:
-    from robo_jev.decisions.prompt import DEFAULT_FORMAT, FORMATS, MODES
+    from robo_jev.decisions.prompt import DEFAULT_FORMAT, DEFAULT_ORDERS, FORMATS, MODES, ORDERS
     from robo_jev.decisions.zero_shot import DEFAULT_BATCH, DEFAULT_GEN_BATCH, REASONING_MAX_NEW_TOKENS
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     action = parser.add_mutually_exclusive_group(required=True)
     action.add_argument("--model", help="Qwen/Qwen3.5-2B | Qwen/Qwen3.5-4B (가중치는 artifacts/models/) | tiny(검사 전용)")
-    action.add_argument("--rescore", type=Path, help="저장한 예측 JSONL에서 요약만 다시 계산 (CPU)")
+    action.add_argument("--rescore", type=Path, nargs="+", help="저장한 예측 JSONL(여럿이면 서로 다른 배치로 합친다)에서 요약만 다시 계산 (CPU)")
     action.add_argument("--compare", type=Path, nargs=2, metavar=("A", "B"), help="두 예측 JSONL의 짝지은 비교 a − b (CPU)")
     parser.add_argument("--input", type=Path, required=True, help="simgen-request/0 JSONL")
     parser.add_argument("--out", type=Path, required=True, help="요약 JSON 경로 (옆에 .predictions.jsonl·.md)")
     parser.add_argument("--mode", choices=MODES, default="direct")
     parser.add_argument("--format", dest="fmt", choices=FORMATS, default=DEFAULT_FORMAT, help=f"프롬프트 형식 (기본 {DEFAULT_FORMAT})")
+    parser.add_argument("--orders", choices=ORDERS, default=DEFAULT_ORDERS, help=f"보이는 순서의 배치 (기본 {DEFAULT_ORDERS})")
     parser.add_argument("--limit", type=int, default=None, help="쌍을 깨지 않는 무작위 표본 크기 (없으면 전부)")
     parser.add_argument("--seed", type=int, default=0, help="표본 고르기 seed")
-    parser.add_argument("--shuffle-seed", type=int, default=1, help="선택지 순서 seed")
+    parser.add_argument("--shuffle-seed", type=int, default=1, help="선택지 순서 seed (균형 배치의 0번 배치 = 이 seed의 순서)")
     parser.add_argument("--shuffle-seeds", type=int, nargs="+", default=None,
-                        help="선택지 순서 seed 여럿 — 첫 seed가 주 run이고, 나머지로 순서만 바꾼 판정 변경률(permutation)을 잰다")
+                        help="(seeded 배치) seed 여럿으로 run을 여러 번 돌려 서로 다른 배치로 합친다 — 옛 방식")
     parser.add_argument("--batch", type=int, default=DEFAULT_BATCH)
     parser.add_argument("--gen-batch", type=int, default=DEFAULT_GEN_BATCH)
     parser.add_argument("--max-new-tokens", type=int, default=REASONING_MAX_NEW_TOKENS)
@@ -109,17 +119,6 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--labels", nargs=2, default=("a", "b"), metavar=("LABEL_A", "LABEL_B"), help="--compare의 열 이름")
     parser.add_argument("--gpu-memory-fraction", type=float, default=DEFAULT_FRACTION)
     return parser
-
-
-def _summarize_with_reasoning(records: list[dict[str, Any]], predictions: list[dict[str, Any]], *, n_boot: int, seed: int) -> dict[str, Any]:
-    from robo_jev.decisions.metrics import summarize
-    from robo_jev.decisions.report import reasoning_stats
-
-    summary = summarize(records, predictions, n_boot=n_boot, seed=seed)
-    stats = reasoning_stats(predictions)
-    if stats is not None:
-        summary["reasoning"] = stats
-    return summary
 
 
 def _write_outputs(out: Path, payload: dict[str, Any], predictions: list[dict[str, Any]] | None, *, title: str, note: str | None) -> None:
@@ -135,23 +134,28 @@ def _write_outputs(out: Path, payload: dict[str, Any], predictions: list[dict[st
 
 
 def _rescore(args: argparse.Namespace) -> int:
+    from robo_jev.decisions.metrics import merge_runs, summarize_all
     from robo_jev.decisions.records import file_sha256
     from robo_jev.decisions.report import PREVIEW_NOTE
 
     records, validation = _load_valid(args.input)
-    predictions = _read_jsonl(args.rescore)
+    runs = [_read_jsonl(path) for path in args.rescore]
+    predictions, merge = merge_runs(runs)
     ids = {str(p["id"]) for p in predictions}
     records = [r for r in records if str(r["id"]) in ids]
     first = predictions[0] if predictions else {}
     config = {
         "model": first.get("model"), "mode": first.get("mode"), "format": first.get("format"), "prompt_version": first.get("prompt_version"),
-        "shuffle_seed": first.get("shuffle_seed"), "records": len(records), "input": str(args.input), "input_sha256": file_sha256(args.input),
-        "predictions": str(args.rescore), "rescored": True, "script_version": SCRIPT_VERSION, "git": _git_sha(),
+        "orders": first.get("orders") or ("seeded" if len(runs) == 1 else f"seeded × {len(runs)} runs, merged"),
+        "shuffle_seeds": [run[0].get("shuffle_seed") for run in runs if run], "records": len(records), "input": str(args.input),
+        "input_sha256": file_sha256(args.input), "predictions": [str(p) for p in args.rescore], "rescored": True,
+        "script_version": SCRIPT_VERSION, "git": _git_sha(),
     }
-    summary = _summarize_with_reasoning(records, predictions, n_boot=args.n_boot, seed=args.seed)
+    summary = summarize_all(records, predictions, n_boot=args.n_boot, seed=args.seed, merge=merge)
     payload = {"config": config, "validation": validation, "run": None, "summary": summary}
-    _write_outputs(args.out, payload, None, title=args.title or f"v0c diagnosis (rescored) — {config['model']} {config['mode']}", note=PREVIEW_NOTE if args.preview else None)
-    _log(f"rescored {len(records)} records → {args.out}")
+    _write_outputs(args.out, payload, predictions, title=args.title or f"v0c diagnosis (rescored) — {config['model']} {config['mode']}",
+                   note=PREVIEW_NOTE if args.preview else None)
+    _log(f"rescored {len(records)} records from {len(runs)} run file(s) → {args.out}")
     return 0
 
 
@@ -162,6 +166,8 @@ def _compare(args: argparse.Namespace) -> int:
 
     records, validation = _load_valid(args.input)
     a, b = _read_jsonl(args.compare[0]), _read_jsonl(args.compare[1])
+    ids = {str(p["id"]) for p in a} | {str(p["id"]) for p in b}
+    records = [r for r in records if str(r["id"]) in ids]  # 예측이 있는 기록만 (리뷰 1 Minor 8)
     comparison = compare_runs(records, a, b, n_boot=args.n_boot, seed=args.seed)
     payload = {
         "config": {"a": str(args.compare[0]), "b": str(args.compare[1]), "labels": list(args.labels), "input": str(args.input),
@@ -173,7 +179,7 @@ def _compare(args: argparse.Namespace) -> int:
     args.out.with_suffix(".md").write_text(
         render_comparison(comparison, label_a=args.labels[0], label_b=args.labels[1], title=title, note=PREVIEW_NOTE if args.preview else None), encoding="utf-8"
     )
-    _log(f"compared {comparison['records']} records → {args.out}")
+    _log(f"compared {comparison['records']} records (gate passed: {comparison['gate']['passed']}) → {args.out}")
     return 0
 
 
@@ -190,6 +196,7 @@ def _run(args: argparse.Namespace) -> int:
     guard = limit_gpu_memory(args.gpu_memory_fraction)
     memory_start = memory_report()
     _log(f"gpu guard {guard} · memory at start {memory_start}")
+    from robo_jev.decisions.metrics import merge_runs, summarize_all
     from robo_jev.decisions.prompt import PROMPT_VERSION, fixed_text_digest
     from robo_jev.decisions.records import file_sha256, select_records
     from robo_jev.decisions.report import PREVIEW_NOTE
@@ -208,51 +215,36 @@ def _run(args: argparse.Namespace) -> int:
     load_seconds = time.perf_counter() - started
     _log(f"loaded {args.model} in {load_seconds:.1f} s · memory {memory_report()}")
     seeds = list(args.shuffle_seeds) if args.shuffle_seeds else [args.shuffle_seed]
+    if len(seeds) > 1 and args.orders != "seeded":
+        raise SystemExit("--shuffle-seeds는 --orders seeded와 함께 쓴다 (균형 배치는 seed 하나로 모든 배치를 만든다)")
     started = time.perf_counter()
     runs = []
     for shuffle_seed in seeds:
         runs.append(diagnose_records(
-            chosen, backbone, tokenizer, model_id=args.model, mode=args.mode, fmt=args.fmt, seed=shuffle_seed, batch=args.batch,
-            gen_batch=args.gen_batch, max_new_tokens=args.max_new_tokens, log=_log,
+            chosen, backbone, tokenizer, model_id=args.model, mode=args.mode, fmt=args.fmt, seed=shuffle_seed, orders=args.orders,
+            batch=args.batch, gen_batch=args.gen_batch, max_new_tokens=args.max_new_tokens, log=_log,
         ))
-    predictions = runs[0]
     seconds = time.perf_counter() - started
-    prompts = sum(len(p["questions"]) for one in runs for p in one)
+    predictions, merge = merge_runs(runs) if len(runs) > 1 else (runs[0], None)
+    prompts = sum(len(q["listings"]) for run in runs for p in run for q in p["questions"].values())
     import torch
 
-    from robo_jev.decisions.metrics import average_over_orders, order_effects, permutation_sensitivity, summarize
-
     peak = int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else None
-    summary = _summarize_with_reasoning(chosen, predictions, n_boot=args.n_boot, seed=args.seed)
-    if len(runs) > 1:
-        # 같은 기록을 선택지 순서만 바꿔 다시 읽은 것: 판정 변경률, 질문 안의 짝지은 순서 효과, 순서 평균 읽기(위치 편향을 뺀 진단)
-        summary["permutation"] = permutation_sensitivity(runs)
-        summary["order_effects"] = order_effects(runs)
-        averaged = average_over_orders(runs)
-        averaged_summary = summarize(chosen, averaged, n_boot=args.n_boot, seed=args.seed)
-        summary["order_averaged"] = {
-            "orders": len(runs), "overall": averaged_summary["overall"], "recommendation": averaged_summary["recommendation"],
-            "groups": {dim: averaged_summary["groups"][dim] for dim in ("phenomena", "scene", "recommendation", "margin_band")},
-            "bootstrap": averaged_summary["bootstrap"],
-        }
-        extra = [(f".predictions.seed{shuffle_seed}.jsonl", run_predictions) for shuffle_seed, run_predictions in zip(seeds[1:], runs[1:])]
-        for suffix, rows in extra + [(".predictions.order-averaged.jsonl", averaged)]:
-            path = args.out.with_suffix(suffix)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text("".join(json.dumps(p, ensure_ascii=False) + "\n" for p in rows), encoding="utf-8")
+    summary = summarize_all(chosen, predictions, n_boot=args.n_boot, seed=args.seed, merge=merge)
     config = {
-        "model": args.model, "mode": args.mode, "format": args.fmt, "prompt_version": PROMPT_VERSION, "prompt_digest": fixed_text_digest(),
-        "seed": args.seed, "shuffle_seed": seeds[0], "shuffle_seeds": seeds, "limit": args.limit, "records": len(chosen), "record_ids": [str(r["id"]) for r in chosen],
+        "model": args.model, "mode": args.mode, "format": args.fmt, "orders": args.orders, "prompt_version": PROMPT_VERSION,
+        "prompt_digest": fixed_text_digest(), "seed": args.seed, "shuffle_seed": seeds[0], "shuffle_seeds": seeds, "limit": args.limit,
+        "records": len(chosen), "record_ids": [str(r["id"]) for r in chosen],
         "selection": f"pair-preserving random sample, seed {args.seed}, limit {args.limit}" if args.limit else "all valid records",
         "input": str(args.input), "input_sha256": file_sha256(args.input), "batch": args.batch, "gen_batch": args.gen_batch,
         "max_new_tokens": args.max_new_tokens if args.mode == "reasoning" else None, "n_boot": args.n_boot,
         "tokenizer": describe_tokenizer(tokenizer_id), "backbone_manifest": getattr(backbone, "manifest", None),
         "script_version": SCRIPT_VERSION, "git": _git_sha(), "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
     }
+    listings = [l for run in runs for p in run for q in p["questions"].values() for l in q["listings"]]
     run = {
         "seconds": round(seconds, 2), "load_seconds": round(load_seconds, 2), "prompts": prompts,
-        "prompt_tokens": sum(q["prompt_tokens"] for one in runs for p in one for q in p["questions"].values()),
-        "scored_tokens": sum(q["scored_tokens"] for one in runs for p in one for q in p["questions"].values()),
+        "prompt_tokens": sum(l["prompt_tokens"] for l in listings), "scored_tokens": sum(l["scored_tokens"] for l in listings),
         "gpu": {"guard": guard, "memory_at_start": memory_start, "memory_at_end": memory_report(), "peak_allocated_bytes": peak},
     }
     payload = {"config": config, "validation": validation, "run": run, "summary": summary}

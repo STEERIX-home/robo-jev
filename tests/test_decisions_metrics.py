@@ -3,6 +3,10 @@
 손으로 계산한 작은 사례와 맞춘다: soft 이진 로그 손실·KL·Brier, ECE(10구간, 정답 확률 대비), choice 교차 엔트로피,
 정답 argmax(= 기대 비용 최소) 일치, 기대 비용 후회, 쌍의 방향 맞음, 단어 쌍의 흔들림, 틀린 권고를 따른 비율, 위치 편향,
 여유 구간, 레코드 단위 bootstrap, 같은 레코드의 두 run 비교.
+
+Fix round 1(리뷰 1 I1–I4, 통제자 결정): 모델 − 기준선(언제나 0.5 / 무작위 고르기)의 짝지은 구간, 두 읽기(한 순서 = 배치별 지표의
+평균, 순서 평균 = 배치 평균 답의 지표), 같은 배치를 한 번만 두는 병합, 서로 다른 배치 짝만 세는 판정 변경률, 기준 계열별 후회(평균·
+중앙값·상위 10 비중·척도 없는 후회), 어려움 축(margin_norm·정답 엔트로피), 묶음별 신호, 설명 뒤 답의 완료율 문턱.
 """
 
 import copy
@@ -89,7 +93,8 @@ def test_choice_cross_entropy_argmax_match_and_cost_regret_match_the_hand_comput
     m = M.choice_metrics({"a": 0.2, "b": 0.5, "c": 0.3}, label)
     assert m["ce"] == pytest.approx(1.294004, abs=1e-6) and m["kl"] == pytest.approx(1.294004 - 0.897946, abs=1e-6)
     assert m["predicted"] == "b" and m["best"] == ["a"] and m["match"] is False
-    assert m["regret"] == pytest.approx(1.0) and m["expected_regret"] == pytest.approx(2.9)
+    assert m["regret"] == pytest.approx(1.0) and m["sampled_regret"] == pytest.approx(2.9)
+    assert m["regret_norm"] == pytest.approx(1.0 / 8.0)  # 후회 1 ÷ 비용 범위 (10 − 2)
     assert m["confidence"] == pytest.approx(0.5) and m["target"] == pytest.approx(0.3)
     assert m["brier"] == pytest.approx(0.16 + 0.04 + 0.04)
 
@@ -103,13 +108,20 @@ def test_ties_in_the_minimum_expected_cost_accept_any_minimiser_with_zero_regret
 def test_without_expected_costs_the_best_option_is_the_label_argmax_and_there_is_no_regret():
     label = {"type": "choice", "kind": "state", "probabilities": {"x": 0.2, "y": 0.8}}
     m = M.choice_metrics({"x": 0.9, "y": 0.1}, label)
-    assert m["best"] == ["y"] and m["match"] is False and m["regret"] is None and m["expected_regret"] is None
+    assert m["best"] == ["y"] and m["match"] is False and m["regret"] is None and m["sampled_regret"] is None and m["regret_norm"] is None
+
+
+def _row(i: int, qtype: str, block: str, m: dict, label: dict) -> dict:
+    """aggregate가 읽는 꼴의 행 하나 (손으로 만든 사례용)."""
+    return {"record_id": f"r{i}", "question": "q", "type": qtype, "kind": None, "block": block, "w": 1.0, "code_mass": None,
+            "m": m, "u": M.uniform_metrics(qtype, label, m), "criterion": "n/a"}
 
 
 def test_state_choice_ece_is_soft_top_label_calibration():
+    label = {"probabilities": {"x": 0.6, "y": 0.4}}
     rows = [
-        {"type": "choice", "kind": "state", "m": M.choice_metrics({"x": 0.8, "y": 0.2}, {"probabilities": {"x": 0.6, "y": 0.4}})},
-        {"type": "choice", "kind": "state", "m": M.choice_metrics({"x": 0.3, "y": 0.7}, {"probabilities": {"x": 0.6, "y": 0.4}})},
+        _row(0, "choice", "choice/state", M.choice_metrics({"x": 0.8, "y": 0.2}, label), label),
+        _row(1, "choice", "choice/state", M.choice_metrics({"x": 0.3, "y": 0.7}, label), label),
     ]
     block = M.aggregate(rows)["choice/state"]
     # 확신 0.8 대 표적 0.6 (구간 8), 확신 0.7 대 표적 q[y] = 0.4 (구간 7) → (0.2 + 0.3) / 2
@@ -143,7 +155,8 @@ def test_a_uniform_predictor_matches_its_closed_form(fixtures):
     for l in actions:
         costs = l["expected_cost"]
         regrets.append(sum(costs.values()) / len(costs) - min(costs.values()))
-    assert reference["choice/action"]["expected_regret_mean"] == pytest.approx(sum(regrets) / len(regrets))
+    assert reference["choice/action"]["regret_mean"] == pytest.approx(sum(regrets) / len(regrets))
+    assert summary["overall"]["choice/action"]["uniform_regret_mean"] == pytest.approx(sum(regrets) / len(regrets))
     assert reference["choice/action"]["accuracy"] == pytest.approx(sum(sum(1 for c in l["expected_cost"].values() if c == min(l["expected_cost"].values())) / len(l["expected_cost"]) for l in actions) / len(actions))
 
 
@@ -224,8 +237,8 @@ def test_position_bias_counts_where_the_model_argmax_and_the_label_best_sit():
     answers = {f"q{i}": {"probabilities": {orders[f"q{i}"][0]: 0.6, orders[f"q{i}"][1]: 0.3, orders[f"q{i}"][2]: 0.1}} for i in range(4)}
     summary = M.summarize([record], [_prediction(record, answers, orders=orders)], n_boot=10)
     bias = summary["position_bias"]["choice"]["3"]
-    assert bias["model_argmax_positions"] == [4, 0, 0] and bias["label_best_positions"] == [1, 1, 2]
-    assert bias["model_first_rate"] == 1.0 and bias["label_first_rate"] == 0.25
+    assert bias["model_argmax_position_rates"] == [1.0, 0.0, 0.0] and bias["label_best_position_rates"] == [0.25, 0.25, 0.5]
+    assert summary["position_bias"]["choice"]["all"]["model_first_rate"] == 1.0 and summary["position_bias"]["choice"]["all"]["label_first_rate"] == 0.25
     assert bias["mean_probability_by_position"] == pytest.approx([0.6, 0.3, 0.1])
     assert bias["accuracy_by_label_position"] == [1.0, 0.0, 0.0]
     assert summary["groups"]["label_position"]["1"]["choice/state"]["accuracy"] == 1.0
@@ -292,20 +305,24 @@ def test_record_bootstrap_is_reproducible_and_brackets_the_point_estimate(fixtur
     assert ll["low"] == pytest.approx(math.log(2)) and ll["high"] == pytest.approx(math.log(2))  # 상수 지표
     brier = a["noul.brier"]
     assert brier["low"] <= brier["value"] <= brier["high"] and brier["low"] < brier["high"]
+    # 균등 예측 − 균등 기준선 = 0 (같은 뽑기라 구간도 0)
+    assert brier["vs_uniform"] == {"value": pytest.approx(0.0, abs=1e-15), "low": pytest.approx(0.0, abs=1e-15), "high": pytest.approx(0.0, abs=1e-15)}
 
 
-def test_comparing_a_run_with_itself_gives_zero_differences(fixtures):
+def test_comparing_a_run_with_itself_gives_zero_differences_in_both_readings(fixtures):
     preds = [_uniform(r) for r in fixtures]
     cmp = M.compare_runs(fixtures, preds, preds, n_boot=100, seed=1)
-    for key, row in cmp["differences"].items():
-        assert row["value"] == pytest.approx(0.0, abs=1e-12) and row["low"] == pytest.approx(0.0, abs=1e-12) and row["high"] == pytest.approx(0.0, abs=1e-12), key
-    assert cmp["records"] == len(fixtures)
+    assert set(cmp["readings"]) == set(M.READINGS) and cmp["records"] == len(fixtures) and cmp["gate"]["passed"] is True
+    for reading in M.READINGS:
+        for key, row in cmp["readings"][reading]["differences"].items():
+            assert row["value"] == pytest.approx(0.0, abs=1e-12) and row["low"] == pytest.approx(0.0, abs=1e-12) and row["high"] == pytest.approx(0.0, abs=1e-12), key
 
 
 def test_comparing_oracle_with_uniform_shows_the_oracle_ahead(fixtures):
     cmp = M.compare_runs(fixtures, [_oracle(r) for r in fixtures], [_uniform(r) for r in fixtures], n_boot=200, seed=1)
-    assert cmp["differences"]["noul.log_loss"]["value"] < 0  # a − b: 오라클이 손실이 작다
-    assert cmp["differences"]["choice/action.accuracy"]["value"] > 0
+    diffs = cmp["readings"]["single_order"]["differences"]
+    assert diffs["noul.log_loss"]["value"] < 0  # a − b: 오라클이 손실이 작다
+    assert diffs["choice/action.accuracy"]["value"] > 0
 
 
 def test_code_mass_is_averaged_by_question_type(fixtures):
@@ -317,27 +334,42 @@ def test_code_mass_is_averaged_by_question_type(fixtures):
 # -- 선택지 순서 교란 (T6 꼴의 판정 변경률) ---------------------------------------------------------------------------
 
 
-def test_permutation_sensitivity_measures_how_answers_move_when_only_the_option_order_changes(fixtures):
+def _reordered(prediction: dict, record: dict, answers: dict[str, dict]) -> dict:
+    """같은 질문들을 보이는 순서만 뒤집어 다시 채점한 것 (배치 하나)."""
+    out = copy.deepcopy(prediction)
+    for name, q in out["questions"].items():
+        q["options"] = list(reversed(q["options"]))
+        if name in answers:
+            q["answer"] = answers[name]
+    return out
+
+
+def test_permutation_sensitivity_counts_only_pairs_of_listings_whose_order_differs(fixtures):
+    """리뷰 1 I4: 같은 보이는 순서의 짝은 판정이 늘 같으므로 세지 않는다(세면 비율이 절반쯤으로 희석된다)."""
     record = fixtures[3]  # fx-004: choice(행동) · noul · score · choice(규칙)
     a = _oracle(record)
-    b = copy.deepcopy(a)
-    b["questions"]["decision"]["answer"] = {"probabilities": {"proceed": 0.7, "slow_down": 0.1, "stop_moderate": 0.1, "stop_hard": 0.1}}
-    b["questions"]["conflict"]["answer"] = {"p_yes": 0.61}  # 0.41 → 0.61: 0.2 움직이고 0.5 경계를 넘는다
-    c = copy.deepcopy(a)
-    sens = M.permutation_sensitivity([[a], [b], [c]])
-    # 쌍 셋(a-b, a-c, b-c): noul 이동 0.2, 0, 0.2 → 평균 0.4/3, 뒤집힘 2/3
-    assert sens["noul"]["questions"] == 1 and sens["noul"]["pairs"] == 3
-    assert sens["noul"]["shift_mean"] == pytest.approx(0.4 / 3) and sens["noul"]["flip_rate"] == pytest.approx(2 / 3)
+    b = _reordered(a, record, {"decision": {"probabilities": {"proceed": 0.7, "slow_down": 0.1, "stop_moderate": 0.1, "stop_hard": 0.1}},
+                                "conflict": {"p_yes": 0.61}})  # 0.41 → 0.61: 0.2 움직이고 0.5 경계를 넘는다
+    c = copy.deepcopy(a)  # a와 같은 배치 — 병합에서 한 번만 남는다
+    merged, stats = M.merge_runs([[a], [b], [c]])
+    assert stats["duplicate_listings_skipped"] == {"choice": 2, "noul": 1, "score": 1}
+    sens = M.permutation_sensitivity(merged)
+    assert sens["noul"] == {"questions": 1, "pairs": 1, "shift_mean": pytest.approx(0.2), "flip_rate": 1.0, "identical_pairs_skipped": 0}
     label = record["labels"]["decision"]["probabilities"]
     tv = 0.5 * sum(abs(label[k] - v) for k, v in {"proceed": 0.7, "slow_down": 0.1, "stop_moderate": 0.1, "stop_hard": 0.1}.items())
-    assert sens["choice"]["questions"] == 2 and sens["choice"]["shift_mean"] == pytest.approx(2 * tv / 6)
-    assert sens["choice"]["flip_rate"] == pytest.approx(2 / 6)  # 행동 질문의 두 쌍에서 argmax가 proceed로 바뀐다
+    assert sens["choice"]["questions"] == 2 and sens["choice"]["shift_mean"] == pytest.approx(tv / 2) and sens["choice"]["flip_rate"] == 0.5
     assert sens["score"]["shift_mean"] == 0.0 and sens["_all"]["questions"] == 4
-    assert M.permutation_sensitivity([[a]]) == {"_all": {"questions": 0, "pairs": 0, "shift_mean": None, "flip_rate": None}}
+    # 병합하지 않은 채 같은 배치를 두 번 가진 예측: 그 짝은 건너뛰고 센다
+    doubled = copy.deepcopy(merged)
+    for q in doubled[0]["questions"].values():
+        q["listings"].append(copy.deepcopy(q["listings"][0]))
+    again = M.permutation_sensitivity(doubled)
+    assert again["noul"]["pairs"] == 2 and again["noul"]["identical_pairs_skipped"] == 1
+    assert M.permutation_sensitivity([a]) == {"_all": {"questions": 0, "pairs": 0, "shift_mean": None, "flip_rate": None, "identical_pairs_skipped": 0}}
 
 
 def test_side_agreement_counts_the_same_side_of_one_half_and_skips_ambiguous_labels():
-    rows = [{"type": "noul", "kind": None, "block": "noul", "m": M.binary_metrics(p, y)} for p, y in [(0.8, 0.9), (0.3, 0.7), (0.6, 0.55), (0.2, 0.1)]]
+    rows = [_row(i, "noul", "noul", M.binary_metrics(p, y), {"p_yes": y}) for i, (p, y) in enumerate([(0.8, 0.9), (0.3, 0.7), (0.6, 0.55), (0.2, 0.1)])]
     block = M.aggregate(rows)["noul"]
     # (0.6, 0.55)은 |y − 0.5| < 0.1이라 빠진다; 나머지 셋 중 둘이 같은 쪽
     assert block["side_n"] == 3 and block["side_agreement"] == pytest.approx(2 / 3)
@@ -360,30 +392,192 @@ def _orders_runs():
                       orders={"y": ["yes", "no"], "s": bins, "c": ["a", "b", "c"]})
     two = _prediction(record, {"y": {"p_yes": 0.3}, "s": {"value": 0.5}, "c": {"probabilities": {"a": 0.2, "b": 0.3, "c": 0.5}}},
                       orders={"y": ["no", "yes"], "s": bins[::-1], "c": ["c", "b", "a"]})
-    three = _prediction(record, {"y": {"p_yes": 0.9}, "s": {"value": 0.3}, "c": {"probabilities": {"a": 0.6, "b": 0.3, "c": 0.1}}},
-                        orders={"y": ["yes", "no"], "s": bins, "c": ["a", "b", "c"]})
-    return record, [[one], [two], [three]]
+    return record, [[one], [two], [copy.deepcopy(one)]]  # 셋째는 첫째와 같은 배치(같은 답)
 
 
-def test_order_averaging_weighs_each_distinct_order_equally():
+def test_merging_runs_keeps_each_distinct_listing_once_and_averages_them_equally():
     record, runs = _orders_runs()
-    (avg,) = M.average_over_orders(runs)
-    q = avg["questions"]
-    # noul: Yes 먼저 (0.7, 0.9) → 0.8, Yes 나중 0.3 → (0.8 + 0.3) / 2
-    assert q["y"]["answer"]["p_yes"] == pytest.approx(0.55) and q["y"]["orders_seen"] == 2
+    (merged,), stats = M.merge_runs(runs)
+    q = merged["questions"]
+    assert stats == {"runs": 3, "duplicate_listings_skipped": {"choice": 1, "noul": 1, "score": 1}}
+    assert q["y"]["n_listings"] == 2 and q["y"]["answer"]["p_yes"] == pytest.approx(0.5)  # (0.7 + 0.3) / 2 — 같은 배치는 한 번만
     assert q["s"]["answer"]["value"] == pytest.approx(0.4)
     assert q["c"]["answer"]["probabilities"] == pytest.approx({"a": 0.4, "b": 0.3, "c": 0.3})
-    assert M.summarize([record], [avg], n_boot=10)["overall"]["noul"]["n"] == 1
+    assert M.summarize([record], [merged], reading="order_averaged", n_boot=10)["overall"]["noul"]["n"] == 1
 
 
-def test_paired_order_effects_compare_the_same_question_under_different_orders():
+def test_paired_order_effects_compare_the_same_question_under_different_listings():
     _, runs = _orders_runs()
-    effects = M.order_effects(runs)
-    assert effects["noul"]["questions"] == 1 and effects["noul"]["mean_shift"] == pytest.approx(0.5) and effects["noul"]["positive_rate"] == 1.0
+    merged, _ = M.merge_runs(runs)
+    effects = M.order_effects(merged)
+    assert effects["noul"] == {"questions": 1, "mean_shift": pytest.approx(0.4), "positive_rate": 1.0}
     assert effects["score"]["mean_shift"] == pytest.approx(-0.2)
-    # choice: 키별 평균(a .4·b .3·c .3)에서 벗어난 정도를 자리별로 — 순서 (a,b,c)·(c,b,a)·(a,b,c)의 세 run
-    dev = effects["choice"]["3"]["mean_deviation_by_position"]
-    assert dev[0] > 0 > dev[2] and dev[1] == pytest.approx(0.0, abs=1e-12)
+    # choice: 키별 배치 평균(a .4·b .3·c .3)에서 벗어난 정도를 자리별로 — 배치 (a,b,c)와 (c,b,a)
+    assert effects["choice"]["3"]["mean_deviation_by_position"] == pytest.approx([0.2, 0.0, -0.2])
+
+
+def test_the_two_readings_differ_as_defined():
+    """한 순서 읽기 = 배치별 지표의 평균, 순서 평균 읽기 = 배치 평균 답의 지표 (통제자 결정)."""
+    record = {
+        "id": "r", "meta": {}, "request": {"state": "s", "questions": {
+            "y": {"type": "noul", "instructions": "?"}, "c": {"type": "choice", "instructions": "?", "criteria": {"a": "", "b": ""}}}},
+        "labels": {"y": {"type": "noul", "p_yes": 0.8}, "c": {"type": "choice", "kind": "state", "probabilities": {"a": 0.9, "b": 0.1}}},
+    }
+    first = _prediction(record, {"y": {"p_yes": 0.9}, "c": {"probabilities": {"a": 0.7, "b": 0.3}}}, orders={"y": ["yes", "no"], "c": ["a", "b"]})
+    second = _prediction(record, {"y": {"p_yes": 0.5}, "c": {"probabilities": {"a": 0.4, "b": 0.6}}}, orders={"y": ["no", "yes"], "c": ["b", "a"]})
+    merged, _ = M.merge_runs([[first], [second]])
+    single = M.summarize([record], merged, reading="single_order", n_boot=10)["overall"]
+    averaged = M.summarize([record], merged, reading="order_averaged", n_boot=10)["overall"]
+    assert single["noul"]["brier"] == pytest.approx((0.01 + 0.09) / 2) and averaged["noul"]["brier"] == pytest.approx(0.01)  # p = 0.7
+    assert single["choice/state"]["accuracy"] == pytest.approx(0.5) and averaged["choice/state"]["accuracy"] == 1.0  # {a .55, b .45}
+    assert single["noul"]["n"] == averaged["noul"]["n"] == 1 and single["noul"]["rows"] == 2 and averaged["noul"]["rows"] == 1
+
+
+# -- Fix round 1: 기준선과 짝지은 구간 (리뷰 1 I1) ---------------------------------------------------------------------
+
+
+def _noul_records(pairs: list[tuple[float, float]]) -> tuple[list[dict], list[dict]]:
+    records, preds = [], []
+    for i, (p, y) in enumerate(pairs):
+        record = {"id": f"r{i}", "meta": {}, "request": {"state": "s", "questions": {"y": {"type": "noul", "instructions": "?"}}},
+                  "labels": {"y": {"type": "noul", "p_yes": y}}}
+        records.append(record)
+        preds.append(_prediction(record, {"y": {"p_yes": p}}))
+    return records, preds
+
+
+def test_the_paired_difference_against_always_half_matches_the_hand_computation():
+    # r0: (p .7, y .9) → Brier .04 대 기준선 .16 (차 −.12); r1: (p .6, y .2) → .16 대 .09 (차 +.07)
+    records, preds = _noul_records([(0.7, 0.9), (0.6, 0.2)])
+    boot = M.summarize(records, preds, n_boot=4000, seed=0)["bootstrap"]["noul.brier"]
+    assert boot["value"] == pytest.approx(0.10) and boot["uniform"] == pytest.approx(0.125)
+    assert boot["vs_uniform"]["value"] == pytest.approx(-0.025)
+    # 레코드 둘의 bootstrap: (r0, r0) 확률 1/4 → −.12, (r1, r1) 1/4 → +.07 — 2.5·97.5 백분위가 그 끝값이다
+    assert boot["vs_uniform"]["low"] == pytest.approx(-0.12) and boot["vs_uniform"]["high"] == pytest.approx(0.07)
+
+
+def test_oracle_and_uniform_differences_against_the_baseline_have_the_right_sign_and_size(fixtures):
+    oracle = M.summarize(fixtures, [_oracle(r) for r in fixtures], n_boot=300)
+    nouls = [r["labels"][n]["p_yes"] for r in fixtures for n in r["labels"] if r["labels"][n]["type"] == "noul"]
+    brier = oracle["bootstrap"]["noul.brier"]["vs_uniform"]
+    assert brier["value"] == pytest.approx(-sum((0.5 - y) ** 2 for y in nouls) / len(nouls)) and brier["high"] < 0
+    assert oracle["bootstrap"]["choice/action.accuracy"]["vs_uniform"]["low"] > 0
+    assert oracle["overall"]["noul"]["brier_vs_uniform"] == pytest.approx(brier["value"])
+
+
+# -- Fix round 1: 기준 계열별 후회 (리뷰 1 I3) --------------------------------------------------------------------------
+
+
+def _criterion_record() -> tuple[dict, dict]:
+    qs, labels, basis, answers = {}, {}, {}, {}
+    spec = {  # 이름: (기준, 기대 비용, 모델이 고르는 키)
+        "default_q": (None, {"a": 1.0, "b": 3.0, "c": 5.0}, "b"),        # 후회 2, 범위 4 → .5; 무작위 2 (.5)
+        "contact_q": ("avoid_contact", {"a": 0.0, "b": 1000.0}, "b"),     # 후회 1000, 척도 없는 1; 무작위 500 (.5)
+        "time_q": ("time_critical", {"a": 2.0, "b": 2.5}, "a"),           # 후회 0
+    }
+    for name, (criterion, costs, pick) in spec.items():
+        qs[name] = {"type": "choice", "instructions": "?", "criteria": {k: "" for k in costs}}
+        labels[name] = {"type": "choice", "kind": "action", "probabilities": {k: 1.0 / len(costs) for k in costs}, "expected_cost": costs}
+        basis[name] = {"kind": "action", "criterion": criterion}
+        answers[name] = {"probabilities": {k: (0.9 if k == pick else 0.1 / (len(costs) - 1)) for k in costs}}
+    record = {"id": "c", "meta": {"basis": basis}, "request": {"state": "s", "questions": qs}, "labels": labels}
+    return record, _prediction(record, answers)
+
+
+def test_regret_is_reported_per_criterion_family_with_a_scale_free_version():
+    record, pred = _criterion_record()
+    summary = M.summarize([record], [pred], n_boot=10)
+    table = summary["regret_by_criterion"]
+    assert set(table) == {"default", "avoid_contact", "time_critical", "stated", "all"}
+    assert table["default"]["regret_mean"] == 2.0 and table["default"]["regret_norm_mean"] == 0.5 and table["default"]["uniform_regret_mean"] == 2.0
+    assert table["avoid_contact"]["regret_mean"] == 1000.0 and table["avoid_contact"]["regret_norm_mean"] == 1.0
+    stated = table["stated"]
+    assert (stated["regret_n"], stated["regret_mean"], stated["regret_median"], stated["regret_max"]) == (2, 500.0, 500.0, 1000.0)
+    assert stated["regret_positive_rate"] == 0.5 and stated["regret_top10_share"] == 1.0
+    assert table["all"]["regret_mean"] == pytest.approx(1002.0 / 3) and table["all"]["regret_norm_mean"] == pytest.approx(1.5 / 3)
+    boot = summary["bootstrap"]
+    assert boot["choice/action.regret_mean[default]"]["value"] == 2.0 and boot["choice/action.regret_mean[stated]"]["value"] == 500.0
+    assert boot["choice/action.regret_norm[stated]"]["value"] == 0.5 and boot["choice/action.regret_norm[stated]"]["uniform"] == pytest.approx(0.5)
+    rows = M.question_rows([record], [pred])
+    assert {r["question"]: r["groups"]["criterion"] for r in rows} == {"default_q": "default", "contact_q": "avoid_contact", "time_q": "time_critical"}
+
+
+def test_the_top_ten_share_is_the_share_of_the_ten_largest_question_regrets():
+    qs, labels, answers = {}, {}, {}
+    for i in range(12):  # 후회 1, 2, …, 12 (질문마다 하나)
+        costs = {"a": 0.0, "b": float(i + 1)}
+        qs[f"q{i}"] = {"type": "choice", "instructions": "?", "criteria": {"a": "", "b": ""}}
+        labels[f"q{i}"] = {"type": "choice", "kind": "action", "probabilities": {"a": 0.5, "b": 0.5}, "expected_cost": costs}
+        answers[f"q{i}"] = {"probabilities": {"a": 0.1, "b": 0.9}}
+    record = {"id": "t", "meta": {}, "request": {"state": "s", "questions": qs}, "labels": labels}
+    block = M.summarize([record], [_prediction(record, answers)], n_boot=10)["overall"]["choice/action"]
+    assert block["regret_top10_share"] == pytest.approx(sum(range(3, 13)) / sum(range(1, 13)))
+    assert block["regret_median"] == pytest.approx(6.5) and block["regret_max"] == 12.0
+
+
+# -- Fix round 1: 어려움 축 (통제자 결정) ---------------------------------------------------------------------------------
+
+
+def test_margin_norm_bands_take_the_tightest_normalized_margin():
+    assert M.margin_norm_band({"margin_norm": {"step_in": -0.3, "spill": 2.0}}) == "near"
+    assert M.margin_norm_band({"margin_norm": 0.7}) == "mid" and M.margin_norm_band({"margin_norm": {"x": -1.6}}) == "far"
+    assert M.margin_norm_band({}) == "absent" and M.margin_norm_band({"margin_norm": {"x": float("nan")}}) == "absent"
+
+
+def test_label_entropy_bands_put_labels_near_one_half_in_the_high_band(fixtures):
+    assert M.normalized_entropy("noul", {"p_yes": 0.5}) == pytest.approx(1.0) and M.normalized_entropy("noul", {"p_yes": 1.0}) == 0.0
+    assert M.normalized_entropy("choice", {"probabilities": {"a": 0.5, "b": 0.5}}) == pytest.approx(1.0)
+    assert M.entropy_band(0.1) == "low" and M.entropy_band(0.5) == "mid" and M.entropy_band(0.9) == "high" and M.entropy_band(None) == "absent"
+    record = copy.deepcopy(fixtures[0])
+    record["meta"]["key_question"] = "contact_if_continue"  # p_yes .86 → H ≈ 0.58 비트 → mid
+    record["meta"]["margin_norm"] = {"stop_margin_m": 0.2, "spill_margin_cm": 3.0}
+    rows = {r["question"]: r["groups"] for r in M.question_rows([record], [_oracle(record)])}
+    assert rows["action"]["key_entropy_band"] == "mid" and rows["action"]["margin_norm_band"] == "near"
+    # spill_if_hard .18 → H ≈ 0.68 비트(high), risk_gentle .07 → 0.37(mid), person_next (.52 .39 .09) → 0.84(high)
+    assert rows["spill_if_hard"]["label_entropy_band"] == "high" and rows["risk_gentle"]["label_entropy_band"] == "mid"
+    assert rows["person_next"]["label_entropy_band"] == "high"
+    low = {r["question"]: r["groups"] for r in M.question_rows([fixtures[1]], [_oracle(fixtures[1])])}
+    assert low["risk_gentle"]["label_entropy_band"] == "low"  # .01 → 0.08 비트
+    plain = {r["question"]: r["groups"] for r in M.question_rows([fixtures[0]], [_oracle(fixtures[0])])}
+    assert plain["action"]["key_entropy_band"] == "absent" and plain["action"]["margin_norm_band"] == "absent"
+
+
+# -- Fix round 1: 묶음별 신호 (리뷰 1 I2) ---------------------------------------------------------------------------------
+
+
+def test_group_signal_reports_correlation_and_paired_difference_per_scene(fixtures):
+    signal = M.summarize(fixtures, [_oracle(r) for r in fixtures], n_boot=300)["signal"]
+    cafe = signal["scene"]["p1p5_step_in_carrying"]["noul"]
+    assert cafe["n"] == 6 and cafe["pearson"] == pytest.approx(1.0)  # 오라클: p = y
+    labels = [0.86, 0.18, 0.71, 0.18, 0.86, 0.18]
+    assert cafe["brier"]["vs_uniform"]["value"] == pytest.approx(-sum((0.5 - y) ** 2 for y in labels) / 6) and cafe["brier"]["vs_uniform"]["high"] < 0
+    assert signal["scene"]["p1_crossing"]["choice/action"]["accuracy"]["vs_uniform"]["value"] == pytest.approx(0.75)  # 오라클 1 − 무작위 1/4
+    assert set(signal) == set(M.SIGNAL_DIMENSIONS)
+
+
+# -- Fix round 1: 설명 뒤 답의 완료율 문턱 -------------------------------------------------------------------------------
+
+
+def _with_reasoning(prediction: dict, completes: list[bool]) -> dict:
+    out = copy.deepcopy(prediction)
+    flags = iter(completes)
+    for q in out["questions"].values():
+        q["reasoning"] = {"text": "x", "stop": "eos", "generated_tokens": 10, "self_answer": True, "complete": next(flags, True)}
+    return out
+
+
+def test_the_completion_gate_marks_explanation_runs_below_ninety_percent_as_inconclusive(fixtures):
+    record = fixtures[7]  # 질문 넷
+    good = M.reasoning_stats([_with_reasoning(_oracle(record), [True, True, True, True])])
+    bad = M.reasoning_stats([_with_reasoning(_oracle(record), [True, False, True, True])])
+    assert good["complete_rate"] == 1.0 and good["gate"] == {"threshold": 0.9, "passed": True}
+    assert bad["complete_rate"] == 0.75 and bad["gate"]["passed"] is False
+    legacy = copy.deepcopy(_oracle(record))  # v0c-p1 기록(완료 칸 없음): 상한에서 잘린 것은 미완료
+    for q in legacy["questions"].values():
+        q["reasoning"] = {"text": "x", "stop": "cap", "generated_tokens": 256, "self_answer": False}
+    assert M.reasoning_stats([legacy])["complete_rate"] == 0.0
+    cmp = M.compare_runs([record], [_with_reasoning(_oracle(record), [True, False, True, True])], [_oracle(record)], n_boot=20)
+    assert cmp["gate"]["passed"] is False and cmp["gate"]["a"]["complete_rate"] == 0.75 and cmp["gate"]["b"] is None
 
 
 def test_a_choice_label_without_kind_but_with_expected_costs_is_read_as_an_action_choice(fixtures):

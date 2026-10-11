@@ -6,6 +6,6 @@
 * :mod:`~robo_jev.decisions.records` — 기록 읽기·형식 검사·쌍 단위 표본 고르기.
 * :mod:`~robo_jev.decisions.prompt` — 요청 → 질문마다 프롬프트 하나(같은 상태 글 + 그 질문), 한 글자 코드, seed로 섞은 순서.
 * :mod:`~robo_jev.decisions.zero_shot` — 실제 backbone에서 코드 확률 읽기(바로 답 / 생각하고 답).
-* :mod:`~robo_jev.decisions.metrics` — 정답(사후 확률)과의 지표, 묶음, 쌍, 권고, 위치 편향.
+* :mod:`~robo_jev.decisions.metrics` — 정답(사후 확률)과의 지표: 두 읽기(한 순서·순서 평균), 기준선 대비 짝지은 구간, 기준 계열별 후회, 어려움 축, 묶음, 쌍, 권고, 위치 편향.
 * :mod:`~robo_jev.decisions.report` — 요약 JSON → 사람이 읽는 markdown 표.
 """
