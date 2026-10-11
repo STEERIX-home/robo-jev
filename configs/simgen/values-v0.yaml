@@ -18,6 +18,15 @@ costs:
   spill_chemical: 40         #               약품·검체
   spill_other: 8             #               그 밖(물·주스·찬 음료)
   delay_per_s: 1.0           # 진행 손실 1초당
+  # Task v0b — 새 현상의 사고 항목(더하기만 했다: 위 항목의 값은 그대로라 P1·P5 정답은 바뀌지 않는다 — 그래서 버전 이름도 그대로다).
+  fall_light: 8              # P3 물건이 넘어지거나 떨어짐: 깨지지 않는 가벼운 것(플라스틱 병·화분·빈 토트)
+  fall_fragile: 20           #                              깨지는 것(유리병·꽃병·잔·소포)
+  fall_heavy: 40             #                              무거운 것(쌓은 상자·상자 더미·페인트 통·팔레트 짐) — 발·사람을 다칠 수 있다
+  fall_chemical: 45          #                              약품(시약병·약품 드럼)
+  unseated_minor: 15         # P4 제대로 앉지(끼워지지) 않은 채 두고 감: 나중에 바로잡을 수 있는 것(선반의 상자·접시·컵)
+  unseated_major: 45         #                                          불량·시험 망침·떨어질 위험(고정구의 부품·리더의 플레이트·랙의 팔레트·커넥터)
+  damage: 40                 # P4 눌러 넣다 물건·고정구를 망가뜨림
+  human_call: 5              # P4 사람을 부름(그 사람의 수고 — 기다리는 시간은 지연으로 따로 센다)
 
 tau: 2.0                     # 소프트맥스 온도 τ (비용 단위)
 
@@ -35,6 +44,15 @@ criteria:
     contact_object: 1000
   time_critical:             # "급하다 — 지연 1초가 평소의 세 배, 안전은 그대로 먼저"
     delay_per_s: 3.0
+  avoid_fall:                # Task v0b P3: "실은 것이 넘어지거나 떨어지지 않는 것 가운데 가장 빠른 것"
+    fall_light: 1000
+    fall_fragile: 1000
+    fall_heavy: 1000
+    fall_chemical: 1000
+  no_defect:                 # Task v0b P4: "제대로 앉지 않았거나 망가진 채로 두지 않는 것 가운데 가장 빠른 것"
+    unseated_minor: 1000
+    unseated_major: 1000
+    damage: 1000
 criterion_share: 0.2         # 행동 choice 가운데 기준을 적는 비율
 
 # 계획기 권고(리뷰 1 I5): 그 순간 가능한 모든 행동을 이 기본 비용표로 비교한다. "맞는" 권고는 최선에서 τ 안쪽, "틀린" 권고는

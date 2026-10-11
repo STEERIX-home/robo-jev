@@ -25,7 +25,8 @@ def test_each_record_is_reproducible_from_its_generator_block():
     for record in generate_batch(40, base_seed=9, cfg=default_config(), git="fixed"):
         gen = record["generator"]
         index = int(record["id"].split("-")[-1])
-        again = generate_record(gen["seed"], index, gen["forced"]["domain"], variant=gen["variant"], pair=record["meta"]["pair"], git="fixed")
+        again = generate_record(gen["seed"], index, gen["forced"]["domain"], forced=gen["forced"], variant=gen["variant"], pair=record["meta"]["pair"],
+                                git="fixed", split=gen["split"])  # fmt: skip
         assert dumps(again) == dumps(record), record["id"]
 
 

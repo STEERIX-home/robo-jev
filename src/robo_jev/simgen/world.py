@@ -31,6 +31,7 @@ class World:
     at_observation: dict[str, Any] = field(default_factory=dict)
     margins: dict[str, float] = field(default_factory=dict)
     geometry: dict[str, float] = field(default_factory=dict)   # 알려진 장면 기하(회전 반경·각도 등) — 관측에도 그대로 간다
+    parts: dict = field(default_factory=dict)                  # 장면별 카드 항목(실은 물건·받침 표면·놓는 물건·센서 단서 …, Task v0b)
 
     def as_batch(self) -> Batch:
         return Batch({k: np.array([v]) for k, v in self.values.items()})

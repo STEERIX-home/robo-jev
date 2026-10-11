@@ -11,7 +11,8 @@
 * 관측 안 된 값(상대의 반지름, 의도별 움직임 매개변수, 출렁임 계수, 바닥 기울기, 공의 구름 저항, 가려진 쪽의 장애물, 보이지 않는 뚜껑,
   가로지르는 상대가 반응하나)은 속성 목록·분야 카드의 사전 분포에서 뽑는다.
 * 이산 의도는 단서 가능도로 베이즈 갱신한다: P(지금 의도 | 단서, 나이) = (1 − q)·P(의도 | 단서) + q·사전, q = 1 − e^{−λ·나이}.
-* 위치를 몇 초 전에 봤으면 그동안 관측 속도로 움직였다고 지금 위치를 민다. 마주 옴(head-on)의 위치 보고는 **그 시각의 둘 사이 간격**이라
+* 위치를 몇 초 전에 봤으면 그동안 관측 속도로 움직였다고 지금 위치를 민다. 끼어듦의 지금 옆 위치는 글의 전제("당신의 차선으로 들어오고
+  있다" — 몸 중심이 들어오는 쪽에서 중심선까지 (로봇 + 상대 반지름) × step_in_band 안)로 자른다(Task v0b — 생성기와 같은 띠). 마주 옴(head-on)의 위치 보고는 **그 시각의 둘 사이 간격**이라
   지금 간격 = 보고 − (상대 속도 + 로봇 속도)·나이이고, 위치 두 개의 차이 / 간격 시간은 다가오는 속도(상대 + 로봇)다(리뷰 1 C1).
 
 정답에는 사후 표본의 빈도 대신 정확한 값을 쓸 수 있는 곳(의도·뚜껑·채움 구간의 상태 정답, Φ로 닫히는 세계 사건과 감속의 넘어섬)이 있다 —
@@ -25,7 +26,7 @@ from statistics import NormalDist
 
 import numpy as np
 
-from robo_jev.simgen.catalog import INTENTS, SimgenConfig, reaction_probability
+from robo_jev.simgen.catalog import INTENTS, SimgenConfig, distraction_probability, reaction_probability
 from robo_jev.simgen.observation import Observation
 from robo_jev.simgen.spec import FILL_BINS, Batch, Reading, fill_bin_index
 
@@ -189,16 +190,40 @@ def _container(cfg: SimgenConfig, obs: Observation, rng, k: int) -> dict[str, np
     return {"fill": fill, "k": slosh, "tilt": tilt, "lid": lid}
 
 
+_PREMISE_OVERSAMPLE = 8
+
+
+def _step_in_track(cfg, obs: Observation, rng, k: int, direction: float, spec: dict):
+    """(상대 반지름, 지금 옆 위치, 옆 속도) — 글의 전제 "당신의 차선으로 들어오고 있다"로 자른 사후(Task v0b; 리뷰 1 재검증의 끼어듦
+    잔여 — 자르지 않으면 오래된 추적에서 사후가 상대를 차선 밖에 두어 닿음을 약 0.05 낮게 잡았다).
+
+    전제: 몸 중심이 들어오는 쪽에서 진로 중심선까지 (로봇 반지름 + 상대 반지름) × ``intent_motion.step_in_band`` 안에 있고 아직 중심선을
+    넘지 않았다 — 생성기가 상대를 두는 띠와 같다. 후보 8K개(반지름·추적 보고의 사후)를 뽑아 전제를 지키는 것만 받는다: 앞에서부터 K개,
+    모자라면 받은 것에서 복원 추출, 하나도 없으면(관측이 전제와 크게 어긋날 때) 자르지 않은 앞 K개."""
+    band = cfg.catalog["intent_motion"]["step_in_band"]
+    m = _PREMISE_OVERSAMPLE * k
+    ra = _uniform(rng, spec["radius"], m)
+    lat0, u0 = _track(rng, obs, m, direction, 0.0)
+    entering = -direction * lat0  # 들어오는 쪽에서 중심선까지(+ = 아직 넘지 않음)
+    ok = np.flatnonzero((entering >= 0.0) & (entering <= band * (obs.robot.radius + ra)))
+    if len(ok) >= k:
+        idx = ok[:k]
+    elif len(ok) > 0:
+        idx = np.concatenate([ok, rng.choice(ok, k - len(ok))])
+    else:
+        idx = np.arange(k)
+    return ra[idx], lat0[idx], u0[idx]
+
+
 def _step_in(cfg, obs: Observation, rng, k: int) -> dict[str, np.ndarray]:
     agent, robot = obs.agent, obs.robot
     spec = cfg.agent(agent.kind)
     motion = cfg.catalog["intent_motion"]
     direction = 1.0 if agent.heading == "left" else -1.0
-    # 보고는 면 사이 간격 — 중심 거리 = 간격 + 로봇 반지름 + 상대 반지름(숨은 값, 사전에서).
-    ra = _uniform(rng, spec["radius"], k)
+    # 옆 위치 축: 시간이 흐르면 direction 쪽으로 움직인다. 상대 반지름(숨은 값)과 함께 글의 전제 띠로 자른다.
+    ra, lat0, u0 = _step_in_track(cfg, obs, rng, k, direction, spec)
+    # 보고는 면 사이 간격 — 중심 거리 = 간격 + 로봇 반지름 + 상대 반지름.
     gap = np.maximum(_normal(rng, agent.ahead, k, 0.0), 0.005) + robot.radius + ra
-    # 옆 위치 축: 시간이 흐르면 direction 쪽으로 움직인다.
-    lat0, u0 = _track(rng, obs, k, direction, 0.0)
     decel = _uniform(rng, spec.get("decel", [1.0, 2.0]), k)
     cross_speed = np.maximum(_uniform(rng, spec["speed"], k), u0)
     values = {
@@ -241,6 +266,9 @@ def _crossing(cfg, obs: Observation, rng, k: int) -> dict[str, np.ndarray]:
         "roll_decel": _roll_decel(cfg, obs, rng, k) if spec["group"] == "ball" else np.zeros(k),
         "reacts": (rng.random(k) < react).astype(float),
         "react_standoff": _uniform(rng, cfg.catalog["crossing_reaction"]["standoff"], k) * scale,
+        # 멈춘(아주 느린) 로봇을 피하는가(수정 1 I3): 주의가 흐트러졌나(단서 또는 갈래 사전), 실패를 정하는 균등 난수
+        "distracted": (rng.random(k) < distraction_probability(cfg, agent.kind, agent.cue)).astype(float),
+        "static_u": rng.random(k),
     }  # fmt: skip
 
 
@@ -263,7 +291,14 @@ def _head_on(cfg, obs: Observation, rng, k: int) -> dict[str, np.ndarray]:
 
 
 def sample_posterior(cfg: SimgenConfig, obs: Observation, k: int, rng: np.random.Generator) -> Batch:
-    """관측에서 사후 세계 K개."""
+    """관측에서 사후 세계 K개(P4·P6의 이산 부분은 정확한 무게로 나열 — 그 Batch는 weights를 갖는다)."""
+    from robo_jev.simgen.catalog import scene_kind
+
+    kind = scene_kind(obs.scene)
+    if kind is not None:
+        from robo_jev.simgen import p3, p4, p6
+
+        return {"p3": p3, "p4": p4, "p6": p6}[kind].sample_posterior(cfg, obs, k, rng)
     if obs.scene in ("p1_step_in", "p1p5_step_in_carrying"):
         values = _step_in(cfg, obs, rng, k)
     elif obs.scene == "p1_crossing":
@@ -299,7 +334,17 @@ def exact_labels(cfg: SimgenConfig, obs: Observation) -> dict:
     열쇠 'overrun|stop_moderate'). 계산할 수 없는 것(검열된 보고 등)은 넣지 않는다."""
     out: dict = {}
     a, r = obs.agent, obs.robot
-    family = {"p1_step_in": "step_in", "p1p5_step_in_carrying": "step_in", "p1_crossing": "crossing", "p1_head_on": "head_on"}.get(obs.scene)
+    from robo_jev.simgen.catalog import scene_kind
+
+    kind = scene_kind(obs.scene)
+    if kind is not None:
+        from robo_jev.simgen import p3, p4, p6
+
+        out.update({"p3": p3, "p4": p4, "p6": p6}[kind].exact(cfg, obs))
+        if obs.scene not in ("p1p6_emerging_step_in", "p1p3_step_in_carrying_tall"):
+            return out
+    family = {"p1_step_in": "step_in", "p1p5_step_in_carrying": "step_in", "p1_crossing": "crossing", "p1_head_on": "head_on",
+              "p1p6_emerging_step_in": "step_in", "p1p3_step_in_carrying_tall": "step_in"}.get(obs.scene)  # fmt: skip
     if a is not None and a.cue is not None and family is not None:
         out["intent"] = intent_posterior(cfg, a.kind, family, a.cue, a.age)
     if obs.container is not None:
@@ -308,7 +353,7 @@ def exact_labels(cfg: SimgenConfig, obs: Observation) -> dict:
         bins = np.searchsorted(np.array([hi for _, hi, _ in FILL_BINS[:-1]]), grid, side="right")
         total = float(weight.sum())
         out["fill_bin"] = np.array([float(weight[bins == b].sum()) / total for b in range(len(FILL_BINS))])
-    if obs.scene in ("p1_step_in", "p1p5_step_in_carrying"):
+    if obs.scene in ("p1_step_in", "p1p5_step_in_carrying", "p1p6_emerging_step_in", "p1p3_step_in_carrying_tall"):
         stop = r.speed * r.latency + r.speed**2 / (2.0 * r.decel_moderate)
         p = _upper_tail(a.ahead, stop, 0.005)
         if p is not None:

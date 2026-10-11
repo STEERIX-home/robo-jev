@@ -1,15 +1,19 @@
-"""질문 생성기: 세 종류(choice·noul·score)와 흔들기 (docs/12 §7, Task v0a 지시서 §3.9).
+"""질문 생성기: 세 종류(choice·noul·score)와 흔들기 (docs/12 §7, Task v0a 지시서 §3.9, v0b §1~§4).
 
 **관측만 받는다** — 세계 모듈을 import하지 않는다. 질문마다 모델이 받는 부분(이름·종류·지시문·criteria)과 정답을 계산하는 조리법
 (``recipe``, 모델 입력이 아니다)을 함께 만든다. 정답은 :mod:`~robo_jev.simgen.labels` 가 사후 굴림 결과와 조리법으로 계산한다.
 
-요청당 3~8개: 행동 choice 1개(25 %는 하나 더), 핵심 noul 1개(장면의 결정 여유를 묻는 것 — 통계의 '핵심 noul'), noul 0~2개 더,
-score 1~2개, 상태 choice(50 %), 규칙 적용 choice(35 %). 행동 choice의 약 20 %는 지시문에 기준을 적고 그 기준의 비용 덮어쓰기를
-조리법에 넣는다. 선택지 열쇠 문체(단어 / 짧은 코드 / 동사형)는 레코드마다, 선택지 순서와 질문 순서는 섞는다.
+요청당 3~8개: 행동 choice 1개(25 %는 하나 더), 핵심 noul 1개(장면의 결정 여유를 묻는 것), noul 0~2개 더, score 1~2개, 상태 choice(50 %),
+'다시 볼까' choice(다시 보기가 있는 장면에서 40 %), 규칙 적용 choice(35 %). 행동 choice의 약 20 %는 지시문에 기준을 적는다.
 
-뚜껑이 보이는 용기(약 5 %)에서는 쏟아짐이 늘 0이라 쏟아짐 질문 대신 '액면이 뚜껑까지 차오르나'(사건 rim_reached)를 묻고, avoid_spill
-기준을 쓰지 않는다(리뷰 1 질문 7). 지연 score는 그 지연의 정의(장면마다)를 지시문에 적는다(리뷰 1 m3): P1은 '앞으로 3초 동안 잃는
-진행', 감속(P5)은 '목표 앞에 일찍 서서 남은 거리를 다시 다가가는 시간', 회전은 '회전을 마치는 시각이 늦어지는 만큼'.
+**같은 것을 두 번 묻지 않는다**(리뷰 1 재검증 m-c): 질문마다 묻는 것의 정체(:func:`identity`)가 있고 후보 묶음은 이미 물은 정체를 뺀 뒤에 고른다.
+
+**문구가 정답과 같은 것을 묻는다**(v0c 진단의 반대 상관 점검, Task v0b): 쏟아짐·뚜껑까지 차오름·빈 높이 사용은 충돌이 있을 수 있는 순간이면
+(:func:`impact_possible`) 그 원인을 문구에 적고(``*_impact`` 묶음), 닿음·가까움은 앞으로 3초를 적는다(가까움은 지금 간격도 센다).
+
+**언어·묶음·흔들기.** ``Surface``의 ``lang``(en/ko)과 ``pool``(train/heldout — 빼 둔 바꿔 쓰기 묶음은 시험 세트 T2 전용)으로 문구 묶음을
+고른다. ``shift``(지시문)·``desc_shift``(선택지 설명)는 고른 문구 번호를 그만큼 옮긴다 — 난수 소비가 같아 질문의 뜻(이름·조리법·선택지·순서)은
+그대로이고 문구만 바뀐다(교란 시험 T6의 지시·설명 바꿔 쓰기). ``key_style``을 주면 선택지 열쇠 문체를 바꾼다(T6 키 바꾸기).
 """
 
 from __future__ import annotations
@@ -22,21 +26,29 @@ import numpy as np
 from robo_jev.simgen import textfmt
 from robo_jev.simgen.catalog import INTENTS, SimgenConfig
 from robo_jev.simgen.observation import Observation
-from robo_jev.simgen.phrases import (
-    ACTION_INSTRUCTIONS,
-    ARM_VERB_KEYS,
-    CRITERION_INSTRUCTIONS,
-    VERB_KEYS,
-    cap,
-    container_ref,
-    option_descriptions,
-    option_short,
-)
+from robo_jev.simgen.phrases import ANCHORS, ARM_VERB_KEYS, VERB_KEYS, bank, cap, container_ref, option_descriptions, option_short
 from robo_jev.simgen.spec import Reading
 
-__all__ = ["KEY_STYLES", "Question", "QuestionSet", "write_questions"]
+__all__ = ["KEY_STYLES", "LONG_OPTIONS", "Question", "QuestionSet", "Surface", "VOI_SCENES", "candidates", "identity", "impact_possible",
+           "impact_possible_load", "write_questions"]
 
 KEY_STYLES = ("word", "code", "verb")
+#: 다시 보기(정보의 가치) 선택지가 있는 장면
+VOI_SCENES = ("p3_place_stack", "p4_place_check", "p4_insert", "p4p6_stale_check", "p6_stale_track", "p6_blind_corner", "p6_sensor_conflict")
+#: 지연이 수 초~수십 초인 선택지 — 지연 score는 30초 눈금(per_30s)
+LONG_OPTIONS = ("secure_first", "detour", "recentre", "place_elsewhere", "check_weight", "press_down", "push_harder", "reseat", "call_human", "ramp_slow")
+
+
+@dataclass(frozen=True)
+class Surface:
+    """문구 고르기의 손잡이(질문의 뜻은 바꾸지 않는다)."""
+
+    lang: str = "en"
+    pool: str = "train"
+    shift: int = 0          # 지시문 묶음에서 고른 번호를 이만큼 옮긴다
+    desc_shift: int = 0     # 선택지 설명 묶음에서
+    key_style: str | None = None
+    mirror: bool = False    # 좌우 거울상 변형(T6): 왼쪽·오른쪽 후보를 거꾸로 돌아 기준 레코드와 같은 자리에 거울상 질문이 오게
 
 
 @dataclass
@@ -62,11 +74,72 @@ class QuestionSet:
     key_question: str                # 핵심 noul의 이름
 
 
+def identity(recipe: dict) -> tuple:
+    """질문이 묻는 것의 정체(정답 조리법에서): 같은 정체의 두 질문은 같은 정답을 갖는 같은 질문이다(m-c).
+
+    행동·다시 볼까 = (기준, 선택지 집합); 사건 확률(noul, 사건 확률 score, 세계 사건 상태 choice) = (갈래, 사건, 선택지, 부정);
+    양 score = (양, 선택지, 변환); 상태 = 상태 이름; 규칙 = 갈래 집합."""
+    kind = recipe["kind"]
+    if kind in ("action", "voi"):
+        return (kind, recipe.get("criterion"), tuple(sorted(recipe["options"].values())))
+    if kind == "noul":
+        return ("event", recipe["source"], recipe["event"], recipe.get("option"), bool(recipe.get("negate")))
+    if kind == "score":
+        if recipe["source"] == "event":
+            return ("event", "event", recipe["name"], recipe["option"], False)
+        return ("quantity", recipe["name"], recipe["option"], recipe.get("transform"))
+    if kind == "state":
+        if "world_event" in recipe:
+            return ("event", "world", recipe["world_event"], None, False)
+        return ("state", recipe["state"])
+    if kind == "rule":
+        return ("rule", tuple(sorted(recipe["classes"].values())))
+    raise ValueError(kind)
+
+
+@dataclass
+class _Cand:
+    """후보 질문 하나: 정체(만들기 전에 안다)와 만드는 함수."""
+
+    ident: tuple
+    build: object
+
+
+def _ev(source: str, event: str, option: str | None = None) -> tuple:
+    return ("event", source, event, option, False)
+
+
 _OPT_NAME = {
     "continue": "keep_speed", "slow": "slow", "stop_gentle": "gentle_stop", "stop_moderate": "firm_stop", "stop_hard": "hard_stop",
     "sidestep_left": "swerve_left", "sidestep_right": "swerve_right", "retract": "retract", "go_now": "go_now", "creep": "creep",
     "wait": "wait", "turn_100": "full_speed", "turn_80": "at_80pct", "turn_60": "at_60pct", "turn_45": "at_45pct", "turn_30": "at_30pct",
+    "start_gentle": "gentle_start", "start_normal": "normal_start", "start_quick": "quick_start", "secure_first": "secure_first",
+    "ramp_normal": "ramp_normal", "ramp_slow": "ramp_slow", "detour": "detour", "place_now": "place_now", "recentre": "recentre",
+    "place_elsewhere": "elsewhere", "check_weight": "check_weight", "press_down": "press", "push_harder": "push", "reseat": "redo",
+    "call_human": "call", "look_again": "look_again", "stop_before": "stop_before",
 }  # fmt: skip
+
+_STEP_IN_SCENES = ("p1_step_in", "p1p5_step_in_carrying", "p1p6_emerging_step_in", "p1p3_step_in_carrying_tall")
+
+
+def impact_possible(obs: Observation) -> bool:
+    """이 순간에 충돌(사람·옆 장애물·멈춰야 할 장애물)로 용기의 액체가 쏟아질 수 있나 — 그러면 쏟아짐 문구가 그 원인을 말한다."""
+    if obs.container is None:
+        return False
+    if obs.scene in ("p1p5_step_in_carrying", "p5_braking"):
+        return True
+    return obs.scene == "p3p5_carrying_mixed" and obs.env.maneuver == "brake"
+
+
+def impact_possible_load(obs: Observation) -> bool:
+    """실은 키 큰 물건이 충돌(멈출 목표를 넘어섬·끼어든 상대·옆 장애물)로 떨어질 수 있는 순간인가(수정 1 I2). 그러면 충돌까지 세는
+    떨어짐(fall)을 묻는 글은 충돌을 밝히고(``*_impact`` 묶음), 움직임만 세는 질문(넘어짐·미끄러짐·fall_motion·미끄러진 거리)은 '충돌은
+    빼고 움직임 자체만'을 덧붙인다. 충돌이 없는 순간(회전·출발·경사로)은 둘이 같아 떨어짐(fall) 하나만 묻는다."""
+    if obs.load is None:
+        return False
+    if obs.scene == "p1p3_step_in_carrying_tall":
+        return True
+    return obs.scene in ("p3_carrying_tall", "p3p5_carrying_mixed") and obs.env.maneuver == "brake"
 
 
 def _entered(agent, arm: bool) -> str:
@@ -80,26 +153,55 @@ def _entered(agent, arm: bool) -> str:
 class _Ctx:
     """질문 문구에 채울 말과 난수."""
 
-    def __init__(self, cfg: SimgenConfig, obs: Observation, rng: np.random.Generator):
-        self.cfg, self.obs, self.rng = cfg, obs, rng
-        a = obs.agent
-        self.ref = a.descriptor.ref if a is not None else "the obstacle"
-        self.cref = container_ref(obs.container.phrase) if obs.container is not None else "the container"
-        self.obstacle = obs.env.obstacle or "the obstacle"
+    def __init__(self, cfg: SimgenConfig, obs: Observation, rng: np.random.Generator, surface: Surface):
+        self.cfg, self.obs, self.rng, self.surface = cfg, obs, rng, surface
+        self.lang, self.pool = surface.lang, surface.pool
         self.names: set[str] = set()
+        if self.lang == "ko":
+            from robo_jev.simgen.phrases_ko import ko_values
 
-    def fmt(self, text: str, **extra) -> str:
-        ref_bare = self.ref[4:] if self.ref.startswith("the ") else self.ref
-        agent = self.obs.agent
-        arm = self.obs.body == "arm"
-        values = {
-            "ref": self.ref, "Ref": cap(self.ref), "cref": self.cref, "obstacle": self.obstacle, "ref_bare": ref_bare,
-            "lane": "the tool's path" if arm else "your lane",
-            "poss": "their" if agent is not None and agent.group == "person" else "its",
-            "entered": _entered(agent, arm),
-            **extra,
-        }  # fmt: skip
-        return text.format(**values)
+            self.values = ko_values(obs)
+        else:
+            self.values = _en_values(obs)
+
+    def text(self, key: str, **extra) -> str:
+        """묶음 ``key``에서 문구 하나를 골라 채운다(``shift``만큼 옮긴 번호)."""
+        templates = bank(key, self.lang, self.pool)
+        index = (int(self.rng.integers(len(templates))) + self.surface.shift) % len(templates)
+        return self.fill(templates[index], **extra)
+
+    def fill(self, template: str, **extra) -> str:
+        values = {**self.values, **extra}
+        if self.lang == "ko":
+            from robo_jev.simgen.korean import kfmt
+
+            return kfmt(template, **values)
+        return template.format(**values)
+
+    def action(self, canon: str) -> dict:
+        """{action} 자리(영어: 명령형; 한국어: 조건형·명사형)."""
+        if self.lang == "ko":
+            from robo_jev.simgen.phrases_ko import option_forms
+
+            return option_forms(canon, self.obs)
+        return {"action": option_short(canon, self.obs)}
+
+    def describe(self, canon: str) -> str:
+        if self.lang == "ko":
+            from robo_jev.simgen.phrases_ko import option_descriptions as ko_descriptions
+
+            variants = ko_descriptions(canon, self.obs, self.pool)
+        else:
+            variants = option_descriptions(canon, self.obs, self.pool)
+        index = (int(self.rng.integers(len(variants))) + self.surface.desc_shift) % len(variants)
+        return variants[index]
+
+    def anchors(self, key: str, **extra) -> list[str]:
+        if self.lang == "ko":
+            from robo_jev.simgen.phrases_ko import ANCHORS as KO_ANCHORS
+
+            return [self.fill(t, **extra) for t in KO_ANCHORS[key]]
+        return [self.fill(t, **extra) for t in ANCHORS[key]]
 
     def pick(self, items):
         return items[int(self.rng.integers(len(items)))]
@@ -111,6 +213,39 @@ class _Ctx:
             name, i = f"{base}_{i}", i + 1
         self.names.add(name)
         return name
+
+
+def _en_values(obs: Observation) -> dict:
+    """영어 문구의 자리 표시 값."""
+    a = obs.agent
+    arm = obs.body == "arm"
+    ref = a.descriptor.ref if a is not None else "the obstacle"
+    values = {
+        "ref": ref, "Ref": cap(ref), "ref_bare": ref[4:] if ref.startswith("the ") else ref,
+        "cref": container_ref(obs.container.phrase) if obs.container is not None else "the container",
+        "obstacle": obs.env.obstacle or "the obstacle",
+        "lane": "the tool's path" if arm else "your lane",
+        "poss": "their" if a is not None and a.group == "person" else "its",
+        "entered": _entered(a, arm),
+    }  # fmt: skip
+    values["hazard"] = values["obstacle"] if obs.env.obstacle is not None else (f"{ref} or anything beside you" if a is not None else "anything")
+    if obs.load is not None:
+        values.update(lref=obs.load.ref, Lref=cap(obs.load.ref), deck=obs.load.deck_phrase)
+    if obs.stack is not None:
+        values.update(sref=obs.stack.ref, Sref=cap(obs.stack.ref), spot=obs.stack.spot)
+    if obs.place is not None:
+        values.update(item=obs.place.item, Item=cap(obs.place.item), target=obs.place.target)
+    if obs.env.ramp is not None:
+        values["ramp"] = obs.env.ramp
+    if obs.stale is not None:
+        values.update(ref=obs.stale.ref, Ref=cap(obs.stale.ref), spot=obs.stale.spot, obj=obs.stale.pronoun)
+    if obs.corner is not None:
+        values.update(corner=obs.corner.phrase, Corner=cap(obs.corner.phrase))
+    if obs.conflict is not None:
+        values["dist"] = textfmt.distance(obs.conflict.distance.value, obs.conflict.distance.resolution, obs.fmt.distance_unit)
+    if obs.env.occluder is not None:
+        values["occluder"] = obs.env.occluder
+    return values
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -132,7 +267,7 @@ def _choice(c: _Ctx, canons: list[str], descriptions: list[str], style: str, pre
     order = c.rng.permutation(len(canons))
     canons = [canons[int(i)] for i in order]
     descriptions = [descriptions[int(i)] for i in order]
-    keys = _option_keys(canons, style, prefix, c.obs) if prefix == "a" or prefix == "b" else _state_keys(canons, style, prefix)
+    keys = _option_keys(canons, style, prefix, c.obs) if prefix in ("a", "b") else _state_keys(canons, style, prefix)
     return dict(zip(keys, descriptions, strict=True)), dict(zip(keys, canons, strict=True))
 
 
@@ -143,7 +278,7 @@ def _state_keys(canons: list[str], style: str, prefix: str) -> list[str]:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# 행동 choice
+# 행동 choice와 '다시 볼까'
 # ----------------------------------------------------------------------------------------------------------------
 
 
@@ -151,36 +286,95 @@ def _lid_visible(obs: Observation) -> bool:
     return obs.container is not None and obs.container.lid == "lid"
 
 
+def _has_contact(obs: Observation) -> bool:
+    return obs.agent is not None or obs.stale is not None or obs.corner is not None or obs.conflict is not None
+
+
 def _criteria_for_scene(obs: Observation) -> list[str]:
+    """그 순간에 뜻이 있는 기준(비용 덮어쓰기) — v0a 장면은 v0a와 같다."""
+    out: list[str] = []
+    if _has_contact(obs):
+        out.append("avoid_contact")
+    if obs.container is not None and not _lid_visible(obs):
+        out.append("avoid_spill")
+    if obs.load is not None or obs.stack is not None:
+        out.append("avoid_fall")
+    if obs.place is not None:
+        out.append("no_defect")
+    out.append("time_critical")
+    return out
+
+
+def _act_key(obs: Observation) -> str:
     scene = obs.scene
-    if scene == "p1p5_step_in_carrying":
-        out = ["avoid_contact", "avoid_spill", "time_critical"]
-    elif scene.startswith("p5"):
-        out = ["avoid_spill", "time_critical"]
-    else:
-        out = ["avoid_contact", "time_critical"]
-    return [c for c in out if not (c == "avoid_spill" and _lid_visible(obs))]
+    if scene == "p1_crossing" and obs.variant == "stopped":
+        return "act.p1_crossing_stopped"
+    if scene == "p3_carrying_tall":
+        return {"brake": "act.p3_brake", "turn": "act.p3_turn", "start": "act.p3_start"}[obs.env.maneuver]
+    return {"p1p3_step_in_carrying_tall": "act.p1_step_in", "p3p5_carrying_mixed": "act.p3p5", "p4p6_stale_check": "act.p4_place_check",
+            "p1p6_emerging_step_in": "act.p1p6"}.get(scene, f"act.{scene}")  # fmt: skip
 
 
 def _action_question(c: _Ctx, options: tuple[str, ...], style: str, prefix: str, criterion: str | None) -> Question:
-    obs = c.obs
     canons = list(options)
     if len(canons) > 2 and c.rng.random() < 0.35:
         size = int(c.rng.integers(max(2, min(3, len(canons) - 1)), len(canons)))
         chosen = sorted(c.rng.choice(len(canons), size=size, replace=False))
         canons = [canons[int(i)] for i in chosen]
-    descriptions = [c.pick(option_descriptions(canon, obs)) for canon in canons]
+    descriptions = [c.describe(canon) for canon in canons]
     criteria, keymap = _choice(c, canons, descriptions, style, prefix)
     if criterion is not None:
-        instructions = c.fmt(c.pick(CRITERION_INSTRUCTIONS[criterion]))
+        instructions = c.text(f"crit.{criterion}")
         name = c.name("action_under_rule", "constrained_action", "action_with_rule")
     else:
-        scene_key = "p1_crossing_stopped" if obs.scene == "p1_crossing" and obs.variant == "stopped" else obs.scene
-        bank = ACTION_INSTRUCTIONS["generic"] + ACTION_INSTRUCTIONS[scene_key]
-        instructions = c.fmt(c.pick(bank))
+        key = "act.generic" if c.rng.random() < 0.4 else _act_key(c.obs)
+        instructions = c.text(key)
         name = c.name("next_action", "what_to_do", "action", "decision", "response")
-    recipe = {"kind": "action", "options": keymap, "criterion": criterion}
-    return Question(name, "choice", instructions, criteria, recipe)
+    return Question(name, "choice", instructions, criteria, {"kind": "action", "options": keymap, "criterion": criterion})
+
+
+def _look_values(c: _Ctx) -> dict:
+    """'다시 볼까' 문구의 자리 표시 값(영어: {look} 명령형; 한국어: {look} 명사 꼴·{look_then} 연결 꼴)."""
+    if c.lang == "ko":
+        from robo_jev.simgen.phrases_ko import look_forms
+
+        return look_forms(c.obs)
+    obs = c.obs
+    if obs.place is not None:
+        return {"look": "measure it again"}
+    if obs.stack is not None:
+        return {"look": "check how the weight sits"}
+    if obs.corner is not None:
+        return {"look": "stop at the corner and look"}
+    return {"look": "pause and look again"}
+
+
+def look_option(obs: Observation) -> str:
+    """다시 보기 선택지의 정식 열쇠(쌓기는 무게 확인)."""
+    return "check_weight" if obs.stack is not None else "look_again"
+
+
+def look_time(obs: Observation) -> float:
+    """다시 보기에 드는 시간(글에 적힌 값)."""
+    if obs.place is not None:
+        return obs.place.action_times["look_again"]
+    if obs.stack is not None:
+        return obs.stack.check_s
+    return obs.env.look_s
+
+
+def _voi_question(c: _Ctx, options: tuple[str, ...], style: str) -> Question:
+    """'다시 볼까' — 지금 정하기(지금 가능한 행동 가운데 최선) 대 먼저 다시 보기(보는 시간 + 본 뒤의 최선)."""
+    look = _look_values(c)
+    t = textfmt.time(look_time(c.obs), 0.1, c.obs.fmt.time_unit)
+    descriptions = [c.text("voi.decide_now"), c.text("voi.look_first", t=t, **look)]
+    criteria, keymap = _choice(c, ["decide_now", "look_first"], descriptions, style, "v")
+    instructions = c.text("voi", **look)
+    look_opt = look_option(c.obs)
+    base = sorted(o for o in options if o != look_opt)
+    recipe = {"kind": "voi", "options": {k: ("look_again" if v == "look_first" else "decide_now") for k, v in keymap.items()}, "criterion": None,
+              "base": base, "look": look_opt}  # fmt: skip
+    return Question(c.name("look_first_or_decide", "check_again_first", "worth_a_second_look"), "choice", instructions, criteria, recipe)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -188,131 +382,180 @@ def _action_question(c: _Ctx, options: tuple[str, ...], style: str, prefix: str,
 # ----------------------------------------------------------------------------------------------------------------
 
 
-def _noul(c: _Ctx, name: str, templates: list[str], recipe: dict, **extra) -> Question:
-    return Question(name, "noul", c.fmt(c.pick(templates), **extra), None, {"kind": "noul", **recipe})
+def _noul(c: _Ctx, name: str, key: str, recipe: dict, suffix: str = "", **extra) -> Question:
+    return Question(name, "noul", c.text(key, **extra) + suffix, None, {"kind": "noul", **recipe})
+
+
+def _motion_only(c: _Ctx) -> str:
+    """움직임만 세는 물건 질문의 덧붙임(충돌이 있을 수 있는 순간 — 글이 정답과 같은 것을 묻게, 수정 1 I2)."""
+    if c.lang == "ko":
+        from robo_jev.simgen.phrases_ko import MOTION_ONLY
+
+        return MOTION_ONLY
+    from robo_jev.simgen.phrases import MOTION_ONLY
+
+    return MOTION_ONLY
+
+
+_LOAD_NOULS = {   # 사건 → (묶음 열쇠, 이름 둘, 움직임만인가)
+    "fall": ("noul.fall", ("falls_if", "topples"), True),
+    "fall_motion": ("noul.fall", ("falls_if", "topples"), True),
+    "fall_impact": ("noul.fall_impact", ("knocked_off_if", "comes_off"), False),
+    "tip": ("noul.tip", ("tips_if", "tips_over"), True),
+    "slide": ("noul.slide", ("slides_if", "slips"), True),
+}
+
+
+def _load_noul(c: _Ctx, event: str, option: str) -> Question:
+    """물건 질문 하나(사건 fall·fall_motion·tip·slide, 또는 충돌까지 세는 fall — 이름 'fall_impact'로 부른다)."""
+    impact = impact_possible_load(c.obs)
+    key, names, motion = _LOAD_NOULS[event]
+    recorded = "fall" if event == "fall_impact" else event
+    suffix = _motion_only(c) if (impact and motion) else ""
+    return _noul(c, c.name(f"{names[0]}_{_OPT_NAME[option]}", f"{names[1]}_{_OPT_NAME[option]}"), key,
+                 {"source": "event", "event": recorded, "option": option}, suffix=suffix, **c.action(option))  # fmt: skip
+
+
+def _spill_noul(c: _Ctx, option: str) -> Question:
+    impact = impact_possible(c.obs)
+    if _lid_visible(c.obs):
+        name = c.name(f"reaches_lid_if_{_OPT_NAME[option]}", f"lid_wet_{_OPT_NAME[option]}")
+        return _noul(c, name, "noul.rim_impact" if impact else "noul.rim_slosh", {"source": "event", "event": "rim_reached", "option": option}, **c.action(option))
+    name = c.name(f"spill_if_{_OPT_NAME[option]}", f"spills_{_OPT_NAME[option]}")
+    return _noul(c, name, "noul.spill_impact" if impact else "noul.spill_slosh", {"source": "event", "event": "spill", "option": option}, **c.action(option))
+
+
+def p3_reference_option(obs: Observation) -> str:
+    """P3의 핵심 noul이 묻는 기준 움직임(결정 여유의 기준 가속과 같은 것 — 감속은 최대 제동, 출발은 빠른 출발; 수정 1 I2)."""
+    from robo_jev.simgen.p3 import reference_option
+
+    return reference_option(obs.scene, obs.env.maneuver)
 
 
 def _key_noul(c: _Ctx) -> Question:
     obs = c.obs
-    if obs.scene in ("p1_step_in", "p1p5_step_in_carrying"):
-        if obs.body == "arm":
-            templates = [
-                "If you pause at the normal deceleration now, does the tool stop before reaching {ref}?",
-                "Is the tool's normal pause distance, reaction included, shorter than its gap to {ref}?",
-                "Pausing at the standard rate from now, does the tool come to rest short of {ref}?",
-            ]
-        else:
-            templates = [
-                "If you brake firmly now, will you come to rest before reaching {ref}'s current position?",
-                "Is your firm-braking stopping distance, reaction included, shorter than the gap to {ref}?",
-                "Braking firmly from now on, do you stop short of where {ref} is now?",
-            ]
-        return _noul(c, c.name("stops_in_time", "firm_stop_short", "can_stop_short"), templates, {"source": "world", "event": "stops_short"})
-    if obs.scene == "p1_crossing":
-        if obs.variant == "stopped":
-            templates = [
-                "If you start now and {ref} keeps {poss} current pace, will you be across {ref}'s line at least 0.3 s before {ref} reaches your path?",
-                "Going right away, do you clear the crossing with at least 0.3 s to spare, assuming {ref} does not change pace?",
-                "If you move off now, would you be past the crossing line at least 0.3 s ahead of {ref} (both at constant pace)?",
-            ]
-        else:
-            templates = [
-                "If you keep your speed and {ref} keeps {poss} current pace, will you be clear of {ref}'s line at least 0.3 s before {ref} reaches your path?",
-                "Keeping your speed, do you get across {ref}'s line with at least 0.3 s to spare, assuming {ref} does not change pace?",
-                "At constant speeds on both sides, would you clear the crossing at least 0.3 s ahead of {ref}?",
-            ]
-        return _noul(c, c.name("clear_before_them", "crossing_in_time", "clears_first"), templates, {"source": "world", "event": "clears_first"})
-    if obs.scene == "p1_head_on":
+    scene = obs.scene
+    if scene in _STEP_IN_SCENES:
+        key = "key.stops_short_arm" if obs.body == "arm" else "key.stops_short"
+        return _noul(c, c.name("stops_in_time", "firm_stop_short", "can_stop_short"), key, {"source": "world", "event": "stops_short"})
+    if scene == "p1_crossing":
+        key = "key.clears_first_stopped" if obs.variant == "stopped" else "key.clears_first"
+        return _noul(c, c.name("clear_before_them", "crossing_in_time", "clears_first"), key, {"source": "world", "event": "clears_first"})
+    if scene == "p1_head_on":
         clearance = textfmt.distance(obs.robot.passing_clearance, 0.01, "cm" if obs.fmt.distance_unit == "cm" else obs.fmt.distance_unit)
-        templates = [
-            "If you and {ref} both keep to opposite walls, is the aisle wide enough to pass with at least {clear} of spare width in total?",
-            "Could you and {ref} pass each other here with {clear} of combined side clearance, hugging opposite walls?",
-            "With both of you against opposite walls, is there at least {clear} of spare width left over?",
-        ]
-        return _noul(c, c.name("room_to_pass", "aisle_wide_enough", "can_pass"), templates, {"source": "world", "event": "passable"}, clear=clearance)
-    if obs.scene == "p5_braking":
+        return _noul(c, c.name("room_to_pass", "aisle_wide_enough", "can_pass"), "key.passable", {"source": "world", "event": "passable"}, clear=clearance)
+    if scene == "p5_braking":
         return _spill_noul(c, "stop_moderate")
-    return _spill_noul(c, "turn_100")
+    if scene == "p5_turning":
+        return _spill_noul(c, "turn_100")
+    if scene in ("p3_carrying_tall", "p3p5_carrying_mixed", "p3_ramp"):
+        # 핵심 질문 = P3 현상 자체(기준 움직임에서 넘어지거나 미끄러져 떨어지나) — 감속 장면에서도 넘어섬·충돌이 정답을 정하지 않게(수정 1 I2)
+        option = p3_reference_option(obs)
+        return _load_noul(c, "fall_motion" if impact_possible_load(obs) else "fall", option)
+    if scene == "p3_place_stack":
+        return _noul(c, c.name("topples_if_placed", "falls_off_stack"), "noul.topple_stack", {"source": "event", "event": "topple", "option": "place_now"}, **c.action("place_now"))
+    if scene in ("p4_place_check", "p4p6_stale_check"):
+        return _noul(c, c.name("seated_now", "properly_seated", "in_place"), "noul.seated", {"source": "world", "event": "ok_now"})
+    if scene == "p4_insert":
+        return _noul(c, c.name("fully_inserted", "inserted_now", "fully_home"), "noul.inserted", {"source": "world", "event": "ok_now"})
+    if scene == "p6_stale_track":
+        return _noul(c, c.name("still_there", "still_in_the_way", "has_stayed"), "noul.still_there", {"source": "world", "event": "present"})
+    if scene == "p6_blind_corner":
+        return _noul(c, c.name("can_stop_before_corner", "stops_in_view", "stop_before_corner"), "key.stops_before_corner",
+                     {"source": "world", "event": "stops_before_corner"})  # fmt: skip
+    if scene == "p6_sensor_conflict":
+        return _noul(c, c.name("really_there", "obstacle_is_real", "something_there"), "noul.present", {"source": "world", "event": "present"})
+    raise ValueError(scene)
 
 
-def _spill_noul(c: _Ctx, option: str) -> Question:
-    action = option_short(option, c.obs)
-    if _lid_visible(c.obs):
-        # 뚜껑이 보이면 쏟아짐은 늘 0 — 대신 액면이 뚜껑(림)까지 차오르나를 묻는다.
-        templates = [
-            "If you {action}, will the liquid in {cref} surge up against the lid?",
-            "Does the surface in {cref} climb all the way to the lid if you {action}?",
-            "Suppose you {action}. Does the liquid in {cref} reach the lid?",
-        ]
-        name = c.name(f"reaches_lid_if_{_OPT_NAME[option]}", f"lid_wet_{_OPT_NAME[option]}")
-        return _noul(c, name, templates, {"source": "event", "event": "rim_reached", "option": option}, action=action)
-    templates = [
-        "If you {action}, will anything spill from {cref}?",
-        "Does liquid slop over the rim of {cref} if you {action}?",
-        "Suppose you {action}. Does {cref} spill?",
-    ]
-    name = c.name(f"spill_if_{_OPT_NAME[option]}", f"spills_{_OPT_NAME[option]}")
-    return _noul(c, name, templates, {"source": "event", "event": "spill", "option": option}, action=action)
+def _contact_key(obs: Observation) -> str:
+    return {"p6_stale_track": "contact_stale", "p6_blind_corner": "contact_emerge", "p6_sensor_conflict": "contact_obstacle", "p1p6_emerging_step_in": "contact_any"}.get(obs.scene, "contact")
 
 
-def _contact_noul(c: _Ctx, option: str) -> Question:
-    action = option_short(option, c.obs)
-    templates = [
-        "If you {action}, will you touch {ref} within the next 3 seconds?",
-        "Suppose you {action}. Do you make contact with {ref} in the next 3 s?",
-        "Would you end up touching {ref} if you {action}?",
-    ]
-    name = c.name(f"contact_if_{_OPT_NAME[option]}", f"touch_{_OPT_NAME[option]}")
-    return _noul(c, name, templates, {"source": "event", "event": "contact", "option": option}, action=action)
+def _contact_options(obs: Observation, options: tuple[str, ...]) -> list[str]:
+    """닿음을 물을 선택지(다시 보기는 빼고, 움직이는 교차에서는 멈춘 변형의 선택지를 빼고)."""
+    out = []
+    for option in options:
+        if option == "look_again":
+            continue
+        if obs.scene == "p1_crossing" and obs.variant != "stopped" and option in ("go_now", "creep", "wait"):
+            continue
+        out.append(option)
+    return out
 
 
 def _extra_nouls(c: _Ctx, options: tuple[str, ...]) -> list:
-    """장면별 추가 noul 후보(만들 함수의 목록)."""
+    """장면별 추가 noul 후보."""
     obs = c.obs
+    scene = obs.scene
     cands = []
-    if obs.agent is not None:
-        for option in options:
-            if option not in ("go_now", "creep", "wait") or obs.variant == "stopped":
-                cands.append(lambda o=option: _contact_noul(c, o))
-    if obs.scene in ("p1_step_in", "p1p5_step_in_carrying"):
+    if _has_contact(obs):
+        key = f"noul.{_contact_key(obs)}"
+        for option in _contact_options(obs, options):
+            cands.append(_Cand(_ev("event", "contact", option), lambda o=option: _noul(
+                c, c.name(f"contact_if_{_OPT_NAME[o]}", f"touch_{_OPT_NAME[o]}"), key, {"source": "event", "event": "contact", "option": o}, **c.action(o))))
+    if scene in _STEP_IN_SCENES:
         if obs.agent.group == "ball":
-            cands.append(lambda: _noul(c, c.name("ball_stops_in_lane", "ball_stays_in_path"), [
-                "Will {ref} come to rest inside your lane?", "Does {ref} stop rolling before it leaves your lane?", "Is {ref} going to stop in your path?",
-            ], {"source": "world", "event": "ball_stops_in_lane"}))  # fmt: skip
+            cands.append(_Cand(_ev("world", "ball_stops_in_lane"), lambda: _noul(
+                c, c.name("ball_stops_in_lane", "ball_stays_in_path"), "noul.ball_stops_in_lane", {"source": "world", "event": "ball_stops_in_lane"})))
         else:
-            cands.append(lambda: _noul(c, c.name("still_in_lane_2s", "in_path_in_2s"), [
-                "Will {ref} still be in {lane} 2 seconds from now?", "Two seconds from now, is {ref} still inside {lane}?",
-                "Is {ref} going to be in your way 2 s from now?",
-            ], {"source": "world", "event": "in_lane_2s"}))  # fmt: skip
+            cands.append(_Cand(_ev("world", "in_lane_2s"), lambda: _noul(
+                c, c.name("still_in_lane_2s", "in_path_in_2s"), "noul.in_lane_2s", {"source": "world", "event": "in_lane_2s"})))
         if obs.env.sides is not None:
-            for side, s in zip(("left", "right"), obs.env.sides, strict=True):
+            pairs = list(zip(("left", "right"), obs.env.sides, strict=True))
+            for side, s in pairs[::-1] if c.surface.mirror else pairs:
                 if s.status == "occluded":
-                    cands.append(lambda side=side: _noul(c, c.name(f"{side}_side_free", f"room_{side}"), [
-                        "Is the space you cannot see on your {side} actually free for a swerve?", "If you swerve {side}, is there room (nothing out of sight there)?",
-                        "Is the area you cannot see on your {side} empty?",
-                    ], {"source": "world", "event": f"side_free_{side}"}, side=side))  # fmt: skip
-    if obs.scene == "p1_crossing" and obs.agent.group == "ball":
-        cands.append(lambda: _noul(c, c.name("ball_reaches_path", "ball_gets_to_path"), [
-            "Will {ref} actually reach your path before it stops rolling?", "Does {ref} roll far enough to enter your path?", "Will {ref} make it into your path?",
-        ], {"source": "world", "event": "ball_reaches_path"}))  # fmt: skip
-    if obs.scene == "p1_head_on" and "stop_moderate" in options:
-        cands.append(lambda: _noul(c, c.name("stuck_if_stop", "blocked_if_stop"), [
-            "If you brake firmly to a stop now, will you and {ref} end up stuck facing each other?",
-            "Stopping now, do the two of you end up blocking each other at a standstill?",
-            "If you stop here, are you and {ref} left facing each other with no one able to pass?",
-        ], {"source": "event", "event": "blocked", "option": "stop_moderate"}))  # fmt: skip
+                    cands.append(_Cand(_ev("world", f"side_free_{side}"), lambda side=side: _noul(
+                        c, c.name(f"{side}_side_free", f"room_{side}"), "noul.side_free", {"source": "world", "event": f"side_free_{side}"}, **_side_values(c, side))))
+        if scene == "p1p6_emerging_step_in":
+            cands.append(_Cand(_ev("world", "follower"), lambda: _noul(c, c.name("someone_following", "second_person"), "noul.follower", {"source": "world", "event": "follower"})))
+    if scene == "p1_crossing" and obs.agent.group == "ball":
+        cands.append(_Cand(_ev("world", "ball_reaches_path"), lambda: _noul(
+            c, c.name("ball_reaches_path", "ball_gets_to_path"), "noul.ball_reaches_path", {"source": "world", "event": "ball_reaches_path"})))
+    if scene == "p1_head_on" and "stop_moderate" in options:
+        cands.append(_Cand(_ev("event", "blocked", "stop_moderate"), lambda: _noul(
+            c, c.name("stuck_if_stop", "blocked_if_stop"), "noul.blocked", {"source": "event", "event": "blocked", "option": "stop_moderate"})))
     if obs.container is not None:
+        event = "rim_reached" if _lid_visible(obs) else "spill"
         for option in options:
-            if option not in ("continue",):
-                cands.append(lambda o=option: _spill_noul(c, o))
-    if obs.scene == "p5_braking":
+            if option in ("continue", "secure_first", "detour"):
+                continue
+            cands.append(_Cand(_ev("event", event, option), lambda o=option: _spill_noul(c, o)))
+    if scene == "p5_braking" or (obs.load is not None and obs.env.maneuver == "brake"):
         for option in ("stop_gentle", "stop_moderate"):
-            action = option_short(option, obs)
-            cands.append(lambda o=option, a=action: _noul(c, c.name(f"hit_if_{_OPT_NAME[o]}", f"overrun_{_OPT_NAME[o]}"), [
-                "If you {action}, will you hit {obstacle} before you stop?", "Suppose you {action}. Do you reach {obstacle} before coming to rest?",
-                "Would you run into {obstacle} if you {action}?",
-            ], {"source": "event", "event": "overrun", "option": o}, action=a))  # fmt: skip
+            if option in options:
+                cands.append(_Cand(_ev("event", "overrun", option), lambda o=option: _noul(
+                    c, c.name(f"hit_if_{_OPT_NAME[o]}", f"overrun_{_OPT_NAME[o]}"), "noul.overrun", {"source": "event", "event": "overrun", "option": o}, **c.action(o))))
+    if obs.load is not None:
+        impact = impact_possible_load(obs)
+        events = ("fall_motion", "fall_impact", "tip", "slide") if impact else ("fall", "tip", "slide")
+        for option in options:
+            if option in ("secure_first", "detour"):
+                continue
+            for event in events:
+                recorded = "fall" if event == "fall_impact" else event
+                cands.append(_Cand(_ev("event", recorded, option), lambda o=option, e=event: _load_noul(c, e, o)))
+    if obs.stack is not None and "recentre" in options:
+        cands.append(_Cand(_ev("event", "topple", "recentre"), lambda: _noul(
+            c, c.name("topples_if_recentred", "falls_off_if_recentred"), "noul.topple_stack", {"source": "event", "event": "topple", "option": "recentre"}, **c.action("recentre"))))
+    if obs.place is not None:
+        for option in options:
+            if option == "look_again":
+                continue
+            cands.append(_Cand(_ev("event", "ok_after", option), lambda o=option: _noul(
+                c, c.name(f"ok_if_{_OPT_NAME[o]}", f"in_place_if_{_OPT_NAME[o]}"), "noul.ok_after", {"source": "event", "event": "ok_after", "option": o}, **c.action(o))))
+            if option in ("press_down", "push_harder"):
+                cands.append(_Cand(_ev("event", "damage", option), lambda o=option: _noul(
+                    c, c.name(f"breaks_if_{_OPT_NAME[o]}", f"damage_if_{_OPT_NAME[o]}"), "noul.damage", {"source": "event", "event": "damage", "option": o}, **c.action(o))))
+    if scene == "p6_blind_corner":
+        cands.append(_Cand(_ev("world", "emerge_3s"), lambda: _noul(c, c.name("someone_comes_out", "anyone_emerging"), "noul.emerge", {"source": "world", "event": "emerge_3s"})))
     return cands
+
+
+def _side_values(c: _Ctx, side: str) -> dict:
+    if c.lang == "ko":
+        return {"side": {"left": "왼쪽", "right": "오른쪽"}[side]}
+    return {"side": side}
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -320,78 +563,104 @@ def _extra_nouls(c: _Ctx, options: tuple[str, ...]) -> list:
 # ----------------------------------------------------------------------------------------------------------------
 
 
-def _delay_templates(obs: Observation) -> list[str]:
-    """지연 score의 지시문 — 그 장면의 지연 정의를 그대로 말한다(리뷰 1 m3)."""
-    if obs.scene == "p5_braking":
-        return [
-            "If you {action}, how much time do you lose because you stop short of the spot right in front of {obstacle} and have to creep up the rest of the way?",
-            "Rate the time lost if you {action}: stopping early means closing the remaining gap to {obstacle} again at a gentle pace.",
-            "If you {action}, how long does it take to make up the distance you leave before {obstacle}, compared with stopping right at it?",
-        ]
-    if obs.scene == "p5_turning":
-        return [
-            "How much later do you come out of the turn if you {action} than if you took it without slowing?",
-            "Rate the delay if you {action}, counting the slowdown, the slower arc and getting back up to speed, against not slowing at all.",
-            "If you {action}, how much time does the turn cost you compared with taking it at your current speed?",
-        ]
-    reference = "going now" if obs.variant == "stopped" else "keeping your current speed"
-    return [
-        f"Over the next 3 seconds, how much progress do you lose if you {{action}}, compared with {reference}?",
-        f"Rate the delay if you {{action}}: the progress you give up during the next 3 s relative to {reference}.",
-        f"If you {{action}}, how far behind {reference} are you after 3 seconds, measured in seconds of travel?",
-    ]
+def _delay_key(obs: Observation, option: str) -> str:
+    if option in LONG_OPTIONS or obs.scene in ("p3_ramp", "p3_place_stack") or obs.place is not None:
+        return "score.delay.time"
+    if obs.scene == "p5_braking" or (obs.load is not None and obs.env.maneuver == "brake"):
+        return "score.delay.p5_braking"
+    if obs.scene == "p5_turning" or (obs.load is not None and obs.env.maneuver == "turn"):
+        return "score.delay.p5_turning"
+    return "score.delay.p1"
+
+
+def _delay_reference(c: _Ctx) -> str:
+    obs = c.obs
+    if c.lang == "ko":
+        from robo_jev.simgen.phrases_ko import delay_reference
+
+        return delay_reference(obs)
+    if obs.variant == "stopped":
+        return "going now"
+    if obs.load is not None and obs.env.maneuver == "start":
+        return "pulling away quickly"
+    return "keeping your current speed"
+
+
+def _score(c: _Ctx, names: tuple[str, ...], key: str, anchors: list[str], recipe: dict, suffix: str = "", **extra) -> Question:
+    return Question(c.name(*names), "score", c.text(key, **extra) + suffix, anchors, {"kind": "score", **recipe})
+
+
+_NO_DELAY = ("continue", "go_now", "turn_100", "place_now", "ramp_normal", "start_quick", "look_again")
 
 
 def _score_candidates(c: _Ctx, options: tuple[str, ...]) -> list:
     obs = c.obs
+    scene = obs.scene
     cands = []
-    near = "20 cm" if obs.body == "arm" else "1 m"
+    near = textfmt.distance(0.2 if obs.body == "arm" else 1.0, 0.01, "cm" if obs.body == "arm" else "m")
+    impact = impact_possible(obs)
+    contact_options = set(_contact_options(obs, options)) if _has_contact(obs) else set()
+    score_key = {"contact": "score.contact", "contact_any": "score.contact", "contact_stale": "score.contact_stale",
+                 "contact_emerge": "score.contact_emerge", "contact_obstacle": "score.contact_obstacle"}[_contact_key(obs)]  # fmt: skip
     for option in options:
-        action = option_short(option, obs)
+        if option == "look_again":
+            continue
+        act = c.action(option)
         short = _OPT_NAME[option]
-        if obs.agent is not None and (option not in ("go_now", "creep", "wait") or obs.variant == "stopped"):
-            cands.append(lambda o=option, a=action, s=short: Question(
-                c.name(f"contact_risk_{s}", f"risk_{s}"), "score",
-                c.fmt(c.pick(["How likely is contact with {ref} if you {action}?", "Rate the risk of touching {ref} if you {action}.",
-                              "What is the chance that you touch {ref} if you {action}?"]), action=a),
-                ["0 = no chance of contact", "1 = contact is certain"], {"kind": "score", "source": "event", "name": "contact", "option": o}))  # fmt: skip
-            cands.append(lambda o=option, a=action, s=short: Question(
-                c.name(f"closeness_{s}", f"how_close_{s}"), "score",
-                c.fmt(c.pick(["How close will you come to {ref} if you {action}?", "Rate how near you pass {ref} if you {action}.",
-                              "If you {action}, how tight is your closest approach to {ref}?"]), action=a),
-                [f"0 = you stay at least {near} clear of {c.ref}", f"1 = you touch {c.ref}"], {"kind": "score", "source": "quantity", "name": "closeness", "option": o}))  # fmt: skip
-        if obs.container is not None:
-            cands.append(lambda o=option, a=action, s=short: Question(
-                c.name(f"rim_reach_{s}", f"headroom_used_{s}"), "score",
-                c.fmt(c.pick(["How much of the free space above the liquid in {cref} gets used up if you {action}?",
-                              "Rate how close the liquid in {cref} comes to the rim if you {action}.",
-                              "If you {action}, how near does the surface in {cref} climb to the rim?"]), action=a),
-                ["0 = the surface barely moves", "1 = it reaches the rim (or spills)"], {"kind": "score", "source": "quantity", "name": "headroom", "option": o}))  # fmt: skip
+        if option in contact_options:
+            cands.append(_Cand(_ev("event", "contact", option), lambda o=option, a=act, s=short: _score(
+                c, (f"contact_risk_{s}", f"risk_{s}"), score_key, c.anchors("contact"), {"source": "event", "name": "contact", "option": o}, **a)))
+            if obs.agent is not None:
+                cands.append(_Cand(("quantity", "closeness", option, None), lambda o=option, a=act, s=short: _score(
+                    c, (f"closeness_{s}", f"how_close_{s}"), "score.closeness", c.anchors("closeness", near=near), {"source": "quantity", "name": "closeness", "option": o}, **a)))
+        if obs.container is not None and option not in ("secure_first", "detour"):
+            hkey = "headroom_impact" if impact else "headroom_slosh"
+            cands.append(_Cand(("quantity", "headroom", option, None), lambda o=option, a=act, s=short, k=hkey: _score(
+                c, (f"rim_reach_{s}", f"headroom_used_{s}"), f"score.{k}", c.anchors(k), {"source": "quantity", "name": "headroom", "option": o}, **a)))
             if _lid_visible(obs):
-                cands.append(lambda o=option, a=action, s=short: Question(
-                    c.name(f"lid_reach_risk_{s}", f"reaches_lid_chance_{s}"), "score",
-                    c.fmt(c.pick(["How likely is the liquid in {cref} to surge up to the lid if you {action}?",
-                                  "Rate the chance that the surface in {cref} reaches the lid if you {action}.",
-                                  "If you {action}, what is the chance that the liquid in {cref} touches the lid?"]), action=a),
-                    ["0 = it certainly stays below the lid", "1 = it certainly reaches the lid"],
-                    {"kind": "score", "source": "event", "name": "rim_reached", "option": o}))  # fmt: skip
+                rkey = "score.rim_impact" if impact else "score.rim_slosh"
+                cands.append(_Cand(_ev("event", "rim_reached", option), lambda o=option, a=act, s=short, k=rkey: _score(
+                    c, (f"lid_reach_risk_{s}", f"reaches_lid_chance_{s}"), k, c.anchors("rim"), {"source": "event", "name": "rim_reached", "option": o}, **a)))
             else:
-                cands.append(lambda o=option, a=action, s=short: Question(
-                    c.name(f"spill_risk_{s}", f"spill_chance_{s}"), "score",
-                    c.fmt(c.pick(["How likely is a spill from {cref} if you {action}?", "Rate the chance that {cref} spills if you {action}.",
-                                  "What is the risk of spilling from {cref} if you {action}?"]), action=a),
-                    ["0 = no chance of a spill", "1 = a spill is certain"], {"kind": "score", "source": "event", "name": "spill", "option": o}))  # fmt: skip
-        if option not in ("continue", "go_now", "turn_100"):
-            templates = _delay_templates(obs)
-            cands.append(lambda o=option, a=action, s=short, t=templates: Question(
-                c.name(f"delay_{s}", f"time_cost_{s}"), "score", c.fmt(c.pick(t), action=a),
-                ["0 = no time lost", "1 = 3 seconds or more"], {"kind": "score", "source": "quantity", "name": "delay", "option": o, "transform": "per_3s"}))  # fmt: skip
-        if obs.scene == "p5_braking" and option != "continue":
-            cands.append(lambda o=option, a=action, s=short: Question(
-                c.name(f"overrun_risk_{s}", f"hit_risk_{s}"), "score",
-                c.fmt(c.pick(["How likely are you to hit {obstacle} if you {action}?", "Rate the risk of reaching {obstacle} before you stop if you {action}.",
-                              "What is the chance of running into {obstacle} if you {action}?"]), action=a),
-                ["0 = you certainly stop short", "1 = you certainly hit it"], {"kind": "score", "source": "event", "name": "overrun", "option": o}))  # fmt: skip
+                skey = "score.spill_impact" if impact else "score.spill_slosh"
+                cands.append(_Cand(_ev("event", "spill", option), lambda o=option, a=act, s=short, k=skey: _score(
+                    c, (f"spill_risk_{s}", f"spill_chance_{s}"), k, c.anchors("spill"), {"source": "event", "name": "spill", "option": o}, **a)))
+        if option not in _NO_DELAY:
+            dkey = _delay_key(obs, option)
+            transform = "per_30s" if dkey == "score.delay.time" else "per_3s"
+            anchors = c.anchors("delay_long", long=textfmt.time(30.0, 1.0, obs.fmt.time_unit)) if transform == "per_30s" else c.anchors("delay")
+            cands.append(_Cand(("quantity", "delay", option, transform), lambda o=option, a=act, s=short, k=dkey, t=transform, an=anchors: _score(
+                c, (f"delay_{s}", f"time_cost_{s}"), k, an, {"source": "quantity", "name": "delay", "option": o, "transform": t}, reference=_delay_reference(c), **a)))
+        if (scene == "p5_braking" or (obs.load is not None and obs.env.maneuver == "brake")) and option != "continue":
+            cands.append(_Cand(_ev("event", "overrun", option), lambda o=option, a=act, s=short: _score(
+                c, (f"overrun_risk_{s}", f"hit_risk_{s}"), "score.overrun", c.anchors("overrun"), {"source": "event", "name": "overrun", "option": o}, **a)))
+        if obs.load is not None and option not in ("secure_first", "detour"):
+            if impact_possible_load(obs):
+                # 충돌이 있을 수 있는 순간: 움직임만 세는 떨어짐·미끄러짐(덧붙임)과 충돌까지 세는 떨어짐(글이 충돌을 밝힘)을 따로 묻는다
+                motion = _motion_only(c)
+                cands.append(_Cand(_ev("event", "fall_motion", option), lambda o=option, a=act, s=short, m=motion: _score(
+                    c, (f"fall_risk_{s}", f"topple_risk_{s}"), "score.fall", c.anchors("fall"), {"source": "event", "name": "fall_motion", "option": o},
+                    suffix=m, **a)))  # fmt: skip
+                cands.append(_Cand(_ev("event", "fall", option), lambda o=option, a=act, s=short: _score(
+                    c, (f"knocked_off_risk_{s}", f"comes_off_risk_{s}"), "score.fall_impact", c.anchors("fall_impact"),
+                    {"source": "event", "name": "fall", "option": o}, **a)))  # fmt: skip
+                cands.append(_Cand(("quantity", "slide_frac", option, None), lambda o=option, a=act, s=short, m=motion: _score(
+                    c, (f"slide_{s}", f"slip_toward_edge_{s}"), "score.slide", c.anchors("slide"), {"source": "quantity", "name": "slide_frac", "option": o},
+                    suffix=m, **a)))  # fmt: skip
+            else:
+                cands.append(_Cand(_ev("event", "fall", option), lambda o=option, a=act, s=short: _score(
+                    c, (f"fall_risk_{s}", f"topple_risk_{s}"), "score.fall", c.anchors("fall"), {"source": "event", "name": "fall", "option": o}, **a)))
+                cands.append(_Cand(("quantity", "slide_frac", option, None), lambda o=option, a=act, s=short: _score(
+                    c, (f"slide_{s}", f"slip_toward_edge_{s}"), "score.slide", c.anchors("slide"), {"source": "quantity", "name": "slide_frac", "option": o}, **a)))
+        if obs.stack is not None and option in ("place_now", "recentre"):
+            cands.append(_Cand(_ev("event", "topple", option), lambda o=option, a=act, s=short: _score(
+                c, (f"topple_risk_{s}", f"falls_off_risk_{s}"), "score.topple_stack", c.anchors("topple"), {"source": "event", "name": "topple", "option": o}, **a)))
+        if obs.place is not None:
+            cands.append(_Cand(("quantity", "bad_after", option, None), lambda o=option, a=act, s=short: _score(
+                c, (f"bad_result_{s}", f"left_wrong_{s}"), "score.unseated", c.anchors("unseated"), {"source": "quantity", "name": "bad_after", "option": o}, **a)))
+            if option in ("press_down", "push_harder"):
+                cands.append(_Cand(_ev("event", "damage", option), lambda o=option, a=act, s=short: _score(
+                    c, (f"damage_risk_{s}", f"break_risk_{s}"), "score.damage", c.anchors("damage"), {"source": "event", "name": "damage", "option": o}, **a)))
     return cands
 
 
@@ -399,91 +668,89 @@ def _score_candidates(c: _Ctx, options: tuple[str, ...]) -> list:
 # 상태 choice
 # ----------------------------------------------------------------------------------------------------------------
 
-_INTENT_TEXT = {
-    "step_in": {
-        "stay": ["stop and stay in your lane", "stay where they are, inside your path"],
-        "cross": ["keep going across your lane", "carry on across and out of your path"],
-        "back": ["step back the way they came", "retreat out of your path on the side they came from"],
-    },
-    "crossing": {
-        "cross": ["keep coming at the same pace and cross your path", "carry on across at their current pace"],
-        "yield": ["stop and wait before your path", "hold back and let you go first"],
-        "hurry": ["speed up to get across first", "hurry across ahead of you"],
-    },
-    "head_on": {
-        "keep": ["keep coming down the middle", "hold their line in the centre"],
-        "aside_left": ["move over to your left", "step aside toward your left"],
-        "aside_right": ["move over to your right", "step aside toward your right"],
-        "stop": ["stop and wait", "come to a halt and let you decide"],
-    },
-}
-_HAND_TEXT = {
-    "stay": ["stay in the tool path", "remain where it is, in the path"],
-    "cross": ["sweep on across the path", "continue across and out of the path"],
-    "back": ["pull back out of the path", "withdraw the way it came"],
-    "yield": ["pause before reaching the path", "hold back short of the path"],
-    "hurry": ["dart across quickly", "move across faster"],
-}
 _STATE_KEYS = {
     "stay": "stays", "cross": "crosses", "back": "backs_off", "yield": "yields", "hurry": "hurries",
     "keep": "keeps_centre", "aside_left": "moves_left", "aside_right": "moves_right", "stop": "stops",
 }  # fmt: skip
+_INTENT_FAMILY = {"p1_step_in": "step_in", "p1p5_step_in_carrying": "step_in", "p1_crossing": "crossing", "p1_head_on": "head_on",
+                  "p1p6_emerging_step_in": "step_in", "p1p3_step_in_carrying_tall": "step_in"}  # fmt: skip
 
 
 def _state_candidates(c: _Ctx, style: str) -> list:
+    from robo_jev.simgen.state_text import state_texts
+
     obs = c.obs
+    texts = state_texts(c.lang)
     cands = []
-    family = {"p1_step_in": "step_in", "p1p5_step_in_carrying": "step_in", "p1_crossing": "crossing", "p1_head_on": "head_on"}.get(obs.scene)
-    if obs.agent is not None and obs.agent.group != "ball":
+    family = _INTENT_FAMILY.get(obs.scene)
+    if obs.agent is not None and obs.agent.group != "ball" and obs.agent.cue is not None and family is not None:
 
         def intent_q():
             intents = list(INTENTS[family])
-            texts = [c.pick((_HAND_TEXT if obs.agent.group == "hand" else _INTENT_TEXT[family])[i]) for i in intents]
-            criteria, keymap = _choice(c, [_STATE_KEYS[i] for i in intents], [cap(t) for t in texts], style, "s")
+            table = texts["hand"] if obs.agent.group == "hand" else texts["intent"][family]
+            criteria, keymap = _choice(c, [_STATE_KEYS[i] for i in intents], [cap(c.pick(table[i])) for i in intents], style, "s")
             options = {key: [float(intents.index(_inverse_state(val)))] for key, val in keymap.items()}
-            instructions = c.fmt(c.pick(["What will {ref} most likely do in the next few seconds?", "Which best describes what {ref} is about to do?",
-                                         "Predict what {ref} will do next."]))  # fmt: skip
-            return Question(c.name("their_next_move", "likely_move", "what_they_do"), "choice", instructions, criteria,
+            return Question(c.name("their_next_move", "likely_move", "what_they_do"), "choice", c.text("state.intent"), criteria,
                             {"kind": "state", "state": "intent", "options": options})  # fmt: skip
 
-        cands.append(intent_q)
+        cands.append(_Cand(("state", "intent"), intent_q))
     if obs.agent is not None and obs.agent.group == "ball" and obs.scene in ("p1_step_in", "p1p5_step_in_carrying", "p1_crossing"):
+        event = "ball_reaches_path" if obs.scene == "p1_crossing" else "ball_stops_in_lane"
+        canon = {"reaches_path": True, "stops_short": False} if obs.scene == "p1_crossing" else {"stops_in_lane": True, "rolls_clear": False}
 
         def ball_q():
-            if obs.scene == "p1_crossing":
-                canon = {"reaches_path": True, "stops_short": False}
-                texts = {"reaches_path": "It rolls on into your path", "stops_short": "It stops before reaching your path"}
-                event = "ball_reaches_path"
-            else:
-                canon = {"stops_in_lane": True, "rolls_clear": False}
-                texts = {"stops_in_lane": "It comes to rest inside your lane", "rolls_clear": "It rolls on out of your lane"}
-                event = "ball_stops_in_lane"
-            criteria, keymap = _choice(c, list(canon), [texts[k] for k in canon], style, "s")
+            criteria, keymap = _choice(c, list(canon), [texts["ball"][k] for k in canon], style, "s")
             options = {key: [1.0 if canon[val] else 0.0] for key, val in keymap.items()}
-            return Question(c.name("ball_outcome", "where_ball_ends"), "choice", c.fmt("Where does {ref} end up?"), criteria,
-                            {"kind": "state", "world_event": event, "options": options})  # fmt: skip
+            return Question(c.name("ball_outcome", "where_ball_ends"), "choice", c.text("state.ball"), criteria, {"kind": "state", "world_event": event, "options": options})
 
-        cands.append(ball_q)
+        cands.append(_Cand(_ev("world", event), ball_q))
     if obs.container is not None:
 
         def fill_q():
-            groups = {"under_70": ([0, 1, 2, 3], "Less than 70 % full"), "from_70_to_82": ([4], "Between 70 % and 82 % full"),
-                      "from_82_to_92": ([5], "Between 82 % and 92 % full"), "over_92": ([6, 7], "More than 92 % full")}  # fmt: skip
-            criteria, keymap = _choice(c, list(groups), [groups[g][1] for g in groups], style, "s")
-            options = {key: [float(b) for b in groups[val][0]] for key, val in keymap.items()}
-            instructions = c.fmt(c.pick(["How full is {cref} most likely?", "Which fill range best matches {cref}?", "Estimate the fill level of {cref}."]))
-            return Question(c.name("fill_level", "how_full"), "choice", instructions, criteria, {"kind": "state", "state": "fill_bin", "options": options})
+            groups = {"under_70": [0, 1, 2, 3], "from_70_to_82": [4], "from_82_to_92": [5], "over_92": [6, 7]}
+            criteria, keymap = _choice(c, list(groups), [texts["fill"][g] for g in groups], style, "s")
+            options = {key: [float(b) for b in groups[val]] for key, val in keymap.items()}
+            return Question(c.name("fill_level", "how_full"), "choice", c.text("state.fill"), criteria, {"kind": "state", "state": "fill_bin", "options": options})
 
-        cands.append(fill_q)
+        cands.append(_Cand(("state", "fill_bin"), fill_q))
         if obs.container.lid == "unknown":
 
             def lid_q():
-                criteria, keymap = _choice(c, ["has_lid", "open"], ["Yes, it has a lid on", "No, it is open"], style, "s")
+                criteria, keymap = _choice(c, ["has_lid", "open"], [texts["lid"]["has_lid"], texts["lid"]["open"]], style, "s")
                 options = {key: [1.0 if val == "has_lid" else 0.0] for key, val in keymap.items()}
-                instructions = c.fmt(c.pick(["Does {cref} have a lid on?", "Is {cref} covered?", "Is there a lid on {cref}?"]))
-                return Question(c.name("lid_on", "has_lid"), "choice", instructions, criteria, {"kind": "state", "state": "lid", "options": options})
+                return Question(c.name("lid_on", "has_lid"), "choice", c.text("state.lid"), criteria, {"kind": "state", "state": "lid", "options": options})
 
-            cands.append(lid_q)
+            cands.append(_Cand(("state", "lid"), lid_q))
+    if obs.place is not None:
+        family_ = obs.place.family
+
+        def p4_q():
+            states = list(texts["p4"][family_])
+            criteria, keymap = _choice(c, states, [c.fill(texts["p4"][family_][s]) for s in states], style, "s")
+            options = {key: [float(states.index(val))] for key, val in keymap.items()}
+            key = "state.p4_place" if family_ == "place" else "state.p4_insert"
+            return Question(c.name("its_state", "how_it_sits", "condition_now"), "choice", c.text(key), criteria, {"kind": "state", "state": "p4_state", "options": options})
+
+        cands.append(_Cand(("state", "p4_state"), p4_q))
+    if obs.conflict is not None:
+        lidar_says = obs.conflict.lidar
+
+        def sensor_q():
+            canon = {"lidar_right": 1.0 if lidar_says else 0.0, "camera_right": 0.0 if lidar_says else 1.0}
+            criteria, keymap = _choice(c, list(canon), [texts["sensor"][k][int(lidar_says)] for k in canon], style, "s")
+            options = {key: [canon[val]] for key, val in keymap.items()}
+            return Question(c.name("which_sensor", "believe_which"), "choice", c.text("state.sensor"), criteria, {"kind": "state", "state": "sensor_present", "options": options})
+
+        cands.append(_Cand(("state", "sensor_present"), sensor_q))
+    if obs.stack is not None and obs.stack.offset != 0.0:
+
+        def weight_q():
+            canon = {"toward_overhang": 1.0, "away_from_overhang": 0.0}
+            criteria, keymap = _choice(c, list(canon), [c.fill(texts["weight"][k]) for k in canon], style, "s")
+            options = {key: [canon[val]] for key, val in keymap.items()}
+            return Question(c.name("heavy_side", "weight_side"), "choice", c.text("state.weight_side"), criteria, {"kind": "state", "state": "weight_toward", "options": options})
+
+        cands.append(_Cand(("state", "weight_toward"), weight_q))
     return cands
 
 
@@ -505,6 +772,12 @@ def _threshold_text(value_si: float, kind: str, unit: str) -> tuple[str, float]:
     """문턱의 글(단위 포함)과 그 글이 보이는 값(SI) — 답은 보이는 문턱으로 정한다(km/h 표기는 반올림된다)."""
     if kind == "percent":
         return textfmt.percent(value_si), round(value_si, 6)
+    if kind == "plain":
+        return textfmt.number(value_si, 1), round(value_si, 6)
+    if kind == "angle":
+        return f"{textfmt.number(value_si, 1)}°", round(value_si, 6)
+    if kind == "mm":
+        return f"{textfmt.number(value_si, 1)} mm", round(value_si, 6)
     resolution = 0.001 if unit == "mm" else 0.01
     text = {"distance": textfmt.distance, "speed": textfmt.speed, "time": textfmt.time}[kind](value_si, resolution, unit)
     return text, textfmt.shown_si(Reading(value_si, 0.0, resolution), unit)
@@ -520,8 +793,43 @@ def _rule_two(c: _Ctx, shown: float, step: float, margin: float) -> tuple[float,
     return threshold, above
 
 
+def _distance_reading(c: _Ctx, what: dict, obs: Observation | None = None) -> tuple[Reading, str] | None:
+    obs = obs or c.obs
+    if obs.scene in _STEP_IN_SCENES:
+        return obs.agent.ahead, c.fill(what["gap"])
+    if obs.scene == "p1_crossing":
+        return obs.agent.track[-1], c.fill(what["crossing"])
+    if obs.scene == "p1_head_on":
+        return obs.agent.track[-1], c.fill(what["head_on"])
+    if obs.env.obstacle_distance is not None:
+        return obs.env.obstacle_distance, c.fill(what["obstacle"])
+    if obs.conflict is not None:
+        return obs.conflict.distance, c.fill(what["conflict"])
+    if obs.stale is not None:
+        return obs.stale.ahead, c.fill(what["stale"])
+    if obs.corner is not None:
+        return obs.corner.ahead, c.fill(what["corner"])
+    return None
+
+
+def _two_way_rule(c: _Ctx, style: str, r: dict, names: list[str], classes: tuple[str, str], value: float, step: float, margin: float, kind: str, unit: str, above_class: str,
+                  strict_above: bool = True, basis: float | None = None):  # fmt: skip
+    """두 갈래 규칙 질문 하나: 보인 값 ``value``가 문턱보다 크면(또는 작으면) ``above_class``. 문턱은 ``basis``(기본 = value — 쌍의 변형은
+    기준의 값) 둘레에 놓는다."""
+    threshold, _ = _rule_two(c, value if basis is None else basis, step, margin)
+    t_text, threshold = _threshold_text(threshold, kind, unit)
+    above = value > threshold if strict_above else value >= threshold
+    other = classes[1] if above_class == classes[0] else classes[0]
+    answer = above_class if above else other
+    return _rule_question(c, names, c.fill(r["instructions"], t=t_text), list(classes), {k: c.fill(r[k], t=t_text) for k in classes}, answer, style)
+
+
 def _rule_candidates(c: _Ctx, style: str) -> list:
+    from robo_jev.simgen.rule_text import rule_texts
+
     obs = c.obs
+    tobs = getattr(c, "tobs", obs)        # 문턱을 놓는 관측(쌍의 변형은 기준 — 수정 1 I4); 답은 obs의 값
+    rt = rule_texts(c.lang)
     cands = []
     dist_unit = obs.fmt.distance_unit
     arm = obs.body == "arm"
@@ -530,113 +838,106 @@ def _rule_candidates(c: _Ctx, style: str) -> list:
     def unit_for_rule() -> str:
         return dist_unit if c.rng.random() < 0.7 else c.pick([u for u in alt_units if u != dist_unit] or [dist_unit])
 
-    def distance_reading() -> tuple[Reading, str] | None:
-        if obs.scene in ("p1_step_in", "p1p5_step_in_carrying"):
-            return obs.agent.ahead, f"the gap to {c.ref}"
-        if obs.scene == "p1_crossing":
-            return obs.agent.track[-1], f"{c.ref}'s last reported distance from your path"
-        if obs.scene == "p1_head_on":
-            return obs.agent.track[-1], f"the last reported gap to {c.ref}"
-        if obs.scene == "p5_braking":
-            return obs.env.obstacle_distance, f"the distance to {c.obstacle}"
-        return None
-
-    found = distance_reading()
-    if found is not None:
+    found = _distance_reading(c, rt["what"])
+    found_t = _distance_reading(c, rt["what"], tobs)
+    if found is not None and found_t is not None:
         reading, what = found
+        reading_t = found_t[0]
 
         def distance_rule():
             shown = textfmt.shown_si(reading, dist_unit)
+            basis = textfmt.shown_si(reading_t, dist_unit)
             step = 0.01 if arm else 0.1
-            margin = max(reading.resolution, step / 2)
+            margin = max(reading_t.resolution, step / 2)
             cls = c.pick(["far", "near", "close"])
             if cls == "far":
-                hi = _nice(shown - margin - float(c.rng.random()) * 2 * step, step, up=False)
+                hi = _nice(basis - margin - float(c.rng.random()) * 2 * step, step, up=False)
                 lo = _nice(hi - step * (1 + int(c.rng.integers(3))), step, up=False)
             elif cls == "near":
-                lo = _nice(shown - margin - float(c.rng.random()) * 2 * step, step, up=False)
-                hi = _nice(shown + margin + float(c.rng.random()) * 2 * step, step, up=True)
+                lo = _nice(basis - margin - float(c.rng.random()) * 2 * step, step, up=False)
+                hi = _nice(basis + margin + float(c.rng.random()) * 2 * step, step, up=True)
             else:
-                lo = _nice(shown + margin + float(c.rng.random()) * 2 * step, step, up=True)
+                lo = _nice(basis + margin + float(c.rng.random()) * 2 * step, step, up=True)
                 hi = _nice(lo + step * (1 + int(c.rng.integers(3))), step, up=True)
             if lo <= 0:
                 return None
             unit = unit_for_rule()
             (lo_t, lo), (hi_t, hi) = _threshold_text(lo, "distance", unit), _threshold_text(hi, "distance", unit)
             answer = "far" if shown >= hi else ("near" if shown >= lo else "close")
-            descriptions = {"far": f"at least {hi_t}", "near": f"at least {lo_t} but less than {hi_t}", "close": f"less than {lo_t}"}
-            instructions = f"Site rule: classify {what} as 'far' if it is at least {hi_t}, 'near' if it is at least {lo_t} but less than {hi_t}, and 'close' otherwise."
+            r = rt["distance"]
+            descriptions = {k: c.fill(r[k], lo=lo_t, hi=hi_t) for k in ("far", "near", "close")}
+            instructions = c.fill(r["instructions"], what=what, lo=lo_t, hi=hi_t)
             return _rule_question(c, ["distance_class", "gap_rule", "range_category"], instructions, ["far", "near", "close"], descriptions, answer, style)
 
         cands.append(distance_rule)
+    def _age_of(o: Observation):
+        return o.agent.age if o.agent is not None else (o.stale.age if o.stale is not None else None)
 
-    if obs.agent is not None:
-
-        def age_rule():
-            age = obs.agent.age
-            threshold, above = _rule_two(c, age, 0.1, 0.05)
-            t_text, threshold = _threshold_text(threshold, "time", obs.fmt.time_unit)
-            answer = "stale" if age > threshold else "fresh"
-            instructions = c.fmt(f"Treat a track as 'stale' if its last update is older than {t_text}, otherwise 'fresh'. Which applies to {{ref}}?")
-            return _rule_question(c, ["track_age_rule", "staleness"], instructions, ["stale", "fresh"],
-                                  {"stale": f"last update older than {t_text}", "fresh": f"last update {t_text} old or newer"}, answer, style)  # fmt: skip
-
-        cands.append(age_rule)
-
+    age, age_t = _age_of(obs), _age_of(tobs)
+    if age is not None and age_t is not None:
+        cands.append(lambda: _two_way_rule(c, style, rt["age"], ["track_age_rule", "staleness"], ("stale", "fresh"), age, 0.1, 0.05, "time", obs.fmt.time_unit, "stale",
+                                           basis=age_t))  # fmt: skip
     if obs.robot.speed > 0:
-
-        def speed_rule():
-            resolution = 0.01 if arm else 0.05
-            shown = textfmt.shown_si(Reading(obs.robot.speed, 0.0, resolution), obs.fmt.speed_unit)
-            step = 0.05 if arm else 0.1
-            threshold, above = _rule_two(c, shown, step, resolution)
-            t_text, threshold = _threshold_text(threshold, "speed", obs.fmt.speed_unit)
-            answer = "over_limit" if shown > threshold else "within_limit"
-            instructions = f"The speed limit in this zone is {t_text}. Under that limit, is your current speed 'over_limit' or 'within_limit'?"
-            return _rule_question(c, ["speed_rule", "zone_limit"], instructions, ["over_limit", "within_limit"],
-                                  {"over_limit": f"faster than {t_text}", "within_limit": f"{t_text} or slower"}, answer, style)  # fmt: skip
-
-        cands.append(speed_rule)
-
-    if obs.container is not None and obs.container.fill_mode == "percent":
+        resolution = 0.01 if arm else 0.05
+        shown_speed = textfmt.shown_si(Reading(obs.robot.speed, 0.0, resolution), obs.fmt.speed_unit)
+        basis_speed = textfmt.shown_si(Reading(tobs.robot.speed, 0.0, resolution), obs.fmt.speed_unit)
+        cands.append(lambda: _two_way_rule(c, style, rt["speed"], ["speed_rule", "zone_limit"], ("over_limit", "within_limit"), shown_speed, 0.05 if arm else 0.1, resolution,
+                                           "speed", obs.fmt.speed_unit, "over_limit", basis=basis_speed))  # fmt: skip
+    if obs.container is not None and obs.container.fill_mode == "percent" and tobs.container is not None and tobs.container.fill_mode == "percent":
 
         def fill_rule():
             shown = obs.container.fill.value
-            threshold, above = _rule_two(c, shown, 0.05, 0.05)
+            threshold, _ = _rule_two(c, tobs.container.fill.value, 0.05, 0.05)
             t_text, threshold = _threshold_text(min(threshold, 0.95), "percent", "%")
             answer = "reduced" if shown > threshold else "normal"
-            instructions = c.fmt(f"House rule: anything filled above {t_text} must be carried at reduced speed. Under this rule, is {{cref}} a 'reduced' or a 'normal' case?")
-            return _rule_question(c, ["fill_rule", "carry_rule"], instructions, ["reduced", "normal"],
-                                  {"reduced": f"filled above {t_text}", "normal": f"filled to {t_text} or less"}, answer, style)  # fmt: skip
+            r = rt["fill"]
+            return _rule_question(c, ["fill_rule", "carry_rule"], c.fill(r["instructions"], t=t_text), ["reduced", "normal"],
+                                  {k: c.fill(r[k], t=t_text) for k in ("reduced", "normal")}, answer, style)  # fmt: skip
 
         cands.append(fill_rule)
-
     if obs.env.corridor_width is not None:
 
         def width_rule():
             shown = textfmt.shown_si(obs.env.corridor_width, dist_unit)
-            threshold, above = _rule_two(c, shown, 0.1, obs.env.corridor_width.resolution)
+            basis = textfmt.shown_si(tobs.env.corridor_width, dist_unit) if tobs.env.corridor_width is not None else shown
+            threshold, _ = _rule_two(c, basis, 0.1, obs.env.corridor_width.resolution)
             t_text, threshold = _threshold_text(threshold, "distance", unit_for_rule())
             answer = "single_file" if shown < threshold else "two_way"
-            instructions = f"Aisle rule: an aisle narrower than {t_text} is 'single_file'; otherwise it is 'two_way'. Which is this aisle?"
-            return _rule_question(c, ["aisle_rule", "aisle_class"], instructions, ["single_file", "two_way"],
-                                  {"single_file": f"narrower than {t_text}", "two_way": f"{t_text} wide or more"}, answer, style)  # fmt: skip
+            r = rt["width"]
+            return _rule_question(c, ["aisle_rule", "aisle_class"], c.fill(r["instructions"], t=t_text), ["single_file", "two_way"],
+                                  {k: c.fill(r[k], t=t_text) for k in ("single_file", "two_way")}, answer, style)  # fmt: skip
 
         cands.append(width_rule)
-
     if obs.env.turn_radius is not None:
 
         def turn_rule():
             radius = obs.env.turn_radius
             step = 0.05 if arm else 0.1
-            threshold, above = _rule_two(c, radius, step, step / 2)
+            threshold, _ = _rule_two(c, tobs.env.turn_radius if tobs.env.turn_radius is not None else radius, step, step / 2)
             t_text, threshold = _threshold_text(threshold, "distance", unit_for_rule())
             answer = "sharp" if radius < threshold else "gentle"
-            instructions = f"Route rule: a turn with a radius under {t_text} counts as 'sharp', otherwise 'gentle'. How is the coming turn classed?"
-            return _rule_question(c, ["turn_rule", "turn_class"], instructions, ["sharp", "gentle"],
-                                  {"sharp": f"radius under {t_text}", "gentle": f"radius {t_text} or more"}, answer, style)  # fmt: skip
+            r = rt["turn"]
+            return _rule_question(c, ["turn_rule", "turn_class"], c.fill(r["instructions"], t=t_text), ["sharp", "gentle"],
+                                  {k: c.fill(r[k], t=t_text) for k in ("sharp", "gentle")}, answer, style)  # fmt: skip
 
         cands.append(turn_rule)
+    if obs.load is not None:
+        aspect = obs.load.aspect_shown()
+        aspect_t = tobs.load.aspect_shown() if tobs.load is not None else aspect
+        cands.append(lambda: _two_way_rule(c, style, rt["aspect"], ["load_rule", "tall_load_rule"], ("secure", "as_is"), aspect, 0.5, 0.2, "plain", "", "secure",
+                                           basis=aspect_t))  # fmt: skip
+    if obs.env.ramp_angle_deg is not None:
+        angle = obs.env.ramp_angle_deg
+        angle_t = tobs.env.ramp_angle_deg if tobs.env.ramp_angle_deg is not None else angle
+        cands.append(lambda: _two_way_rule(c, style, rt["ramp"], ["ramp_rule", "slope_class"], ("steep", "normal"), angle, 0.5, 0.5, "angle", "", "steep", basis=angle_t))
+    if obs.place is not None:
+        name, reading = obs.place.primary()
+        reading_t = tobs.place.primary()[1] if tobs.place is not None else reading
+        step = 0.1 if obs.place.cls == "fine" else (0.5 if obs.place.cls == "medium" else 1.0)
+        r = dict(rt["p4"])
+        r["instructions"] = r[f"instructions_{name}"]
+        cands.append(lambda: _two_way_rule(c, style, r, ["reading_rule", "tolerance_rule"], ("recheck", "accept"), abs(reading.value), step, step / 2, "mm", "", "recheck",
+                                           basis=abs(reading_t.value)))  # fmt: skip
     return cands
 
 
@@ -649,10 +950,20 @@ def _rule_question(c: _Ctx, names: list[str], instructions: str, classes: list[s
 # ----------------------------------------------------------------------------------------------------------------
 
 
-def write_questions(cfg: SimgenConfig, obs: Observation, options: tuple[str, ...], rng: np.random.Generator) -> QuestionSet:
-    """요청 하나의 질문들(3~8개)."""
-    c = _Ctx(cfg, obs, rng)
+def candidates(cfg: SimgenConfig, obs: Observation, options: tuple[str, ...], rng: np.random.Generator, surface: Surface | None = None, style: str = "word") -> list:
+    """추가 noul·score·상태 후보 전부(정체와 만드는 함수) — '한 가지 더 정하기' 교란(T6)이 쓰지 않은 것 하나를 고른다."""
+    c = _Ctx(cfg, obs, rng, surface or Surface())
+    return _extra_nouls(c, options) + _score_candidates(c, options) + _state_candidates(c, style)
+
+
+def write_questions(cfg: SimgenConfig, obs: Observation, options: tuple[str, ...], rng: np.random.Generator, surface: Surface | None = None,
+                    threshold_obs: Observation | None = None) -> QuestionSet:  # fmt: skip
+    """요청 하나의 질문들(3~8개). ``threshold_obs``: 규칙 질문의 문턱을 놓을 관측(숫자 쌍의 변형은 기준의 관측 — 답은 이 관측의 값으로)."""
+    surface = surface or Surface()
+    c = _Ctx(cfg, obs, rng, surface)
+    c.tobs = threshold_obs or obs
     style = KEY_STYLES[int(rng.integers(len(KEY_STYLES)))]
+    style = surface.key_style or style
     share = cfg.values["criterion_share"]
     criteria = _criteria_for_scene(obs)
 
@@ -662,18 +973,36 @@ def write_questions(cfg: SimgenConfig, obs: Observation, options: tuple[str, ...
     primary = _action_question(c, options, style, "a", criterion())
     questions = [primary]
     if rng.random() < 0.25:
-        questions.append(_action_question(c, options, style, "b", criterion()))
+        second = _action_question(c, options, style, "b", criterion())
+        if identity(second.recipe) != identity(primary.recipe):  # 같은 기준·같은 선택지면 같은 질문이다(m-c)
+            questions.append(second)
     key = _key_noul(c)
     questions.append(key)
-    extra = _extra_nouls(c, options)
+    used = {identity(q.recipe) for q in questions}
+
+    def fresh(cands: list) -> list:
+        return [cand for cand in cands if cand.ident not in used]
+
+    def take(cand: _Cand) -> None:
+        q = cand.build()
+        assert identity(q.recipe) == cand.ident, (cand.ident, q.recipe)
+        questions.append(q)
+        used.add(cand.ident)
+
+    extra = fresh(_extra_nouls(c, options))
     for i in rng.permutation(len(extra))[: int(rng.integers(0, 3))]:
-        questions.append(extra[int(i)]())
-    scores = _score_candidates(c, options)
+        take(extra[int(i)])
+    scores = fresh(_score_candidates(c, options))
     for i in rng.permutation(len(scores))[: int(rng.integers(1, 3))]:
-        questions.append(scores[int(i)]())
-    states = _state_candidates(c, style)
+        take(scores[int(i)])
+    states = fresh(_state_candidates(c, style))
     if states and rng.random() < 0.5:
-        questions.append(states[int(rng.integers(len(states)))]())
+        take(states[int(rng.integers(len(states)))])
+    if obs.scene in VOI_SCENES and look_option(obs) in options and rng.random() < 0.4:
+        voi = _voi_question(c, options, style)
+        if identity(voi.recipe) not in used:
+            questions.append(voi)
+            used.add(identity(voi.recipe))
     rules = _rule_candidates(c, style)
     if rules and rng.random() < 0.35:
         rule = rules[int(rng.integers(len(rules)))]()

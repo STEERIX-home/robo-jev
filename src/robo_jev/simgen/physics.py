@@ -6,6 +6,10 @@
   물러남(두 번 이어 붙임)이 모두 이 꼴이다.
 * 쏟아짐(정적 근사): 액면이 수평에서 atan(a/g) + φ 기울고, 용기 가장자리에서 k·(D/2)·tan(그 각)만큼 오른다.
   f·H + 상승 > H 이면 쏟아진다. k ∈ [1.0, 1.6]은 출렁임을 거칠게 덮는 숨은 계수, φ는 바닥 기울기(라디안). 뚜껑이 있으면 쏟아지지 않는다.
+* 받침 위 물건(P3, 준정적 — Task v0b): 쏠림 비 r = (받침이 물건에 요구하는 수평 힘) / (수직 힘) — 평지면 a/g, 기울기 φ에서 a로 서면
+  (sin φ + a/g)/cos φ. 마찰이 낼 수 있는 비는 μ라서 실제로 전해지는 비는 min(r, μ): **넘어짐** min(r, μ)·h > b_eff(무게중심 높이 h,
+  쏠리는 쪽 가장자리까지 수평 거리 b_eff), 그렇지 않고 r > μ면 **미끄러짐**. 미끄러진 거리: 받침 속도가 Δv만큼 a로 바뀌는 동안 물건은
+  마찰로만(a_obj = g(μcos φ − sin φ)) 따라가 Δv²/2·(1/a_obj − 1/a)만큼 밀린다(a_obj ≤ 0이면 멈추지 않고 미끄러진다 — 무한).
 """
 
 from __future__ import annotations
@@ -14,6 +18,10 @@ import numpy as np
 
 __all__ = [
     "G",
+    "incline_ratio",
+    "slide_distance",
+    "tip_slide",
+    "turn_slide_distance",
     "arrival_time",
     "clear_time",
     "clear_time_from_rest",
@@ -146,8 +154,8 @@ def min_distance(xr, yr, xa, ya):
     return np.min(_segment_distances(dx, dy), axis=-1)
 
 
-def first_contact(xr, yr, xa, ya, radius_sum, dt: float):
-    """(닿았나, 처음 닿는 구간의 상대 속도 — 안 닿았으면 0, 최소 거리). 상대 속도는 그 구간의 평균이다."""
+def first_contact(xr, yr, xa, ya, radius_sum, dt: float, with_step: bool = False):
+    """(닿았나, 처음 닿는 구간의 상대 속도 — 안 닿았으면 0, 최소 거리[, 처음 닿는 구간 번호 — 안 닿았으면 −1]). 상대 속도는 그 구간의 평균이다."""
     dx = np.asarray(xa, dtype=float) - np.asarray(xr, dtype=float)
     dy = np.asarray(ya, dtype=float) - np.asarray(yr, dtype=float)
     dx, dy = np.broadcast_arrays(dx, dy)
@@ -157,6 +165,8 @@ def first_contact(xr, yr, xa, ya, radius_sum, dt: float):
     first = np.argmax(touching, axis=-1)
     rel = np.hypot(np.diff(dx, axis=-1), np.diff(dy, axis=-1)) / dt
     speed = np.take_along_axis(rel, first[..., None], axis=-1)[..., 0]
+    if with_step:
+        return hit, np.where(hit, speed, 0.0), seg.min(axis=-1), np.where(hit, first, -1)
     return hit, np.where(hit, speed, 0.0), seg.min(axis=-1)
 
 
@@ -184,3 +194,42 @@ def turn_delay(v0, v, approach, radius, angle_rad, a_long, accel):
     taken = (approach - s1) / v0 + t1 + arc / v + t3
     reference = (approach + arc + s3) / v0
     return float(taken - reference)
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# P3 받침 위 물건 (준정적)
+# ----------------------------------------------------------------------------------------------------------------
+
+
+def incline_ratio(accel, incline_rad, g=G):
+    """기울기 φ에서 받침이 내리막 쪽으로 쏠리게 a로 속도를 바꿀 때의 쏠림 비 (sin φ + a/g)/cos φ (평지면 a/g)."""
+    return (np.sin(incline_rad) + np.asarray(accel, dtype=float) / g) / np.cos(incline_rad)
+
+
+def tip_slide(ratio, mu, b_eff, h):
+    """(넘어짐, 미끄러짐): 넘어짐 = min(r, μ)·h > b_eff; 미끄러짐 = r > μ 이고 넘어지지 않음. 모두 broadcast."""
+    ratio, mu = np.asarray(ratio, dtype=float), np.asarray(mu, dtype=float)
+    tip = np.minimum(ratio, mu) * np.asarray(h, dtype=float) > np.asarray(b_eff, dtype=float)
+    slide = (ratio > mu) & ~tip
+    return tip, slide
+
+
+def slide_distance(dv, accel, mu, incline_rad=0.0, g=G):
+    """받침 속도가 dv만큼 accel로 바뀌는 동안 마찰로만 따라가는 물건의 상대 미끄럼 거리 dv²/2·(1/a_obj − 1/a),
+    a_obj = g(μcos φ − sin φ). 미끄러지지 않으면(a ≤ a_obj) 0, a_obj ≤ 0이면 inf."""
+    dv = np.asarray(dv, dtype=float)
+    accel = np.asarray(accel, dtype=float)
+    a_obj = g * (np.asarray(mu, dtype=float) * np.cos(incline_rad) - np.sin(incline_rad))
+    with np.errstate(divide="ignore", invalid="ignore"):
+        d = 0.5 * dv * dv * (1.0 / np.where(a_obj > 0, a_obj, 1.0) - 1.0 / np.where(accel > 0, accel, np.inf))
+    out = np.where(a_obj <= 0, np.inf, np.where(accel > a_obj, np.maximum(d, 0.0), 0.0))
+    return float(out) if np.ndim(out) == 0 else out
+
+
+def turn_slide_distance(a_lat, mu, duration, g=G):
+    """회전 호를 도는 duration 동안 옆으로 (a_lat − μg)로 밀리고, 회전이 끝난 뒤 남은 옆 속도가 마찰로 멎을 때까지의 미끄럼:
+    ½(a − μg)T² + ((a − μg)T)²/(2μg). 미끄러지지 않으면 0."""
+    a_lat, mu = np.asarray(a_lat, dtype=float), np.asarray(mu, dtype=float)
+    excess = np.maximum(a_lat - mu * g, 0.0)
+    out = 0.5 * excess * duration * duration + (excess * duration) ** 2 / (2.0 * np.maximum(mu * g, 1e-9))
+    return float(out) if np.ndim(out) == 0 else out

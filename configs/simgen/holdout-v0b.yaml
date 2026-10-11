@@ -1,0 +1,60 @@
+# 빼 둔 칸 v0b — 봉인된 시험 세트(T2·T3·T4)만 쓰고 학습 생성기는 만들 수 없는 칸 (Task v0b 지시서 §4).
+#
+# **이 파일 하나가 정본이다.** 학습 생성기(split = train)는 생성 시점에 이 칸을 거절한다(robo_jev.simgen.holdout — 문체·상황·바꿔 쓰기
+# 묶음·묶음(조합)은 고를 수 없게 막고, 변수 범위는 관측을 만든 뒤 검사해 다시 뽑는다). 시험 tests/test_simgen_holdout.py가 학습 세트 전부를
+# 훑어 빼 둔 칸이 0건이고 요청 글의 해시가 시험 세트와 겹치지 않음을 확인한다. 값을 바꾸면 `version`을 올리고 시험 세트를 다시 봉인한다.
+version: holdout-v0b
+
+# T2 — 처음 보는 문체: 시각이 찍힌 사건 기록(학습 문체 셋 facts·prose·planner에는 없다)
+styles: [log]
+
+# T2 — 분야마다 다섯째 상황(분야 카드 settings의 번호)은 시험 전용이다. 그 상황의 새 태그만 가진 항목(장소·방해 문구·물건)도 그 상황에서만
+# 나오므로 함께 빠진다.
+settings:
+  warehouse: [4]
+  factory: [4]
+  cafe: [4]
+  hospital: [4]
+  lab: [4]
+  sidewalk: [4]
+  home: [4]
+  retail: [4]
+  greenhouse: [4]
+  transit: [4]
+
+# T2 — 질문 지시문·선택지 설명의 빼 둔 바꿔 쓰기 묶음(phrases.EN / phrases_ko.KO의 `heldout`)
+paraphrase_pool: heldout
+
+# T4 — 처음 보는 조합: P1+P3(사람이 끼어들 때 키 큰 잔·짐을 실은 로봇). 학습은 P1·P3 단독과 P1+P5·P3+P5를 보지만 이 조합은 보지 않는다.
+groups: [P1+P3]
+
+# T3 — 처음 보는 변수 범위(외삽). 칸마다 관측에서 읽는 변수(var), 잘라 낸 쪽: `above`(값 > cut이 시험 전용) 또는 `below`(값 < cut이
+# 시험 전용), cut이 몸별이면 몸마다. **학습은 그 변수가 관측되는 모든 장면에서 잘라 낸 쪽을 만들 수 없다**(생성기가 범위를 좁혀 뽑고,
+# 보고값이 넘으면 다시 뽑는다 — 수정 1 I1: 로봇 속도는 로봇 자체의 변수라 P3+P5·P3·P6 장면으로 새고 있었다). `scenes`는 T3가 그 칸의
+# 레코드를 뽑는 장면일 뿐이다. 같은 변수를 쓰는 칸(p1_fast_robot·p5_fast_robot)은 한 물리량이라 같은 쪽·같은 cut이어야 하고 장면 목록이
+# 겹치면 안 된다 — 어기면 holdout.load_holdout이 이 파일을 거절한다.
+ranges:
+  - {name: p1_fast_robot, phenomenon: P1, var: robot_speed, side: above, cut: {mobile_base: 1.25, humanoid: 1.0, forklift_amr: 2.1, arm: 0.8},
+     scenes: [p1_step_in, p1_crossing, p1_head_on, p1p5_step_in_carrying, p1p6_emerging_step_in]}
+  - {name: p1_old_track, phenomenon: P1, var: track_age, side: above, cut: 1.0, scenes: [p1_step_in, p1_crossing, p1_head_on, p1p5_step_in_carrying]}
+  # 높이/바닥 폭 > 5: 단단한 제동에도 넘어질 만큼 가늘고 키 큰 물건이 학습에도 있게(≤ 5) 자르고, 그보다 가는 것을 시험 전용으로
+  - {name: p3_tall_narrow_load, phenomenon: P3, var: load_aspect, side: above, cut: 5.0, scenes: [p3_carrying_tall, p3_ramp, p3p5_carrying_mixed]}
+  - {name: p3_steep_ramp, phenomenon: P3, var: ramp_angle, side: above, cut: 7.0, scenes: [p3_ramp]}
+  - {name: p4_coarse_gauge, phenomenon: P4, var: gauge_ratio, side: above, cut: 0.8, scenes: [p4_place_check, p4_insert, p4p6_stale_check]}
+  - {name: p4_old_image, phenomenon: P4, var: image_age, side: above, cut: 3.0, scenes: [p4p6_stale_check]}
+  - {name: p5_high_fill, phenomenon: P5, var: fill_reading, side: above, cut: 0.92, scenes: [p5_braking, p5_turning, p1p5_step_in_carrying, p3p5_carrying_mixed]}
+  - {name: p5_fast_robot, phenomenon: P5, var: robot_speed, side: above, cut: {mobile_base: 1.25, humanoid: 1.0, forklift_amr: 2.1, arm: 0.8},
+     scenes: [p5_braking, p5_turning]}
+  - {name: p6_old_sighting, phenomenon: P6, var: stale_age, side: above, cut: 4.0, scenes: [p6_stale_track]}
+  - {name: p6_tight_corner, phenomenon: P6, var: corner_lateral, side: below, cut: 0.5, scenes: [p6_blind_corner]}
+
+# 시험 세트·학습 세트의 seed 범위(겹치지 않는다 — 레코드 seed = 시작 + 단위 번호)
+seed_ranges:
+  train: [1000000, 1999999]
+  T1: [2000000, 2099999]
+  T2: [2100000, 2199999]
+  T3: [2200000, 2299999]
+  T4: [2300000, 2399999]
+  T5: [2400000, 2499999]
+  T6: [2500000, 2599999]
+  T7: [2600000, 2699999]

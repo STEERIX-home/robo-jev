@@ -30,17 +30,23 @@ def with_reading(reading, value: float):
 
 
 def numeric_view(obs):
-    """관측에서 상황 옷 문구(장소·과제·묘사·단서 문장·용기 문구·장애물 이름·방해 문구)를 지운 것 — 수치·상태·단위만 남는다."""
+    """관측에서 상황 옷 문구(장소·과제·묘사·단서 문장·용기·물건 문구·장애물·경사로·가림 이름·방해 문구)를 지운 것 — 수치·상태·단위만 남는다."""
     agent = obs.agent
     if agent is not None:
         agent = replace(agent, descriptor=None, cue_phrase=None)
     container = obs.container
     if container is not None:
-        container = replace(container, phrase=None)
-    env = replace(obs.env, place=None, obstacle=None)
+        container = replace(container, phrase=None, ref=None)
+    env = replace(obs.env, place=None, obstacle=None, ramp=None, ramp_end=None, detour=None, occluder=None)
     if env.sides is not None:
         env = replace(env, sides=tuple(replace(s, phrase=None) for s in env.sides))
-    return replace(obs, agent=agent, container=container, env=env, skin=None)
+    texts = {
+        "load": dict(phrase=None, ref=None, deck_phrase=None), "stack": dict(phrase=None, ref=None, spot=None),
+        "place": dict(item=None, target=None, stale_reason=None), "stale": dict(descriptor=None, ref=None, pronoun=None, spot=None, occluder=None),
+        "corner": dict(phrase=None), "conflict": dict(phrase=None),
+    }  # fmt: skip
+    parts = {name: replace(getattr(obs, name), **blank) for name, blank in texts.items() if getattr(obs, name) is not None}
+    return replace(obs, agent=agent, container=container, env=env, skin=None, **parts)
 
 
 def skin_strings(obs) -> list[str]:
@@ -52,4 +58,17 @@ def skin_strings(obs) -> list[str]:
         out.append(obs.container.phrase)
     if obs.env.sides is not None:
         out += [s.phrase or "" for s in obs.env.sides]
+    out += [obs.env.ramp or "", obs.env.ramp_end or "", obs.env.detour or "", obs.env.occluder or ""]
+    if obs.load is not None:
+        out += [obs.load.phrase, obs.load.ref, obs.load.deck_phrase]
+    if obs.stack is not None:
+        out += [obs.stack.phrase, obs.stack.ref, obs.stack.spot]
+    if obs.place is not None:
+        out += [obs.place.item, obs.place.target, obs.place.stale_reason or ""]
+    if obs.stale is not None:
+        out += [obs.stale.descriptor.np, obs.stale.descriptor.ref, obs.stale.spot, obs.stale.occluder]
+    if obs.corner is not None:
+        out.append(obs.corner.phrase)
+    if obs.conflict is not None:
+        out.append(obs.conflict.phrase)
     return sorted((t for t in out if t), key=len, reverse=True)
