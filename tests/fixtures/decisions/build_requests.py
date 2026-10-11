@@ -9,7 +9,7 @@ p_a = softmax(−(E[c_a] − min_b E[c_b]) / τ), τ = 2.0 (v0a 지시서 §3.6�
     uv run python tests/fixtures/decisions/build_requests.py   # → tests/fixtures/decisions/requests.jsonl
 
 담은 것: 장면 6종(p1_step_in·p1_crossing·p1_head_on·p5_braking·p5_turning·p1p5_step_in_carrying), 문체 3종,
-분야 7개, 몸 4종, 권고(맞음·틀림·없음), 힌트, 숫자 쌍(fx-002 ↔ fx-001)과 단어 쌍(fx-003 ↔ fx-001), 선택지 8개
+분야 6개(카페·창고·병원·실험실·가정·보도), 몸 4종, 권고(맞음·틀림·없음), 힌트, 숫자 쌍(fx-002 ↔ fx-001)과 단어 쌍(fx-003 ↔ fx-001), 선택지 8개
 질문(코드 A–H), 키 문체 3종(단어·짧은 코드·동사형), 규칙 적용 choice, 상태 choice.
 """
 
