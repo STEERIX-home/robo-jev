@@ -887,7 +887,7 @@ def test_the_provider_interface_is_there_but_not_implemented():
 # --------------------------------------------------------------------------
 
 
-def test_the_cli_offers_exactly_the_six_commands_task_6_named():
+def test_the_cli_offers_the_six_task_6_commands_and_the_cloud1_pod_commands():
     import importlib.util
 
     spec = importlib.util.spec_from_file_location("launch_run", REPO / "scripts" / "launch_run.py")
@@ -896,8 +896,11 @@ def test_the_cli_offers_exactly_the_six_commands_task_6_named():
     spec.loader.exec_module(module)
     parser = module.build_parser()
     actions = [action for action in parser._actions if hasattr(action, "choices") and action.dest == "command"]
-    assert set(actions[0].choices) == {"prepare", "launch", "status", "fetch", "cancel", "resume"}
-    assert module.COMMANDS == ("prepare", "launch", "status", "fetch", "cancel", "resume")
+    task6 = ("prepare", "launch", "status", "fetch", "cancel", "resume")
+    # Task cloud1: dry-run(네트워크 없음)·finish·down(pod 지우기)·pods·prices(읽기 전용)·ledger(단계 장부)
+    cloud1 = ("dry-run", "finish", "down", "pods", "prices", "ledger")
+    assert set(actions[0].choices) == set(task6 + cloud1)
+    assert module.COMMANDS == task6 + cloud1
 
 
 def test_a_config_with_modes_will_not_be_sent_without_a_mode():

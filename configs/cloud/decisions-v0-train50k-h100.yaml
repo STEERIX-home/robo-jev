@@ -1,0 +1,94 @@
+# Task cloud1 — 첫 본 run 계획 ①: train-50k 1 epoch(2B LoRA, bf16 adapter + fp32 master)을 1×H100에서 재현해 GB10 대비 속도 배수를 잰다.
+#
+# Spark에서 v0 검증(첫 학습 → 봉인 시험 세트의 학습 전·후)이 통과한 **뒤에** 돌린다 — 같은 설정·같은 데이터·같은 seed라 학습 곡선이 Spark의 것과
+# 같은 꼴이어야 하고(GPU가 달라 비트 단위로 같지는 않다), 걸린 시간의 비가 속도 배수다. 그 배수로 ② 규모 키우기(학습 세트 10배, 4B, seed 셋)의
+# 시간·비용을 다시 계산한다(HANDOFF "RunPod에서 판단 학습 돌리기").
+#
+# 평가는 v0a.1 평가 쪽 400개(봉인 시험 세트가 아니다)의 학습 전·후 진단만 — GB10의 같은 진단(기반 304 s · LoRA 뒤 498 s, v0d §6)과 시간을 견준다.
+# 봉인 시험 세트(T1~T7)의 평가는 v0 검증의 일이고 여기서 하지 않는다.
+#
+#   uv run python scripts/launch_run.py prices
+#   uv run python scripts/launch_run.py prepare --job configs/cloud/decisions-v0-train50k-h100.yaml --run-id <id> \
+#       --manifest artifacts/cloud/runs/<id>.json --hourly-usd <단가> [--set provider.gpu_type=…] [--set job.steps.…]
+#   uv run python scripts/launch_run.py dry-run --manifest artifacts/cloud/runs/<id>.json
+#   uv run python scripts/launch_run.py launch  --manifest artifacts/cloud/runs/<id>.json --yes
+kind: robojev-cloud-job-v0
+name: decisions-v0-train50k-h100
+job:
+  kind: decisions
+  model: Qwen/Qwen3.5-2B
+  inputs:
+    - artifacts/simgen/v0b/train-50k.jsonl
+    - artifacts/scratch/v0d/smoke/sample-2000.v0a1-8fb1919a.eval.jsonl
+  runtime:
+    env:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      HF_HUB_DISABLE_TELEMETRY: "1"
+  setup:
+    - name: sync
+      argv: ["{uv}", "sync", "--frozen", "--group", "backbone"]
+      fallback: ["{uv}", "sync", "--frozen", "--group", "backbone", "--no-install-package", "evdev"]
+      max_minutes: 15
+      est_minutes: 3
+      env: {UV_LINK_MODE: copy, UV_PYTHON_DOWNLOADS: automatic}
+  steps:
+    - name: env
+      argv: ["{python}", "-m", "robo_jev.launch.envprobe", "--out", "{reports}/env.json"]
+      max_minutes: 3
+      est_minutes: 0.3
+    - name: weights
+      argv: ["{python}", "scripts/fetch_backbone.py", "--from-manifest", "artifacts/models/manifest.json", "--id", "{model}"]
+      max_minutes: 10
+      est_minutes: 1.5
+    - name: diagnose-before
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}",
+             "--input", "artifacts/scratch/v0d/smoke/sample-2000.v0a1-8fb1919a.eval.jsonl",
+             "--out", "{reports}/before-2b.json", "--preview", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 15
+      est_minutes: 3
+      optional: true
+    - name: train
+      # 1 epoch = 요청 5만 × 2 질문 (dev 2 % 뺌) ÷ 32 ≈ 3,063 step. GB10 bf16 LoRA 5.13 s/step(1,024) ≈ 4.4 h + dev — H100 배수는 시운전이 잰다
+      argv: ["{python}", "scripts/train_decisions.py", "train", "--config", "configs/train/decisions-v0-lora.yaml",
+             "--set", "train_input=artifacts/simgen/v0b/train-50k.jsonl", "--set", "out_dir={runs}", "--set", "run_name=train50k-lora-bf16",
+             "--set", "lora_dtype=bfloat16", "--set", "micro_batch_tokens=4096", "--set", "min_free_disk_gb=10",
+             "--gpu-memory-fraction", "0.92"]
+      wall_set: max_wall_hours
+      max_minutes: 420
+      est_minutes: 150
+    - name: diagnose-after
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/train50k-lora-bf16/checkpoint.pt",
+             "--input", "artifacts/scratch/v0d/smoke/sample-2000.v0a1-8fb1919a.eval.jsonl",
+             "--out", "{reports}/after-2b-lora.json", "--preview", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 20
+      est_minutes: 4
+      optional: true
+  fetch:
+    - runs/*/metrics.json
+    - runs/*/config.yaml
+    - runs/*/checkpoint.pt
+    - reports/*
+provider:
+  name: runpod
+  gpu_type: NVIDIA H100 80GB HBM3   # SXM (대역폭 3.35 TB/s — v0d가 본 원소별 연산의 대역폭 병목에 유리). 시운전 결과로 PCIe와 비교해 고른다
+  gpu_count: 1
+  cloud: SECURE
+  image: runpod/base:1.4.0-cuda1300-ubuntu2404
+  min_cuda_version: "13.0"
+  disk_gb: 100
+  boot_timeout_minutes: 15
+  fetch_reserve_minutes: 8
+  delete_margin_minutes: 2
+  start_grace_minutes: 30
+  done_grace_minutes: 30
+budget:
+  hourly_usd: 2.69                  # 자리 — prepare에서 그때의 단가로 (--hourly-usd); launch가 API와 대조한다
+  max_wall_hours: 8
+  max_usd: null                     # null = 단계 장부의 남은 돈 (첫 단계 $150) — 벽시계 8 h × 단가가 먼저 구속한다
+  price_source: "RunPod v2 카탈로그 (launch 직전 대조)"
+  phase: {name: cloud-phase-1, cap_usd: 150}
+estimate:
+  boot_minutes: 5
+  uplink_mbps: 40
+  fetch_minutes: 3
+  assumption: "학습 150분은 H100이 GB10의 2배라는 가정(미측정) — 시운전의 배수로 바꾼다"

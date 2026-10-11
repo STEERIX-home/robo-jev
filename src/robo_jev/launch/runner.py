@@ -35,8 +35,6 @@ import traceback
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from robo_jev.launch.manifest import (
     Budget,
     budget_deadline_hours,
@@ -218,6 +216,13 @@ def run_bundle(bundle: str | Path, *, repo: str | Path | None = None) -> int:
     bundle = Path(bundle)
     repo = Path(repo or Path.cwd())
     manifest = json.loads((bundle / "manifest.json").read_text(encoding="utf-8"))
+    if (manifest.get("job") or {}).get("kind") == "decisions":
+        # 판단 학습 job — 명령줄 도구를 차례로 돈다 (robo_jev.launch.jobs). torch·yaml 없이 시스템 파이썬으로도 뜬다.
+        from robo_jev.launch.jobs import run_job
+
+        return run_job(bundle, repo=repo)
+    import yaml  # 책상 정리 줄기의 학습 설정 — 여기서만 쓴다 (판단 job의 러너는 venv가 생기기 전에 뜬다)
+
     config = yaml.safe_load((bundle / "config.yaml").read_text(encoding="utf-8")) or {}
     run_dir = bundle.parent
     budget = Budget.from_manifest(manifest)

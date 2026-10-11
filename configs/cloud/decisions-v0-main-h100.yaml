@@ -1,0 +1,108 @@
+# v0 본 run ①(pod 하나): train-50k 1 epoch(2B LoRA bf16 + fp32 master, λ 0.2, p3, 마지막 체크포인트) → 학습한 2B로 봉인 시험 세트 T1~T7 진단(균형 배치, 두 읽기).
+# 학습 전 기준(학습 없는 2B·4B)은 ② decisions-v0-base-h100.yaml이 다른 pod에서 같은 때 돈다. 비교(--compare)는 Spark에서 CPU로.
+kind: robojev-cloud-job-v0
+name: decisions-v0-main-h100
+job:
+  kind: decisions
+  model: Qwen/Qwen3.5-2B
+  inputs:
+    - artifacts/simgen/v0b/train-50k.jsonl
+    - artifacts/simgen/v0b/tests/T1.jsonl
+    - artifacts/simgen/v0b/tests/T2.jsonl
+    - artifacts/simgen/v0b/tests/T3.jsonl
+    - artifacts/simgen/v0b/tests/T4.jsonl
+    - artifacts/simgen/v0b/tests/T5.jsonl
+    - artifacts/simgen/v0b/tests/T6.jsonl
+    - artifacts/simgen/v0b/tests/T7.jsonl
+    - artifacts/simgen/v0b/tests/manifest.json
+  runtime:
+    env:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      HF_HUB_DISABLE_TELEMETRY: "1"
+  setup:
+    - name: sync
+      argv: ["{uv}", "sync", "--frozen", "--group", "backbone"]
+      fallback: ["{uv}", "sync", "--frozen", "--group", "backbone", "--no-install-package", "evdev"]
+      max_minutes: 15
+      est_minutes: 3
+      env: {UV_LINK_MODE: copy, UV_PYTHON_DOWNLOADS: automatic}
+  steps:
+    - name: env
+      argv: ["{python}", "-m", "robo_jev.launch.envprobe", "--out", "{reports}/env.json"]
+      max_minutes: 3
+      est_minutes: 0.3
+    - name: weights
+      argv: ["{python}", "scripts/fetch_backbone.py", "--from-manifest", "artifacts/models/manifest.json", "--id", "{model}"]
+      max_minutes: 10
+      est_minutes: 1.5
+    - name: train
+      argv: ["{python}", "scripts/train_decisions.py", "train", "--config", "configs/train/decisions-v0-lora-h100.yaml",
+             "--set", "train_input=artifacts/simgen/v0b/train-50k.jsonl", "--set", "out_dir={runs}", "--set", "run_name=v0-main-2b",
+             "--gpu-memory-fraction", "0.92"]
+      wall_set: max_wall_hours
+      max_minutes: 300
+      est_minutes: 90
+    - name: after-T1
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v0-main-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T1.jsonl", "--out", "{reports}/after-2b-T1.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 6
+      optional: true
+    - name: after-T2
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v0-main-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T2.jsonl", "--out", "{reports}/after-2b-T2.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 6
+      optional: true
+    - name: after-T3
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v0-main-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T3.jsonl", "--out", "{reports}/after-2b-T3.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 6
+      optional: true
+    - name: after-T4
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v0-main-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T4.jsonl", "--out", "{reports}/after-2b-T4.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 6
+      optional: true
+    - name: after-T5
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v0-main-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T5.jsonl", "--out", "{reports}/after-2b-T5.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 6
+      optional: true
+    - name: after-T6
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v0-main-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T6.jsonl", "--out", "{reports}/after-2b-T6.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 6
+      optional: true
+    - name: after-T7
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v0-main-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T7.jsonl", "--out", "{reports}/after-2b-T7.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 6
+      optional: true
+  fetch:
+    - runs/*/metrics.json
+    - runs/*/config.yaml
+    - runs/*/checkpoint.pt
+    - reports/*
+provider:
+  name: runpod
+  gpu_type: NVIDIA H100 80GB HBM3
+  gpu_count: 1
+  cloud: SECURE
+  image: runpod/base:1.4.0-cuda1300-ubuntu2404
+  min_cuda_version: "13.0"
+  disk_gb: 100
+  boot_timeout_minutes: 15
+  fetch_reserve_minutes: 8
+  delete_margin_minutes: 2
+  start_grace_minutes: 30
+  done_grace_minutes: 30
+budget:
+  hourly_usd: 3.99
+  max_wall_hours: 6
+  max_usd: null
+  price_source: "RunPod v2 카탈로그 (launch 직전 대조)"
+  phase: {name: cloud-phase-1, cap_usd: 150}
+estimate:
+  boot_minutes: 5
+  uplink_mbps: 40
+  fetch_minutes: 3
+  assumption: "학습·진단 시간은 시운전이 잰 H100/GB10 배수로 고친다"

@@ -111,6 +111,12 @@
         "max_gpu_hours": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "max_usd": {"type": ["number", "null"], "exclusiveMinimum": 0},
         "price_source": {"type": ["string", "null"], "description": "단가의 출처 (docs/05 §5 표, 또는 예약 직전 콘솔)."},
+        "phase": {
+          "type": "object",
+          "additionalProperties": true,
+          "required": ["name", "cap_usd"],
+          "description": "클라우드 단계 (pod run만). 단계 장부(artifacts/cloud/runpod-ledger.json)가 누적 + 이 run의 상한 ≤ cap_usd일 때만 띄운다 (Task cloud1: 첫 단계 $150)."
+        },
         "planned": {
           "type": "object",
           "additionalProperties": false,
@@ -199,7 +205,7 @@
     "finished_at": {"type": ["string", "null"]},
     "exit_reason": {
       "type": ["string", "null"],
-      "description": "completed | budget | cancelled | process_vanished | inputs | error | cancel-unconfirmed | cancel-command-failed"
+      "description": "completed | budget | cancelled | process_vanished | inputs | error | cancel-unconfirmed | cancel-command-failed | step:<이름>:<상태> (판단 job) | pod-delete-unconfirmed | create-ambiguous"
     },
     "budget_limit": {"type": ["string", "null"], "description": "budget으로 끝났다면 구속한 상한의 이름 (max_wall_hours | max_gpu_hours | max_usd)."},
 
@@ -219,6 +225,23 @@
       }
     },
 
-    "notes": {"type": "array", "items": {"type": "string"}, "description": "사람이 읽는 주석 — 카드 크기·메모리 같은 전제."}
+    "notes": {"type": "array", "items": {"type": "string"}, "description": "사람이 읽는 주석 — 카드 크기·메모리 같은 전제."},
+
+    "job": {
+      "type": "object",
+      "additionalProperties": true,
+      "required": ["kind"],
+      "description": "판단 학습 job (Task cloud1, kind=decisions) — 원격 러너가 명령줄 도구(train_decisions·diagnose_decisions)를 argv 틀대로 차례로 돈다. `uploads`는 올려 보내고 원격이 sha256을 대조하는 입력, `code`는 pod에 가는 git archive, `deadline_epoch`은 실행기가 정한 러너의 절대 마감. 없으면 책상 정리 줄기의 학습(robo_jev.train)이다."
+    },
+    "provider": {
+      "type": ["object", "null"],
+      "additionalProperties": true,
+      "description": "인스턴스를 만드는 공급자 (Task cloud1: runpod) — GPU 종류·수·클라우드·이미지·디스크·볼륨·지역·CUDA 하한, 부팅·가져오기·지우기의 시간 몫, 그리고 `pod`(id·만든 시각·감시 마감·지운 시각·지움 확인·쓴 돈 추정). 키는 들어가지 않는다."
+    },
+    "estimate": {
+      "type": "object",
+      "additionalProperties": true,
+      "description": "dry-run의 시간 가정 (부팅 분·올리기 Mbps·가져오기 분·가정의 출처)."
+    }
   }
 }

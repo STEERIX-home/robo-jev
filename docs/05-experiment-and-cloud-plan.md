@@ -176,6 +176,10 @@ uv run python scripts/launch_run.py resume --manifest … --from <가져온 chec
 
 **카드 크기, 이 run의 것.** 2B의 fp32 master T1은 R2 실측 peak allocated **56.05 GiB** / reserved 57.68 GiB다 — 80 GB 카드(= 74.5 GiB)에 들고 여유는 **reserved 기준**(74.5 − 57.68) 16.8 GiB = **22.6 %**로 — allocated로 재면 18.45 GiB = 24.8 %이지만 할당기가 실제로 붙잡고 있는 것은 reserved이므로 보수적인 쪽을 쓴다 — §4의 "실사용 장치 메모리의 최소 10 %가 남는다" 기준을 통과한다(다만 GB10 통합 메모리에서 잰 값이므로 첫 run의 200 step에서 다시 확인한다). **4B의 fp32 master T1은 이 카드에 들지 않는다**: optimizer step의 바닥만 **94.0 GiB**(Task P2 산술, 03 §5)로 activation 이전에 이미 74.5 GiB를 넘는다. 필요한 것은 **H200 141 GB(131 GiB) 또는 B200 180 GB 한 장**, 아니면 optimizer/parameter sharding(FSDP)인데 이 학습기는 `world_size: 1`이라 그것부터 만들어야 한다. 저장은 checkpoint 하나가 26.35 GB이고 `checkpoint_every 50` + `keep_steps [40]`이면 디스크에 두 개(52.7 GB)가 남는다 — §7의 영속 볼륨에 두고 **회수 시간과 그 재시도를 비용에 더한다**: 26 GB 전송은 몇 분이 아니라 몇십 분이고, 끊기면 다시 붙는 동안에도 인스턴스 요금은 나간다. `fetch`/`push`의 rsync는 `--partial-dir`로 **이어 받으므로** 재시도가 처음부터 다시 받지는 않는다.
 
+### RunPod 공급자와 판단 학습 job (2026-10-11, Task cloud1)
+
+R3b가 인터페이스만 둔 공급자(`create/destroy/describe`)를 **RunPod REST API v2**로 채웠다(`src/robo_jev/launch/providers/runpod.py`; v1은 2026-11-15 퇴역). 판단 학습은 job 정의(`configs/cloud/*.yaml`, `kind: decisions`)로 보내고, `launch --yes`가 pod를 만들고 결과를 가져온 뒤 **지운다**. §7의 "launcher가 GPU 종료를 요청하고 외부 watchdog이 비정상 종료와 종료 API 실패를 확인한다"는 이렇게 섰다: 실행기의 finally가 지우고 GET이 404를 줄 때까지 확인하며(확인 못 하면 `unknown`·종료 코드 3), **pod 안의 감시**(`infra/runpod-watchdog.sh`, 만들 때 시작 명령에 심는다)가 실행기가 죽어도 절대 마감에 자기 pod를 지운다. 단가는 만들기 전(카탈로그)과 뒤(pod의 `cost`) 두 번 명세와 대조하고, 단계 장부(첫 단계 누적 $150)가 run 상한의 합을 묶는다. 사용법·사용자 할 일·비용표·첫 run 계획은 `HANDOFF.md` §6이 정본이다. **아직 유료 pod는 한 번도 만들지 않았다** — 시운전 명세는 준비돼 있고 사용자 권한을 기다린다.
+
 ## 7. 저장·재개·종료 설정
 
 원본 데이터·동결 checkpoint는 영속 저장소, 실행 중 임시 shard·cache는 로컬 SSD에 둔다. 언어 모델 약 27B의 BF16 가중치는 약 54GB이며, vision 등 포함 범위에 따른 실제 export 크기를 별도 집계한다. optimizer와 master state를 포함한 재개본은 구현에 따라 수백 GB다. 초기에 영속 2TB·노드 scratch 1TB 이상을 예산 대상으로 두고 실제 checkpoint 크기로 조정한다.

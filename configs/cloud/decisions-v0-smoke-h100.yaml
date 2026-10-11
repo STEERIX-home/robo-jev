@@ -1,0 +1,127 @@
+# Task cloud1 — 승인된 유료 시운전 한 번 (2026-10-11 사용자 승인: 1×H100, 상한 $5 · 30분, 시운전 데이터만).
+#
+# 묻는 것: (0) pod 안의 자기 지우기 길이 실제로 지우는가(`launch --prove-self-delete`), (1) x86_64 + CUDA에서 lock이 풀리는가
+# (uv sync --frozen --group backbone), (2) 2B LoRA(bf16 adapter + fp32 master)와 전체 미세조정의
+# H100 토큰/s — GB10 기준(Task v0d §4): LoRA fp32 1,784 · LoRA bf16 2,563 · 전체 2,017 토큰/s, (3) 준비·모델 받기를 포함한 처음부터 끝까지의 벽시계.
+# 데이터: v0a.1 표본의 시운전 나눔(Task v0d `split --eval-records 400 --seed 0` — 학습 1,600 / 평가 400). v0b의 시험 세트는 열지 않는다.
+#
+#   uv run python scripts/launch_run.py prices                                    # 읽기 전용: 지금 단가·재고 → 싼 쪽(PCIe/SXM)을 고른다
+#   uv run python scripts/launch_run.py prepare --job configs/cloud/decisions-v0-smoke-h100.yaml --run-id <id> \
+#       --manifest artifacts/cloud/runs/<id>.json --code-ref <학습기가 든 커밋> --hourly-usd <콘솔·카탈로그 단가> [--set provider.gpu_type=…]
+#   uv run python scripts/launch_run.py dry-run --manifest artifacts/cloud/runs/<id>.json
+#   uv run python scripts/launch_run.py launch  --manifest artifacts/cloud/runs/<id>.json --yes
+#
+# 단계 순서는 중요한 것부터다: 마감(감시 마감 − 가져갈 몫)에 걸리면 뒤의 선택 단계가 잘리고, 그래도 앞의 결과는 가져온다.
+kind: robojev-cloud-job-v0
+name: decisions-v0-smoke-h100
+job:
+  kind: decisions
+  model: Qwen/Qwen3.5-2B
+  inputs:
+    - artifacts/scratch/v0d/smoke/sample-2000.v0a1-8fb1919a.train.jsonl
+    - artifacts/scratch/v0d/smoke/sample-2000.v0a1-8fb1919a.eval.jsonl
+  runtime:
+    env:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      HF_HUB_DISABLE_TELEMETRY: "1"
+  setup:
+    - name: sync
+      argv: ["{uv}", "sync", "--frozen", "--group", "backbone"]
+      # evdev(robosuite → pynput의 리눅스 입력 장치)는 x86_64 wheel이 없어 소스로 짓는다 — 컴파일러가 없으면 그것만 빼고 다시
+      fallback: ["{uv}", "sync", "--frozen", "--group", "backbone", "--no-install-package", "evdev"]
+      max_minutes: 12
+      est_minutes: 3
+      env: {UV_LINK_MODE: copy, UV_PYTHON_DOWNLOADS: automatic}
+  steps:
+    - name: env
+      argv: ["{python}", "-m", "robo_jev.launch.envprobe", "--out", "{reports}/env.json"]
+      max_minutes: 3
+      est_minutes: 0.3
+    - name: weights
+      argv: ["{python}", "scripts/fetch_backbone.py", "--from-manifest", "artifacts/models/manifest.json", "--id", "{model}"]
+      max_minutes: 8
+      est_minutes: 1.5
+    - name: lora-bf16
+      # 본 run의 설정 그대로(v0d의 decisions-v0-lora-h100.yaml: LoRA bf16 + fp32 master, λ 0.2, p3, micro-batch 16,384) — step 수만 줄인다
+      argv: ["{python}", "scripts/train_decisions.py", "train", "--config", "configs/train/decisions-v0-lora-h100.yaml",
+             "--set", "train_input=artifacts/scratch/v0d/smoke/sample-2000.v0a1-8fb1919a.train.jsonl",
+             "--set", "out_dir={runs}", "--set", "run_name=lora-bf16", "--set", "max_steps=120", "--set", "dev_every=120",
+             "--set", "checkpoint_every=0", "--gpu-memory-fraction", "0.92"]
+      wall_set: max_wall_hours
+      max_minutes: 9
+      est_minutes: 4.5
+    - name: diagnose-after
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/lora-bf16/checkpoint.pt",
+             "--input", "artifacts/scratch/v0d/smoke/sample-2000.v0a1-8fb1919a.eval.jsonl", "--limit", "100", "--seed", "0",
+             "--out", "{reports}/after-lora-bf16.json", "--preview", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 5
+      est_minutes: 1.5
+      optional: true
+    - name: full-2048
+      # 전체 미세조정 (BF16 + MasterWeightAdamW) — GB10과 같은 micro-batch. 체크포인트 없음(26 GB를 쓰지 않는다)
+      argv: ["{python}", "scripts/train_decisions.py", "train", "--config", "configs/train/decisions-v0-full.yaml",
+             "--set", "train_input=artifacts/scratch/v0d/smoke/sample-2000.v0a1-8fb1919a.train.jsonl",
+             "--set", "out_dir={runs}", "--set", "run_name=full-2048", "--set", "micro_batch_tokens=2048", "--set", "max_steps=12",
+             "--set", "save_checkpoints=false", "--set", "dev_every=0", "--gpu-memory-fraction", "0.92"]
+      wall_set: max_wall_hours
+      max_minutes: 4
+      est_minutes: 1.5
+      optional: true
+    - name: lora-bf16-1024
+      # GB10의 최적(1,024)과 같은 micro-batch — 같은 조건의 배수
+      argv: ["{python}", "scripts/train_decisions.py", "train", "--config", "configs/train/decisions-v0-lora.yaml",
+             "--set", "train_input=artifacts/scratch/v0d/smoke/sample-2000.v0a1-8fb1919a.train.jsonl",
+             "--set", "out_dir={runs}", "--set", "run_name=lora-bf16-1024", "--set", "lora_dtype=bfloat16", "--set", "micro_batch_tokens=1024",
+             "--set", "max_steps=12", "--set", "save_checkpoints=false", "--set", "dev_every=0", "--gpu-memory-fraction", "0.92"]
+      wall_set: max_wall_hours
+      max_minutes: 3
+      est_minutes: 1
+      optional: true
+    - name: full-8192
+      argv: ["{python}", "scripts/train_decisions.py", "train", "--config", "configs/train/decisions-v0-full.yaml",
+             "--set", "train_input=artifacts/scratch/v0d/smoke/sample-2000.v0a1-8fb1919a.train.jsonl",
+             "--set", "out_dir={runs}", "--set", "run_name=full-8192", "--set", "micro_batch_tokens=8192", "--set", "max_steps=12",
+             "--set", "save_checkpoints=false", "--set", "dev_every=0", "--gpu-memory-fraction", "0.92"]
+      wall_set: max_wall_hours
+      max_minutes: 3
+      est_minutes: 1.2
+      optional: true
+    - name: lora-fp32-4096
+      argv: ["{python}", "scripts/train_decisions.py", "train", "--config", "configs/train/decisions-v0-lora.yaml",
+             "--set", "train_input=artifacts/scratch/v0d/smoke/sample-2000.v0a1-8fb1919a.train.jsonl",
+             "--set", "out_dir={runs}", "--set", "run_name=lora-fp32-4096", "--set", "micro_batch_tokens=4096",
+             "--set", "max_steps=12", "--set", "save_checkpoints=false", "--set", "dev_every=0", "--gpu-memory-fraction", "0.92"]
+      wall_set: max_wall_hours
+      max_minutes: 3
+      est_minutes: 1
+      optional: true
+  fetch:
+    - runs/*/metrics.json
+    - runs/*/config.yaml
+    - runs/lora-bf16/checkpoint.pt
+    - reports/*
+provider:
+  name: runpod
+  gpu_type: NVIDIA H100 PCIe        # launch 직전 `prices`로 PCIe·SXM 중 쌀 쪽을 고른다 (--set provider.gpu_type=…)
+  gpu_count: 1
+  cloud: SECURE
+  # CPU 쪽은 venv가 들고 온다(torch cu130 wheel) — 이미지는 sshd·rsync·컴파일러·/start.sh가 있는 RunPod 공식 기반(CUDA 13.0, 6.9 GB)
+  image: runpod/base:1.4.0-cuda1300-ubuntu2404
+  min_cuda_version: "13.0"          # torch 2.14.0의 PyPI 리눅스 wheel은 CUDA 13 (드라이버 ≥ 580) — 그런 호스트에만 놓는다
+  disk_gb: 80                       # venv ≈ 10 GB + 가중치 4.5 GB + 캐시 — 볼륨은 두지 않는다(멈춘 pod의 볼륨 요금을 남기지 않게)
+  boot_timeout_minutes: 10
+  fetch_reserve_minutes: 4
+  delete_margin_minutes: 2
+  start_grace_minutes: 15
+  done_grace_minutes: 10
+budget:
+  hourly_usd: 2.39                  # 자리 — prepare에서 --hourly-usd로 그때의 단가를 적는다 (launch가 API와 대조해 다르면 거절)
+  max_wall_hours: 0.5               # 30분 — 감시가 만든 때부터 28분에 pod를 지운다
+  max_usd: 5.0
+  price_source: "RunPod v2 카탈로그 (launch 직전 대조)"
+  phase: {name: cloud-phase-1, cap_usd: 150}
+estimate:
+  boot_minutes: 4
+  uplink_mbps: 40
+  fetch_minutes: 1.5
+  assumption: "H100 속도는 미측정 — 단계 예상은 GB10 실측(v0d §4)의 1/2 정도로 어림; 이 run이 그 배수를 잰다"
