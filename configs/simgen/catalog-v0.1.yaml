@@ -1,0 +1,422 @@
+# 속성 목록 v0.1 — 의미(몸·움직이는 주체·용기·감각)를 물리 값의 분포로 잇는 다리 (docs/12 §4, Task v0a 지시서 §3).
+# v0.1(리뷰 1 반영): 몸별 회전 감속 하한(comfort_decel)·정지 허용치(stop_tolerance)·끼어듦 마지막 위치 상한(last_fix_max), 가로지르는
+# 상대의 늦은 반응(crossing_reaction), 뚜껑 보임 약 5 %(lid_view), 용기 셋 추가(measuring_cylinder, glue_pot, paint_can).
+#
+# 범위는 [하한, 상한]이고 균등분포로 뽑는다(따로 적지 않으면). 값의 근거는 항목마다 주석에 적었다. 이 파일의 값을 바꾸면
+# `version`을 올린다 — 레코드의 `generator.catalog`가 이 문자열이고, (생성기 버전, 속성 목록 버전, seed)로 레코드를 다시 만든다.
+# 범위 검사는 tests/test_simgen_catalog.py가 한다(지시서 §3.2 표·§3.3 주체 목록의 범위 안인지).
+version: catalog-v0.1
+
+g: 9.81                 # m/s²
+horizon_s: 3.0          # 갈라 굴리기 지평 H (지시서 §3.3)
+dt_s: 0.05              # 적분 간격
+posterior_k: 256        # 사후 표본 수 K (지시서 §3.5)
+
+# ---------------------------------------------------------------------------------------------------------------
+# 몸 4종 (지시서 §3.2 표). 로봇 자신의 값은 고유 감각·사양이라 관측된다(글에 적힌 값 그대로 — 보고 해상도로 반올림한 값이
+# 참값이다). 감속 세 단계는 gentle·moderate·hard; 글에서는 "부드럽게 / 단단히 / 최대로".
+# ---------------------------------------------------------------------------------------------------------------
+bodies:
+  mobile_base:
+    # 서비스·배송 이동 로봇. 실내 서비스 로봇의 순항 속도 0.3–1.5 m/s, 비상 감속 2.5–3.5 m/s²는 바퀴 접지(μ≈0.3–0.4)가 허락하는 범위.
+    speed: [0.3, 1.5]
+    decel: {gentle: [0.8, 1.2], moderate: [1.5, 2.0], hard: [2.5, 3.5]}
+    accel: [0.5, 1.0]             # 멈춘 상태에서 출발 가속(p1_crossing의 멈춘 변형)
+    latency: [0.1, 0.3]           # 인지→제동 반응 지연 s
+    radius: [0.25, 0.40]
+    can_sidestep: true
+    sidestep: {offset: [0.4, 0.7], duration: [1.0, 1.6], speed_ratio: 0.6}
+    slow_ratio: 0.5               # 'slow' = 현재 속도의 이 비율까지 gentle로 감속
+    creep_ratio: 0.3              # 'creep' = 순항 속도의 이 비율까지 gentle로 출발
+    passing_clearance: 0.20       # head-on에서 필요한 폭 = 벽 여유 0.05 × 2 + 지나침 여유 0.10 m
+    turn_radius: [0.5, 3.0]       # 실내 회전 반경(지도에서 읽는 값)
+    turn_approach: [1.0, 3.0]     # 회전 시작까지 거리 m
+    comfort_decel: 0.2            # 회전 전 감속의 하한(필요한 감속이 이보다 작아도 이 정도로 줄인다) m/s²
+    stop_tolerance: 0.05          # p5_braking: 목표(장애물 앞) 정지 허용치 — 이보다 더 일찍 서면 다시 다가가야 한다 m
+    last_fix_max: 2.0             # step_in: 마지막 위치 보고가 진로 중심선에서 이보다 멀지 않게(나이를 줄여 맞춘다) m
+    range_max: 8.0                # 이 거리 밖의 상대는 장면에 두지 않는다(감각 범위)
+    gap_min: 0.10                 # 끼어든 상대와의 최소 간격 m (이미 닿아 있지 않게)
+    speed_resolution: 0.05        # 자기 속도 보고 해상도 m/s
+    sensor_suites: {lidar_camera: 0.6, stereo_camera: 0.4}
+  humanoid:
+    # 두 다리 보행. 걷기 0.3–1.2 m/s, 넘어지지 않고 멈출 수 있는 감속은 바퀴보다 낮다(발 디딤 1~2걸음).
+    speed: [0.3, 1.2]
+    decel: {gentle: [0.5, 0.8], moderate: [1.0, 1.5], hard: [1.8, 2.5]}
+    accel: [0.4, 0.8]
+    latency: [0.15, 0.35]
+    radius: [0.25, 0.35]
+    can_sidestep: true
+    sidestep: {offset: [0.3, 0.6], duration: [1.0, 1.6], speed_ratio: 0.6}
+    slow_ratio: 0.5
+    creep_ratio: 0.3
+    passing_clearance: 0.20
+    turn_radius: [0.5, 2.5]
+    turn_approach: [1.0, 3.0]
+    comfort_decel: 0.15
+    stop_tolerance: 0.05
+    last_fix_max: 2.0
+    range_max: 8.0
+    gap_min: 0.10
+    speed_resolution: 0.05
+    sensor_suites: {lidar_camera: 0.5, stereo_camera: 0.5}
+  forklift_amr:
+    # 자율 지게차·견인 AMR. 짐을 실으면 감속을 낮춘다(`loaded_decel_factor` — 짐이 미끄러지거나 넘어가지 않게; 지시서 §3.2).
+    speed: [0.5, 2.5]
+    decel: {gentle: [0.5, 1.0], moderate: [1.2, 2.0], hard: [2.5, 3.5]}
+    loaded_decel_factor: [0.6, 0.8]
+    accel: [0.3, 0.7]
+    latency: [0.2, 0.5]
+    radius: [0.6, 1.0]
+    can_sidestep: false           # 통로에서 옆으로 비켜서지 못한다
+    slow_ratio: 0.5
+    creep_ratio: 0.3
+    passing_clearance: 0.30
+    turn_radius: [1.5, 6.0]
+    turn_approach: [2.0, 5.0]
+    comfort_decel: 0.15
+    stop_tolerance: 0.10
+    last_fix_max: 2.0
+    range_max: 15.0
+    gap_min: 0.20
+    speed_resolution: 0.05
+    sensor_suites: {lidar_camera: 1.0}
+  arm:
+    # 고정 팔, 끝점(공구·그리퍼) 이동. P1 = 작업 영역에 사람 손·팔이 들어옴, P5 = 그리퍼에 든 비커·컵을 옮김(지시서 §3.2).
+    # 협동 로봇의 끝점 속도 0.1–1.0 m/s, 보호 정지 감속 6–10 m/s². 반지름 = 끝점·공구 여유.
+    speed: [0.1, 1.0]
+    decel: {gentle: [1.0, 2.0], moderate: [3.0, 5.0], hard: [6.0, 10.0]}
+    accel: [1.0, 2.0]
+    latency: [0.02, 0.1]
+    radius: [0.05, 0.15]
+    can_sidestep: false
+    slow_ratio: 0.5
+    creep_ratio: 0.3
+    retract: {speed: [0.1, 0.3]}  # 'retract' = moderate로 멈춘 뒤 gentle로 뒤로 가속해 이 속도로 물러남
+    turn_radius: [0.15, 0.8]      # 끝점이 도는 호의 반지름
+    turn_approach: [0.10, 0.40]
+    comfort_decel: 0.5
+    stop_tolerance: 0.01          # 팔은 목표에서 1 cm 안에 서야 한다
+    last_fix_max: 0.5
+    range_max: 1.2
+    gap_min: 0.02
+    speed_resolution: 0.01
+    sensor_suites: {arm_cell: 1.0}
+
+# 몸마다 가능한 장면과 가중치. 팔은 통로 마주침(p1_head_on)이 없다. 조합 장면(p1p5_step_in_carrying)이 이 단계의 대표 장면이라
+# 가장 크게 둔다(지시서 §3.4).
+scenes_by_body:
+  mobile_base: {p1_step_in: 0.16, p1_crossing: 0.15, p1_head_on: 0.13, p5_braking: 0.14, p5_turning: 0.12, p1p5_step_in_carrying: 0.30}
+  humanoid: {p1_step_in: 0.16, p1_crossing: 0.15, p1_head_on: 0.13, p5_braking: 0.14, p5_turning: 0.12, p1p5_step_in_carrying: 0.30}
+  forklift_amr: {p1_step_in: 0.20, p1_crossing: 0.22, p1_head_on: 0.18, p5_braking: 0.12, p5_turning: 0.10, p1p5_step_in_carrying: 0.18}
+  arm: {p1_step_in: 0.20, p1_crossing: 0.16, p5_braking: 0.14, p5_turning: 0.15, p1p5_step_in_carrying: 0.35}
+
+# p1_crossing 가운데 로봇이 멈춘 채 건널지 정하는 변형(go / creep / wait)의 비율.
+crossing_stopped_share: 0.3
+
+# ---------------------------------------------------------------------------------------------------------------
+# 움직이는 주체 (지시서 §3.3). speed = 평소 걷기·주행 속도 범위, radius = 몸 반폭(닿음 판정 원의 반지름), decel = 스스로 멈출 때
+# 쓰는 감속. group은 단서 표와 닿음 비용의 갈래, reactive는 "멈춰 있는 로봇에 걸어 들어가지 않는다"(head-on에서 줄이 겹치면
+# 늦게라도 선다). hazard_per_s = 관측 뒤 의도가 바뀔 위험률(관측 나이 a초 → 바뀌었을 확률 1 − e^{−λa}).
+# 의도 사전 확률의 근거: 끼어든 어른은 대개 그 자리에서 멈추거나(선반·안내판을 봄) 마저 건넌다 — 지시서 예 {섬 .5, 건넘 .4, 물러남 .1};
+# 아이는 의도 분산이 넓다(지시서 예 {.3, .5, .2}); 보행 보조기 노인은 느리고 멈추는 쪽; 자전거·지게차는 대개 계속 간다;
+# 다른 로봇은 양보 규칙을 따르는 경우가 많다; 작업 영역의 손은 대개 무언가를 하러 들어와 머문다.
+# head-on의 aside_left/right는 **로봇에서 본** 왼쪽·오른쪽이다 — 마주 오는 사람이 자기 오른쪽으로 비키면 로봇의 왼쪽이다.
+# ---------------------------------------------------------------------------------------------------------------
+agents:
+  adult:
+    group: person
+    contact: contact_person
+    speed: [0.8, 1.6]
+    radius: [0.22, 0.30]
+    decel: [1.5, 3.0]
+    reactive: true
+    hazard_per_s: 0.15
+    intent_prior:
+      step_in: {stay: 0.50, cross: 0.40, back: 0.10}
+      crossing: {cross: 0.55, yield: 0.40, hurry: 0.05}
+      head_on: {keep: 0.25, aside_left: 0.40, aside_right: 0.20, stop: 0.15}
+  child:
+    group: person
+    contact: contact_vulnerable
+    speed: [1.0, 3.0]
+    radius: [0.15, 0.22]
+    decel: [2.0, 4.0]
+    reactive: true
+    hazard_per_s: 0.50
+    intent_prior:
+      step_in: {stay: 0.30, cross: 0.50, back: 0.20}
+      crossing: {cross: 0.45, yield: 0.20, hurry: 0.35}
+      head_on: {keep: 0.40, aside_left: 0.20, aside_right: 0.20, stop: 0.20}
+  elder_walker:
+    group: person
+    contact: contact_vulnerable
+    speed: [0.3, 0.9]
+    radius: [0.30, 0.38]          # 보행 보조기 폭 포함
+    decel: [0.5, 1.0]
+    reactive: true
+    hazard_per_s: 0.10
+    intent_prior:
+      step_in: {stay: 0.55, cross: 0.35, back: 0.10}
+      crossing: {cross: 0.50, yield: 0.48, hurry: 0.02}
+      head_on: {keep: 0.20, aside_left: 0.30, aside_right: 0.20, stop: 0.30}
+  cyclist:
+    group: person
+    contact: contact_person
+    speed: [2.5, 6.0]
+    radius: [0.30, 0.40]
+    decel: [2.0, 4.0]
+    reactive: true
+    hazard_per_s: 0.20
+    intent_prior:
+      step_in: {stay: 0.15, cross: 0.75, back: 0.10}
+      crossing: {cross: 0.70, yield: 0.20, hurry: 0.10}
+      head_on: {keep: 0.40, aside_left: 0.30, aside_right: 0.25, stop: 0.05}
+  cart:
+    # 사람이 미는 카트(손수레·이동 침대·쇼핑 카트·짐 수레). 카트에 닿으면 미는 사람에게 힘이 전해지므로 사람 닿음으로 센다.
+    group: person
+    contact: contact_person
+    speed: [0.5, 1.2]
+    radius: [0.35, 0.50]
+    decel: [1.0, 2.0]
+    reactive: true
+    hazard_per_s: 0.15
+    intent_prior:
+      step_in: {stay: 0.50, cross: 0.40, back: 0.10}
+      crossing: {cross: 0.55, yield: 0.42, hurry: 0.03}
+      head_on: {keep: 0.30, aside_left: 0.35, aside_right: 0.20, stop: 0.15}
+  forklift:
+    # 사람이 모는 지게차·견인차.
+    group: vehicle
+    contact: contact_vehicle
+    speed: [1.0, 3.0]
+    radius: [0.60, 0.90]
+    decel: [1.0, 2.5]
+    reactive: true
+    hazard_per_s: 0.10
+    intent_prior:
+      step_in: {stay: 0.35, cross: 0.55, back: 0.10}
+      crossing: {cross: 0.60, yield: 0.30, hurry: 0.10}
+      head_on: {keep: 0.45, aside_left: 0.25, aside_right: 0.15, stop: 0.15}
+  other_robot:
+    # 다른 이동 로봇. 로봇끼리 닿음은 사람 다침이 없어 물체 닿음으로 센다(values-v0 주석).
+    group: robot
+    contact: contact_object
+    speed: [0.3, 1.5]
+    radius: [0.25, 0.45]
+    decel: [1.0, 2.0]
+    reactive: true
+    hazard_per_s: 0.05
+    intent_prior:
+      step_in: {stay: 0.45, cross: 0.45, back: 0.10}
+      crossing: {cross: 0.40, yield: 0.58, hurry: 0.02}
+      head_on: {keep: 0.15, aside_left: 0.45, aside_right: 0.15, stop: 0.25}
+  ball:
+    # 굴러오는 공. 의도가 없다 — 앞으로의 움직임은 숨은 구름 감속(바닥 재질별, 아래 floors)이 정한다.
+    group: ball
+    contact: contact_object
+    speed: [1.0, 5.0]
+    radius: [0.08, 0.15]
+    reactive: false
+    hazard_per_s: 0.0
+  hand:
+    # 팔 작업 영역에 들어온 사람 손·팔. 손에 닿으면 사람 닿음.
+    group: hand
+    contact: contact_person
+    speed: [0.2, 1.5]
+    radius: [0.05, 0.10]
+    decel: [3.0, 8.0]
+    reactive: false
+    hazard_per_s: 0.40
+    intent_prior:
+      step_in: {stay: 0.55, cross: 0.25, back: 0.20}
+      crossing: {cross: 0.50, yield: 0.30, hurry: 0.20}
+
+# 의도별 움직임 매개변수(숨은 값; 사후 표본에서는 이 사전 분포에서 뽑는다). 멈추거나 돌아설 때의 감속은 주체의 `decel` 범위를 쓴다.
+# 거리 매개변수(standoff)는 손이면 `arm_scale`을 곱한다(작업 영역의 크기).
+intent_motion:
+  step_in_lateral_speed: [0.3, 0.8]  # 끼어드는 옆 속도 = 그 주체의 최고 평소 속도 × 이 비율 (공은 ball_lateral_speed)
+  ball_lateral_speed: [0.3, 1.5]
+  stay: {stay_s: [1.5, 6.0]}         # 옆으로 가던 걸음을 멈추고 이만큼 머문 뒤 마저 건넌다
+  cross: {accel: [1.0, 2.0]}         # 옆 속도를 그 주체의 평소 속도(speed 범위)까지 올린다
+  back: {speed_factor: [0.4, 0.8]}   # 돌아서서 (건너던 속도 × 이 비율)로 물러난다
+  yield: {standoff: [0.2, 0.8]}      # 로봇 진로 가장자리 앞 이만큼에서 선다
+  hurry: {factor: [1.3, 1.8], accel: [1.0, 2.0]}
+  aside: {lateral_speed: [0.3, 0.6], wall_gap: 0.05}
+  keep: {standoff: [0.3, 0.8]}       # 줄이 겹치면 이만큼 앞에서 서도록 늦게라도 감속한다(reactive 주체)
+  arm_scale: 0.15
+
+# 가로지르는 상대의 늦은 반응(리뷰 1 질문 4): 사람·로봇·손은 로봇이 자기 줄을 막고 있으면 늦게라도 감속해 선다 — 그럴 확률은 갈래의
+# 기본값 × 단서 배수(정신이 팔렸으면 낮게, 로봇을 봤으면 높게), 최대 0.98. 공은 반응하지 않는다. 'yield' 의도는 반응과 따로 진로 앞에서 선다.
+crossing_reaction:
+  base: {person: 0.75, vehicle: 0.80, robot: 0.95, hand: 0.60, ball: 0.0}
+  cue_factor: {glance: 1.25, distracted: 0.4, steady: 1.0, rushing: 0.6, brake_lights: 1.2, horn: 0.7, amber: 1.0, green: 1.0,
+               priority_light: 0.5, reaching: 1.0, hesitating: 1.3, quick_motion: 0.6}
+  max: 0.98
+  standoff: [0.2, 0.6]            # 로봇 몸 앞 이만큼에서 서려 한다(손이면 arm_scale을 곱한다) m
+
+# 바닥 재질별 공의 구름 저항 계수 μ_r (감속 = μ_r·g). 단단한 바닥은 작고 카펫·흙은 크다(구름 저항 측정 범위).
+floors:
+  hard: [0.01, 0.04]
+  carpet: [0.05, 0.25]
+  pavement: [0.02, 0.08]
+  soil: [0.10, 0.30]
+
+# ---------------------------------------------------------------------------------------------------------------
+# 단서 가능도 P(단서 | 의도) — 의도마다 단서들에 대한 분포(각 의도의 열 합 = 1, 시험이 검사). 단서 하나를 관측으로 주고 사후 의도는
+# 사전 × 가능도로 정확히 갱신한다(지시서 §3.5). 단서 문구는 skins-v0.1.yaml의 cue_phrases.
+# ---------------------------------------------------------------------------------------------------------------
+cues:
+  person:
+    step_in:
+      slowing: {stay: 0.40, cross: 0.10, back: 0.25}
+      steady: {stay: 0.15, cross: 0.50, back: 0.10}
+      glance: {stay: 0.25, cross: 0.15, back: 0.40}
+      distracted: {stay: 0.20, cross: 0.25, back: 0.25}
+    crossing:
+      glance: {cross: 0.20, yield: 0.50, hurry: 0.15}
+      distracted: {cross: 0.35, yield: 0.15, hurry: 0.15}
+      steady: {cross: 0.35, yield: 0.20, hurry: 0.10}
+      rushing: {cross: 0.10, yield: 0.15, hurry: 0.60}
+    head_on:
+      drift_left: {keep: 0.15, aside_left: 0.60, aside_right: 0.05, stop: 0.15}
+      drift_right: {keep: 0.15, aside_left: 0.05, aside_right: 0.60, stop: 0.15}
+      straight: {keep: 0.55, aside_left: 0.20, aside_right: 0.20, stop: 0.30}
+      slowing: {keep: 0.15, aside_left: 0.15, aside_right: 0.15, stop: 0.40}
+  vehicle:
+    step_in:
+      brake_lights: {stay: 0.55, cross: 0.10, back: 0.30}
+      steady: {stay: 0.15, cross: 0.70, back: 0.10}
+      reverse_alarm: {stay: 0.05, cross: 0.05, back: 0.45}
+      horn: {stay: 0.25, cross: 0.15, back: 0.15}
+    crossing:
+      brake_lights: {cross: 0.10, yield: 0.60, hurry: 0.05}
+      steady: {cross: 0.60, yield: 0.20, hurry: 0.25}
+      horn: {cross: 0.30, yield: 0.20, hurry: 0.70}
+    head_on:
+      drift_left: {keep: 0.10, aside_left: 0.60, aside_right: 0.05, stop: 0.10}
+      drift_right: {keep: 0.10, aside_left: 0.05, aside_right: 0.60, stop: 0.10}
+      straight: {keep: 0.70, aside_left: 0.25, aside_right: 0.25, stop: 0.30}
+      brake_lights: {keep: 0.10, aside_left: 0.10, aside_right: 0.10, stop: 0.50}
+  robot:
+    step_in:
+      amber: {stay: 0.60, cross: 0.15, back: 0.30}
+      green: {stay: 0.25, cross: 0.75, back: 0.15}
+      reverse_light: {stay: 0.15, cross: 0.10, back: 0.55}
+    crossing:
+      amber: {cross: 0.15, yield: 0.65, hurry: 0.10}
+      green: {cross: 0.75, yield: 0.25, hurry: 0.40}
+      priority_light: {cross: 0.10, yield: 0.10, hurry: 0.50}
+    head_on:
+      drift_left: {keep: 0.10, aside_left: 0.65, aside_right: 0.05, stop: 0.10}
+      drift_right: {keep: 0.10, aside_left: 0.05, aside_right: 0.65, stop: 0.10}
+      straight: {keep: 0.65, aside_left: 0.20, aside_right: 0.20, stop: 0.25}
+      amber: {keep: 0.15, aside_left: 0.10, aside_right: 0.10, stop: 0.55}
+  hand:
+    step_in:
+      holding_part: {stay: 0.55, cross: 0.15, back: 0.15}
+      reaching_across: {stay: 0.15, cross: 0.65, back: 0.10}
+      pulling_back: {stay: 0.10, cross: 0.05, back: 0.60}
+      still: {stay: 0.20, cross: 0.15, back: 0.15}
+    crossing:
+      reaching: {cross: 0.55, yield: 0.15, hurry: 0.25}
+      hesitating: {cross: 0.15, yield: 0.65, hurry: 0.05}
+      quick_motion: {cross: 0.30, yield: 0.20, hurry: 0.70}
+
+# ---------------------------------------------------------------------------------------------------------------
+# 용기 (지시서 §3.4). diameter = 안지름 D, height = 바닥에서 림까지 H(m), fill = 채움 비율 f의 범위(관측·생성 모두 이 안),
+# transparent = 채움을 카메라로 얼마나 잘 보나(투명하면 채움 잡음 σ가 작다), lid_prior = 뚜껑이 보이지 않을 때 뚜껑이 있을 사전 확률.
+# 내용물(뜨거운 음료·물·약품)은 상황 옷 카드가 정한다 — 같은 머그에 커피도 물도 담긴다. bodies = 그 몸이 들 수 있는 용기.
+# ---------------------------------------------------------------------------------------------------------------
+containers:
+  espresso_cup: {diameter: 0.060, height: 0.055, fill: [0.40, 1.0], transparent: false, lid_prior: 0.02, bodies: [mobile_base, humanoid, arm]}
+  mug: {diameter: 0.082, height: 0.095, fill: [0.40, 1.0], transparent: false, lid_prior: 0.05, bodies: [mobile_base, humanoid, arm]}
+  tall_glass: {diameter: 0.070, height: 0.150, fill: [0.40, 1.0], transparent: true, lid_prior: 0.02, bodies: [mobile_base, humanoid, arm]}
+  soup_bowl: {diameter: 0.160, height: 0.060, fill: [0.40, 1.0], transparent: false, lid_prior: 0.10, bodies: [mobile_base, humanoid]}
+  takeaway_cup: {diameter: 0.090, height: 0.120, fill: [0.50, 1.0], transparent: false, lid_prior: 0.60, bodies: [mobile_base, humanoid, arm]}
+  deli_tub: {diameter: 0.110, height: 0.080, fill: [0.50, 1.0], transparent: false, lid_prior: 0.70, bodies: [mobile_base, humanoid]}
+  pitcher: {diameter: 0.110, height: 0.200, fill: [0.40, 1.0], transparent: true, lid_prior: 0.05, bodies: [mobile_base, humanoid]}
+  beaker_250: {diameter: 0.070, height: 0.095, fill: [0.30, 1.0], transparent: true, lid_prior: 0.05, bodies: [mobile_base, humanoid, arm]}
+  beaker_600: {diameter: 0.090, height: 0.125, fill: [0.30, 1.0], transparent: true, lid_prior: 0.05, bodies: [mobile_base, humanoid, arm]}
+  specimen_cup: {diameter: 0.060, height: 0.080, fill: [0.30, 1.0], transparent: true, lid_prior: 0.40, bodies: [mobile_base, humanoid, arm]}
+  pot: {diameter: 0.240, height: 0.160, fill: [0.30, 1.0], transparent: false, lid_prior: 0.15, bodies: [mobile_base, humanoid]}
+  basin: {diameter: 0.350, height: 0.120, fill: [0.30, 1.0], transparent: false, lid_prior: 0.02, bodies: [mobile_base, humanoid]}
+  shallow_tray: {diameter: 0.400, height: 0.050, fill: [0.30, 1.0], transparent: false, lid_prior: 0.02, bodies: [mobile_base, humanoid, forklift_amr]}
+  bucket: {diameter: 0.280, height: 0.300, fill: [0.30, 1.0], transparent: false, lid_prior: 0.10, bodies: [mobile_base, humanoid, forklift_amr]}
+  open_tote: {diameter: 0.500, height: 0.300, fill: [0.30, 1.0], transparent: false, lid_prior: 0.10, bodies: [forklift_amr]}
+  measuring_cylinder: {diameter: 0.055, height: 0.250, fill: [0.30, 1.0], transparent: true, lid_prior: 0.03, bodies: [mobile_base, humanoid, arm]}
+  glue_pot: {diameter: 0.100, height: 0.090, fill: [0.30, 0.90], transparent: false, lid_prior: 0.30, bodies: [mobile_base, humanoid, arm]}
+  paint_can: {diameter: 0.170, height: 0.190, fill: [0.30, 1.0], transparent: false, lid_prior: 0.40, bodies: [mobile_base, humanoid, forklift_amr]}
+
+slosh_k: [1.0, 1.6]       # 정적 액면 근사 위의 출렁임 계수 k (숨은 값; 지시서 §3.4)
+fill_sigma: {opaque: 0.10, transparent: 0.04}   # 채움 관측 잡음 σ_f (불투명 용기는 위에서 비스듬히 봐서 거칠다)
+# 뚜껑 관측 모형: 참 뚜껑 ~ Bernoulli(lid_prior[용기]); 뚜껑이 있으면 'lid'(보임) 0.35 / 'unknown' 0.65, 없으면 'open'(보임) 0.75 /
+# 'unknown' 0.25. 'unknown'이면 사후 P(뚜껑) = p·0.65 / (p·0.65 + (1 − p)·0.25). 뚜껑이 보이는 레코드는 약 5 %(리뷰 1 질문 7:
+# 쏟아짐 질문이 늘 0이 되는 쉬운 음성 — 줄이고, 그때는 쏟아짐 대신 '뚜껑까지 차오르나'를 묻는다).
+lid_view:
+  given_lid: {lid: 0.35, unknown: 0.65}
+  given_open: {open: 0.75, unknown: 0.25}
+
+# ---------------------------------------------------------------------------------------------------------------
+# 감각 구성 (지시서 §3.5). 라이다 거리 σ 0.02–0.05 m; 카메라 깊이 σ 0.05–0.15 m(거리에 비례해 커짐); 속도 추정 σ 0.1–0.3 m/s.
+# 팔의 작업 셀(손목·천장 깊이 카메라 + 광 커튼)은 거리가 짧아 mm 단위다.
+# distance_sigma가 per_m이면 σ = clip(per_m × 거리, min, max).
+# ---------------------------------------------------------------------------------------------------------------
+sensor_suites:
+  lidar_camera:
+    distance_sigma: [0.02, 0.05]
+    lateral_sigma: [0.03, 0.06]
+    speed_sigma: [0.10, 0.20]
+    width_sigma: [0.02, 0.04]
+  stereo_camera:
+    distance_sigma: {per_m: [0.02, 0.04], min: 0.05, max: 0.15}
+    lateral_sigma: [0.05, 0.10]
+    speed_sigma: [0.15, 0.30]
+    width_sigma: [0.04, 0.08]
+  arm_cell:
+    distance_sigma: [0.005, 0.015]
+    lateral_sigma: [0.005, 0.015]
+    speed_sigma: [0.03, 0.08]
+    width_sigma: [0.005, 0.010]
+
+observation:
+  age: {fresh_share: 0.5, fresh: [0.0, 0.2], stale: [0.2, 1.5]}    # 관측 나이 s (지시서 §3.5: 0–1.5 s)
+  two_fix_share: 0.3          # 속도 대신 위치 두 개와 시각만 준다
+  two_fix_dt: [0.5, 1.0]
+  side_view: {clear: 0.45, blocked: 0.20, occluded: 0.35}        # 비켜설 수 있는 몸의 옆 공간 보임 상태(좌우 따로)
+
+# ---------------------------------------------------------------------------------------------------------------
+# 결정 여유 (지시서 §3.7). 목표 여유 m ~ 0.6·N(0, σ_m) + 0.4·U(−M, M) — 혼합분포(무게 0.6 / 0.4)로 읽는다. 표면 변수를 그 여유에
+# 맞춰 푼다. σ_m·M은 몸의 크기·속도에 맞춰 장면마다 정한다(M은 그 몸이 실제로 만들 수 있는 여유 안 — 예: 팔의 최대 멈춤 거리 ≈ 0.12 m).
+#   step_in  m = gap − (반응 거리 + moderate 멈춤 거리) − 반지름 합                          [m]
+#   crossing m = 상대 도착 시각 − (로봇이 비우는 시각 + 0.3 s)                               [s]
+#   head_on  m = 남는 옆 폭(통로 폭 − 두 몸 폭) − 필요한 폭(passing_clearance)               [m]
+#   spill    m = (H − f·H − k_ref·(D/2)·a_ref/g) / H   — 기준 가속에서 림까지 남는 높이의 비율 [림 높이 비율]
+#   stop     m = 장애물 거리 − 로봇 반지름 − (반응 거리 + moderate 멈춤 거리)                   [m]  (p5_braking)
+# ---------------------------------------------------------------------------------------------------------------
+margins:
+  normal_weight: 0.6
+  safety_s: 0.3
+  spill_k_ref: 1.3            # k 범위 [1.0, 1.6]의 가운데
+  # step_in·stop의 σ_m은 '멈춤 세기가 결과를 가르는 띠'에 맞춘다: 대표 속도에서 gentle과 moderate의 멈춤 거리 차(+쪽)와 moderate와
+  # hard의 차(−쪽)가 이동 로봇 ≈ 0.1–0.2 m, 지게차 ≈ 0.3–0.6 m, 팔 ≈ 0.02–0.05 m다. σ_m을 이보다 크게 두면 '무엇을 해도 닿는' 경우가
+  # 30 % 가까이 된다(스모크 실측) — 판단이 아니라 운이 정하는 레코드다.
+  step_in:
+    unit: m
+    sigma: {mobile_base: 0.15, humanoid: 0.12, forklift_amr: 0.30, arm: 0.02}
+    half_range: {mobile_base: 0.40, humanoid: 0.35, forklift_amr: 0.80, arm: 0.05}
+  crossing:
+    unit: s
+    sigma: {mobile_base: 0.50, humanoid: 0.50, forklift_amr: 0.50, arm: 0.30}
+    half_range: {mobile_base: 1.20, humanoid: 1.20, forklift_amr: 1.20, arm: 0.80}
+  head_on:
+    unit: m
+    sigma: {mobile_base: 0.12, humanoid: 0.12, forklift_amr: 0.20}
+    half_range: {mobile_base: 0.30, humanoid: 0.30, forklift_amr: 0.50}
+  spill:
+    unit: rim_fraction
+    sigma: {mobile_base: 0.06, humanoid: 0.06, forklift_amr: 0.06, arm: 0.06}
+    half_range: {mobile_base: 0.15, humanoid: 0.15, forklift_amr: 0.15, arm: 0.15}
+  stop:
+    unit: m
+    sigma: {mobile_base: 0.15, humanoid: 0.12, forklift_amr: 0.30, arm: 0.02}
+    half_range: {mobile_base: 0.40, humanoid: 0.35, forklift_amr: 0.80, arm: 0.05}
