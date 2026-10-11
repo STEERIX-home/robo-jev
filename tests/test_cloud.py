@@ -300,6 +300,8 @@ echo "PY311=%s"
 echo "NOW=$(date +%%s)"
 echo "GPU=fake H100"
 if [ -f "$R/watchdog.pid" ] && kill -0 "$(cat "$R/watchdog.pid")" 2>/dev/null; then echo "WATCHDOG=armed"; else echo "WATCHDOG=missing"; fi
+i=0; while [ ! -s "$R/watchdog-auth" ] && [ "$i" -lt 30 ]; do sleep 1; i=$((i + 1)); done
+echo "WATCHDOG_AUTH=$(cat "$R/watchdog-auth" 2>/dev/null || echo none)"
 """ % sys.executable
 
 
@@ -326,22 +328,45 @@ def write_job(tmp_path: Path, *, steps: list | None = None, budget: dict | None 
 
 
 class Container:
-    """"pod"의 컨테이너 — 가짜 API에 실린 env로 **진짜 시작 명령**을 sh로 돌린다 (감시가 뜨고 pid 파일이 생긴다)."""
+    """"pod"의 컨테이너 — 가짜 API에 실린 env로 **진짜 시작 명령**을 sh로 돌린다 (감시가 뜨고 pid 파일이 생긴다).
 
-    def __init__(self, tmp_path: Path) -> None:
+    가짜 `runpodctl`·`curl`이 PATH 앞에 있다: 읽기(`pod get`, `-w` 상태 코드, GraphQL 읽기)는 `routes_ok`대로 인증되거나 거절되고, 지우기
+    (`pod delete`·`remove pod`·REST DELETE·GraphQL podTerminate)가 `delete_ok`면 표지 파일(`marker`)을 만든다 — 가짜 API는 그 표지를 보고
+    pod를 TERMINATED로 둔다(pod 안의 길이 자기 pod를 지운 것).
+    """
+
+    def __init__(self, tmp_path: Path, *, routes_ok: bool = True, delete_ok: bool = True) -> None:
         self.tmp = tmp_path
         self.process: subprocess.Popen | None = None
         self.calls = tmp_path / "runpodctl.log"
+        self.marker = tmp_path / "deleted-from-inside-the-pod"
+        self.routes_ok = routes_ok
+        self.delete_ok = delete_ok
+
+    def _fakes(self, bin_dir: Path) -> None:
+        delete = f'touch "{self.marker}"; exit 0' if self.delete_ok else "exit 1"
+        read = "exit 0" if self.routes_ok else "exit 1"
+        (bin_dir / "runpodctl").write_text(
+            f'#!/bin/sh\necho "runpodctl $*" >> "{self.calls}"\ncase "$1 $2" in\n'
+            f'  "pod delete"|"remove pod") {delete} ;;\n  "pod get"|"get pod") {read} ;;\nesac\nexit 0\n', encoding="utf-8")
+        code = "200" if self.routes_ok else "401"
+        body = '{"data":{"pod":{"id":"%s"}}}' if self.routes_ok else '{"errors":[{"message":"unauthorized"}]}'
+        (bin_dir / "curl").write_text(
+            f'#!/bin/sh\necho "curl $*" >> "{self.calls}"\ncase "$*" in\n'
+            f'  *"-X DELETE"*|*podTerminate*) {delete if self.delete_ok else "exit 22"} ;;\n'
+            f'  *" -w "*) printf {code}; exit 0 ;;\n'
+            f'  *"query {{ pod"*) printf \'{body}\' "$RUNPOD_POD_ID"; exit 0 ;;\nesac\nexit 0\n', encoding="utf-8")
+        for name in ("runpodctl", "curl"):
+            (bin_dir / name).chmod(0o755)
 
     def boot(self, pod_env: dict[str, str], pod_id: str) -> None:
         if self.process is not None:
             return
         bin_dir = self.tmp / "podbin"
         bin_dir.mkdir(exist_ok=True)
-        fake = bin_dir / "runpodctl"
-        fake.write_text(f'#!/bin/sh\necho "runpodctl $*" >> "{self.calls}"\nexit 0\n', encoding="utf-8")
-        fake.chmod(0o755)
-        env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(self.tmp), "RUNPOD_POD_ID": pod_id, "RUNPOD_API_KEY": "pod-scoped", **pod_env}
+        self._fakes(bin_dir)
+        env = {"PATH": f"{bin_dir}:/usr/bin:/bin", "HOME": str(self.tmp), "RUNPOD_POD_ID": pod_id, "RUNPOD_API_KEY": "pod-scoped",
+               "ROBOJEV_WATCHDOG_POLL": "0.5", **pod_env}  # fmt: skip
         self.process = subprocess.Popen(["/bin/sh", "-c", start_script()], env=env, start_new_session=True,
                                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)  # fmt: skip
         root = Path(pod_env["ROBOJEV_ROOT"])
@@ -367,10 +392,33 @@ class PinnedLocal(LocalBackend):
         pass
 
 
+class FakeFence:
+    """셋째 울타리(이 상자의 systemd 타이머)의 기록용 가짜 — 검사가 진짜 타이머를 남기지 않게."""
+
+    def __init__(self, *, fail: bool = False) -> None:
+        self.armed: list[dict] = []
+        self.disarmed: list[str] = []
+        self.fail = fail
+
+    def arm(self, *, manifest_path, run_id, at_epoch, now_epoch):
+        if self.fail:
+            raise RuntimeError("셋째 울타리(이 상자의 systemd 타이머)를 걸지 못했다: no user bus")
+        record = {"unit": f"cloud-fence-{run_id}", "fires_in_seconds": int(at_epoch - now_epoch), "fires_at_epoch": at_epoch, "armed": True,
+                  "manifest": str(manifest_path)}  # fmt: skip
+        self.armed.append(record)
+        return dict(record)
+
+    def disarm(self, *, run_id):
+        self.disarmed.append(run_id)
+        return True
+
+
 @pytest.fixture
-def pod_world(tmp_path):
+def pod_world(tmp_path, request):
+    marker = getattr(request, "param", {}) or {}
     api = FakeRunPodApi()
-    container = Container(tmp_path)
+    container = Container(tmp_path, routes_ok=marker.get("routes_ok", True), delete_ok=marker.get("delete_ok", True))
+    api.external_delete_marker = str(container.marker)
     ledger = Ledger(tmp_path / "ledger.json")
     lines: list[str] = []
 
@@ -380,8 +428,10 @@ def pod_world(tmp_path):
         root = manifest["provider"]["remote_root"]
         return PinnedLocal(remote_dir=f"{root}/run", remote_repo=f"{root}/repo", remote_python="python3", gpus=1)
 
-    ctx = PodContext(provider=_provider(api), ledger=ledger, backend_factory=factory, out=lines.append, poll_seconds=0.3)
-    yield {"api": api, "ctx": ctx, "ledger": ledger, "container": container, "lines": lines, "tmp": tmp_path}
+    fence = FakeFence()
+    ctx = PodContext(provider=_provider(api), ledger=ledger, backend_factory=factory, out=lines.append, poll_seconds=0.3, fence=fence,
+                     ambiguous_sweep_seconds=2.0, ambiguous_sweep_poll=0.2, self_delete_timeout=20.0)  # fmt: skip
+    yield {"api": api, "ctx": ctx, "ledger": ledger, "container": container, "lines": lines, "tmp": tmp_path, "fence": fence}
     container.stop()
     for pod in api.pods.values():  # "pod"를 지워도 이 상자의 러너 유닛은 남는다 — 진짜 pod라면 함께 사라질 것을 여기서 멈춘다
         subprocess.run(["systemctl", "--user", "stop", pod["name"]], capture_output=True, check=False)
@@ -745,3 +795,218 @@ def test_the_fake_catalog_matches_the_real_catalog_shape():
     for gpu in CATALOG:
         assert {"id", "name", "memory", "secure", "community", "price", "maxCount"} <= set(gpu)
         assert {"secure", "community"} <= set(gpu["price"])
+
+
+# --------------------------------------------------------------------------
+# 수정 1 (리뷰 1): 울타리 셋·증명 모드·애매한 만들기·장부의 실제 지출
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("pod_world", [{"routes_ok": False}], indirect=True)
+def test_a_pod_whose_delete_routes_do_not_authenticate_is_deleted_without_working(pod_world):
+    """감시가 같은 키로 자기 pod를 **읽어 봤더니** 어느 길도 인증되지 않았다 — 실행기가 죽으면 남을 pod이므로 일하지 않고 지운다 (I1 c)."""
+    manifest, path = _prepared(pod_world, _unique("cloud1-noroute"))
+    with pytest.raises(RuntimeError, match="지울 길이 하나도 인증되지 않았다"):
+        launch_pod(manifest, manifest_path=path, ctx=pod_world["ctx"], yes=True)
+    saved = load_manifest(path)
+    assert pod_world["api"].live_pods() == [] and saved["provider"]["pod"]["delete_confirmed"] is True
+    assert "runpodctl=fail" in saved["provider"]["pod"]["bootstrap"]["WATCHDOG_AUTH"]
+    assert not (pod_world["tmp"] / "pod" / "run" / "state.json").exists(), "러너를 띄우지 않았다"
+    calls = pod_world["container"].calls.read_text(encoding="utf-8")
+    assert "pod get" in calls and "pod delete" not in calls, "점검은 읽기만 했다 (지운 것은 실행기다)"
+
+
+def test_the_third_fence_is_armed_past_the_watchdog_deadline_and_taken_down_after_a_confirmed_delete(pod_world):
+    """셋째 울타리 — 이 상자의 타이머가 감시 마감 + 5분에 `down --fence` (I1 d). 지움이 확인되면 내린다."""
+    run_id = _unique("cloud1-fence")
+    manifest, path = _prepared(pod_world, run_id)
+    launch_pod(manifest, manifest_path=path, ctx=pod_world["ctx"], yes=True, dest=pod_world["tmp"] / "f")
+    pod = load_manifest(path)["provider"]["pod"]
+    (armed,) = pod_world["fence"].armed
+    assert armed["fires_at_epoch"] == pytest.approx(pod["terminate_at_epoch"] + 300.0)
+    assert armed["manifest"] == str(path) and pod["fence"]["unit"] == f"cloud-fence-{run_id}"
+    assert pod_world["fence"].disarmed == [run_id] and pod["fence"]["disarmed"] is True
+
+
+def test_a_fence_that_cannot_be_armed_stops_the_launch_and_deletes_the_pod(pod_world):
+    pod_world["ctx"].fence = FakeFence(fail=True)
+    manifest, path = _prepared(pod_world, _unique("cloud1-nofence"))
+    with pytest.raises(RuntimeError, match="셋째 울타리"):
+        launch_pod(manifest, manifest_path=path, ctx=pod_world["ctx"], yes=True)
+    assert pod_world["api"].live_pods() == [] and pod_world["ledger"].summary()["open_runs"] == []
+
+
+def test_the_systemd_fence_runs_down_with_the_fence_flag_at_the_right_time():
+    from robo_jev.launch.cloud import SystemdFence
+
+    seen = []
+
+    def runner(argv, **kwargs):
+        seen.append(argv)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    fence = SystemdFence(python="/py", repo=Path("/repo"), runner=runner)
+    armed = fence.arm(manifest_path="/runs/x.json", run_id="run-1", at_epoch=1_000_900.0, now_epoch=1_000_000.0)
+    argv = seen[0]
+    assert argv[:2] == ["systemd-run", "--user"] and "--unit=cloud-fence-run-1" in argv and "--on-active=900s" in argv
+    assert argv[-6:] == ["/py", "/repo/scripts/launch_run.py", "down", "--manifest", str(Path("/runs/x.json").resolve()), "--fence"]
+    assert armed["fires_in_seconds"] == 900 and armed["armed"] is True
+    fence.disarm(run_id="run-1")
+    assert seen[1] == ["systemctl", "--user", "stop", "cloud-fence-run-1.timer"]
+
+
+def test_down_from_the_fence_does_nothing_once_the_delete_was_confirmed(pod_world):
+    manifest, path = _prepared(pod_world, _unique("cloud1-fence-late"))
+    launch_pod(manifest, manifest_path=path, ctx=pod_world["ctx"], yes=True, dest=pod_world["tmp"] / "f")
+    before = pod_world["ledger"].read()
+    calls = len(pod_world["api"].requests)
+    assert down(load_manifest(path), manifest_path=path, ctx=pod_world["ctx"], fence=True) is True
+    assert pod_world["ledger"].read()["runs"] == before["runs"], "장부를 두 번 닫지 않는다"
+    assert len(pod_world["api"].requests) == calls, "API도 부르지 않는다"
+
+
+def test_prove_self_delete_lets_the_in_pod_route_delete_and_names_the_route(pod_world):
+    """증명 모드 (I1 a): job과 가져오기가 끝난 뒤 감시가 **자기 길로** 지운다 — 실행기는 DELETE를 보내지 않고 404만 확인한다."""
+    manifest, path = _prepared(pod_world, _unique("cloud1-prove"))
+    launch_pod(manifest, manifest_path=path, ctx=pod_world["ctx"], yes=True, dest=pod_world["tmp"] / "f", prove_self_delete=True)
+    saved = load_manifest(path)
+    proof = saved["provider"]["pod"]["self_delete"]
+    assert proof["proved"] is True and proof["route"] == "runpodctl pod delete" and proof["deleted_by"] == "watchdog:runpodctl pod delete"
+    assert pod_world["api"].deleted == [], "실행기는 DELETE를 보내지 않았다 — pod 안의 길이 지웠다"
+    assert pod_world["api"].live_pods() == [] and saved["provider"]["pod"]["delete_confirmed"] is True
+    assert pod_world["ledger"].summary()["runs"][0]["status"] == "closed"
+
+
+@pytest.mark.parametrize("pod_world", [{"delete_ok": False}], indirect=True)
+def test_prove_self_delete_falls_back_to_the_launcher_when_the_in_pod_route_fails(pod_world):
+    pod_world["ctx"].self_delete_timeout = 4.0
+    manifest, path = _prepared(pod_world, _unique("cloud1-prove-fail"))
+    launch_pod(manifest, manifest_path=path, ctx=pod_world["ctx"], yes=True, dest=pod_world["tmp"] / "f", prove_self_delete=True)
+    proof = load_manifest(path)["provider"]["pod"]["self_delete"]
+    assert proof["proved"] is False and proof["deleted_by"] == "launcher"
+    assert pod_world["api"].deleted == ["fakepod001"], "기한 안에 안 지워지면 실행기가 지운다"
+
+
+def test_a_pod_created_after_the_client_gave_up_is_found_by_the_repeated_sweep(pod_world):
+    """POST가 끊긴 뒤에 RunPod가 pod를 만든다 — 한 번 찾고 끝내면 놓친다(I2). 몇 번 다시 찾아 지운다."""
+    pod_world["api"].create_mode = "late"
+    pod_world["api"].late_after = 4
+    manifest, path = _prepared(pod_world, _unique("cloud1-late"))
+    with pytest.raises(RunPodError):
+        launch_pod(manifest, manifest_path=path, ctx=pod_world["ctx"], yes=True)
+    pod = load_manifest(path)["provider"]["pod"]
+    assert pod["ambiguous_sweeps"] >= 2 and pod["id"] == "fakepod001"
+    assert pod_world["api"].live_pods() == [] and pod_world["ledger"].summary()["runs"][0]["status"] == "closed"
+
+
+def test_an_ambiguous_create_that_is_never_found_keeps_the_reservation_and_blocks_a_relaunch(pod_world):
+    pod_world["api"].create_mode = "never"
+    manifest, path = _prepared(pod_world, _unique("cloud1-never"))
+    with pytest.raises(RunPodError):
+        launch_pod(manifest, manifest_path=path, ctx=pod_world["ctx"], yes=True)
+    saved = load_manifest(path)
+    assert (saved["state"], saved["exit_reason"]) == ("unknown", "create-ambiguous")
+    run = pod_world["ledger"].summary()["runs"][0]
+    assert run["status"] == "create-ambiguous" and pod_world["ledger"].committed_usd() == pytest.approx(run["cap_usd"]), "'모른다'는 상한 전부"
+    with pytest.raises(RuntimeError, match="두 번"):
+        launch_pod(saved, manifest_path=path, ctx=pod_world["ctx"], yes=True)
+    with pytest.raises(LedgerError, match="애매"):
+        pod_world["ledger"].release(saved["run_id"], reason="사람이 지웠다고 믿는다")
+    assert down(saved, manifest_path=path, ctx=pod_world["ctx"]) is True
+    resolved = load_manifest(path)
+    assert resolved["exit_reason"] == "create-ambiguous-resolved" and pod_world["ledger"].committed_usd() == 0.0
+
+
+def test_a_pod_still_alive_past_its_deadline_is_counted_until_it_is_actually_deleted(pod_world):
+    """감시가 실패해 pod가 마감을 넘겨 살아 있었다 — 장부는 상한에서 자르지 않고 실제로 지운 때까지 센다 (I3)."""
+    manifest, path = _prepared(pod_world, _unique("cloud1-overrun"))
+    api = pod_world["api"]
+    status, body = api(("POST"), "https://api.runpod.io/v2/pods", {}, json.dumps({"name": manifest["run_id"], "image": "x", "cloud": "SECURE",
+                       "gpu": {"id": "NVIDIA H100 80GB HBM3", "count": 1}, "env": {}}).encode(), 30)[0], None  # fmt: skip
+    pod_world["ledger"].reserve(manifest["run_id"], cap_usd=1.345, hourly_usd=2.69, manifest=str(path), phase=manifest["budget"]["phase"])
+    pod_world["ledger"].activate(manifest["run_id"], pod_id="fakepod001")
+    api.pods["fakepod001"]["status"] = "RUNNING"
+    now_epoch = time.time()
+    manifest["provider"]["pod"] = {"id": "fakepod001", "create_requested_epoch": now_epoch - 3 * 3600, "terminate_at_epoch": now_epoch - 2.5 * 3600}
+    assert down(manifest, manifest_path=path, ctx=pod_world["ctx"]) is True
+    spent = load_manifest(path)["provider"]["pod"]["spent_usd_estimate"]
+    assert spent == pytest.approx(3 * 2.69, rel=0.01), "3시간 × 단가 — 감시 마감(0.5 h)으로 자르지 않는다"
+    assert pod_world["ledger"].committed_usd() == pytest.approx(spent)
+
+
+def test_billed_amounts_are_reconciled_before_every_launch_and_can_refuse_it(pod_world):
+    """닫힌 run의 실제 청구가 추정보다 많았다 — launch는 예약 전에 청구 기록을 읽고(읽기 전용) 그 숫자로 $150을 잰다 (I3)."""
+    first, path1 = _prepared(pod_world, _unique("cloud1-billed"))
+    launch_pod(first, manifest_path=path1, ctx=pod_world["ctx"], yes=True, dest=pod_world["tmp"] / "f")
+    pod_world["api"].billed["fakepod001"] = 149.5  # 추정보다 훨씬 많이 청구됐다
+    second, path2 = _prepared(pod_world, _unique("cloud1-after"))  # prepare는 아직 대조 전의 장부를 본다
+    with pytest.raises(PhaseCapExceeded):
+        launch_pod(second, manifest_path=path2, ctx=pod_world["ctx"], yes=True)
+    assert len(pod_world["api"].created) == 1, "둘째 pod는 만들지 않았다"
+    billing = [i for i, r in enumerate(pod_world["api"].requests) if r["path"] == "billing/pods"]
+    assert billing, "청구 기록을 읽었다"
+    assert pod_world["ledger"].committed_usd() == pytest.approx(149.5)
+
+
+def test_the_cli_relaunches_itself_under_systemd_and_returns_at_once(pod_world, tmp_path):
+    """systemd 유닛 밖에서 `launch --yes`를 부르면 유닛(cloud-<run-id>, TimeoutStopSec=600)으로 다시 띄우고 곧바로 돌아온다 — 도구의
+    시간 초과가 실행기를 SIGKILL하지 못하게 (I1). 유닛 안에서는(`--foreground`) 그대로 돈다."""
+    manifest, path = _prepared(pod_world, _unique("cloud1-detach"))
+    fake = tmp_path / "fake-systemd-run"
+    record = tmp_path / "systemd-run.args"
+    fake.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > "{record}"\nexit 0\n', encoding="utf-8")
+    fake.chmod(0o755)
+    env = {k: v for k, v in os.environ.items() if k != "INVOCATION_ID"}
+    env.update(ROBOJEV_SYSTEMD_RUN=str(fake), CUDA_VISIBLE_DEVICES="")
+    started = time.monotonic()
+    result = subprocess.run([sys.executable, str(REPO / "scripts" / "launch_run.py"), "launch", "--manifest", str(path), "--yes",
+                             "--prove-self-delete", "--key-file", str(tmp_path / "no-key.env"), "--ledger", str(tmp_path / "ledger.json")],
+                            capture_output=True, text=True, check=False, env=env)  # fmt: skip
+    assert result.returncode == 0, result.stderr
+    assert time.monotonic() - started < 30
+    out = json.loads(result.stdout)
+    assert out["detached"] is True and out["unit"] == f"cloud-{manifest['run_id']}" and out["log"].endswith(f"{manifest['run_id']}-launch.log")
+    args = record.read_text(encoding="utf-8").splitlines()
+    assert args[:2] == ["--user", f"--unit=cloud-{manifest['run_id']}"] and "TimeoutStopSec=600" in args
+    assert args[-1] == "--foreground" and "--prove-self-delete" in args and "--yes" in args and str(path) in args
+    assert pod_world["api"].requests == [] and load_manifest(path)["state"] == "prepared"
+
+
+def test_the_cli_exits_3_when_a_failed_launch_left_a_pod_unconfirmed(pod_world, monkeypatch, tmp_path):
+    """예외 길에서도 명세가 '지움 미확인'이면 종료 코드 3 — 감싸는 쪽이 코드만 봐도 알게 (리뷰 1의 Minor 1)."""
+    import importlib.util
+
+    import robo_jev.launch.cloud as cloud
+
+    manifest, path = _prepared(pod_world, _unique("cloud1-exit3"))
+    spec = importlib.util.spec_from_file_location("launch_run_exit3", REPO / "scripts" / "launch_run.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["launch_run_exit3"] = module
+    spec.loader.exec_module(module)
+
+    def failing_launch(manifest, *, manifest_path, **kwargs):
+        manifest["provider"]["pod"].update(id="fakepod009", delete_confirmed=False)
+        manifest["exit_reason"] = "pod-delete-unconfirmed"
+        from robo_jev.launch.manifest import note_state, save_manifest
+
+        note_state(manifest, "unknown", note="검사")
+        save_manifest(manifest_path, manifest)
+        raise PriceMismatch("pod fakepod009: 실제 청구 단가 다름")
+
+    monkeypatch.setattr(cloud, "launch_pod", failing_launch)
+    monkeypatch.setattr(module, "_pod_context", lambda args, read_only=False: None)
+    code = module.main(["launch", "--manifest", str(path), "--yes", "--foreground"])
+    assert code == 3
+
+
+def test_a_stale_reservation_can_be_released_from_the_cli_but_never_one_with_a_pod(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.json")
+    ledger.reserve("stale", cap_usd=2.0, hourly_usd=4.0, manifest=None)
+    ledger.reserve("real", cap_usd=2.0, hourly_usd=4.0, manifest=None)
+    ledger.activate("real", pod_id="p1")
+    result = _cli("ledger", "--ledger", str(tmp_path / "ledger.json"), "--release", "stale")
+    assert result.returncode != 0 and "이유" in result.stderr
+    result = _cli("ledger", "--ledger", str(tmp_path / "ledger.json"), "--release", "real", "--reason", "x")
+    assert result.returncode != 0 and "pod p1" in result.stderr
+    result = _cli("ledger", "--ledger", str(tmp_path / "ledger.json"), "--release", "stale", "--reason", "실행기가 만들기 전에 죽었다")
+    assert result.returncode == 0 and ledger.summary()["open_runs"] == ["real"]

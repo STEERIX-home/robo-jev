@@ -37,6 +37,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+import os
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -277,6 +279,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--keep-on-interrupt", dest="keep_on_interrupt", action="store_true", help="(pod) 중단해도 지우지 않는다 (감시 마감에 지워진다)")
     run.add_argument("--ledger", default=None)
     run.add_argument("--key-file", dest="key_file", default=None, help="(pod) API 키 파일 (기본 ~/.config/robo-jev/runpod.env)")
+    run.add_argument("--prove-self-delete", dest="prove_self_delete", action="store_true",
+                     help="(pod) job과 가져오기가 끝난 뒤 pod 안의 감시가 스스로 지우게 하고 어느 길이 지웠는지 적는다 (3분 안에 안 되면 실행기가 지운다)")
+    run.add_argument("--foreground", action="store_true",
+                     help="(pod) 이 프로세스에서 바로 돈다 — 기본은 systemd 유닛(cloud-<run-id>, TimeoutStopSec=600)으로 다시 띄우고 곧바로 돌아온다")
 
     done = sub.add_parser("finish", help="(pod) 다시 붙어 기다리고 가져온 뒤 지운다")
     done.add_argument("--manifest", required=True)
@@ -289,6 +295,7 @@ def build_parser() -> argparse.ArgumentParser:
     kill.add_argument("--manifest", required=True)
     kill.add_argument("--ledger", default=None)
     kill.add_argument("--key-file", dest="key_file", default=None)
+    kill.add_argument("--fence", action="store_true", help="셋째 울타리(이 상자의 타이머)가 부른다 — 이미 지움이 확인된 명세면 아무것도 하지 않는다")
 
     pods = sub.add_parser("pods", help="(읽기 전용) 내 pod·네트워크 볼륨 — 남은 자원이 없는지")
     pods.add_argument("--key-file", dest="key_file", default=None)
@@ -303,6 +310,7 @@ def build_parser() -> argparse.ArgumentParser:
     book.add_argument("--set-phase-cap", dest="set_phase_cap", type=float, default=None)
     book.add_argument("--reason", default=None)
     book.add_argument("--reconcile", action="store_true", help="(읽기 전용) pod를 만든 run마다 RunPod 청구 기록을 장부에 적는다")
+    book.add_argument("--release", default=None, metavar="RUN_ID", help="pod를 만들지 않은 예약을 푼다 (pod가 있었으면 거절 — --reason 필수)")
     book.add_argument("--key-file", dest="key_file", default=None)
     return parser
 
@@ -340,11 +348,43 @@ def _pod_context(args: argparse.Namespace, *, read_only: bool = False) -> Any:
 
 
 DEFAULT_PRICE_GPUS = ("NVIDIA H100 PCIe", "NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL", "NVIDIA H200")
+#: 분리 실행한 launch의 로그 자리 (git 밖)
+DETACH_LOG_DIR = REPO / "artifacts" / "scratch" / "cloud"
+
+
+def detach_command(raw_argv: list[str], *, run_id: str, log: Path, cwd: str, systemd_run: str = "systemd-run") -> list[str]:
+    """`launch`를 systemd 유닛으로 다시 띄우는 명령 — 도구 호출의 시간 초과가 실행기를 SIGKILL하지 못하게 (리뷰 1의 I1).
+
+    `TimeoutStopSec=600`: 유닛을 멈추면 SIGTERM 뒤 10분 — 실행기의 정리(가져오기 + 지우기 + 확인)가 끝날 시간이다.
+    """
+    return [
+        systemd_run, "--user", f"--unit=cloud-{run_id}", "-p", "TimeoutStopSec=600", "--collect",
+        "-p", f"StandardOutput=append:{log}", "-p", f"StandardError=append:{log}", f"--working-directory={cwd}",
+        "-E", f"HOME={os.environ.get('HOME', '')}", "-E", f"PATH={os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin')}", "-E", "PYTHONUNBUFFERED=1",
+        sys.executable, str(Path(__file__).resolve()), *raw_argv, "--foreground",
+    ]  # fmt: skip
+
+
+def _detach(args: argparse.Namespace, manifest: dict[str, Any]) -> int:
+    run_id = manifest["run_id"]
+    DETACH_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log = DETACH_LOG_DIR / f"{run_id}-launch.log"
+    argv = detach_command(args.raw_argv, run_id=run_id, log=log, cwd=os.getcwd(), systemd_run=os.environ.get("ROBOJEV_SYSTEMD_RUN", "systemd-run"))
+    result = subprocess.run(argv, capture_output=True, text=True, check=False)
+    if result.returncode != 0:
+        print(f"[launch_run] systemd 유닛으로 띄우지 못했다 — 아무것도 만들지 않았다: {result.stderr.strip()[:300]}", file=sys.stderr)
+        return 1
+    print(json.dumps({"detached": True, "unit": f"cloud-{run_id}", "log": str(log), "manifest": str(Path(args.manifest).resolve()),
+                      "follow": f"tail -f {log}", "stop": f"systemctl --user stop cloud-{run_id}  (SIGTERM → 가져오기·지우기, 최대 10분)"},
+                     ensure_ascii=False))  # fmt: skip
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw_argv = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw_argv)
+    args.raw_argv = raw_argv
 
     if args.command == "prepare" and args.job:
         from robo_jev.launch.jobs import JobError
@@ -392,8 +432,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "ledger":
         ledger = _ledger(args.ledger)
-        if args.set_phase_cap is not None:
-            ledger.set_phase_cap(args.set_phase_cap, reason=args.reason or "")
+        from robo_jev.launch.ledger import LedgerError
+
+        try:
+            if args.set_phase_cap is not None:
+                ledger.set_phase_cap(args.set_phase_cap, reason=args.reason or "")
+            if args.release:
+                ledger.release(args.release, reason=args.reason or "")
+        except LedgerError as exc:
+            raise SystemExit(f"[launch_run] 장부 거절: {exc}") from None
         if args.reconcile:
             from robo_jev.launch.ledger import reconcile
             from robo_jev.launch.providers.runpod import RunPodError
@@ -475,18 +522,32 @@ def _manifest_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
             print(format_plan(plan_job(manifest, ledger=_ledger(args.ledger))))
             print("[launch_run] --yes가 없다 — 위의 예상 비용을 보고 승인할 때만 띄운다. 아무것도 만들지 않았다", file=sys.stderr)
             return 2
+        if not args.foreground and not os.environ.get("INVOCATION_ID"):
+            # systemd 유닛 밖이다 — 유닛으로 다시 띄우고 곧바로 돌아온다 (도구의 시간 초과가 실행기를 SIGKILL하지 못하게)
+            return _detach(args, manifest)
         ctx = _pod_context(args)
         try:
             manifest = launch_pod(manifest, manifest_path=args.manifest, ctx=ctx, yes=True, dest=args.dest, watch=args.watch,
-                                  keep_on_interrupt=args.keep_on_interrupt)  # fmt: skip
+                                  keep_on_interrupt=args.keep_on_interrupt, prove_self_delete=args.prove_self_delete)  # fmt: skip
         except LaunchNotApproved as exc:  # pragma: no cover - 위에서 걸렀다
             print(f"[launch_run] {exc}", file=sys.stderr)
             return 2
-        except (PriceMismatch, PhaseCapExceeded, LedgerError) as exc:
-            raise SystemExit(f"[launch_run] 띄우지 않았다: {exc}") from None
-        except RunPodError as exc:
-            print(f"[launch_run] RunPod 오류: {exc}", file=sys.stderr)
-            _print(load_manifest(args.manifest))
+        except BaseException as exc:
+            # 예외 길에서도 명세가 말하는 대로 끝난다 — pod를 만들었는지, 지움이 확인됐는지 (리뷰 1의 Minor 1)
+            saved = load_manifest(args.manifest)
+            pod = (saved.get("provider") or {}).get("pod") or {}
+            created = bool(pod.get("id"))
+            kind = "띄우지 않았다" if not created else f"pod {pod.get('id')}를 만들었고 " + ("지움을 확인했다" if pod.get("delete_confirmed") else "**지움을 확인하지 못했다**")
+            print(f"[launch_run] {type(exc).__name__}: {exc} — {kind}", file=sys.stderr)
+            _print(saved)
+            if saved.get("exit_reason") in ("pod-delete-unconfirmed", "create-ambiguous") or (created and not pod.get("delete_confirmed")):
+                return 3
+            if isinstance(exc, KeyboardInterrupt):
+                return 130
+            if isinstance(exc, (PriceMismatch, PhaseCapExceeded, LedgerError)):
+                return 1
+            if isinstance(exc, RunPodError):
+                return 1
             return 1
         _print(manifest)
         return 3 if manifest.get("exit_reason") == "pod-delete-unconfirmed" else (0 if manifest["state"] in ("completed", "running") else 2)
@@ -498,7 +559,7 @@ def _manifest_command(args: argparse.Namespace, parser: argparse.ArgumentParser,
             parser.error(f"{args.command}은 pod run(provider가 있는 명세)에만 쓴다")
         ctx = _pod_context(args)
         if args.command == "down":
-            ok = down(manifest, manifest_path=args.manifest, ctx=ctx)
+            ok = down(manifest, manifest_path=args.manifest, ctx=ctx, fence=args.fence)
             _print(load_manifest(args.manifest))
             return 0 if ok else 3
         manifest = finish(manifest, manifest_path=args.manifest, ctx=ctx, dest=args.dest, wait=args.wait)

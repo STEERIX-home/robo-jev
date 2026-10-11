@@ -14,8 +14,14 @@
     (ii) 끝나거나 실패하면 결과를 가져오고(sha256 대조, 실패하면 마감까지 다시) **반드시 지운다** — finally. 지우기가 확인되지 않으면
          명세는 `unknown`, 장부는 열린 채(상한 전부를 센다), 종료 코드 3
 
+울타리는 셋이다 (리뷰 1의 I1): (1) 실행기의 finally, (2) pod 안의 감시(+ 감시와 따로 도는 sleep 울타리 — 둘 다 runpodctl·REST·GraphQL,
+User-Agent를 밝히고 끝없이 다시), (3) **이 상자(Spark)의 systemd 타이머** — 만든 직후 감시 마감 + 5분에 `launch_run.py down --fence`가
+계정 키로 지운다(실행기가 SIGKILL돼도, pod가 API에 닿지 못해도). 지우기가 확인되면 타이머를 내린다. 접속하면 감시가 적어 둔 '지울 길 점검'
+(같은 pod 범위 키로 자기 pod를 **읽기만**)을 보고, 지울 길이 하나도 없으면 일하지 않고 지운다. `--prove-self-delete`는 job과 가져오기가 끝난
+뒤 감시에게 지우라고 하고 API가 404를 줄 때까지 보며 **어느 길이 지웠는지** 적는다(3분 안에 안 되면 실행기가 지운다).
+
 시계: 마감은 실행기의 epoch 초로 정해 pod의 환경 변수로 넘긴다. 접속하면 pod의 시계를 재서 어긋남이 크면(pod가 늦으면 감시가 늦게 지운다)
-멈춘다.
+멈춘다. 두 끝 모두 NTP를 전제한다 — 접속 전에 실행기가 죽으면 어긋남을 잴 수 없다(셋째 울타리는 이 상자의 시계로 돈다).
 """
 
 from __future__ import annotations
@@ -27,7 +33,9 @@ import io
 import json
 import shlex
 import signal
+import os
 import subprocess
+import sys
 import tarfile
 import time
 from collections.abc import Callable, Iterator
@@ -37,7 +45,7 @@ from typing import Any
 
 from robo_jev.launch.manifest import REPO, Budget, budget_deadline_hours, note_state, now, save_manifest, sha256_of
 from robo_jev.launch.providers.base import Backend, Handle
-from robo_jev.launch.providers.runpod import PodView, RunPodError, pod_request
+from robo_jev.launch.providers.runpod import USER_AGENT, PodView, RunPodError, pod_request
 
 __all__ = [
     "DEFAULT_BOOTSTRAP",
@@ -45,6 +53,7 @@ __all__ = [
     "LaunchNotApproved",
     "LauncherInterrupted",
     "PodContext",
+    "SystemdFence",
     "build_payload",
     "down",
     "ensure_ssh_key",
@@ -83,6 +92,8 @@ echo "PY311=$PY"
 echo "NOW=$(date +%s)"
 echo "GPU=$(nvidia-smi --query-gpu=name,driver_version,memory.total --format=csv,noheader 2>/dev/null | head -n1)"
 if [ -f "$R/watchdog.pid" ] && kill -0 "$(cat "$R/watchdog.pid")" 2>/dev/null; then echo "WATCHDOG=armed"; else echo "WATCHDOG=missing"; fi
+i=0; while [ ! -s "$R/watchdog-auth" ] && [ "$i" -lt {auth_wait} ]; do sleep 1; i=$((i + 1)); done
+echo "WATCHDOG_AUTH=$(cat "$R/watchdog-auth" 2>/dev/null || echo none)"
 """
 
 
@@ -118,6 +129,12 @@ def run_cap_usd(budget: Budget) -> float:
 # --------------------------------------------------------------------------
 
 
+#: 둘째 울타리(감시와 따로 도는 sleep)의 curl User-Agent — 기본값은 Cloudflare가 막는다.
+SECOND_FENCE_AGENT = "robo-jev-fence/0.2"
+#: pod 안의 지울 길 — 감시의 점검 결과(`runpodctl=… rest=… graphql=…`)에서 하나라도 `ok`여야 일한다.
+DELETE_ROUTES = ("runpodctl", "rest", "graphql")
+
+
 def watchdog_script() -> str:
     return WATCHDOG.read_text(encoding="utf-8")
 
@@ -130,7 +147,9 @@ def start_script() -> str:
         'printf "%s" "$ROBOJEV_WATCHDOG_B64" | base64 -d > "$R/robojev-watchdog.sh" && chmod 700 "$R/robojev-watchdog.sh"; '
         'nohup sh "$R/robojev-watchdog.sh" >> "$R/watchdog.log" 2>&1 & echo $! > "$R/watchdog.pid"; '
         '( S=$(( ${ROBOJEV_TERMINATE_AT:-0} - $(date +%s) )); [ "$S" -gt 0 ] && sleep "$S"; '
-        'runpodctl pod delete "$RUNPOD_POD_ID" || runpodctl remove pod "$RUNPOD_POD_ID" ) >> "$R/watchdog.log" 2>&1 & '
+        'while :; do runpodctl pod delete "$RUNPOD_POD_ID" || runpodctl remove pod "$RUNPOD_POD_ID" || '
+        f'curl -fsS -m 30 --retry 2 -A {SECOND_FENCE_AGENT} -X DELETE -H "Authorization: Bearer $RUNPOD_API_KEY" '
+        '"${ROBOJEV_API_BASE:-https://api.runpod.io}/v2/pods/$RUNPOD_POD_ID"; sleep "${ROBOJEV_FENCE_RETRY:-60}"; done ) >> "$R/watchdog.log" 2>&1 & '
         'if [ -x /start.sh ]; then exec /start.sh; else exec sleep infinity; fi'
     )
 
@@ -191,6 +210,45 @@ def build_payload(ref: str, out: Path, *, repo: Path = REPO) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
+class SystemdFence:
+    """셋째 울타리 — **이 상자**의 `systemd-run --user --on-active=…` 타이머가 감시 마감 + 여유에 `launch_run.py down --fence`를 돈다.
+
+    계정 키(키 파일)로 지우므로 실행기 프로세스와도, pod의 네트워크와도 무관하다. `down --fence`는 이미 지움이 확인된 명세면 아무것도 하지
+    않는다. 지우기가 확인되면 실행기가 내린다(:meth:`disarm`).
+    """
+
+    def __init__(self, *, python: str | None = None, repo: Path = REPO, runner: Callable[..., Any] = subprocess.run, systemd_run: str = "systemd-run") -> None:
+        self.python = python or sys.executable
+        self.repo = repo
+        self.runner = runner
+        self.systemd_run = systemd_run
+
+    @staticmethod
+    def unit(run_id: str) -> str:
+        return f"cloud-fence-{run_id}"
+
+    def command(self, *, manifest_path: str | Path, run_id: str, seconds: int) -> list[str]:
+        return [
+            self.systemd_run, "--user", f"--unit={self.unit(run_id)}", f"--on-active={int(seconds)}s", "--timer-property=AccuracySec=5s",
+            "--collect", f"--working-directory={self.repo}", "-E", f"HOME={os.environ.get('HOME', '')}",
+            "-E", f"PATH={os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin')}", "-E", "PYTHONUNBUFFERED=1",
+            self.python, str(self.repo / "scripts" / "launch_run.py"), "down", "--manifest", str(Path(manifest_path).resolve()), "--fence",
+        ]  # fmt: skip
+
+    def arm(self, *, manifest_path: str | Path, run_id: str, at_epoch: float, now_epoch: float) -> dict[str, Any]:
+        seconds = max(int(at_epoch - now_epoch), 60)
+        argv = self.command(manifest_path=manifest_path, run_id=run_id, seconds=seconds)
+        result = self.runner(argv, capture_output=True, text=True, check=False)
+        if result.returncode != 0:
+            raise RuntimeError(f"셋째 울타리(이 상자의 systemd 타이머)를 걸지 못했다: {(result.stderr or '').strip()[:300]}")
+        return {"unit": self.unit(run_id), "fires_in_seconds": seconds, "fires_at_epoch": now_epoch + seconds, "armed": True}
+
+    def disarm(self, *, run_id: str) -> bool:
+        result = self.runner(["systemctl", "--user", "stop", f"{self.unit(run_id)}.timer"], capture_output=True, text=True, check=False)
+        self.runner(["systemctl", "--user", "reset-failed", f"{self.unit(run_id)}.timer"], capture_output=True, text=True, check=False)
+        return result.returncode == 0
+
+
 @dataclass
 class PodContext:
     """주입할 수 있는 것들 — 검사는 가짜 공급자·local 백엔드·가짜 시계를 넣는다."""
@@ -204,7 +262,18 @@ class PodContext:
     ssh_key: str | Path | None = None
     poll_seconds: float = 20.0
     bootstrap_timeout: float = 900.0
+    #: 셋째 울타리 — 이 상자의 타이머 (`arm`/`disarm`). None이면 :class:`SystemdFence`.
+    fence: Any = None
+    #: 애매한 만들기 뒤 같은 이름의 pod를 찾는 시간(초) — 클라이언트 시간 초과 + RunPod의 만들기 시간보다 길게 (리뷰 1의 I2)
+    ambiguous_sweep_seconds: float = 180.0
+    ambiguous_sweep_poll: float = 15.0
+    #: `--prove-self-delete`: 감시에게 지우라고 한 뒤 API의 404를 기다리는 시간(초) — 넘으면 실행기가 지운다
+    self_delete_timeout: float = 180.0
     log: list[str] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if self.fence is None:
+            self.fence = SystemdFence()
 
     def say(self, message: str) -> None:
         line = f"[cloud {now()}] {message}"
@@ -266,12 +335,35 @@ def _wait_ssh(backend: Backend, ctx: PodContext, *, deadline: float, poll: float
 def _bootstrap(backend: Backend, manifest: dict[str, Any], ctx: PodContext) -> dict[str, str]:
     provider = manifest["provider"]
     script = provider.get("bootstrap") or DEFAULT_BOOTSTRAP
-    script = script.replace("{root}", shlex.quote(provider["remote_root"])).replace("{uv_version}", UV_VERSION)
+    script = (script.replace("{root}", shlex.quote(provider["remote_root"])).replace("{uv_version}", UV_VERSION)
+              .replace("{auth_wait}", str(int(provider.get("auth_wait_seconds") or 90))))  # fmt: skip
     result = backend.shell(script, timeout=ctx.bootstrap_timeout)
     markers = _parse_markers(result.stdout)
     if not result.ok or "BOOTSTRAP_FAIL" in markers:
         raise RuntimeError(f"부트스트랩 실패 (코드 {result.returncode}): {markers.get('BOOTSTRAP_FAIL') or result.stderr.strip()[:400]}")
     return markers
+
+
+def _routes(markers: dict[str, str]) -> dict[str, str]:
+    """감시의 점검 줄(`runpodctl=ok rest=http-403 graphql=fail key=set pod=set`)을 dict로."""
+    out = {}
+    for part in (markers.get("WATCHDOG_AUTH") or "").split():
+        key, sep, value = part.partition("=")
+        if sep:
+            out[key] = value
+    return out
+
+
+def _require_delete_route(markers: dict[str, str]) -> list[str]:
+    """pod 안에서 지울 길이 하나라도 인증되는지(읽기만으로 확인) — 없으면 RuntimeError(호출자의 finally가 곧바로 지운다)."""
+    routes = _routes(markers)
+    usable = [name for name in DELETE_ROUTES if routes.get(name) == "ok"]
+    if not usable:
+        raise RuntimeError(
+            f"pod 안에서 자기 pod를 지울 길이 하나도 인증되지 않았다 ({markers.get('WATCHDOG_AUTH') or '점검 없음'}) — 실행기가 죽으면 이 pod는 남는다. "
+            "일하지 않고 지운다"
+        )
+    return usable
 
 
 def _push_payload(backend: Backend, manifest: dict[str, Any], bundle: Path, ctx: PodContext) -> None:
@@ -390,26 +482,82 @@ def _fetch_until(backend: Backend, manifest: dict[str, Any], manifest_path: str 
             ctx.sleep(15)
 
 
+def _prove_self_delete(backend: Backend, manifest: dict[str, Any], manifest_path: str | Path, ctx: PodContext) -> dict[str, Any]:
+    """감시에게 지우라고 하고(`terminate-now` 표지 — 감시가 자기 환경의 pod 범위 키로 **같은 명령**을 돈다) API가 404를 줄 때까지 본다.
+
+    pod가 곧 사라지므로 감시가 남긴 길(`watchdog-route`: `trying:<길>`·`ok:<길>`)을 짧은 간격으로 읽어 둔다. 기한 안에 안 지워지면
+    실행기의 finally가 지운다(`deleted_by: launcher`). 돌려주는 것(명세의 `provider.pod.self_delete`에도 적는다): 증명 여부·길·걸린 초.
+    """
+    pod = _pod_block(manifest)
+    root = shlex.quote(manifest["provider"]["remote_root"])
+    started = ctx.clock()
+    result: dict[str, Any] = {"requested_at": now(), "proved": False, "route": None, "seconds": None, "deleted_by": None}
+    ctx.say("자기 지우기 증명 — 감시에게 지우라고 한다 (terminate-now)")
+    backend.shell(f"touch {root}/terminate-now")
+    seen = None
+    while True:
+        read = backend.shell(f"cat {root}/watchdog-route 2>/dev/null", timeout=15)
+        if read.ok and read.stdout.strip():
+            # 꼴: "<trying|ok>:<길 이름(빈칸 있음)> <epoch>" — 끝의 시각만 떼어 낸다
+            text = read.stdout.strip().splitlines()[0]
+            head, _, tail = text.rpartition(" ")
+            seen = head if head and tail.isdigit() else text
+        raw = ctx.provider.describe(pod["id"])
+        if raw is None or raw.get("status") == "TERMINATED":
+            elapsed = round(ctx.clock() - started, 1)
+            route = seen.split(":", 1)[1] if seen and ":" in seen else seen
+            result.update(proved=True, route=route, route_marker=seen, seconds=elapsed, deleted_by=f"watchdog:{route}" if route else "watchdog")
+            pod["deleted_observed_epoch"] = ctx.clock()
+            ctx.say(f"증명됨: pod 안의 길({route or '기록을 읽기 전에 사라짐'})이 {elapsed} s 만에 pod를 지웠다 (API 404)")
+            break
+        if ctx.clock() - started >= ctx.self_delete_timeout:
+            result.update(seconds=round(ctx.clock() - started, 1), deleted_by="launcher", route_marker=seen)
+            ctx.say(f"⚠ 증명 실패: {ctx.self_delete_timeout:.0f} s 안에 pod 안의 길이 지우지 못했다 (마지막 표지 {seen}) — 실행기가 지운다")
+            break
+        ctx.sleep(2.0)
+    pod["self_delete"] = result
+    _save(manifest, manifest_path)
+    return result
+
+
 def _teardown(manifest: dict[str, Any], manifest_path: str | Path, ctx: PodContext, *, reason: str) -> bool:
-    """pod를 지우고 **확인한다**. 확인되면 장부를 닫고 참, 아니면 명세 `unknown`·장부 열린 채로 두고 거짓."""
+    """pod를 지우고 **확인한다**. 확인되면 장부를 닫고 셋째 울타리를 내리고 참, 아니면 명세 `unknown`·장부 열린 채로 두고 거짓.
+
+    쓴 돈(리뷰 1의 I3): 지우기 직전에 pod가 아직 살아 있었으면 **지운 때까지** 센다(상한으로 자르지 않는다 — 감시가 실패한 경우다).
+    이미 없었으면 감시가 마감 전후에 지웠으므로 감시 마감 + 2분까지만 센다. 증명 모드가 지운 때를 봤으면 그때까지.
+    """
     pod = _pod_block(manifest)
     pod_id = pod.get("id")
     if not pod_id:
         return True
     ctx.say(f"pod {pod_id}를 지운다 — {reason}")
-    confirmed = bool(ctx.provider.destroy(pod_id))
+    try:
+        before = ctx.provider.describe(pod_id)
+    except Exception:  # noqa: BLE001 — 모르면 살아 있다고 본다(많게 센다)
+        before = {"status": "UNKNOWN"}
+    live = before is not None and before.get("status") != "TERMINATED"
+    try:
+        confirmed = bool(ctx.provider.destroy(pod_id))
+    except Exception as error:  # noqa: BLE001 — 어떤 실패도 '확인 못 함'이다 (리뷰 1의 Minor 2)
+        confirmed = False
+        pod["delete_error"] = f"{type(error).__name__}: {str(error)[:300]}"
     pod["deleted_at"] = now()
     pod["delete_confirmed"] = confirmed
-    # 끝 시각: 지금, 다만 감시 마감(+2분)보다 늦지 않게 — `finish`를 며칠 뒤에 돌려도 감시가 그 전에 지웠다(그래서 상한까지만 센다)
+    pod["live_at_teardown"] = live
     end = ctx.clock()
-    if pod.get("terminate_at_epoch") is not None:
+    if pod.get("deleted_observed_epoch") is not None:
+        end = min(end, float(pod["deleted_observed_epoch"]))
+    elif not live and pod.get("terminate_at_epoch") is not None:
         end = min(end, float(pod["terminate_at_epoch"]) + 120.0)
     hours = max(end - float(pod.get("create_requested_epoch") or end), 0.0) / 3600.0
     spent = round(hours * float(manifest["budget"]["hourly_usd"]), 6)
     pod["spent_usd_estimate"] = spent
     if confirmed:
         ctx.ledger.close(manifest["run_id"], spent_usd_estimate=spent, note=f"지움 확인 ({reason})")
-        ctx.say(f"지움 확인 · 쓴 돈 추정 ${spent:.4f} (단가 × 만든 때부터 지운 때까지)")
+        ctx.say(f"지움 확인 · 쓴 돈 추정 ${spent:.4f} (단가 × 만든 때부터 {'지운 때' if live or pod.get('deleted_observed_epoch') else '감시 마감'}까지)")
+        fence = pod.get("fence") or {}
+        if fence.get("armed"):
+            fence["disarmed"] = bool(ctx.fence.disarm(run_id=manifest["run_id"]))
     else:
         manifest["exit_reason"] = "pod-delete-unconfirmed"
         note_state(manifest, "unknown", note=f"pod {pod_id} 지우기를 확인하지 못했다 — 돈이 계속 나갈 수 있다. 사람이 콘솔에서 확인한다")
@@ -417,6 +565,24 @@ def _teardown(manifest: dict[str, Any], manifest_path: str | Path, ctx: PodConte
         ctx.say(f"⚠ pod {pod_id} 지우기를 확인하지 못했다 — 콘솔에서 확인하고 `launch_run.py down --manifest {manifest_path}`")
     _save(manifest, manifest_path)
     return confirmed
+
+
+def _sweep_until(run_id: str, ctx: PodContext) -> tuple[list[tuple[str, bool]], int, list[str]]:
+    """같은 이름의 pod를 `ambiguous_sweep_seconds` 동안 찾는다 (늦게 생긴 pod도 잡게 — 리뷰 1의 I2). 찾으면 지우고 곧바로 돌려준다."""
+    deadline = ctx.clock() + float(ctx.ambiguous_sweep_seconds)
+    sweeps, errors = 0, []
+    while True:
+        sweeps += 1
+        try:
+            swept = ctx.provider.sweep_name(run_id)
+        except Exception as error:  # noqa: BLE001 — 찾기 실패도 기록하고 다시
+            swept = []
+            errors.append(f"{type(error).__name__}: {str(error)[:200]}")
+        if swept:
+            return swept, sweeps, errors
+        if ctx.clock() >= deadline:
+            return [], sweeps, errors
+        ctx.sleep(float(ctx.ambiguous_sweep_poll))
 
 
 def launch_pod(
@@ -428,8 +594,11 @@ def launch_pod(
     dest: str | Path | None = None,
     watch: bool = True,
     keep_on_interrupt: bool = False,
+    prove_self_delete: bool = False,
 ) -> dict[str, Any]:
     """dry-run을 찍고, `--yes`면 pod를 만들어 job을 돌리고 결과를 가져온 뒤 지운다. 돌려주는 것은 명세.
+
+    `prove_self_delete`: job과 가져오기가 끝난 뒤 pod 안의 감시가 **스스로** 지우게 하고 어느 길이 지웠는지 적는다(:func:`_prove_self_delete`).
 
     **지우기의 규칙** (finally): pod를 만들었으면 지운다. 예외는 둘뿐이다 — 러너가 뜬 뒤 `--no-watch`로 손을 뗀 경우와, 러너가 뜬 뒤
     `--keep-on-interrupt`로 중단한 경우. 둘 다 pod 안의 감시가 마감에 지우고, `finish`가 다시 붙는다.
@@ -453,7 +622,15 @@ def launch_pod(
     # 1) 단가 — 읽기만. 다르면 거절 (장부도 건드리지 않는다)
     price = ctx.provider.check_price(provider_spec, budget.hourly_usd)
     ctx.say(f"단가 대조 통과: 카탈로그 ${price['catalog_hourly_usd']:.4f}/h = 명세 ${budget.hourly_usd:.4f}/h")
-    # 2) 장부 — 넘으면 거절
+    # 2) 장부 — 먼저 청구 기록을 읽어(읽기 전용) 닫힌 run을 실제 청구로 센 뒤, 넘으면 거절
+    from robo_jev.launch.ledger import reconcile
+
+    try:
+        reconciled = reconcile(ctx.ledger, ctx.provider.client)
+    except Exception as error:  # noqa: BLE001 — 단계 누적을 확인할 수 없으면 띄우지 않는다
+        raise RuntimeError(f"장부 대조(청구 기록 읽기)가 실패했다 — 단계 누적을 확인할 수 없어 띄우지 않는다: {type(error).__name__}: {str(error)[:200]}") from None
+    if reconciled:
+        ctx.say(f"청구 기록 대조: {len(reconciled)}개 run — 단계 누적 ${ctx.ledger.committed_usd():.2f}")
     admitted = ctx.ledger.reserve(run_id, cap_usd=cap_usd, hourly_usd=budget.hourly_usd, manifest=str(manifest_path), phase=manifest["budget"].get("phase"))
     ctx.say(f"장부 예약: ${cap_usd:.2f} (단계 누적 {admitted['after_usd']:.2f} / {admitted['phase']['cap_usd']:.2f})")
     try:
@@ -484,22 +661,24 @@ def launch_pod(
                 if not ambiguous:
                     ctx.ledger.release(run_id, reason=f"만들기 거절: {str(error)[:200]}")
                     raise
-                ctx.say(f"만들기 응답이 애매하다 ({type(error).__name__}: {str(error)[:200]}) — 같은 이름의 pod를 찾아 지운다")
-                try:
-                    swept = ctx.provider.sweep_name(run_id)
-                except BaseException as sweep_error:  # noqa: BLE001
-                    pod["sweep_error"] = f"{type(sweep_error).__name__}: {str(sweep_error)[:200]}"
-                    note_state(manifest, "unknown", note="만들기 응답도, 같은 이름 pod 찾기도 실패했다 — 콘솔에서 확인한다 (장부는 상한 전부를 센 채로 둔다)")
-                    manifest["exit_reason"] = "create-ambiguous"
-                    _save(manifest, manifest_path)
-                    raise error from sweep_error
+                ctx.say(f"만들기 응답이 애매하다 ({type(error).__name__}: {str(error)[:200]}) — {ctx.ambiguous_sweep_seconds:.0f} s 동안 같은 이름의 pod를 찾아 지운다")
+                swept, sweeps, sweep_errors = _sweep_until(run_id, ctx)
                 pod["swept_after_ambiguous_create"] = [[pod_id, ok] for pod_id, ok in swept]
-                if not swept:
-                    ctx.ledger.release(run_id, reason="만들기 응답이 애매했지만 같은 이름의 pod가 없었다")
+                pod["ambiguous_sweeps"] = sweeps
+                if sweep_errors:
+                    pod["sweep_errors"] = sweep_errors[-3:]
+                if swept:
+                    created = True
+                    pod["id"] = swept[0][0]
+                    ctx.ledger.activate(run_id, pod_id=pod["id"])
                     raise
-                created = True
-                pod["id"] = swept[0][0]
-                ctx.ledger.activate(run_id, pod_id=pod["id"])
+                # 못 찾았다 — '없다'가 아니라 '모른다'다. 예약(상한 전부)을 그대로 두고 이 명세의 다시 띄우기를 막는다
+                pod["create_ambiguous"] = True
+                ctx.ledger.mark_create_ambiguous(run_id, note=f"만들기 응답이 애매했고 {sweeps}번 찾아도 같은 이름의 pod가 없었다")
+                manifest["exit_reason"] = "create-ambiguous"
+                note_state(manifest, "unknown", note=f"만들기 응답이 애매했다 — {sweeps}번 찾아도 pod가 없었지만 확인한 것은 아니다. "
+                                                     f"`launch_run.py pods`로 보고 `down --manifest {manifest_path}`로 정리한다 (장부는 상한 전부를 센다)")  # fmt: skip
+                _save(manifest, manifest_path)
                 raise
             created = True
             pod.update(id=view.pod_id, created_at=now(), status=view.status, cost_per_hour=view.cost)
@@ -508,6 +687,10 @@ def launch_pod(
             ctx.ledger.activate(run_id, pod_id=view.pod_id)
             _save(manifest, manifest_path)  # pod id를 디스크에 먼저 — 실행기가 여기서 죽어도 `down`이 찾는다
             ctx.say(f"pod {view.pod_id} 생성 · 감시 마감 {time.strftime('%H:%M:%S', time.localtime(terminate_at))} ({hours * 60:.0f}분, {binding})")
+            # 셋째 울타리 — 이 상자의 타이머가 감시 마감 + 5분에 `down --fence` (실행기가 SIGKILL돼도, pod가 API에 닿지 못해도)
+            pod["fence"] = ctx.fence.arm(manifest_path=manifest_path, run_id=run_id, at_epoch=terminate_at + 300.0, now_epoch=ctx.clock())
+            _save(manifest, manifest_path)
+            ctx.say(f"셋째 울타리: {pod['fence']['unit']} — {pod['fence']['fires_in_seconds']} s 뒤 `down --fence`")
             ctx.provider.check_created_price(view, budget.hourly_usd)
             boot_timeout = float(provider_spec.get("boot_timeout_minutes") or 15.0) * 60.0
             view = ctx.provider.wait_ready(view.pod_id, timeout=boot_timeout, expected_hourly_usd=budget.hourly_usd)
@@ -519,10 +702,12 @@ def launch_pod(
                 manifest["backend"][key] = getattr(backend, key, None)
             pod["ssh_attempts"] = _wait_ssh(backend, ctx, deadline=requested + boot_timeout + 300.0)
             markers = _bootstrap(backend, manifest, ctx)
-            pod["bootstrap"] = {k: markers.get(k) for k in ("UV", "PY311", "NOW", "GPU", "WATCHDOG")}
+            pod["bootstrap"] = {k: markers.get(k) for k in ("UV", "PY311", "NOW", "GPU", "WATCHDOG", "WATCHDOG_AUTH")}
             pod["bootstrap_seconds"] = round(ctx.clock() - requested - pod["ready_seconds"], 1)
             if markers.get("WATCHDOG") != "armed":
                 raise RuntimeError("pod 안의 자기 종료 감시가 살아 있지 않다 — 이 pod로는 일하지 않는다(실행기가 죽으면 남는다)")
+            pod["delete_routes_ok"] = _require_delete_route(markers)
+            ctx.say(f"pod 안의 지울 길 인증됨(읽기로 확인): {', '.join(pod['delete_routes_ok'])}")
             skew = float(markers.get("NOW") or ctx.clock()) - ctx.clock()
             pod["clock_skew_seconds"] = round(skew, 1)
             if skew < -300:
@@ -554,8 +739,15 @@ def launch_pod(
                     manifest["budget_limit"] = remote["budget_limit"]
                 note_state(manifest, str(remote.get("state")), note=f"원격이 끝냈다: {remote.get('state')}({remote.get('exit_reason')})")
             _save(manifest, manifest_path)
+            fetched = False
             if pod.get("vanished_at") is None:
-                _fetch_until(backend, manifest, manifest_path, dest, ctx, deadline=float(pod["fetch_deadline_epoch"]))
+                fetched = _fetch_until(backend, manifest, manifest_path, dest, ctx, deadline=float(pod["fetch_deadline_epoch"]))
+            if prove_self_delete:
+                if fetched and manifest["state"] == "completed":
+                    _prove_self_delete(backend, manifest, manifest_path, ctx)
+                else:
+                    ctx.say("자기 지우기 증명은 건너뛴다 — job과 가져오기가 모두 끝났을 때만 한다")
+                    pod["self_delete"] = {"proved": False, "skipped": True, "deleted_by": "launcher"}
             finished = True
             return manifest
         except KeyboardInterrupt:
@@ -602,6 +794,29 @@ def finish(manifest: dict[str, Any], *, manifest_path: str | Path, ctx: PodConte
     return manifest
 
 
-def down(manifest: dict[str, Any], *, manifest_path: str | Path, ctx: PodContext) -> bool:
-    """지금 지운다 (가져오지 않는다) — 비상용."""
-    return _teardown(manifest, manifest_path, ctx, reason="down (사람의 요청)")
+def down(manifest: dict[str, Any], *, manifest_path: str | Path, ctx: PodContext, fence: bool = False) -> bool:
+    """지금 지운다 (가져오지 않는다) — 비상용, 그리고 셋째 울타리(`--fence`, 이 상자의 타이머)가 부르는 것.
+
+    이미 지움이 확인된 명세면 아무것도 하지 않는다(타이머가 늦게 와도 장부를 두 번 닫지 않는다). 애매한 만들기(`create-ambiguous`)로
+    pod id가 없는 명세면 같은 이름의 pod를 한 번 더 찾아 지우고, 없으면 그 사실로 장부를 닫는다.
+    """
+    pod = _pod_block(manifest)
+    reason = "셋째 울타리 (이 상자의 타이머)" if fence else "down (사람의 요청)"
+    if pod.get("delete_confirmed"):
+        ctx.say(f"이미 지움이 확인됐다 (pod {pod.get('id')}) — 할 일이 없다")
+        return True
+    if not pod.get("id") and pod.get("create_ambiguous"):
+        swept = ctx.provider.sweep_name(manifest["run_id"])
+        pod["swept_at_down"] = [[pod_id, ok] for pod_id, ok in swept]
+        if swept:
+            pod["id"] = swept[0][0]
+            return _teardown(manifest, manifest_path, ctx, reason=f"{reason} — 애매한 만들기에서 늦게 나타난 pod")
+        ctx.ledger.close(manifest["run_id"], spent_usd_estimate=0.0, note="애매한 만들기 — down에서 다시 찾아도 같은 이름의 pod가 없었다")
+        manifest["exit_reason"] = "create-ambiguous-resolved"
+        note_state(manifest, "failed", note="애매한 만들기를 정리했다 — 같은 이름의 pod가 없다 (장부를 0으로 닫았다)")
+        _save(manifest, manifest_path)
+        ctx.say("애매한 만들기 정리: 같은 이름의 pod가 없다 — 장부를 닫았다")
+        return True
+    if fence:
+        manifest.setdefault("notes", []).append(f"{now()} 셋째 울타리(이 상자의 타이머)가 down을 돌렸다 — 실행기가 지우기를 확인하지 못한 run이다")
+    return _teardown(manifest, manifest_path, ctx, reason=reason)

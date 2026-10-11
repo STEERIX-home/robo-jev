@@ -30,7 +30,8 @@ DEFAULT_LEDGER = REPO / "artifacts" / "cloud" / "runpod-ledger.json"
 #: 첫 클라우드 단계 — 2026-10-11 사용자 승인(통제자 전달): 누적 $150.
 DEFAULT_PHASE = {"name": "cloud-phase-1", "cap_usd": 150.0, "approved": "2026-10-11 사용자 승인 (통제자 전달) — 첫 클라우드 단계 누적 상한"}
 SCHEMA = "robojev-cloud-ledger-v0"
-OPEN = ("reserved", "active", "delete-unconfirmed")
+#: 열린 run — 상한 전부를 센다. `create-ambiguous`는 만들기 응답이 애매했고 같은 이름의 pod를 찾지 못한 run이다('없다'가 아니라 '모른다').
+OPEN = ("reserved", "active", "delete-unconfirmed", "create-ambiguous")
 
 
 class LedgerError(RuntimeError):
@@ -170,11 +171,15 @@ class Ledger:
             data["history"].append({"at": now(), "note": f"pod {pod_id} 생성 ({run_id})"})
 
     def release(self, run_id: str, *, reason: str) -> None:
-        """pod를 만들지 않았다 — 예약을 푼다 (단가 불일치·키 없음·만들기 거절)."""
+        """pod를 만들지 않았다 — 예약을 푼다 (단가 불일치·키 없음·만들기 거절, 또는 사람이 CLI로: `ledger --release <run> --reason …`)."""
+        if not reason or not reason.strip():
+            raise LedgerError("예약을 푸는 이유(--reason)가 있어야 한다")
         with self._transaction() as data:
             run = self._find(data, run_id)
             if run.get("pod_id"):
-                raise LedgerError(f"{run_id}: pod {run['pod_id']}가 있었다 — 풀지 않고 close로 닫는다")
+                raise LedgerError(f"{run_id}: pod {run['pod_id']}가 있었다 — 풀지 않고 down으로 지우고 닫는다")
+            if run.get("status") == "create-ambiguous":
+                raise LedgerError(f"{run_id}: 만들기 응답이 애매했던 run이다 — `down --manifest …`가 같은 이름의 pod를 한 번 더 찾은 뒤 닫는다")
             run.update(status="released")
             run["notes"].append(f"{now()} 풀음: {reason}")
             data["history"].append({"at": now(), "note": f"예약 풂 {run_id}: {reason}"})
@@ -187,6 +192,14 @@ class Ledger:
             if note:
                 run["notes"].append(f"{now()} {note}")
             data["history"].append({"at": now(), "note": f"닫음 {run_id}: 추정 ${float(spent_usd_estimate):.4f}"})
+
+    def mark_create_ambiguous(self, run_id: str, *, note: str) -> None:
+        """만들기 응답이 애매했고 같은 이름의 pod를 찾지 못했다 — 예약(상한 전부)을 그대로 둔다 (리뷰 1의 I2)."""
+        with self._transaction() as data:
+            run = self._find(data, run_id)
+            run.update(status="create-ambiguous")
+            run["notes"].append(f"{now()} {note}")
+            data["history"].append({"at": now(), "note": f"만들기 애매 {run_id}: {note}"})
 
     def mark_unconfirmed(self, run_id: str, *, note: str) -> None:
         """지우기를 확인하지 못했다 — 열린 채로(상한 전부를 센 채로) 둔다."""
