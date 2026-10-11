@@ -30,6 +30,7 @@ sha256이 대조된** 것이어야 한다. 아무 파일에서나 잇지 않는�
 from __future__ import annotations
 
 import copy
+import fnmatch
 import json
 import os
 import shlex
@@ -70,6 +71,7 @@ __all__ = [
     "launch",
     "observed_spend_seconds",
     "prepare",
+    "prepare_job",
     "remaining_budget",
     "resume",
     "status",
@@ -292,6 +294,128 @@ def prepare(
     return manifest
 
 
+def prepare_job(
+    *,
+    job_path: str | Path,
+    run_id: str,
+    manifest_path: str | Path,
+    backend: Backend | None = None,
+    overrides: dict[str, Any] | None = None,
+    code_ref: str | None = None,
+    allow_dirty: bool = False,
+    ledger: Any = None,
+    notes: list[str] | None = None,
+) -> dict[str, Any]:
+    """판단 학습 job(`kind: decisions`)의 명세와 묶음을 만든다. GPU도 원격도 네트워크도 건드리지 않는다.
+
+    묶음에 드는 것: 이 명세(`manifest.json`)와 **코드 묶음**(`code.tar.gz` = `git archive <ref>` — 커밋된 것만 간다). 데이터는 묶음 밖에서
+    올린다(launch가 저장소 기준 같은 자리로 rsync하고 원격에서 sha256을 대조한다) — 명세에는 경로·sha256·바이트가 적힌다.
+
+    pod(`provider`가 있는 job)는 구속하는 상한이 있어야 하고(`--no-cap` 없음), 달러 상한을 적지 않으면 **단계 장부의 남은 돈**이
+    기본이다(첫 단계 $150). 그 상한이 남은 돈을 넘으면 여기서 거절한다 — launch가 같은 검사를 잠금 안에서 다시 한다.
+    """
+    from robo_jev.launch.cloud import DEFAULT_ROOT, DEFAULT_SSH_KEY, build_payload, pod_lifetime
+    from robo_jev.launch.jobs import JobError, all_inputs, decisions_artifact_plan, hash_inputs, load_job, model_entry
+    from robo_jev.launch.ledger import DEFAULT_PHASE, Ledger
+    from robo_jev.launch.providers.ssh import DEFAULT_SSH_OPTIONS
+
+    spec = load_job(job_path, overrides)
+    job, provider, budget_block = spec["job"], spec.get("provider"), dict(spec.get("budget") or {})
+    if provider is not None and provider.get("name") != "runpod":
+        raise JobError(f"provider.name: 지금은 runpod만 안다 (받은 값 {provider.get('name')!r})")
+    if provider is None and backend is None:
+        raise JobError("provider가 없는 job은 백엔드(--backend local|ssh)가 있어야 한다")
+    if "hourly_usd" not in budget_block:
+        raise JobError("budget.hourly_usd: 노드 시간 단가를 적는다 (pod는 launch가 API 단가와 대조한다)")
+    phase = None
+    if provider is not None:
+        phase = dict(budget_block.get("phase") or DEFAULT_PHASE)
+        ledger = ledger if ledger is not None else Ledger(phase=phase)
+        if budget_block.get("max_usd") is None:
+            budget_block["max_usd"] = max(round(ledger.remaining_usd(), 2), 0.0) or None
+    budget = Budget(
+        hourly_usd=float(budget_block["hourly_usd"]), gpus=int((provider or {}).get("gpu_count") or budget_block.get("gpus") or 0),
+        max_wall_hours=budget_block.get("max_wall_hours"), max_gpu_hours=budget_block.get("max_gpu_hours"), max_usd=budget_block.get("max_usd"),
+    )  # fmt: skip
+    deadline, _binding = check_caps(budget, run_id=run_id, allow_no_cap=False)
+    if provider is not None:
+        hours, binding = pod_lifetime(budget)
+        cap = round(hours * budget.hourly_usd, 6)
+        ledger.check(run_id, cap, phase=phase)  # 넘으면 PhaseCapExceeded — 명세를 만들지 않는다
+
+    repo = REPO
+    revision = git_revision()
+    ref = code_ref or str(job["code"].get("ref") or "HEAD")
+    if provider is not None and ref == "HEAD" and revision["dirty"] and not allow_dirty:
+        raise JobError(
+            f"작업 트리가 깨끗하지 않다 ({revision['dirty_files'][:5]}) — pod에는 **커밋된** 코드(git archive {ref})만 간다. 커밋하거나, "
+            "고치는 중인 파일이 이 run과 무관하면 --allow-dirty로 그렇게 말한다"
+        )
+    inputs = hash_inputs(all_inputs(job, repo), repo)
+    entry = model_entry(job["model"], repo)
+
+    bundle = bundle_dir(manifest_path)
+    if bundle.exists():
+        shutil.rmtree(bundle)
+    bundle.mkdir(parents=True)
+    code = {"ref": ref, "commit": None}
+    if provider is not None:
+        code = build_payload(ref, bundle / "code.tar.gz", repo=repo)
+    job_block = {**job, "code": code, "uploads": inputs, "model_entry": entry}
+    job_text = json.dumps(spec, ensure_ascii=False, sort_keys=True)
+    remote_root = (provider or {}).get("remote_root") or DEFAULT_ROOT
+    if provider is not None:
+        provider = {
+            "name": "runpod", "remote_root": remote_root, "ssh_key": str(provider.get("ssh_key") or DEFAULT_SSH_KEY),
+            "boot_timeout_minutes": 15, "fetch_reserve_minutes": 4, "delete_margin_minutes": 2, "start_grace_minutes": 45, "done_grace_minutes": 20,
+            **provider, "pod": {},
+        }  # fmt: skip
+        backend_block = {
+            "kind": "ssh", "host": None, "user": "root", "port": None, "remote_dir": f"{remote_root}/run", "remote_repo": f"{remote_root}/repo",
+            "remote_python": None, "gpus": int(provider.get("gpu_count") or 1), "unit": run_id, "launcher": None, "pid": None,
+            "identity_path": str(Path(provider["ssh_key"]).expanduser()), "known_hosts": str(bundle / "known_hosts"),
+            "ssh_options": [*DEFAULT_SSH_OPTIONS, "-o", "StrictHostKeyChecking=accept-new"], "provider": "runpod", "instance_id": None,
+        }  # fmt: skip
+    else:
+        backend_block = {**backend.describe(), "unit": run_id, "launcher": None, "pid": None, "provider": "existing-box", "instance_id": None}
+    from robo_jev.launch.jobs import tokenizer_inputs
+
+    tokenizer_manifest = json.loads((repo / tokenizer_inputs(repo)[0]).read_text(encoding="utf-8"))
+    tokenizer_file = next(item for item in inputs if item["path"].endswith("tokenizer.json"))
+    budget_out = {
+        **budget.as_dict(), "price_source": budget_block.get("price_source"),
+        "planned": {"wall_hours": None, "gpu_hours": None, "usd": None, "seconds_per_step": None, "assumption": (spec.get("estimate") or {}).get("assumption")},
+    }  # fmt: skip
+    if phase is not None:
+        budget_out["phase"] = phase
+    manifest = new_manifest(
+        run_id=run_id,
+        code={**revision, "git_sha": code.get("commit") or revision["git_sha"], "dirty": False if code.get("commit") else revision["dirty"]},
+        train_config={"path": portable_path(job_path), "sha256": sha256_of(job_path), "resolved_sha256": sha256_of_text(job_text),
+                      "run_name": spec.get("name"), "overrides": copy.deepcopy(overrides or {})},  # fmt: skip
+        dataset_manifests=[{"path": item["path"], "sha256": item["sha256"], "domain": None, "material": None, "files": None, "bundled": False} for item in inputs],
+        tokenizer={"id": str(tokenizer_manifest.get("id")), "kind": "tokenizers", "sha256": tokenizer_file["sha256"],
+                   "revision": tokenizer_manifest.get("revision"), "path": tokenizer_file["path"]},  # fmt: skip
+        contract={"sha256": code.get("payload_sha256") or sha256_of_text(job_text), "kind": "decisions-code-payload" if code.get("payload_sha256") else "decisions-job"},
+        seed=0,
+        max_steps=max(len(job["steps"]), 1),
+        checkpoint={"every": 1, "keep_steps": [], "resume_from": None},
+        budget=budget_out,
+        artifacts=decisions_artifact_plan(job),
+        backend=backend_block,
+        notes=list(notes or []),
+        job=job_block,
+        provider=provider,
+        estimate=spec.get("estimate") or {},
+    )
+    if code.get("commit") and code["commit"] != revision["git_sha"]:
+        manifest["notes"].append(f"pod에 가는 코드는 {code['commit'][:12]}({ref})다 — 이 체크아웃의 HEAD {str(revision['git_sha'])[:12]}와 다르다")
+    note_state(manifest, "prepared", note=f"{Path(job_path).name} · job decisions · 입력 {len(inputs)}개 · 마감 {deadline} h")
+    (bundle / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    save_manifest(manifest_path, manifest)
+    return manifest
+
+
 # --------------------------------------------------------------------------
 # launch
 # --------------------------------------------------------------------------
@@ -302,7 +426,7 @@ def launch(manifest: dict[str, Any], backend: Backend, *, manifest_path: str | P
     if manifest["state"] == "running" and not force:
         raise RuntimeError(f"{manifest['run_id']}: 이미 running이다 — 먼저 `status`로 확인하거나 `cancel`한다 (--force로 무시)")
     bundle = bundle_dir(manifest_path)
-    if not (bundle / "config.yaml").is_file():
+    if not (bundle / "config.yaml").is_file() and not (manifest.get("job") and (bundle / "manifest.json").is_file()):
         raise FileNotFoundError(f"{bundle}: 묶음이 없다 — 먼저 `prepare`")
     # 명세는 매번 다시 담는다 (resume이 부모 명세를 고쳐 놓았을 수 있다).
     (bundle / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
@@ -313,7 +437,13 @@ def launch(manifest: dict[str, Any], backend: Backend, *, manifest_path: str | P
     backend.reset_unit(unit)
     # 지난 시도의 상태 파일을 지운다 — 남겨 두면 새 러너가 자기 것을 쓰기 전의 `status`가
     # **옛 run의 `completed`**를 읽는다. 로그는 지우지 않는다(장부라서 이어 붙는다).
-    backend.shell(f"rm -f {shlex.quote(backend.path('state.json'))}")
+    backend.shell(f"rm -f {shlex.quote(backend.path('state.json'))} {shlex.quote(backend.path('finished'))}")
+    job = manifest.get("job")
+    if job and Path(backend.remote_repo).resolve() != REPO.resolve():
+        # 판단 job — 입력은 묶음에 담지 않고 원격 repo의 같은 자리로 올린다 (원격 러너가 시작 전에 sha256을 대조한다)
+        repo_backend = backend.with_remote_dir(backend.remote_repo)
+        for item in job.get("uploads") or []:
+            repo_backend.push_file(REPO / item["path"], item["path"])
     backend.push(bundle, "bundle")
 
     argv = [*shlex.split(backend.remote_python), "-m", "robo_jev.launch.runner", "--bundle", backend.path("bundle"), "--repo", backend.remote_repo]
@@ -391,6 +521,11 @@ def status(manifest: dict[str, Any], backend: Backend, *, manifest_path: str | P
 # --------------------------------------------------------------------------
 
 
+def _matches(path: str, pattern: str) -> bool:
+    """원격 상대 경로가 산출물 패턴에 맞는가 — 경로 **전체**로 견준다(`fnmatch`; `*`는 `/`도 넘는다). 예전 판의 `Path.match`도 받는다."""
+    return path == pattern or fnmatch.fnmatch(path, pattern) or Path(path).match(pattern)
+
+
 def fetch(
     manifest: dict[str, Any],
     backend: Backend,
@@ -417,7 +552,7 @@ def fetch(
     missing = []
     for entry in plan:
         pattern = entry["remote"]
-        hits = [path for path in remote_files if Path(path).match(pattern) or path == pattern]
+        hits = [path for path in remote_files if _matches(path, pattern)]
         if not hits and entry.get("required_", True):
             missing.append(pattern)
     if missing and strict:
@@ -433,9 +568,11 @@ def fetch(
 
     fetched: list[dict[str, Any]] = []
     mismatched: list[str] = []
+    claimed: set[str] = set()
     for entry in plan:
         pattern = entry["remote"]
-        hits = sorted(path for path in remote_files if Path(path).match(pattern) or path == pattern)
+        hits = sorted(path for path in remote_files if _matches(path, pattern) and path not in claimed)
+        claimed.update(hits)
         if not hits:
             fetched.append({**entry, "bytes": None, "sha256": None, "local": None, "fetched_at": None, "sha256_match": None})
             continue

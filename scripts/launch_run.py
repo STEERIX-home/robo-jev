@@ -17,6 +17,19 @@ localhost 왕복(인수, Stage B)::
 
 **자격 증명은 인자로도 받지 않는다** — 개인키는 `--identity <경로>`, known_hosts는 `--known-hosts <경로>`이고
 명세에는 경로만 적힌다. 암호·토큰을 받는 자리는 없다.
+
+**RunPod에서 판단 학습 (Task cloud1)** — job 정의(`configs/cloud/*.yaml`)에서 명세를 만들고, dry-run을 보고, `--yes`로 띄운다::
+
+    uv run python scripts/launch_run.py prepare --job configs/cloud/decisions-v0-smoke-h100.yaml --run-id <id> --manifest artifacts/cloud/runs/<id>.json
+    uv run python scripts/launch_run.py dry-run --manifest artifacts/cloud/runs/<id>.json      # 네트워크·키 없음
+    uv run python scripts/launch_run.py launch  --manifest artifacts/cloud/runs/<id>.json --yes # 만들기 → 돌리기 → 가져오기 → 지우기
+    uv run python scripts/launch_run.py finish  --manifest …   # 중단·--no-watch 뒤: 가져오고 지운다
+    uv run python scripts/launch_run.py down    --manifest …   # 지금 지운다
+    uv run python scripts/launch_run.py pods                   # 읽기 전용: 내 pod·볼륨 (남은 것이 없는지)
+    uv run python scripts/launch_run.py prices --gpu "NVIDIA H100 80GB HBM3"   # 읽기 전용: 카탈로그 단가
+    uv run python scripts/launch_run.py ledger                 # 단계 장부 ($150)
+
+API 키는 `~/.config/robo-jev/runpod.env`(600)에서만 읽는다 — 인자·환경 변수로는 받지 않고 어디에도 찍지 않는다.
 """
 
 from __future__ import annotations
@@ -42,17 +55,18 @@ from robo_jev.launch.launcher import (  # noqa: E402
     fetch,
     launch,
     prepare,
+    prepare_job,
     resume,
     status,
 )
-from robo_jev.launch.manifest import Budget, budget_deadline_hours, load_manifest  # noqa: E402
+from robo_jev.launch.manifest import Budget, budget_deadline_hours, load_manifest, now  # noqa: E402
 from robo_jev.launch.providers.base import Backend  # noqa: E402
 from robo_jev.launch.providers.local import LocalBackend  # noqa: E402
 from robo_jev.launch.providers.ssh import DEFAULT_SSH_OPTIONS, SshBackend  # noqa: E402
 
 __all__ = ["backend_from_manifest", "build_parser", "load_train_config", "main"]
 
-COMMANDS = ("prepare", "launch", "status", "fetch", "cancel", "resume")
+COMMANDS = ("prepare", "launch", "status", "fetch", "cancel", "resume", "dry-run", "finish", "down", "pods", "prices", "ledger")
 
 
 def load_train_config(path: str | Path, *, mode: str | None = None, dataset: str = "d1", overrides: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -178,7 +192,11 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     prep = sub.add_parser("prepare", help="명세를 만들고 묶음을 정리한다 (원격을 건드리지 않는다)")
-    prep.add_argument("--config", required=True, help="학습 설정 YAML")
+    prep.add_argument("--config", default=None, help="학습 설정 YAML (책상 정리 줄기의 학습)")
+    prep.add_argument("--job", default=None, help="판단 학습 job 정의 (configs/cloud/*.yaml) — --config 대신")
+    prep.add_argument("--code-ref", dest="code_ref", default=None, help="pod에 보낼 코드의 git ref (기본: job의 code.ref, 없으면 HEAD)")
+    prep.add_argument("--allow-dirty", dest="allow_dirty", action="store_true", help="고치는 중인 파일이 있어도 (pod에는 커밋된 것만 간다)")
+    prep.add_argument("--ledger", default=None, help="단계 장부 경로 (기본 artifacts/cloud/runpod-ledger.json)")
     prep.add_argument("--mode", default=None, help="`modes:`가 있는 설정의 모드 (t0|lora|t1)")
     prep.add_argument("--dataset", default="d1", help="adapt_readout의 --dataset (모드가 있을 때만)")
     prep.add_argument("--set", action="append", default=[], metavar="KEY=VALUE", help="학습 설정 덮어쓰기 (YAML로 읽는다)")
@@ -195,7 +213,7 @@ def build_parser() -> argparse.ArgumentParser:
     prep.add_argument("--remote-repo", dest="remote_repo", default=None, help="원격 저장소 체크아웃")
     prep.add_argument("--remote-python", dest="remote_python", default=None, help="원격 파이썬 (미리 준비된 venv, 또는 'uv run python')")
     prep.add_argument("--gpus", type=int, default=0)
-    prep.add_argument("--hourly-usd", dest="hourly_usd", type=float, required=True, help="노드 시간 단가 (USD/h). 0이면 비용 상한을 걸 수 없다 (--max-usd와 함께 주면 거절한다)")
+    prep.add_argument("--hourly-usd", dest="hourly_usd", type=float, default=None, help="노드 시간 단가 (USD/h). 0이면 비용 상한을 걸 수 없다 (--max-usd와 함께 주면 거절한다)")
     prep.add_argument("--max-wall-hours", dest="max_wall_hours", type=float, default=None)
     prep.add_argument("--max-gpu-hours", dest="max_gpu_hours", type=float, default=None)
     prep.add_argument("--max-usd", dest="max_usd", type=float, default=None)
@@ -248,14 +266,110 @@ def build_parser() -> argparse.ArgumentParser:
     again.add_argument("--max-wall-hours", dest="max_wall_hours", type=float, default=None)
     again.add_argument("--max-gpu-hours", dest="max_gpu_hours", type=float, default=None)
     again.add_argument("--max-usd", dest="max_usd", type=float, default=None)
+    plan = sub.add_parser("dry-run", help="명세만으로 할 일·예상 시간·예상 비용·가져올 파일 (네트워크·키 없음)")
+    plan.add_argument("--manifest", required=True)
+    plan.add_argument("--ledger", default=None)
+    plan.add_argument("--json", dest="as_json", action="store_true")
+
+    run.add_argument("--yes", action="store_true", help="(pod) 예상 비용을 봤고 띄운다 — 없으면 dry-run만 찍고 끝난다")
+    run.add_argument("--dest", default=None, help="(pod) 결과를 가져올 곳 (기본: 명세 옆 <이름>-fetched/)")
+    run.add_argument("--no-watch", dest="watch", action="store_false", help="(pod) 러너를 띄우고 손을 뗀다 — pod 안의 감시가 마감에 지운다")
+    run.add_argument("--keep-on-interrupt", dest="keep_on_interrupt", action="store_true", help="(pod) 중단해도 지우지 않는다 (감시 마감에 지워진다)")
+    run.add_argument("--ledger", default=None)
+    run.add_argument("--key-file", dest="key_file", default=None, help="(pod) API 키 파일 (기본 ~/.config/robo-jev/runpod.env)")
+
+    done = sub.add_parser("finish", help="(pod) 다시 붙어 기다리고 가져온 뒤 지운다")
+    done.add_argument("--manifest", required=True)
+    done.add_argument("--dest", required=True)
+    done.add_argument("--no-wait", dest="wait", action="store_false")
+    done.add_argument("--ledger", default=None)
+    done.add_argument("--key-file", dest="key_file", default=None)
+
+    kill = sub.add_parser("down", help="(pod) 지금 지운다 — 가져오지 않는다")
+    kill.add_argument("--manifest", required=True)
+    kill.add_argument("--ledger", default=None)
+    kill.add_argument("--key-file", dest="key_file", default=None)
+
+    pods = sub.add_parser("pods", help="(읽기 전용) 내 pod·네트워크 볼륨 — 남은 자원이 없는지")
+    pods.add_argument("--key-file", dest="key_file", default=None)
+    pods.add_argument("--json", dest="as_json", action="store_true")
+
+    price = sub.add_parser("prices", help="(읽기 전용) 카탈로그 단가·재고")
+    price.add_argument("--gpu", action="append", default=[], help="GPU id (여러 번; 기본: H100 PCIe·SXM·NVL, H200)")
+    price.add_argument("--key-file", dest="key_file", default=None)
+
+    book = sub.add_parser("ledger", help="단계 장부 ($150) 보기·상한 바꾸기")
+    book.add_argument("--ledger", default=None)
+    book.add_argument("--set-phase-cap", dest="set_phase_cap", type=float, default=None)
+    book.add_argument("--reason", default=None)
     return parser
+
+
+def _ledger(path: str | None) -> Any:
+    from robo_jev.launch.ledger import Ledger
+
+    return Ledger(path)
+
+
+def _runpod(args: argparse.Namespace, *, read_only: bool) -> Any:
+    """키 파일에서 키를 읽어 공급자를 만든다. 키가 없거나 권한이 넓으면 이유를 말하고 끝난다 (pod를 만들지 않는다)."""
+    from robo_jev.launch.providers.runpod import MissingApiKey, RunPodClient, RunPodProvider, UnsafeKeyFile, load_api_key
+
+    try:
+        key = load_api_key(getattr(args, "key_file", None))
+    except (MissingApiKey, UnsafeKeyFile) as exc:
+        raise SystemExit(f"[launch_run] 키 거절: {exc}") from None
+    return RunPodProvider(RunPodClient(key, read_only=read_only))
+
+
+def _pod_backend(view: Any, manifest: dict[str, Any]) -> Backend:
+    block = manifest["backend"]
+    return SshBackend(
+        host=view.host, port=view.port, user=view.username or block.get("user") or "root", remote_dir=block["remote_dir"],
+        remote_repo=block["remote_repo"], remote_python=block.get("remote_python") or "python3", gpus=int(block.get("gpus") or 1),
+        identity_path=block.get("identity_path"), known_hosts=block.get("known_hosts"), ssh_options=tuple(block.get("ssh_options") or DEFAULT_SSH_OPTIONS),
+    )  # fmt: skip
+
+
+def _pod_context(args: argparse.Namespace, *, read_only: bool = False) -> Any:
+    from robo_jev.launch.cloud import PodContext
+
+    return PodContext(provider=_runpod(args, read_only=read_only), ledger=_ledger(getattr(args, "ledger", None)), backend_factory=_pod_backend)
+
+
+DEFAULT_PRICE_GPUS = ("NVIDIA H100 PCIe", "NVIDIA H100 80GB HBM3", "NVIDIA H100 NVL", "NVIDIA H200")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
 
+    if args.command == "prepare" and args.job:
+        from robo_jev.launch.jobs import JobError
+        from robo_jev.launch.ledger import LedgerError, PhaseCapExceeded
+
+        if args.config:
+            parser.error("--config와 --job은 함께 주지 않는다")
+        overrides = _overrides(args.set, parser)
+        for flag, key in (("hourly_usd", "budget.hourly_usd"), ("max_wall_hours", "budget.max_wall_hours"), ("max_usd", "budget.max_usd"),
+                          ("max_gpu_hours", "budget.max_gpu_hours"), ("price_source", "budget.price_source")):  # fmt: skip
+            if getattr(args, flag) is not None:
+                overrides[key] = getattr(args, flag)
+        backend = None if args.backend == "ssh" and not args.host else _backend_from_args(args)
+        try:
+            manifest = prepare_job(job_path=args.job, run_id=args.run_id, manifest_path=args.manifest, backend=backend, overrides=overrides,
+                                   code_ref=args.code_ref, allow_dirty=args.allow_dirty, ledger=_ledger(args.ledger) if args.ledger else None,
+                                   notes=args.note)  # fmt: skip
+        except (UncappedRun, JobError, PhaseCapExceeded, LedgerError) as exc:
+            raise SystemExit(f"[launch_run] prepare 거절: {exc}") from None
+        _print(manifest)
+        return 0
+
     if args.command == "prepare":
+        if not args.config:
+            parser.error("--config(학습 설정) 또는 --job(판단 학습 job)이 필요하다")
+        if args.hourly_usd is None:
+            parser.error("--hourly-usd가 필요하다 (노드 시간 단가; 0이면 비용 상한을 걸 수 없다)")
         overrides = _overrides(args.set, parser)
         config = load_train_config(args.config, mode=args.mode, dataset=args.dataset, overrides=overrides)
         backend = _backend_from_args(args)
@@ -274,7 +388,96 @@ def main(argv: list[str] | None = None) -> int:
         _print(manifest)
         return 0
 
+    if args.command == "ledger":
+        ledger = _ledger(args.ledger)
+        if args.set_phase_cap is not None:
+            ledger.set_phase_cap(args.set_phase_cap, reason=args.reason or "")
+        print(json.dumps(ledger.summary(), ensure_ascii=False, indent=1))
+        return 0
+
+    if args.command == "prices":
+        provider = _runpod(args, read_only=True)
+        gpus = args.gpu or list(DEFAULT_PRICE_GPUS)
+        rows = {}
+        for gpu in provider.client.gpu_types():
+            if gpu.get("id") in gpus:
+                rows[gpu["id"]] = {"name": gpu.get("name"), "memory_gb": gpu.get("memory"), "secure": gpu.get("secure"), "community": gpu.get("community"),
+                                   "price_per_gpu_hour": gpu.get("price")}  # fmt: skip
+        for cloud in ("SECURE", "COMMUNITY"):
+            for gpu in provider.client.gpu_types(availability=True, cloud=cloud, count=1):
+                if gpu.get("id") in rows:
+                    rows[gpu["id"]].setdefault("availability", {})[cloud] = gpu.get("availability")
+                    rows[gpu["id"]].setdefault("cuda_versions", {})[cloud] = gpu.get("cudaVersions")
+        print(json.dumps({"queried_at": now(), "gpus": rows, "missing": [g for g in gpus if g not in rows]}, ensure_ascii=False, indent=1))
+        return 0
+
+    if args.command == "pods":
+        provider = _runpod(args, read_only=True)
+        pods = provider.client.list_pods()
+        rows = [{"id": p.get("id"), "name": p.get("name"), "status": p.get("status"), "cost_per_hour": p.get("cost"), "created_at": p.get("createdAt"),
+                 "robojev": bool((p.get("env") or {}).get("ROBOJEV_RUN_ID")), "terminate_at": (p.get("env") or {}).get("ROBOJEV_TERMINATE_AT")} for p in pods]  # fmt: skip
+        try:
+            volumes = [{k: v.get(k) for k in ("id", "name", "size", "dataCenterId")} for v in provider.client.list_network_volumes()]
+        except Exception as exc:  # noqa: BLE001 — 목록이 안 되면 그렇게 적는다
+            volumes = [{"error": str(exc)[:300]}]
+        live = [row for row in rows if row["status"] not in ("TERMINATED",)]
+        print(json.dumps({"queried_at": now(), "pods": rows, "network_volumes": volumes, "live_pods": len(live), "clean": not live and not volumes},
+                         ensure_ascii=False, indent=1))  # fmt: skip
+        return 0
+
     manifest = load_manifest(args.manifest)
+
+    if args.command == "dry-run":
+        from robo_jev.launch.jobs import format_plan, plan_job
+
+        if not manifest.get("job"):
+            parser.error("dry-run은 판단 학습 job(--job으로 prepare한 명세)만 그린다")
+        plan = plan_job(manifest, ledger=_ledger(args.ledger) if manifest.get("provider") else None)
+        print(json.dumps(plan, ensure_ascii=False, indent=1) if args.as_json else format_plan(plan))
+        return 0
+
+    is_pod = bool(manifest.get("provider"))
+    if args.command == "launch" and is_pod:
+        from robo_jev.launch.cloud import LaunchNotApproved, launch_pod
+        from robo_jev.launch.ledger import LedgerError, PhaseCapExceeded
+        from robo_jev.launch.providers.runpod import PriceMismatch, RunPodError
+
+        if not args.yes:
+            from robo_jev.launch.jobs import format_plan, plan_job
+
+            print(format_plan(plan_job(manifest, ledger=_ledger(args.ledger))))
+            print("[launch_run] --yes가 없다 — 위의 예상 비용을 보고 승인할 때만 띄운다. 아무것도 만들지 않았다", file=sys.stderr)
+            return 2
+        ctx = _pod_context(args)
+        try:
+            manifest = launch_pod(manifest, manifest_path=args.manifest, ctx=ctx, yes=True, dest=args.dest, watch=args.watch,
+                                  keep_on_interrupt=args.keep_on_interrupt)  # fmt: skip
+        except LaunchNotApproved as exc:  # pragma: no cover - 위에서 걸렀다
+            print(f"[launch_run] {exc}", file=sys.stderr)
+            return 2
+        except (PriceMismatch, PhaseCapExceeded, LedgerError) as exc:
+            raise SystemExit(f"[launch_run] 띄우지 않았다: {exc}") from None
+        except RunPodError as exc:
+            print(f"[launch_run] RunPod 오류: {exc}", file=sys.stderr)
+            _print(load_manifest(args.manifest))
+            return 1
+        _print(manifest)
+        return 3 if manifest.get("exit_reason") == "pod-delete-unconfirmed" else (0 if manifest["state"] in ("completed", "running") else 2)
+
+    if args.command in ("finish", "down"):
+        from robo_jev.launch.cloud import down, finish
+
+        if not is_pod:
+            parser.error(f"{args.command}은 pod run(provider가 있는 명세)에만 쓴다")
+        ctx = _pod_context(args)
+        if args.command == "down":
+            ok = down(manifest, manifest_path=args.manifest, ctx=ctx)
+            _print(load_manifest(args.manifest))
+            return 0 if ok else 3
+        manifest = finish(manifest, manifest_path=args.manifest, ctx=ctx, dest=args.dest, wait=args.wait)
+        _print(manifest)
+        return 3 if manifest.get("exit_reason") == "pod-delete-unconfirmed" else 0
+
     backend = backend_from_manifest(manifest)
 
     if args.command == "launch":
