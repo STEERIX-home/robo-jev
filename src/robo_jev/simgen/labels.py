@@ -8,7 +8,7 @@
   가치표의 두 기제(리뷰 1 질문 1·6): 닿음·넘어섬 비용 × max(floor, min(1, (충격 속도 / v_ref)²)) — 질문 기준이 덮어쓴 항목에는 걸지
   않는다(기준은 '닿지 않기'를 속도와 무관하게 요구한다); 급제동 선택지에 몸별 비용(짐 실은 지게차는 따로). values-v0에서는 둘 다 꺼짐.
 * 상태 ``choice`` — 이산 상태(의도, 채움 구간, 뚜껑 …)의 사후 확률. 닫힌 꼴이 있으면(:func:`~robo_jev.simgen.posterior.exact_labels`)
-  표본 빈도 대신 그 값을 쓴다(리뷰 1 m2) — 세계 사건 중 stops_short·passable도 같다.
+  표본 빈도 대신 그 값을 쓴다(리뷰 1 m2) — 세계 사건 stops_short·passable과 감속의 넘어섬(선택지마다)도 같다.
 * 규칙 적용 ``choice`` — 질문 글에 적힌 규칙을 글에 적힌 값에 적용한 결과(확률 1). 답은 질문 생성기가 정한다.
 
 반올림: 기대 비용은 소수 4자리로 먼저 반올림하고 그 값으로 확률을 계산한 뒤 소수 8자리로 반올림한다(합 오차 ≤ 4e-8 — 계약은 ±1e-6).
@@ -127,9 +127,14 @@ def _event(outcomes: Outcomes, recipe: dict) -> np.ndarray:
     return ~values if recipe.get("negate") else values
 
 
+def _exact_key(recipe: dict) -> str:
+    """닫힌 꼴 정답의 열쇠: 세계 사건은 이름, 선택지 사건은 '사건|선택지'."""
+    return recipe["event"] if recipe["source"] == "world" else f"{recipe['event']}|{recipe['option']}"
+
+
 def noul_label(outcomes: Outcomes, recipe: dict, exact: dict | None = None) -> dict:
-    if exact and recipe["source"] == "world" and recipe["event"] in exact:
-        p = float(exact[recipe["event"]])
+    if exact and _exact_key(recipe) in exact:
+        p = float(exact[_exact_key(recipe)])
         return {"type": "noul", "p_yes": round(1.0 - p if recipe.get("negate") else p, 6)}
     return {"type": "noul", "p_yes": round(float(np.mean(_event(outcomes, recipe))), 6)}
 
@@ -160,7 +165,7 @@ def uses_exact(recipe: dict, exact: dict | None) -> bool:
     if not exact:
         return False
     if recipe["kind"] == "noul":
-        return recipe["source"] == "world" and recipe["event"] in exact
+        return _exact_key(recipe) in exact
     if recipe["kind"] == "state":
         return "state" in recipe and recipe["state"] in exact
     return False

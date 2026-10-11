@@ -330,3 +330,8 @@ def test_exact_world_events_match_large_sample_frequencies(cfg):
         out = rollout(cfg, obs, sample_posterior(cfg, obs, 20_000, _rng(24)))
         event = "stops_short" if obs.scene == "p1_step_in" else "passable"
         assert exact[event] == pytest.approx(out.world_events[event].mean(), abs=0.012), (obs.scene, exact[event])
+    obs = moment(14, "lab", scene="p5_braking", body="mobile_base").obs
+    exact = exact_labels(cfg, obs)
+    out = rollout(cfg, obs, sample_posterior(cfg, obs, 20_000, _rng(25)))
+    for option in ("stop_gentle", "stop_moderate", "stop_hard"):
+        assert exact[f"overrun|{option}"] == pytest.approx(out.events["overrun"][out.index(option)].mean(), abs=0.012), option

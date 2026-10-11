@@ -64,6 +64,7 @@ def test_searched_examples_are_informative_at_the_selection_k(examples):
         assert selected["request"]["questions"] == r["request"]["questions"]  # 같은 순간·같은 질문(권고 줄만 K에 따라 다를 수 있다)
         primary = selected["labels"][selected["meta"]["recommendation"]["question"]]
         assert max(primary["probabilities"].values()) <= 0.97, r["id"]
+        assert max(primary["expected_cost"].values()) - min(primary["expected_cost"].values()) >= 1.0, r["id"]
         assert 0.03 <= selected["labels"][selected["meta"]["key_question"]]["p_yes"] <= 0.97, r["id"]
 
 

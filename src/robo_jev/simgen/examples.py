@@ -2,7 +2,7 @@
 사실 하나 바꾼 쌍 하나.
 
 예시는 정해 둔 칸(:data:`PLAN`)마다 장면·몸·문체를 강제하고, seed를 차례로 시도해 **정답이 한쪽으로 다 쏠리지 않은**(기본 행동 질문의 최고
-확률 ≤ 0.97, 핵심 noul ∈ [0.03, 0.97]) 첫 레코드를 고른다 — 칸의 요구(틀린 권고·힌트·기준·상태·규칙 질문·보이는 뚜껑)도 그 조건에 더한다.
+확률 ≤ 0.97, 핵심 noul ∈ [0.03, 0.97], 기대 비용이 모두 같지 않음) 첫 레코드를 고른다 — 칸의 요구(틀린 권고·힌트·기준·상태·규칙 질문·보이는 뚜껑)도 그 조건에 더한다.
 **고르는 판단은 K = 2048로 다시 계산한 정답으로 한다**(리뷰 1 m8: K = 256 정답의 몬테카를로 잡음으로 고르면 보여 주는 정답이 그 잡음
 쪽으로 치우친다). 고른 seed는 레코드의 `generator`에 남으므로 그대로 다시 만들 수 있다. 쌍은 numeric 변형이 기본 행동의 argmax를 바꾸는
 seed를 고른다.
@@ -88,6 +88,9 @@ def _informative(record: dict, needs: tuple[str, ...]) -> bool:
     label = _primary(record)
     key = record["labels"][record["meta"]["key_question"]]["p_yes"]
     if max(label["probabilities"].values()) > 0.97 or not 0.03 <= key <= 0.97:
+        return False
+    costs = label["expected_cost"].values()
+    if max(costs) - min(costs) < 1.0:  # 모든 선택지가 같은 비용(예: 어느 감속으로도 넘어섬)인 평평한 정답은 보여 줄 거리가 없다
         return False
     meta, kinds = record["meta"], {lab.get("kind") for lab in record["labels"].values()}
     checks = {
@@ -259,7 +262,8 @@ def _flags(record: dict) -> str:
     if crit:
         bits.append(f"criterion in an action question: {', '.join(crit)}")
     if meta["agent"]:
-        bits.append(f"agent `{meta['agent']['kind']}` (cue `{meta['agent']['cue']}`, {meta['agent']['velocity_mode']}, track age {meta['agent']['age_s']:.2f} s)")
+        cue = f"cue `{meta['agent']['cue']}`" if meta["agent"]["cue"] else "no cue"
+        bits.append(f"agent `{meta['agent']['kind']}` ({cue}, {meta['agent']['velocity_mode']}, track age {meta['agent']['age_s']:.2f} s)")
     if meta["container"]:
         c = meta["container"]
         bits.append(f"container `{c['kind']}` ({c['content']}; fill as {c['fill_mode']}; lid view {c['lid_view']})")
@@ -288,7 +292,7 @@ def render_markdown(records: list[dict], cfg: SimgenConfig | None = None) -> str
         "How the labels are defined (docs/12 §5, corrected):",
         "",
         "- **noul** = probability of the event over the posterior given what the robot can see: the share of K = 256 posterior worlds, or the",
-        "  exact value where it has a closed form (stop-short, room to pass).",
+        "  exact value where it has a closed form (stop-short, room to pass, overrunning a stop target).",
         "- **score** = mean of a [0, 1] quantity over the same worlds (a probability, closeness, share of the rim headroom used, or delay / 3 s).",
         "- **action choice** = softmax(−(E[cost] − min E[cost]) / τ), τ = {:g}. The highest probability is always the lowest expected cost. Costs"
         " ({}, to be tuned by you): person {} · child/elder {} · vehicle {} · object {} · spill hot {} / chemical {} / other {} · delay {}/s; {}.".format(

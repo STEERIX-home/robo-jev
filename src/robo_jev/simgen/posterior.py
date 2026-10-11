@@ -14,7 +14,7 @@
 * 위치를 몇 초 전에 봤으면 그동안 관측 속도로 움직였다고 지금 위치를 민다. 마주 옴(head-on)의 위치 보고는 **그 시각의 둘 사이 간격**이라
   지금 간격 = 보고 − (상대 속도 + 로봇 속도)·나이이고, 위치 두 개의 차이 / 간격 시간은 다가오는 속도(상대 + 로봇)다(리뷰 1 C1).
 
-정답에는 사후 표본의 빈도 대신 정확한 값을 쓸 수 있는 곳(의도·뚜껑·채움 구간의 상태 정답, Φ로 닫히는 세계 사건)이 있다 —
+정답에는 사후 표본의 빈도 대신 정확한 값을 쓸 수 있는 곳(의도·뚜껑·채움 구간의 상태 정답, Φ로 닫히는 세계 사건과 감속의 넘어섬)이 있다 —
 :func:`exact_labels` (리뷰 1 m2).
 """
 
@@ -295,7 +295,8 @@ def _upper_tail(reading: Reading, threshold: float, lo: float) -> float | None:
 
 
 def exact_labels(cfg: SimgenConfig, obs: Observation) -> dict:
-    """닫힌 꼴로 계산되는 정답: 상태(의도·뚜껑·채움 구간)와 세계 사건(stops_short, passable). 계산할 수 없는 것은 넣지 않는다."""
+    """닫힌 꼴로 계산되는 정답: 상태(의도·뚜껑·채움 구간), 세계 사건(stops_short, passable), 선택지 사건(감속의 넘어섬 —
+    열쇠 'overrun|stop_moderate'). 계산할 수 없는 것(검열된 보고 등)은 넣지 않는다."""
     out: dict = {}
     a, r = obs.agent, obs.robot
     family = {"p1_step_in": "step_in", "p1p5_step_in_carrying": "step_in", "p1_crossing": "crossing", "p1_head_on": "head_on"}.get(obs.scene)
@@ -312,6 +313,13 @@ def exact_labels(cfg: SimgenConfig, obs: Observation) -> dict:
         p = _upper_tail(a.ahead, stop, 0.005)
         if p is not None:
             out["stops_short"] = p
+    if obs.scene == "p5_braking":
+        # 넘어섬: 멈춤 거리 > 장애물 면 간격 — 선택지마다 P(면 < 멈춤) (사건 열쇠 '사건|선택지')
+        for option, level in (("stop_gentle", "gentle"), ("stop_moderate", "moderate"), ("stop_hard", "hard")):
+            stop = r.speed * r.latency + r.speed**2 / (2.0 * r.decel(level))
+            p = _upper_tail(obs.env.obstacle_distance, stop, 0.005)
+            if p is not None:
+                out[f"overrun|{option}"] = 1.0 - p
     if obs.scene == "p1_head_on" and not obs.env.corridor_width.censored and not a.size.censored:
         spare = obs.env.corridor_width.value - a.size.value - 2.0 * r.radius - r.passing_clearance
         sd = math.hypot(obs.env.corridor_width.sigma_eff, a.size.sigma_eff)

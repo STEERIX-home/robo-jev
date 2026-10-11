@@ -63,7 +63,7 @@
 | `basis` | 질문마다 정답을 계산한 법(사건·선택지·상태 이름) |
 | `options` | 행동·상태 질문의 열쇠 → 정식 선택지(또는 상태 값) |
 | `posterior_k` | 사후 표본 수 K (기본 256) |
-| `exact_labels` | 정답을 표본 빈도가 아니라 닫힌 꼴로 계산한 질문의 이름(의도·뚜껑·채움 구간 상태, stops_short·passable — 리뷰 1 m2) |
+| `exact_labels` | 정답을 표본 빈도가 아니라 닫힌 꼴로 계산한 질문의 이름(의도·뚜껑·채움 구간 상태, stops_short·passable, 감속의 넘어섬 — 리뷰 1 m2) |
 | `sides` | 비켜설 수 있는 몸의 옆 공간 보임 상태 `[왼쪽, 오른쪽]`(clear / blocked / occluded) 또는 `null` |
 | `margin_redraws` | 여유를 다시 뽑은 횟수(보통 0) |
 
