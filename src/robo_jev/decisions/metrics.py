@@ -50,6 +50,7 @@ from robo_jev.decisions.records import pair_of
 __all__ = [
     "BLOCKS",
     "COMPLETION_GATE",
+    "DECISIVE_MARGIN",
     "ECE_BINS",
     "ENTROPY_CUTS",
     "EPS",
@@ -59,6 +60,7 @@ __all__ = [
     "MOVE_MIN",
     "NORM_CUTS",
     "READINGS",
+    "SCORE_EDGE_RANGE",
     "SIGNAL_DIMENSIONS",
     "aggregate",
     "average_answers",
@@ -88,6 +90,7 @@ __all__ = [
     "reasoning_stats",
     "recommendation_summary",
     "regret_by_criterion",
+    "score_label_range",
     "summarize",
     "summarize_all",
     "uniform_metrics",
@@ -100,8 +103,12 @@ ECE_BINS = 10
 MOVE_MIN = 0.05
 #: 모델이 "움직이지 않았다"고 보는 변화 (숫자 쌍의 still 비율).
 STILL_MAX = 0.01
-#: noul·score의 "판정 뒤집힘" 문턱.
+#: noul·score의 "판정 뒤집힘" 문턱 — 판정 = 값 ``>= 0.5`` (dev와 진단이 같은 규칙; Task v0d fix round 1).
 FLIP_THRESHOLD = 0.5
+#: "결정적인 바뀜"의 여유 (통제자 결정 6): 두 답이 모두 0.5에서 이만큼 이상 떨어진(choice는 1등이 2등을 2배 이상 앞선) 채 판정이 바뀐 것만.
+DECISIVE_MARGIN = 0.1
+#: v0c-p2의 score 읽기가 닿는 범위 — 정답이 이 밖인 score 질문을 따로 묶는다(``score_label_range``; 통제자 결정 1).
+SCORE_EDGE_RANGE = (0.05, 0.95)
 #: 같은 쪽 일치(side agreement)에서 빼는 애매한 정답의 폭: |y − 0.5| < 이 값이면 세지 않는다.
 SIDE_MARGIN = 0.1
 _TIE = 1e-9
@@ -118,12 +125,12 @@ TOP_K = 10
 GROUP_DIMENSIONS = (
     "scene", "phenomena", "domain", "body", "sensor_suite", "style", "language", "hint", "recommendation", "criterion",
     "margin_norm_band", "key_entropy_band", "label_entropy_band", "margin_band", "family", "pair", "label_position",
-    "key_style", "agent", "distractors", "distance_unit",
+    "key_style", "agent", "distractors", "distance_unit", "score_label_range",
 )
 #: 기준선 대비 짝지은 구간을 내는 묶음 (보고서의 신호·어려움 표).
 SIGNAL_DIMENSIONS = (
     "scene", "phenomena", "margin_norm_band", "key_entropy_band", "label_entropy_band", "margin_band", "criterion", "recommendation",
-    "hint", "style",
+    "hint", "style", "score_label_range",
 )
 _BAND_NAMES = ("small", "medium", "large")
 #: bootstrap·run 비교의 머리 지표 — (이름, 행 고르기, 값, 기준 계열 거르개). 이름은 ``<묶음>.<지표>[계열]``. 기준선(``u``)에 같은 값이 있으면
@@ -144,6 +151,12 @@ HEADLINES: tuple[tuple[str, str, str, str | None], ...] = (
     ("choice/action.regret_norm", "choice/action", "regret_norm", None),
     ("choice/action.regret_norm[default]", "choice/action", "regret_norm", "default"),
     ("choice/action.regret_norm[stated]", "choice/action", "regret_norm", "stated"),
+    ("score.log_loss[label_outside]", "score", "log_loss", "label_outside"),
+    ("score.log_loss[label_inside]", "score", "log_loss", "label_inside"),
+    ("score.brier[label_outside]", "score", "brier", "label_outside"),
+    ("score.brier[label_inside]", "score", "brier", "label_inside"),
+    ("score.mae[label_outside]", "score", "abs_error", "label_outside"),
+    ("score.mae[label_inside]", "score", "abs_error", "label_inside"),
     ("choice/state.ce", "choice/state", "ce", None),
     ("choice/state.accuracy", "choice/state", "match", None),
     ("choice/rule.accuracy", "choice/rule", "match", None),
@@ -495,6 +508,14 @@ def _record_groups(record: dict[str, Any], bands: dict[str, str]) -> dict[str, s
     }
 
 
+def score_label_range(qtype: str, label: dict[str, Any] | None) -> str:
+    """score 질문의 정답이 v0c-p2의 읽기 범위 :data:`SCORE_EDGE_RANGE` 밖(``outside``)인지 안(``inside``)인지; 그 밖의 질문은 ``n/a``."""
+    if qtype != "score" or not isinstance(label, dict) or not _finite(label.get("value")):
+        return "n/a"
+    value = float(label["value"])
+    return "outside" if value < SCORE_EDGE_RANGE[0] or value > SCORE_EDGE_RANGE[1] else "inside"
+
+
 def _row_metrics(qtype: str, label: dict[str, Any], answer: dict[str, Any]) -> dict[str, Any]:
     if qtype == "noul":
         return binary_metrics(answer["p_yes"], label["p_yes"])
@@ -529,6 +550,7 @@ def question_rows(records: list[dict[str, Any]], predictions: list[dict[str, Any
             qgroups = dict(groups)
             qgroups["criterion"] = criterion
             qgroups["label_entropy_band"] = entropy_band(normalized_entropy(qtype, label))
+            qgroups["score_label_range"] = score_label_range(qtype, label)
             base: dict[str, Any] = {
                 "record_id": rid, "question": name, "type": qtype, "kind": kind, "block": block, "family": question_family(record, name),
                 "criterion": criterion, "label": label, "answer": None, "options": None, "values": None, "code_mass": None, "w": 1.0,
@@ -913,27 +935,39 @@ def position_bias(rows: list[dict[str, Any]]) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 
-def _answer_shift(qtype: str, a: dict[str, Any], b: dict[str, Any]) -> tuple[float, bool]:
-    """같은 질문의 두 답 사이 (이동, 판정 뒤집힘): choice는 전변동 거리와 argmax, noul·score는 |Δ|와 0.5 경계."""
+def _decisive_choice(probabilities: dict[str, float]) -> bool:
+    """choice 답이 결정적인가 — 1등 확률이 2등보다 2 × :data:`DECISIVE_MARGIN` 이상 크다(이진에서 |p − 0.5| ≥ 여유와 같은 뜻)."""
+    values = sorted((float(v) for v in probabilities.values()), reverse=True)
+    return len(values) < 2 or values[0] - values[1] >= 2 * DECISIVE_MARGIN
+
+
+def _answer_shift(qtype: str, a: dict[str, Any], b: dict[str, Any]) -> tuple[float, bool, bool]:
+    """같은 질문의 두 답 사이 (이동, 판정 뒤집힘, 결정적인 뒤집힘): choice는 전변동 거리와 argmax(결정적 = 두 답 모두 1등이 2등을
+    0.2 이상 앞섬), noul·score는 |Δ|와 ``>= 0.5`` 판정(결정적 = 두 값 모두 0.5에서 :data:`DECISIVE_MARGIN` 이상 떨어짐)."""
     if qtype == "choice":
         pa, pb = a["probabilities"], b["probabilities"]
         keys = list(pa)
         shift = 0.5 * sum(abs(float(pa[k]) - float(pb.get(k, 0.0))) for k in keys)
         top_a = max(keys, key=lambda k: (float(pa[k]), -keys.index(k)))
         top_b = max(keys, key=lambda k: (float(pb.get(k, 0.0)), -keys.index(k)))
-        return shift, top_a != top_b
+        flip = top_a != top_b
+        return shift, flip, flip and _decisive_choice(pa) and _decisive_choice(pb)
     field = "p_yes" if qtype == "noul" else "value"
     x, y = float(a[field]), float(b[field])
-    return abs(x - y), (x >= FLIP_THRESHOLD) != (y >= FLIP_THRESHOLD)
+    flip = (x >= FLIP_THRESHOLD) != (y >= FLIP_THRESHOLD)
+    decisive = abs(x - FLIP_THRESHOLD) >= DECISIVE_MARGIN - _TIE and abs(y - FLIP_THRESHOLD) >= DECISIVE_MARGIN - _TIE
+    return abs(x - y), flip, flip and decisive
 
 
 def permutation_sensitivity(predictions: list[dict[str, Any]]) -> dict[str, Any]:
     """질문마다 **보이는 순서가 다른** 배치 짝 모두에서 :func:`_answer_shift` (기획서 §10 T6의 판정 변경률 꼴; 리뷰 1 I4).
 
     같은 순서의 짝은 세지 않고(채점이 결정적이라 늘 같은 답 — 세면 비율이 희석된다) ``identical_pairs_skipped``로 남긴다.
-    ``shift_mean``(choice는 키로 되돌린 분포의 전변동 거리, noul·score는 |Δ|), ``flip_rate``(판정이 뒤집힌 짝의 비율).
+    ``shift_mean``(**주 지표** — choice는 키로 되돌린 분포의 전변동 거리, noul·score는 |Δ|), ``flip_rate``(판정이 뒤집힌 짝의 비율 —
+    답이 0.5 가까이 있으면 작은 이동에도 뒤집혀 흔들린다), ``decisive_flip_rate``(두 답이 모두 경계에서 :data:`DECISIVE_MARGIN` 이상
+    떨어진 채 뒤집힌 짝의 비율; 분모는 같은 모든 짝).
     """
-    sums: dict[str, list[float]] = defaultdict(lambda: [0, 0, 0.0, 0, 0])  # 질문, 짝, 이동 합, 뒤집힘, 건너뛴 같은 순서 짝
+    sums: dict[str, list[float]] = defaultdict(lambda: [0, 0, 0.0, 0, 0, 0])  # 질문, 짝, 이동 합, 뒤집힘, 건너뛴 같은 순서 짝, 결정적 뒤집힘
     for prediction in predictions:
         for question in prediction["questions"].values():
             qtype = question["type"]
@@ -944,21 +978,23 @@ def permutation_sensitivity(predictions: list[dict[str, Any]]) -> dict[str, Any]
                     for bucket in (qtype, "_all"):
                         sums[bucket][4] += 1
                     continue
-                shift, flip = _answer_shift(qtype, a["answer"], b["answer"])
+                shift, flip, decisive = _answer_shift(qtype, a["answer"], b["answer"])
                 for bucket in (qtype, "_all"):
                     sums[bucket][1] += 1
                     sums[bucket][2] += shift
                     sums[bucket][3] += 1 if flip else 0
+                    sums[bucket][5] += 1 if decisive else 0
                     if not counted:
                         sums[bucket][0] += 1
                 counted = True
     out = {}
-    for bucket, (questions, pairs, shift, flips, skipped) in sums.items():
+    for bucket, (questions, pairs, shift, flips, skipped, decisive) in sums.items():
         out[bucket] = {
             "questions": int(questions), "pairs": int(pairs), "shift_mean": shift / pairs if pairs else None, "flip_rate": flips / pairs if pairs else None,
-            "identical_pairs_skipped": int(skipped),
+            "decisive_flip_rate": decisive / pairs if pairs else None, "decisive_flips": int(decisive), "identical_pairs_skipped": int(skipped),
         }
-    out.setdefault("_all", {"questions": 0, "pairs": 0, "shift_mean": None, "flip_rate": None, "identical_pairs_skipped": 0})
+    out.setdefault("_all", {"questions": 0, "pairs": 0, "shift_mean": None, "flip_rate": None, "decisive_flip_rate": None, "decisive_flips": 0,
+                            "identical_pairs_skipped": 0})
     return dict(sorted(out.items()))
 
 
@@ -1030,17 +1066,18 @@ def _delta(row_a: dict[str, Any], row_b: dict[str, Any]) -> dict[str, Any] | Non
     if row_a["type"] in ("noul", "score"):
         dq = row_b["m"]["y"] - row_a["m"]["y"]
         dp = row_b["m"]["p"] - row_a["m"]["p"]
-        flip = (row_a["m"]["p"] >= FLIP_THRESHOLD) != (row_b["m"]["p"] >= FLIP_THRESHOLD)
-        return {"label_move": abs(dq), "model_move": abs(dp), "agree": dq * dp > 0.0, "flip": flip}
+        _, flip, decisive = _answer_shift("noul", {"p_yes": row_a["m"]["p"]}, {"p_yes": row_b["m"]["p"]})
+        return {"label_move": abs(dq), "model_move": abs(dp), "agree": dq * dp > 0.0, "flip": flip, "decisive_flip": decisive}
     qa, qb = row_a["label"]["probabilities"], row_b["label"]["probabilities"]
     if set(qa) != set(qb):
         return None
     pa, pb = row_a["answer"]["probabilities"], row_b["answer"]["probabilities"]
     dq = {k: float(qb[k]) - float(qa[k]) for k in qa}
     dp = {k: float(pb.get(k, 0.0)) - float(pa.get(k, 0.0)) for k in qa}
+    flip = row_a["m"]["predicted"] != row_b["m"]["predicted"]
     return {
         "label_move": 0.5 * sum(abs(v) for v in dq.values()), "model_move": 0.5 * sum(abs(v) for v in dp.values()),
-        "agree": sum(dq[k] * dp[k] for k in qa) > 0.0, "flip": row_a["m"]["predicted"] != row_b["m"]["predicted"],
+        "agree": sum(dq[k] * dp[k] for k in qa) > 0.0, "flip": flip, "decisive_flip": flip and _decisive_choice(pa) and _decisive_choice(pb),
     }
 
 
@@ -1108,10 +1145,12 @@ def pair_summary(records: list[dict[str, Any]], rows: list[dict[str, Any]]) -> d
         by_type[qtype] = {
             "compared": len(sel), "model_shift_mean": _mean([d["model_move"] for d in sel]),
             "label_shift_mean": _mean([d["label_move"] for d in sel]), "flip_rate": _mean([1.0 if d["flip"] else 0.0 for d in sel]),
+            "decisive_flip_rate": _mean([1.0 if d["decisive_flip"] else 0.0 for d in sel]),
         }
     out["wording"] = {
         "pairs": pair_count["wording"], "questions": len(wording), "model_shift_mean": _mean([d["model_move"] for _, d in wording]),
         "label_shift_mean": _mean([d["label_move"] for _, d in wording]), "flip_rate": _mean([1.0 if d["flip"] else 0.0 for _, d in wording]),
+        "decisive_flip_rate": _mean([1.0 if d["decisive_flip"] else 0.0 for _, d in wording]),
         "by_type": by_type,
     }
     return out
@@ -1153,7 +1192,10 @@ def _headline_entries(rows: list[dict[str, Any]], rec_rows: list[dict[str, Any]]
         for name, block, key, criterion in HEADLINES:
             if block.startswith("rec_") or (block != "_all" and row["block"] != block):
                 continue
-            if criterion is not None and _criterion_class(row["criterion"]) != criterion:
+            if criterion in ("label_outside", "label_inside"):
+                if row["groups"].get("score_label_range") != criterion.removeprefix("label_"):
+                    continue
+            elif criterion is not None and _criterion_class(row["criterion"]) != criterion:
                 continue
             value = _value(row["m"], key)
             if value is None:
@@ -1271,7 +1313,10 @@ DEFINITIONS = {
     "entropy_bands": "normalized label entropy (binary entropy in bits for noul/score, H(q)/ln n for choice): low < 1/3 <= mid < 2/3 <= high (high = label near 0.5); key_entropy_band uses the record's key question, label_entropy_band the question itself",
     "margin_band": "legacy: tertiles of |margin| per margin name over the scored set (units differ per name); not a difficulty axis",
     "side_agreement": "noul/score: share of questions whose label is at least 0.1 away from 0.5 where the model value is on the same side of 0.5",
-    "flip_rate": "pairs of listings of the same question whose option order differs (identical listings are not counted): share where the verdict changed",
+    "shift_mean": "primary order-sensitivity measure: mean |answer change| between listings of the same question whose option order differs (choice: total-variation distance of the key-mapped distributions; noul/score: |dp|)",
+    "flip_rate": "pairs of listings of the same question whose option order differs (identical listings are not counted): share where the verdict changed (noul/score verdict = value >= 0.5; choice = argmax); unstable when answers sit near 0.5",
+    "decisive_flip_rate": "share of the same pairs whose verdict changed while both answers were decisive: noul/score at least 0.1 away from 0.5, choice top-1 ahead of top-2 by at least 0.2",
+    "score_label_range": "score questions whose label lies outside [0.05, 0.95] (the range the v0c-p2 bin reading cannot reach) vs inside; v0c-p3 reads all of [0, 1]",
     "direction_correct_rate": "numeric pairs: among questions whose label moved (|dy| or total variation >= 0.05), share where the model moved the same way (sign / inner product > 0)",
     "completion_gate": "explanation-first runs: a trace is complete when the model stopped on its own before the cap (it wrote the answer cue with a code letter, or an end token); below a 0.9 completion rate the run is marked inconclusive",
 }
