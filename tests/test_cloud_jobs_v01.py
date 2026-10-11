@@ -1,8 +1,8 @@
 """v0.1 본 run의 job 정의 둘 (Task v0.1b) — `decisions-v01-main-h100`(v0.1a의 train-50k)·`decisions-v01-mix-h100`(그 뒤에 G1-train-mix ×1).
 
 v0 job 정의의 시험(tests/test_cloud_jobs.py의 실어 보내는 job 검사 — 그것이 이 둘도 자기 argparse·resolve_config로 이미 읽는다)과 같은 방식으로
-더 본다: 두 job이 v0의 학습 조리법을 그대로 쓰고 학습 입력·이름만 다른지, 학습한 체크포인트로 G1·G2와 T1~T7을 한 번씩 진단하는지(기준·v0의
-G1·G2는 Spark에서 쟀으므로 pod에서 학습 없는 모델을 다시 재지 않는다), 봉인 세트(T1~T7·G1·G2)가 어느 job의 학습 입력도 아닌지, 섞기용 학습 입력이
+더 본다: 두 job이 v0의 학습 조리법을 그대로 쓰고 학습 입력·이름만 다른지, 학습한 체크포인트로 G1·G2와 T1~T7을 한 번씩 진단하는지(main job은 그 뒤에
+같은 하드웨어 기준 — 학습 없는 2B와 v0을 G1·G2에 — 을 optional로 더 잰다, 42dc431; mix job은 자기 체크포인트만), 봉인 세트(T1~T7·G1·G2)가 어느 job의 학습 입력도 아닌지, 섞기용 학습 입력이
 `convert_single_probe.py mix`로 봉인되지 않은 재료에서만 만들어지는지. v0.1a의 train-50k가 아직 없으면 가짜 파일로 한다. 모델·데이터는 싣지 않는다.
 """
 

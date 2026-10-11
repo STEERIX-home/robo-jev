@@ -168,6 +168,10 @@ def test_a_false_boolean_is_p_yes_zero_and_a_valid_set_choice_shares_the_label()
 def test_a_long_candidate_list_is_cut_to_eight_keeping_the_answer_and_the_none_option():
     options = [(f"c{i:02d}", f"요소 e{i}", f"e{i}") for i in range(1, 13)] + [("c99", "해당하는 후보가 없거나 주어진 정보로 결정할 수 없음", None)]
     question = choice("q_action_0", options, text="목표를 위해 지금 누를 요소를 고르라.")
+    for i in range(50):  # 고정 seed 하나로는 "없음"이 우연히 살아남을 수 있다(리뷰 1 M1) — 레코드 id 50개 모두에서 정답·"없음"이 남아야 한다
+        (each,), _ = convert_record(judgment([question], [single("q_action_0", "c07")], rid=f"dom-{i:04d}-1", domain="dom"))
+        names = list(each["request"]["questions"]["q_action_0"]["criteria"])
+        assert len(names) == 8 and "c07" in names and "c99" in names, (i, names)
     (record,), counts = convert_record(judgment([question], [single("q_action_0", "c07")], rid="dom-0003-1", domain="dom"))
     kept = list(record["request"]["questions"]["q_action_0"]["criteria"])
     assert len(kept) == 8 and "c07" in kept and "c99" in kept
@@ -393,8 +397,10 @@ def test_the_mix_command_refuses_sealed_splits_shared_lineage_and_clashing_ids(t
     sealed_records = convert_records([mixed_record()], splits=G1_SPLITS)[0]
     sealed = _write(tmp_path / "G1.jsonl", sealed_records)
     out = tmp_path / "mix.jsonl"
-    with pytest.raises(SystemExit, match="only"):  # 봉인 분할의 레코드
+    with pytest.raises(SystemExit):  # --sealed는 반드시 준다(리뷰 1 M4) — 빠뜨리면 argparse가 거절한다
         script().main(["mix", "--base", str(REQUESTS), "--probe", str(sealed), "--out", str(out)])
+    with pytest.raises(SystemExit, match="only"):  # 봉인 분할의 레코드
+        script().main(["mix", "--base", str(REQUESTS), "--probe", str(sealed), "--sealed", str(sealed), "--out", str(out)])
     same_group = judgment([boolean("q_b")], [single("q_b", True)], rid="spatial-0001-9", split="train", origin="spatial/zone-color/0001")
     probe = _write(tmp_path / "probe.jsonl", convert_records([same_group], splits=MIX_SPLITS)[0])
     with pytest.raises(SystemExit, match="shares origin groups"):
@@ -402,7 +408,7 @@ def test_the_mix_command_refuses_sealed_splits_shared_lineage_and_clashing_ids(t
     clash = copy.deepcopy(read_records(probe))
     clash[0]["id"] = read_records(REQUESTS)[0]["id"]
     with pytest.raises(SystemExit, match="both files"):
-        script().main(["mix", "--base", str(REQUESTS), "--probe", str(_write(tmp_path / "clash.jsonl", clash)), "--out", str(out)])
+        script().main(["mix", "--base", str(REQUESTS), "--probe", str(_write(tmp_path / "clash.jsonl", clash)), "--sealed", str(sealed), "--out", str(out)])
     assert not out.exists()
 
 
