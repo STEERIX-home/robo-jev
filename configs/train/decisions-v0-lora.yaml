@@ -21,14 +21,14 @@ questions_per_request: 2     # 요청마다 epoch당 최대 2개, 종류별로 �
 type_weights: {choice: 1.0, noul: 1.0, score: 1.0}
 dev_fraction: 0.02           # 레코드 열쇠(쌍은 함께) 해시로 2 % — 고르기·멈추기는 dev로만
 dev_salt: v0d-dev
-dev_every: 500               # dev 한 번 ≈ 300 레코드 × 15.5 배치 ≈ 4,650 프롬프트 — 2B LoRA(fp32 adapter)에서 ≈ 7.6분이라 드물게 (보고서)
+dev_every: 500               # dev 한 번 ≈ 300 레코드 × 15.5 배치 ≈ 4,650 프롬프트 — 2B LoRA(fp32 adapter)에서 ≈ 6분이라 드물게 (보고서)
 dev_max_records: 300         # dev 손실은 균형 배치 전부(레코드당 ≈ 15 프롬프트)라 큰 학습 파일(train-50k의 2 % = 1,000)에서는 앞의 300개로 줄인다
 dev_batch_tokens: null       # null = micro_batch_tokens
 seed: 0
 epochs: 1
 max_steps: null              # null = epochs × epoch당 step 수
 batch_examples: 32           # optimizer step 하나의 예 수 (길이로 묶은 micro-batch들의 gradient 누적)
-micro_batch_tokens: 16384    # micro-batch 하나의 (예 수 × 가장 긴 길이) 상한
+micro_batch_tokens: 1024      # micro-batch 하나의 (예 수 × 가장 긴 길이) 상한 — GB10 실측: LoRA는 1,024가 가장 빨랐다(16 K 1,201 → 1 K 1,784 토큰/s) (보고서 §4)
 lr: 2.0e-4
 weight_decay: 0.0
 betas: [0.9, 0.999]

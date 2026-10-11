@@ -112,9 +112,9 @@ def test_the_shipped_configs_resolve(name, mode):
     assert resolved["mode"] == mode and resolved["model_id"] == "Qwen/Qwen3.5-2B" and resolved["format"] == "chat" and resolved["augment"]
     assert resolved["questions_per_request"] == 2 and resolved["dev_fraction"] == 0.02 and resolved["min_free_disk_gb"] == 60 and resolved["mix"] == []
     if mode == "lora":
-        assert resolved["lora"] == T.DEFAULT_LORA and resolved["lr"] == 2e-4
+        assert resolved["lora"] == T.DEFAULT_LORA and resolved["lr"] == 2e-4 and resolved["micro_batch_tokens"] == 1024
     else:
-        assert resolved["lr"] == 1e-5
+        assert resolved["lr"] == 1e-5 and resolved["micro_batch_tokens"] == 2048
 
 
 # -- 손실: 답 자리의 코드 행에서만, 진단의 읽기와 같은 KL ---------------------------------------------------------

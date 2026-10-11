@@ -143,7 +143,7 @@ DEFAULTS: dict[str, Any] = {
     "epochs": 1,
     "max_steps": None,  # null = epochs × epoch당 step 수 (풀어 둔 값이 여기에 들어간다)
     "batch_examples": 32,
-    "micro_batch_tokens": 16384,
+    "micro_batch_tokens": 1024,  # GB10 실측 최적(LoRA; 보고서 §4) — 큰 micro-batch는 padding과 원소별 연산의 메모리 대역폭 때문에 오히려 느리다
     "lr": 2.0e-4,
     "weight_decay": 0.0,
     "betas": [0.9, 0.999],
