@@ -218,3 +218,55 @@ FSDP sharding부터). 자격 증명은 저장소에도 명세에도 넣지 않�
 **체크포인트 슬림화 상시 규칙 (2026-10-09 사용자 승인, Task R14).** 각 라운드는 **평가 run이 모두 끝난 자기 체크포인트**를 같은 도구·같은 검증으로 model-only로 슬림화한다 — `scripts/slim_checkpoint.py`의 `APPROVALS`에 그 라운드의 경로를 상시 규칙 묶음(`standing_rule: true`, 날짜 2026-10-09, 근거 "상시 규칙")으로 더하고, 파일마다 model tensor 비트 동일·optimizer 밖 키 동일·평가 경로(`load_serving_judge`)가 받고 실린 파라미터 비트 동일을 확인한 뒤에만 atomic하게 대체한다(하나라도 떨어지면 그 파일은 그대로 두고 보고); 상시 규칙 묶음은 run이 `completed`로 `max_steps`에 닿았을 때만 대체한다(도구가 `metrics.json`으로 확인). 기록(sha256 전후·크기·확보 용량·`/` 여유 전후)은 그 라운드의 보고서와 이 파일 §4에 남긴다. **그 밖의 파일**(이전 라운드의 체크포인트·P 계열·HF 캐시·backbone 가중치 등)은 **따로 동의**를 받는다. 슬림화한 run은 평가·서빙만 되고 이어 학습할 수 없다(재개 경로가 거절한다). **첫 적용**: R14가 평가 run이 모두 끝난 뒤 자기 세 체크포인트를 이 규칙으로 줄였다(2026-10-10, 67.75 GB; §4의 R14 E 행).
 
 superpowers SDD 루프(브리프 파일 → 구현 에이전트 → 리뷰 패키지 → 리뷰 → 수정 → 재리뷰 → `progress.md` 한 줄). 커밋은 사용자 승인 하에, trailer `Co-Authored-By: <그 커밋을 쓴 세션의 Claude 모델> <noreply@anthropic.com>` — 2026-09-18~20 Claude Fable 5.1, 09-21~22 Claude Opus 5 (1M context)와 Claude Fable 5.1이 섞임, 09-23~25(R2~R5) Claude Fable 5.1, 2026-09-25 R6부터(R7·R8·R9·R10·R11·R12·R13·R14 포함) Claude Opus 5.5 (1M context). 어느 커밋이 어느 모델인지의 정본은 `git log`다. `.superpowers/`·`.venv/`·`artifacts/`·`data/`·`.claude/worktrees/`는 커밋 금지. docs/08이 로봇 스트림 계약의 정본, README의 구현 상태 표가 태스크 상태의 정본. 외부 리뷰는 코드로 검증한 뒤 동의를 받아 반영(07·09·10·11 반영 완료).
+
+## 6. RunPod에서 판단 학습 돌리기 (Task cloud1, 2026-10-11)
+
+판단 학습(`scripts/train_decisions.py`, Task v0d)과 진단(`scripts/diagnose_decisions.py`)을 **RunPod pod 한 대에서 한 명령으로** 돌린다: 만들기 → 접속 → 환경 맞추기(`uv sync --frozen --group backbone`) → 코드(`git archive`)·입력 올리기(도착 뒤 sha256 대조) → 모델을 HF에서 받아 `artifacts/models/manifest.json`의 revision·sha256과 대조 → 학습·진단 → 결과를 sha256과 함께 가져오기 → **지우기와 확인**. 코드: `src/robo_jev/launch/{cloud,jobs,ledger,envprobe}.py`, `providers/runpod.py`(REST API v2 — v1은 2026-11-15 퇴역), `infra/runpod-watchdog.sh`, job 정의 `configs/cloud/*.yaml`, CLI `scripts/launch_run.py`. 보고서 `.superpowers/sdd/task-cloud1-report.md`.
+
+**돈 안전 장치.** (i) 상한(달러·벽시계)은 하나의 pod 수명으로 접히고, 원격 러너는 그 수명 − 가져갈 몫에 스스로 멈추며(학습 단계에는 `max_wall_hours`를 넘긴다) 실행기도 그 시각을 잰다. (ii) 끝나거나 실패하면 결과를 가져오고(실패하면 마감까지 다시) **반드시 지운다**(finally — 지우기가 확인되지 않으면 명세 `unknown`, 장부는 열린 채, 종료 코드 3). (iii) pod를 만들 때 컨테이너 시작 명령에 **자기 종료 감시**를 심는다 — 절대 마감·시작 유예·끝난 뒤 유예에 `runpodctl`/API로 자기 pod를 지우므로 실행기가 죽어도 pod는 마감을 넘지 못한다(접속하면 감시가 살아 있는지 먼저 보고, 없으면 일하지 않고 지운다). (iv) `launch`는 예상 비용·상한·장부를 찍고 `--yes` 없이는 아무것도 만들지 않는다. (v) 키는 `~/.config/robo-jev/runpod.env`(600)에서만 읽고 어디에도 찍지 않는다. 그 밖에: 만들기 전에 카탈로그 단가 × GPU 수를, 만든 뒤 그 pod의 `cost`를 명세의 `budget.hourly_usd`와 대조(다르면 거절·곧바로 지움), 만들기 POST는 재시도하지 않음(애매하면 같은 이름 pod를 찾아 지움). **단계 장부**(`artifacts/cloud/runpod-ledger.json`): 첫 단계 누적 **$150**(2026-10-11 사용자 승인) — 열린 run은 상한 전부, 닫힌 run은 쓴 만큼으로 세고, 넘는 run은 prepare·launch가 거절한다. 단계 상한을 바꾸는 것은 `launch_run.py ledger --set-phase-cap <$> --reason "<승인>"`(이유가 장부에 남는다).
+
+**사용자가 할 일.**
+1. 계정·크레딧: 완료(2026-10-11). 키 파일: 완료 — `~/.config/robo-jev/runpod.env`, 한 줄 `RUNPOD_API_KEY=<키>`, `chmod 600`. 디렉터리가 지금 `775`라 다른 사용자가 파일을 바꿔 놓을 수 있다 — `chmod 700 ~/.config/robo-jev` 권장.
+2. **Claude Code 권한.** 이 세션의 자동 모드 분류기는 `launch_run.py launch --yes`(유료 pod 만들기)를 "실제 거래"로, 한 번은 키를 읽는 조회도 막았다. 에이전트가 pod를 띄우게 하려면 사용자가 그 명령을 허용하는 Bash 권한 규칙을 더하거나, 아래 명령을 사용자가 직접 돌린다.
+3. 예산: run마다 `budget.max_usd`(적지 않으면 단계에 남은 돈)와 `max_wall_hours`. 단가는 **예약 직전에** `prices`로 다시 보고 `--hourly-usd`에 적는다 — 다르면 launch가 거절한다.
+4. (선택) SSH 공개 키 등록은 필요 없다 — 실행기가 전용 키(`~/.config/robo-jev/runpod_ed25519`, 없으면 만든다)의 공개 키를 pod의 `PUBLIC_KEY`로 넘긴다.
+
+**명령.**
+```bash
+uv run python scripts/launch_run.py prices                     # 읽기 전용: 단가·재고·CUDA 판 (키만 읽고 아무것도 만들지 않는다)
+uv run python scripts/launch_run.py prepare --job configs/cloud/decisions-v0-train50k-h100.yaml --run-id <id> \
+    --manifest artifacts/cloud/runs/<id>.json --hourly-usd <prices의 값> [--set provider.gpu_type="NVIDIA H100 80GB HBM3"] [--code-ref <커밋>]
+uv run python scripts/launch_run.py dry-run --manifest artifacts/cloud/runs/<id>.json   # 할 일·시간·비용·장부·올릴 것·가져올 것 (네트워크 없음)
+uv run python scripts/launch_run.py launch  --manifest artifacts/cloud/runs/<id>.json --yes   # 끝나면 결과가 <id>-fetched/에, pod는 지워져 있다
+uv run python scripts/launch_run.py finish  --manifest …   # 중단·--no-watch 뒤: 가져오고 지운다
+uv run python scripts/launch_run.py down    --manifest …   # 지금 지운다 (가져오지 않는다)
+uv run python scripts/launch_run.py pods                   # 읽기 전용: 남은 pod·볼륨이 없는지 ("clean": true)
+uv run python scripts/launch_run.py ledger                 # 단계 장부
+```
+pod에 가는 코드는 **커밋된 것**(`git archive <ref>`)뿐이다 — 고치는 중인 파일은 가지 않는다(작업 트리가 깨끗하지 않으면 `--allow-dirty` 없이는 거절). v0d 학습기가 main에 병합되기 전에는 `--code-ref`에 병합한 커밋을 준다(이번 시운전 묶음 `41db4a6` = task-cloud1 `b556622` + task-v0d `7668b8b`, 브랜치에 올리지 않은 커밋).
+
+**환경 (x86_64 + CUDA).** lock은 linux-x86_64·cp311에서 풀린다: 82개 중 81개가 x86_64 wheel(해시 포함)이고, `evdev` 하나만 sdist라 컴파일러로 짓는다(RunPod 기반 이미지에 build-essential이 있다; 없으면 job의 대체 명령이 `--no-install-package evdev` — robosuite의 키보드 입력용이라 판단 학습은 쓰지 않는다). torch 2.14.0의 PyPI 리눅스 wheel은 **CUDA 13**(cu130)이라 호스트 드라이버가 CUDA 13 이상이어야 한다 — 만들기 요청에 `gpu.minCudaVersion: 13.0`을 건다(2026-10-11 카탈로그: H100 SXM·H200 Secure는 12.8/13.0/13.2 호스트가 있고, H100 PCIe Secure는 그 시각 재고 없음). fla는 순수 파이썬 wheel(Triton 3.8 커널, H100 sm_90에서 JIT — 컴파일러 필요), `causal-conv1d`는 lock에 없어 torch 대체로 돈다 — **GB10의 기준 측정(v0d §4)도 같은 조합**(fla + causal_conv1d 없음)이라 속도 배수가 하드웨어의 배수다. 실행기는 첫 단계에서 `reports/env.json`(GPU·드라이버·torch·고른 커널)을 남긴다.
+
+**예상 비용표** (단가: RunPod v2 카탈로그, **2026-10-11 12:49 UTC 조회** — GPU 한 장 시간당 USD. **예약 직전에 `prices`로 다시 보고 명세를 고친다**; 실행기는 다르면 거절한다).
+
+| GPU | Secure | Community | 재고(Secure / Community) | 30분 시운전 상한 | ① train-50k 1 epoch (H100 배수 m=1 / 2 / 4) |
+| --- | ---: | ---: | --- | ---: | --- |
+| H100 PCIe 80 GB | $2.89 | $1.99 | NONE / NONE | $1.45 | 5.5 h $15.9 · 3.0 h $8.7 · 1.75 h $5.1 |
+| H100 SXM 80 GB (HBM3) | $3.99 | $2.69 | HIGH / NONE | $2.00 | 5.5 h $21.9 · 3.0 h $12.0 · 1.75 h $7.0 |
+| H100 NVL 94 GB | $3.19 | $2.59 | LOW / NONE | $1.60 | 5.5 h $17.5 · 3.0 h $9.6 · 1.75 h $5.6 |
+| H200 141 GB | $5.29 | $3.59 | HIGH / NONE | $2.65 | 5.5 h $29.1 · 3.0 h $15.9 · 1.75 h $9.3 |
+
+①의 시간 = GB10 1 epoch(3,063 step × 5.13 s = 4.4 h + dev ≈ 0.6 h ≈ 5.0 h) ÷ m + 준비·가져오기 ≈ 0.5 h. Secure로 계산했다.
+
+**첫 run 계획.**
+1. **(승인된 시운전 — 아직 돌지 않았다)** `configs/cloud/decisions-v0-smoke-h100.yaml`: 1×H100 SXM Secure $3.99/h, 상한 30분·$5(run 상한 $2.00), 시운전 데이터(v0a.1 1,600/400)만. LoRA bf16 120 step + 진단 100 레코드 + 전체 미세조정·LoRA의 짧은 측정. 명세는 준비돼 있다(`artifacts/cloud/runs/cloud1-smoke-01.json`, dry-run은 보고서 §6) — 권한 규칙(위 2)이 있으면 `launch --yes` 하나로 돈다. 환경이 풀리는지, H100 토큰/s(GB10: LoRA fp32 1,784 · LoRA bf16 2,563 · 전체 2,017), 준비 포함 끝까지의 시간을 잰다.
+2. **① 속도 배수** — v0 검증(Spark의 첫 학습 → 봉인 시험 세트의 학습 전·후)이 통과한 뒤 `configs/cloud/decisions-v0-train50k-h100.yaml`: train-50k 1 epoch(LoRA bf16, 같은 설정·seed)를 1×H100에서 재현한다. 배수 m = GB10 s/step ÷ H100 s/step(`metrics.json`의 `summary.seconds_per_step_steady`); v0a.1 평가 400개의 학습 전·후 진단으로 평가 처리량 배수도(GB10 기반 304 s · LoRA 뒤 498 s).
+3. **② 규모 키우기를 m으로 다시 계산** — GB10 기준 시간 ÷ m × 단가. 4B의 step은 2B의 ≈ 2배(G0b 실측 120 / 59 s)로 둔다:
+
+   | 구성 | GB10 시간(계산만) | H100 SXM m=2 | m=4 | m=8 |
+   | --- | ---: | --- | --- | --- |
+   | 2B LoRA, 학습 세트 10배(50만), seed 1 | 44 h | 22 h · $88 | 11 h · $44 | 5.5 h · $22 |
+   | 4B LoRA, 10배, seed 1 | 87 h | 44 h · $174 | 22 h · $87 | 11 h · $44 |
+   | 4B LoRA, 10배, seed 셋 | 262 h | 131 h · $523 | 65 h · $261 | 33 h · $131 |
+
+   dev·진단·준비는 따로 더한다(봉인 시험 세트 T1~T7 = 13,900 레코드 × 레코드당 ≈ 15.9 배치 ≈ 22만 프롬프트 — GB10에서 2B 기반 20.9 프롬프트/s ≈ 2.9 h, LoRA 뒤 12.8 프롬프트/s ≈ 4.8 h; v0d §6의 400 레코드 실측에서). 단계 상한 $150을 넘는 행은 사용자의 새 승인이 먼저다. 4B 전체 미세조정은 80 GB 카드에 들지 않는다(optimizer 바닥 94 GiB) — H200 141 GB 한 장이나 sharding이 필요하다.
