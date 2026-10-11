@@ -34,6 +34,16 @@ G2 = "artifacts/simgen/probes/G2.jsonl"  # 공개 BoolQ·MultiNLI 표본 (통제
 SEALED = (*TESTS, G1, G2)
 CONTEXT = {"python": "python", "uv": "uv", "repo": "/r", "run_dir": "/r/run", "runs": "/r/run/runs", "reports": "/r/run/reports", "run_id": "x"}
 PROBES = REPO / "artifacts" / "simgen" / "probes"
+#: main job의 같은 하드웨어 기준(통제자 결정 2026-10-12): v0 adapter — 원래 자리 그대로 입력으로 올린다.
+V0_ADAPTER = "artifacts/cloud/runs/v0-main-01-fetched/runs/v0-main-2b/checkpoint.pt"
+V0_ADAPTER_SHA256 = "4859a972027fa4d9c24caaa92a372139a0e55ff850e9299377709511f120f091"
+#: main job에만 있는 기준 단계 (이름, 체크포인트, 입력, 출력) — v0.1 모델의 진단이 모두 끝난 뒤.
+BASELINES = [
+    ("base-G1", None, G1, "/r/run/reports/base-2b-G1.json"),
+    ("base-G2", None, G2, "/r/run/reports/base-2b-G2.json"),
+    ("v0-G1", V0_ADAPTER, G1, "/r/run/reports/v0-2b-G1.json"),
+    ("v0-G2", V0_ADAPTER, G2, "/r/run/reports/v0-2b-G2.json"),
+]
 
 
 @functools.lru_cache(maxsize=None)
@@ -74,10 +84,14 @@ def test_each_v01_job_trains_once_with_the_v0_recipe(which):
 @pytest.mark.parametrize("which", sorted(JOBS))
 def test_each_v01_job_diagnoses_its_own_checkpoint_on_g1_g2_then_the_seven_sealed_sets(which):
     diagnoses = _diagnoses(JOBS[which])
-    assert [str(args.input) for _, args in diagnoses] == [G1, G2, *TESTS], "G1·G2가 먼저, 그다음 T1~T7 — 한 번씩"
+    own = diagnoses[: 2 + len(TESTS)]
+    assert [str(args.input) for _, args in own] == [G1, G2, *TESTS], "G1·G2가 먼저, 그다음 T1~T7 — 한 번씩"
     checkpoint = f"/r/run/runs/{RUN_NAME[which]}/checkpoint.pt"
+    for name, args in own:
+        assert str(args.checkpoint) == checkpoint, f"{name}: v0.1 모델 자신의 체크포인트"
+    rest = [name for name, _ in diagnoses[len(own):]]
+    assert rest == ([b[0] for b in BASELINES] if which == "main" else []), "같은 하드웨어 기준은 main에만, 자기 진단이 모두 끝난 뒤에"
     for name, args in diagnoses:
-        assert str(args.checkpoint) == checkpoint, f"{name}: 학습 없는 모델·v0을 pod에서 다시 재지 않는다 (Spark에서 쟀다)"
         assert not args.preview and args.model == "Qwen/Qwen3.5-2B"
         # Spark의 G1 기준·v0 run과 같은 채점 조건 (진단 도구의 기본값)
         assert (args.prompt_version, args.fmt, args.orders, args.mode, args.shuffle_seed, args.batch, args.limit) == ("v0c-p3", "chat", "counterbalanced", "direct", 1, 1, None)
@@ -89,9 +103,35 @@ def test_each_v01_job_diagnoses_its_own_checkpoint_on_g1_g2_then_the_seven_seale
     assert t6["max_minutes"] >= 80, "v0의 T6 진단은 H100에서 53.8분 — 60분 상한은 빠듯했다"
 
 
+def test_the_main_job_adds_optional_same_hardware_baselines_on_g1_and_g2_after_its_own_results():
+    spec, steps = _steps(JOBS["main"])
+    job = spec["job"]
+    names = [step["name"] for step in job["steps"]]
+    assert names[-len(BASELINES):] == [b[0] for b in BASELINES] and names.index("after-T7") < names.index("base-G1")
+    by_name = {step["name"]: step for step in job["steps"]}
+    parsed = dict(_diagnoses(JOBS["main"]))
+    for name, checkpoint, probe, out in BASELINES:
+        args = parsed[name]
+        assert by_name[name]["optional"] is True, f"{name}: 기준 단계의 실패가 본 결과를 막지 않는다"
+        assert (str(args.checkpoint) if args.checkpoint else None) == checkpoint and str(args.input) == probe and str(args.out) == out
+        assert args.model == "Qwen/Qwen3.5-2B" == job["model"]
+    assert V0_ADAPTER in job["inputs"], "v0 adapter는 job inputs로 올라가야 pod에 있다"
+    assert V0_ADAPTER_SHA256 in JOBS["main"].read_text(encoding="utf-8"), "머리 주석에 adapter의 sha256을 적는다"
+    adapter = REPO / V0_ADAPTER
+    if adapter.is_file():  # 원래 파일 그대로인가 (고치거나 줄이지 않았다)
+        from robo_jev.decisions.records import file_sha256
+
+        assert file_sha256(adapter) == V0_ADAPTER_SHA256
+    assert V0_ADAPTER not in load_job(JOBS["mix"])["job"]["inputs"], "mix job은 그대로다"
+
+
 def test_the_two_v01_jobs_differ_only_in_the_training_input_and_the_names():
     def normalised(which: str) -> str:
         spec = load_job(JOBS[which])
+        if which == "main":  # main에만 있는 같은 하드웨어 기준(단계 넷과 v0 adapter 입력)을 빼고 견준다
+            spec["job"]["steps"] = [step for step in spec["job"]["steps"] if step["name"] not in {b[0] for b in BASELINES}]
+            spec["job"]["inputs"] = [path for path in spec["job"]["inputs"] if path != V0_ADAPTER]
+        spec["estimate"] = {k: v for k, v in spec["estimate"].items() if k != "assumption"}  # 가정 글은 main에 기준 단계의 몫이 더 적혀 있다
         text = json.dumps({k: v for k, v in spec.items() if k != "name"}, sort_keys=True, ensure_ascii=False)
         return text.replace(TRAIN_INPUT[which], "<train>").replace(RUN_NAME[which], "<run>").replace("after-v01mix-", "after-<tag>-").replace("after-v01-", "after-<tag>-")
 

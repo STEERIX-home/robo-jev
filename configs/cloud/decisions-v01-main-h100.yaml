@@ -1,7 +1,11 @@
 # v0.1 본 run ①(pod 하나): v0.1a의 train-50k(학습 문구 넓히기 + 사실 순서 섞기) 1 epoch — 학습 설정은 v0과 같다(decisions-v0-lora-h100:
 # 2B LoRA bf16 + fp32 master, λ 0.2, p3, 마지막 체크포인트) → 학습한 2B로 일반 능력 시험 G1(봉인, Task v0.1b)과 봉인 시험 세트 T1~T7 진단
-# (균형 배치, 두 읽기). 기준(학습 없는 2B)과 v0의 G1은 Spark에서 같은 진단 도구 판(v0d-diagnose-4)·같은 프롬프트(v0c-p3)로 이미 쟀다
-# (artifacts/reports/v01b/G1-{base,v0}-2b.*) — pod에서 다시 재지 않는다. 비교(--compare, convert_single_probe.py compare)는 Spark에서 CPU로.
+# (균형 배치, 두 읽기). 기준(학습 없는 2B)과 v0의 G1·G2는 Spark(GB10)에서 같은 진단 도구 판(v0d-diagnose-4)·같은 프롬프트(v0c-p3)로 이미 쟀고
+# (artifacts/reports/v01b/G{1,2}-{base,v0}-2b.*), **같은 하드웨어 기준**(통제자 결정 2026-10-12)으로 이 pod에서도 v0.1 모델의 진단(G1·G2·T1~T7)이
+# 모두 끝난 뒤에 학습 없는 2B(base-2b-G1/G2)와 v0(v0-2b-G1/G2)을 G1·G2에 다시 잰다 — 모두 optional이라 실패해도 본 결과를 막지 않는다.
+# v0 adapter는 입력으로 올린다(원래 자리 그대로 — 고치거나 줄이지 않는다): artifacts/cloud/runs/v0-main-01-fetched/runs/v0-main-2b/checkpoint.pt
+#   sha256 4859a972027fa4d9c24caaa92a372139a0e55ff850e9299377709511f120f091, 439,102,777 B (run v0-main-2b, step 3065, LoRA).
+# 비교(--compare, convert_single_probe.py compare)는 Spark에서 CPU로.
 # 일반 능력 시험 G2(공개 BoolQ dev·MultiNLI dev_matched 각 500, seed 0 — 통제자 결정 2026-10-12: 섞기가 닿을 수 없는 독립 시험)도 같은 체크포인트로
 # 잰다; 기준·v0의 G2도 Spark에서 쟀다(artifacts/reports/v01b/G2-{base,v0}-2b.*).
 # G1·G2를 T1~T7보다 앞에 둔다(짧고, 새 측정이다). T6의 단계 상한은 v0의 실측(53.8분)이 60분에 가까워 90분으로 둔다.
@@ -24,6 +28,7 @@ job:
     - artifacts/simgen/probes/G1.manifest.json
     - artifacts/simgen/probes/G2.jsonl
     - artifacts/simgen/probes/G2.manifest.json
+    - artifacts/cloud/runs/v0-main-01-fetched/runs/v0-main-2b/checkpoint.pt
   runtime:
     env:
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
@@ -96,6 +101,26 @@ job:
       max_minutes: 60
       est_minutes: 27
       optional: true
+    - name: base-G1
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--input", "artifacts/simgen/probes/G1.jsonl", "--out", "{reports}/base-2b-G1.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 45
+      est_minutes: 14
+      optional: true
+    - name: base-G2
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--input", "artifacts/simgen/probes/G2.jsonl", "--out", "{reports}/base-2b-G2.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 20
+      est_minutes: 2
+      optional: true
+    - name: v0-G1
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "artifacts/cloud/runs/v0-main-01-fetched/runs/v0-main-2b/checkpoint.pt", "--input", "artifacts/simgen/probes/G1.jsonl", "--out", "{reports}/v0-2b-G1.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 45
+      est_minutes: 20
+      optional: true
+    - name: v0-G2
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "artifacts/cloud/runs/v0-main-01-fetched/runs/v0-main-2b/checkpoint.pt", "--input", "artifacts/simgen/probes/G2.jsonl", "--out", "{reports}/v0-2b-G2.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 20
+      est_minutes: 2
+      optional: true
   fetch:
     - runs/*/metrics.json
     - runs/*/config.yaml
@@ -124,4 +149,4 @@ estimate:
   boot_minutes: 3
   uplink_mbps: 40
   fetch_minutes: 3
-  assumption: "단계 시간은 v0 본 run(v0-main-01, H100)의 실측: 학습 62.6분, 진단 T1 26.3 · T2 26.1 · T3 25.4 · T4 14.7 · T5 13.2 · T6 53.8 · T7 26.7분; G1은 같은 처리량(≈ 7,700 토큰/s, 9.0 M 토큰)으로 ≈ 20분, G2는 0.56 M 토큰으로 ≈ 2분"
+  assumption: "단계 시간은 v0 본 run(v0-main-01, H100)의 실측: 학습 62.6분, 진단 T1 26.3 · T2 26.1 · T3 25.4 · T4 14.7 · T5 13.2 · T6 53.8 · T7 26.7분; G1은 같은 처리량(≈ 7,700 토큰/s, 9.0 M 토큰)으로 ≈ 20분, G2는 0.56 M 토큰으로 ≈ 2분; 같은 하드웨어 기준: 학습 없는 2B는 v0-base-01의 실측 ≈ 10,800 토큰/s로 G1 ≈ 14분·G2 ≈ 2분, v0은 adapter 진단과 같은 ≈ 20분·2분"
