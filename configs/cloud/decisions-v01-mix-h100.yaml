@@ -4,6 +4,9 @@
 #   uv run python scripts/convert_single_probe.py mix --base artifacts/simgen/v01/train-50k.jsonl \
 #       --probe artifacts/simgen/probes/G1-train-mix.jsonl --sealed artifacts/simgen/probes/G1.jsonl \
 #       --train-config configs/train/decisions-v0-lora-h100.yaml --out artifacts/simgen/v01-mix/train-50k-mix.jsonl
+# 섞인 몫(대리 실측 — v0b의 train-50k에 이어 붙인 것, artifacts/scratch/v01b/standin/): 섞기용 train 1,405 레코드(dev 34는 dev 상한 300
+# 밖이라 쓰이지 않는다) → epoch당 예 2,724 / 100,774 = 2.70 %, step 3,065 → 3,150; 섞기용 예는 평균 866 토큰(simgen 예 407)이라 토큰으로는
+# ≈ 5.6 %다 — 학습 단계는 ①보다 ≈ 6 % 길다(≈ 70분; 예상 시간은 ①과 같게 두었다).
 # 진단은 ①과 같다(after-v01mix: G1 → T1~T7).
 kind: robojev-cloud-job-v0
 name: decisions-v01-mix-h100
