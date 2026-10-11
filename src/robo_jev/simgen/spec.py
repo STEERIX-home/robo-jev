@@ -114,9 +114,11 @@ class RobotSpec:
 
 @dataclass(frozen=True)
 class Batch:
-    """세계 K개의 값 배열(열쇠 → (K,) 배열)."""
+    """세계 K개의 값 배열(열쇠 → (K,) 배열). ``weights``가 있으면 세계마다의 사후 무게(합 1) — 이산 사후를 정확히 나열할 때(P4 상태,
+    P6 있음/없음; Task v0b). 없으면 K개가 같은 무게(표본)."""
 
     values: dict[str, np.ndarray] = field(default_factory=dict)
+    weights: np.ndarray | None = None
 
     @property
     def size(self) -> int:

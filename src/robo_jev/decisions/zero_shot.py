@@ -178,8 +178,10 @@ def diagnose_records(
     gen_batch: int = DEFAULT_GEN_BATCH,
     max_new_tokens: int = REASONING_MAX_NEW_TOKENS,
     log: Callable[[str], None] | None = None,
+    version: str = PROMPT_VERSION,
 ) -> list[dict[str, Any]]:
-    """기록 → 기록마다 예측 하나 (기록 순서). 프롬프트는 기록의 ``request``만으로 만든다(:func:`record_prompts`).
+    """기록 → 기록마다 예측 하나 (기록 순서). 프롬프트는 기록의 ``request``만으로 만든다(:func:`record_prompts`, 판 `version` —
+    기본은 지금의 판 v0c-p3; v0c-p2는 재현용).
 
     `orders`가 ``counterbalanced``(기본)면 질문마다 균형 배치 모두(choice n개, noul·score 둘)를, ``seeded``면 seed 배치 하나를 채점한다.
     채점 전에 모든 프롬프트의 보이는 선택지 줄을 기록과 대조한다(:func:`check_displayed_lines` — 어긋나면 ``ValueError``).
@@ -188,7 +190,7 @@ def diagnose_records(
     "answer"(배치 평균), "code_mass"(배치 평균), "listings": [{"options", "values", "codes", "code_probs", "code_mass", "answer",
     "prompt_tokens", "scored_tokens", "reasoning"?}, …]}}}``.
     """
-    prompts = [p for record in records for p in record_prompts(record, tokenizer, seed=seed, fmt=fmt, mode=mode, orders=orders)]
+    prompts = [p for record in records for p in record_prompts(record, tokenizer, seed=seed, fmt=fmt, mode=mode, orders=orders, version=version)]
     problems = [(p["record_id"], p["question"], p["listing"], problem) for p in prompts for problem in check_displayed_lines(p)]
     if problems:
         raise ValueError(f"보이는 선택지 줄이 기록과 어긋난 프롬프트 {len(problems)}개 — 첫 것: {problems[0]}")
@@ -208,7 +210,7 @@ def diagnose_records(
     by_id: dict[str, dict[str, Any]] = {}
     for p, s, f in zip(prompts, scored, finished):
         entry = by_id.setdefault(p["record_id"], {
-            "id": p["record_id"], "model": model_id, "mode": mode, "format": fmt, "prompt_version": PROMPT_VERSION, "orders": orders,
+            "id": p["record_id"], "model": model_id, "mode": mode, "format": fmt, "prompt_version": version, "orders": orders,
             "shuffle_seed": seed, "questions": {},
         })
         listing = {

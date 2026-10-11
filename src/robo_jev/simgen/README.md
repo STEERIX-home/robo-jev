@@ -1,7 +1,7 @@
 # simgen — 시뮬레이션 판단 데이터 엔진 (레코드 형식 `simgen-request/0`)
 
-정본 기획은 `docs/12-sim-judgment-data-engine.md`, 이 단계의 지시서는 Task v0a다. 이 문서는 **레코드 형식**(필드 뜻), **정답 정의**,
-**버전 규칙**을 적는다.
+정본 기획은 `docs/12-sim-judgment-data-engine.md`, 지시서는 Task v0a(엔진 1단계)와 Task v0b(새 현상 P3·P4·P6, 조합, 한국어, 봉인된 시험 세트
+T1~T7, 학습 세트 — §5)다. 이 문서는 **레코드 형식**(필드 뜻), **정답 정의**, **버전 규칙**을 적는다.
 
 한 줄 = 한 판단 순간 = 한 요청. 판단이 필요한 순간 하나를 만들고(①), 결정 여유에 맞춘 '닻' 세계를 풀고(②), 로봇 감각만 담은 관측을
 만들어 글로 쓰고(③), 관측에서 뽑은 사후 세계 K개에서 선택지마다 갈라 굴려(④) 확률 정답을 붙인다(⑤). 평가용 참 세계는 그 사후에서 한 번
@@ -48,8 +48,8 @@
 | `variant` | `moving`, 또는 `p1_crossing`에서 멈춘 로봇이 건널지 정하는 `stopped` |
 | `agent` | 상대 주체 `{kind, group, cue, velocity_mode (direct / two_fix), age_s}` 또는 `null` |
 | `container` | 용기 `{kind, content (hot / chemical / other), fill_mode (phrase / percent), lid_view (open / lid / unknown)}` 또는 `null` |
-| `style` | 서술 문체 `facts` · `prose` · `planner` |
-| `language` | `en` |
+| `style` | 서술 문체 `facts` · `prose` · `planner` (+ 빼 둔 `log` — T2 전용) |
+| `language` | `en` · `ko`(v0b) |
 | `units` | 글의 단위 표기 `{distance, speed, time}` |
 | `hint` | 계산된 힌트 문장이 글에 있나 |
 | `recommendation` | 계획기 권고 `{present, canonical, wrong, gap, costs, option, question}` — 그 순간 **가능한 모든 행동**(`costs` = 정식 선택지 → 기본 비용표의 기대 비용, 기준 없음)으로 판정한다: 맞는 권고는 최선과의 차 `gap` ≤ τ, `wrong`이면 `gap` ≥ 2τ. `option`은 기본 행동 질문(`question`)에 그 행동이 있을 때의 열쇠(없으면 `null`) |
@@ -66,6 +66,10 @@
 | `exact_labels` | 정답을 표본 빈도가 아니라 닫힌 꼴로 계산한 질문의 이름(의도·뚜껑·채움 구간 상태, stops_short·passable, 감속의 넘어섬 — 리뷰 1 m2) |
 | `sides` | 비켜설 수 있는 몸의 옆 공간 보임 상태 `[왼쪽, 오른쪽]`(clear / blocked / occluded) 또는 `null` |
 | `margin_redraws` | 여유를 다시 뽑은 횟수(보통 0) |
+| `margin_fallback` | 닻이 목표 여유에 닿지 못해 가장 가까운 띠를 쓴 여유 이름(P3, 보통 빈 목록) — v0b |
+| `group` · `maneuver` · `split` · `holdout` · `pool` · `holdout_vars` | 현상·조합 묶음, P3 움직임 갈래, 나눔, 들어간 빼 둔 칸, 문구 묶음, T3 변수의 보인 값 — §5 |
+| `load` · `stack` · `place` · `stale` · `corner` · `conflict` | 새 장면의 관측 요약(종류·클래스·단서 …) — v0b |
+| `t6` | T6 교란 레코드만: `{base, variant, map}` |
 
 ### `request` — 모델 입력
 
@@ -168,7 +172,48 @@ catalog-v0.1 `margins`). 정답은 설계와 무관한 사전(속성 목록: 채
 * **`catalog` / `skins` / `values`**: YAML의 값을 바꾸면 그 파일의 `version`을 올린다. 기본 가치표는 가치 판단이라 공개하고 버전을 붙인다.
 * 레코드는 (생성기 버전, 세 설정 버전, seed, 강제한 분야, 쌍 변형)으로 다시 만든다. 물리가 좋아지면 옛 데이터도 새로 뽑는다(docs/12 §12).
 
-## 5. 모듈과 명령
+## 5. Task v0b — 새 현상·조합·한국어·빼 둔 칸·시험 세트
+
+**장면(18).** v0a의 여섯에 더해: `p3_carrying_tall`(키 큰 물건을 싣고 감속 `brake`·회전 `turn`·출발 `start` — `meta.maneuver`),
+`p3_ramp`(경사로 `down`·`up`), `p3_place_stack`(쌓기), `p4_place_check`·`p4_insert`(안착·끼우기 확인), `p6_stale_track`(가려진 상대가
+아직 있나), `p6_blind_corner`(모퉁이), `p6_sensor_conflict`(라이다·카메라 불일치), 조합 `p3p5_carrying_mixed`·`p1p6_emerging_step_in`·
+`p4p6_stale_check`, 그리고 **학습에 없는** `p1p3_step_in_carrying_tall`(T4 전용). 묶음(`meta.group`) = P1·P3·P4·P5·P6·P1+P5·P3+P5·P1+P6·P4+P6
+(학습)·P1+P3(T4). 학습 세트는 분야 × 묶음으로 층화한다(분야 한 바퀴마다 다음 묶음).
+
+**결정 여유(새 것).** `tip` = (B/2)/(com_mid·H) − r_ref(관측으로 정해지는 명목값 — com_mid는 무게중심 높이 비율 범위의 가운데; 기준 움직임의 쏠림 비 —
+단단한 제동/g, 지금 속도의 v²/(R·g), 보통 출발/g, 경사로 (sin φ + a/g)/cos φ), `stack` = L_low/2 − |d|(명목 — 무게 치우침 c·놓기 오차 ε는 숨은 값), `seat` = logit P(제대로 | 보고),
+`sight` = 다시 보이는 거리 − 최대 제동 멈춤 거리, `corner` = 모퉁이까지 거리 − 최대 제동 멈춤 거리, `late` = 늦은 감지 거리 − 최대 제동 멈춤 거리.
+P3는 로봇 쪽 결정 변수(감속·회전 속도·출발 가속 — 글에 보이는 해상도의 값)와 물건 기하를 함께 풀어 정확히 맞추고, 그 상황의 물건으로는
+닿을 수 없는 목표만 가장 가까운 띠를 쓴다(`meta.margin_fallback`). 정확히 맞출 수 없는 여유: `seat` ±0.35(거절 표본), `sight` ±0.025,
+`stack` ±0.0025(글의 해상도).
+
+**사후.** P4는 상태(좋음·둘째·셋째±)의 정확한 베이즈(무게 있는 세계 — `Batch.weights`), P6의 있음·출현·따라옴은 세계를 둘로 나눠 정확한
+무게로 센다. 정답은 무게 평균(`labels.wmean`). 닫힌 꼴(`meta.exact_labels`): P4 `ok_now`·상태 분포, P6 `present`·`emerge_3s`·
+`stops_before_corner`·`follower`, P3 쌓기 `topple|…`·무게 쏠림.
+
+**'다시 볼까'(정보의 가치).** 다시 보기 선택지(`look_again`, 쌓기는 `check_weight`)의 기대 비용 = 보는 시간 × 지연 비용 +
+E_신호[min_a E[c_a | 신호]] — 결정 규칙은 정답의 사후에서 정하고 참 세계에는 그 규칙을 적용한다(`truth.realized`가 보정된다). 이산 신호
+(다시 봤더니 있다/없다, 두 센서의 새 보고, 무게 확인 값의 구간)는 닫힌 꼴, 재측정(P4)은 준난수 적분(할턴 4,096점 — 차원별 부호 대칭).
+질문 종류 `voi`(choice: 지금 정하기 / 먼저 보기)는 `labels`에서 `kind: action`(기대 비용 소프트맥스)이다.
+
+**한국어(`meta.language` = `ko`, 학습·T1~T7의 약 15 %).** 서술기 `narrate_ko`(같은 사실·같은 수, 단위 기호는 영어와 같은 규칙), 질문 문구
+`phrases_ko_data`(영어와 같은 열쇠·같은 묶음 크기), 상황 옷 `configs/simgen/skins-ko-v0.2.yaml`, 조사는 `korean.kfmt`가 받침에 맞춘다.
+같은 순간을 두 언어로 쓰면 관측·정답이 같다(시험).
+
+**빼 둔 칸과 나눔(`configs/simgen/holdout-v0b.yaml`이 정본).** 학습 나눔은 문체 `log`, 분야마다 다섯째 상황, 빼 둔 바꿔 쓰기 묶음
+(`pool: heldout`), 조합 P1+P3, T3 범위 칸 10개(로봇 속도 상위·추적 나이 > 1 s·높이/바닥 폭 > 5·경사 > 7°·거친 게이지·오래된 이미지 > 3 s·
+채움 보고 > 0.92·오래된 목격 > 4 s·모퉁이 옆 거리 < 0.5 m)을 **만들 수 없다** — 고를 수 없게 막고, 범위는 좁혀 뽑고, 보고값이 넘으면 시도마다
+새 잡음으로 다시 뽑는다(`generate.build_moment`, `holdout.violations`). 레코드: `meta.split`, `meta.holdout`(이 레코드가 들어간 빼 둔 칸),
+`meta.pool`, `meta.holdout_vars`(T3 변수의 글에 보인 값 — 학습 세트 전부를 레코드만으로 다시 잰다), `generator.split`(나눔 규칙).
+
+**시험 세트(`artifacts/simgen/v0b/tests/T{1..7}.jsonl` + `manifest.json` — sha256·seed 범위·빼 둔 칸의 정의·생성기 git).** T1 = 학습과 같은
+분포, T2 = 레코드마다 빼 둔 축 하나 이상(문체·상황·바꿔 쓰기 묶음), T3 = 칸 하나의 시험 쪽(칸마다 같은 수), T4 = P1+P3만, T5 = 사실 하나만
+바꾼 쌍, T6 = 기준 300 × 교란 12(`perturb.VARIANTS` — 상태·지시·선택지 설명 바꿔 쓰기, 순서 뒤집기, 섞기, 열쇠 바꾸기, 서식 잡음, 한 가지 더
+정하기, 단위, 숫자 표기, 좌우 거울상, 사실 순서; `meta.t6 = {base, variant, map}` — map은 변형의 질문 → 같은 것을 묻는 기준 질문; 정답이
+대응으로 정확히 같다, 거울상은 사후 세계를 공통 난수로 뒤집는다; 마주 옴은 좌우가 다른 사전이라 기준에서 뺀다), T7 = 보정(K = 1024).
+seed 범위는 나눔마다 겹치지 않는다(학습 1,000,000~, T1 2,000,000~ …); 요청 글의 해시(`holdout.request_hash`)가 학습과 겹치지 않는다(시험).
+
+## 6. 모듈과 명령
 
 | 모듈 | 하는 일 |
 |---|---|
@@ -184,10 +229,18 @@ catalog-v0.1 `margins`). 정답은 설계와 무관한 사전(속성 목록: 채
 | `textfmt` · `phrases` · `narrate` · `questions` | 단위 표기, 문구 묶음, 서술기 3종, 질문 생성기 |
 | `record` · `rationale` · `generate` | 형식 검사·직렬화, 계산 과정 문단, 생성 흐름·층화·쌍 |
 | `stats` · `examples` | 묶음 통계, 검수용 예시 |
+| `p3` · `p4` · `p6` (관측 쪽) / `p3_world` · `p4_world` · `p6_world` (세계 쪽) | 새 현상의 사후·굴리기·닫힌 꼴 / 닻 세계·여유·감각 모형 |
+| `voi` | '다시 볼까' 신호 모형(이산 닫힌 꼴, 연속 준난수 적분) |
+| `holdout` · `testsets` · `perturb` | 빼 둔 칸과 나눔, 시험 세트 T1~T7과 manifest, T6 교란 |
+| `korean` · `narrate_ko` · `phrases_ko` · `phrases_ko_data` · `state_text` · `rule_text` | 조사·한국어 서술기·한국어 문구, 상태·규칙 글(두 언어) |
 
 ```bash
 uv run python scripts/simgen_generate.py --n 2000 --seed 0 --out artifacts/simgen/v0a/sample-2000.jsonl --stats artifacts/simgen/v0a/stats.json [--values configs/simgen/values-v0.1.yaml]
 uv run python scripts/simgen_examples.py --out-dir artifacts/simgen/v0a
 uv run python scripts/simgen_value_compare.py --n 2000 --out artifacts/simgen/v0a/value-compare.json   # 두 가치표의 최선 행동 분포
 uv run python scripts/simgen_mutants.py --work artifacts/scratch/v0a/mutants --out artifacts/scratch/v0a/mutants/result.json   # 변이 시험
+# Task v0b
+uv run python scripts/simgen_v0b.py train --out artifacts/simgen/v0b/train-50k.jsonl --workers 12 [--values configs/simgen/values-v0.1.yaml]
+uv run python scripts/simgen_v0b.py tests --out-dir artifacts/simgen/v0b/tests --workers 7
+uv run python scripts/simgen_v0b.py examples --out artifacts/simgen/v0b/examples-30
 ```

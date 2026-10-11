@@ -87,10 +87,57 @@ def test_a_crossing_agent_that_reacts_brakes_for_a_robot_on_its_line(cfg):
     obs = moment(12, "warehouse", scene="p1_crossing", body="mobile_base", variant="moving", agent_kind="adult").obs
     obs = replace(obs, robot=_robot(obs))
     row = {"ahead": 1.0, "dist": 2.0, "from_sign": 1.0, "va": 1.2, "ra": 0.3, "intent": 0.0, "yield_standoff": 0.5, "agent_decel": 2.0,
-           "hurry_factor": 1.5, "hurry_accel": 1.5, "roll_decel": 0.0, "reacts": 1.0, "react_standoff": 0.4}  # fmt: skip
+           "hurry_factor": 1.5, "hurry_accel": 1.5, "roll_decel": 0.0, "reacts": 1.0, "react_standoff": 0.4, "distracted": 0.0, "static_u": 0.5}  # fmt: skip
     out = rollout(cfg, obs, _batch([row, {**row, "reacts": 0.0}]), ("continue",))
     assert out.events["contact"][0].tolist() == [False, True]
     assert out.impact["contact"][0][1] > 0.5  # 닿을 때의 상대 속도
+
+
+def test_people_walk_around_a_robot_standing_still_unless_distracted_and_close(cfg):
+    """수정 1 I3: '반응하지 않음'(reacts = 0)은 움직이는 로봇에 대한 것이다. 로봇이 최대로 서서(멈춤 거리 0.2 + 1/6 = 0.37 m) 교차선(0.5 m
+    앞) 위에 서 있으면, 다가오는 사람(1.2 m/s)은 처음 마주칠 때의 주의·거리로 정한 확률로만 부딪힌다: 그때 남은 거리가 자기 반응 + 멈춤
+    거리(1.2 × 0.5 + 1.2²/(2·2) = 0.96 m)보다 짧으면 '가깝다'(주의 0.05 / 흐트러짐 0.50), 아니면 0.01 / 0.05.
+    로봇은 t ≈ 0.53 s부터 멈춘 물체다: 2.0 m에서 오던 사람은 그때 남은 거리 ≈ 0.76 m(가깝다), 4.0 m에서 오던 사람은 ≈ 2.76 m(멀다)."""
+    obs = moment(12, "warehouse", scene="p1_crossing", body="mobile_base", variant="moving", agent_kind="adult").obs
+    obs = replace(obs, robot=_robot(obs))
+    base = {"ahead": 0.5, "dist": 2.0, "from_sign": 1.0, "va": 1.2, "ra": 0.3, "intent": 0.0, "yield_standoff": 0.5, "agent_decel": 2.0,
+            "hurry_factor": 1.5, "hurry_accel": 1.5, "roll_decel": 0.0, "reacts": 0.0, "react_standoff": 0.4, "distracted": 0.0, "static_u": 0.5}  # fmt: skip
+    rows = [
+        base,                                                      # 주의, 가깝다: 0.5 ≥ 0.05 → 피한다
+        {**base, "distracted": 1.0, "static_u": 0.3},              # 흐트러짐, 가깝다: 0.3 < 0.50 → 부딪힌다
+        {**base, "distracted": 1.0, "static_u": 0.7},              # 흐트러짐, 가깝다: 0.7 ≥ 0.50 → 피한다
+        {**base, "distracted": 1.0, "static_u": 0.3, "dist": 4.0},  # 흐트러짐, 멀다: 0.3 ≥ 0.05 → 피한다
+        {**base, "static_u": 0.03},                                 # 주의, 가깝다: 0.03 < 0.05 → 부딪힌다
+    ]
+    out = rollout(cfg, obs, _batch(rows), ("stop_hard", "continue"))
+    assert out.events["contact"][out.index("stop_hard")].tolist() == [False, True, False, False, True]
+    speeds = out.aux["contact_robot_speed"][out.index("stop_hard")]
+    assert np.all(speeds[[1, 4]] < 0.05)                           # 서 있는 로봇에 사람이 걸어와 닿는다
+    # 움직이는 로봇(그대로 가기)은 반응하지 않는 사람에게 단서·거리와 무관하게 닿는다(대조)
+    keep = rollout(cfg, obs, _batch([{**base, "ahead": 1.0}, {**base, "ahead": 1.0, "distracted": 1.0}]), ("continue",))
+    assert keep.events["contact"][0].tolist() == [True, True]
+
+
+def test_the_static_failure_probability_reads_the_catalog(cfg):
+    """멈춘 로봇을 피하지 못할 확률은 속성 목록(static_avoidance)의 값이고 단서에 묶인다: 흐트러진 단서면 높고, 공은 언제나 피하지 못한다."""
+    from robo_jev.simgen.catalog import distraction_probability
+    from robo_jev.simgen.rollout import static_encounter
+
+    spec = cfg.catalog["static_avoidance"]
+    assert spec["fail"]["attentive"] < spec["fail"]["distracted"] < spec["fail_close"]["distracted"]
+    assert spec["fail_close"]["attentive"] < spec["fail_close"]["distracted"]
+    assert distraction_probability(cfg, "adult", "distracted") > distraction_probability(cfg, "adult", "steady") > distraction_probability(cfg, "adult", "glance")
+    u = np.linspace(0.0, 1.0, 20001)
+    k = len(u)
+    for distracted in (False, True):
+        for remaining, key in ((0.2, "fail_close"), (5.0, "fail")):
+            decided, fail = static_encounter(cfg, np.ones(k, dtype=bool), np.full(k, remaining), np.full(k, 1.2), np.full(k, 2.0), np.full(k, distracted), u,
+                                             np.zeros(k, dtype=bool), np.zeros(k, dtype=bool), np.zeros(k, dtype=bool))  # fmt: skip
+            assert decided.all()
+            assert fail.mean() == pytest.approx(spec[key]["distracted" if distracted else "attentive"], abs=1e-3)
+    _, fail = static_encounter(cfg, np.ones(k, dtype=bool), np.full(k, 5.0), np.full(k, 1.2), np.full(k, 2.0), np.zeros(k, dtype=bool), u,
+                               np.zeros(k, dtype=bool), np.zeros(k, dtype=bool), np.ones(k, dtype=bool))  # fmt: skip
+    assert fail.all()
 
 
 def test_reaction_probability_is_tied_to_the_cue(cfg):

@@ -9,15 +9,14 @@
 ``turn_100`` … ``turn_30``(회전 속도 = 지금 속도의 비율).
 
 결과: 사건(닿음 contact, 옆 장애물 닿음 side_contact, 쏟아짐 spill, 장애물 넘어섬 overrun, 마주 섬 blocked, 액면이 림·뚜껑에 닿음
-rim_reached)은 (A, K) bool, 양(진행 손실 delay 초, 가까움 closeness, 빈 높이 사용 headroom)은 (A, K) float, 닿음·넘어섬의 충격 속도
+rim_reached — 출렁임이나 충돌로)은 (A, K) bool, 양(진행 손실 delay 초, 가까움 closeness, 빈 높이 사용 headroom — 충돌이면 1)은 (A, K) float, 닿음·넘어섬의 충격 속도
 (impact, (A, K) m/s — 충돌 속도에 따른 닿음 비용 기제용), 급제동을 쓰나(hard_brake, (A,)), 선택지와 무관한 세계 사건(world_events)과
 상태(states)는 (K,).
 
 * 가장 가까운 거리는 표본 사이를 직선으로 이은 구간마다 찾는다(0.05 s 간격이 팔·손에서 지나가는 가까움을 놓치지 않게, 리뷰 1 m5).
 * 가로지르는 상대(사람·로봇·손)는 로봇이 자기 줄을 막고 있으면 늦게라도 선다 — 숨은 `reacts`(단서에 묶인 확률)일 때(리뷰 1 질문 4).
-* 쏟아짐: 정적 액면 근사로 넘치거나, 상대와의 닿음(contact)·장애물 넘어섬(overrun)의 충격이 있고 뚜껑이 없으면 쏟아진 것으로
-  센다(v0 근사). **옆 장애물 닿음(side_contact)은 지금 쏟아짐으로 세지 않는다** — 리뷰 1 재검증 m-b: 비켜서기 선택지의 쏟아짐
-  확률을 낮게 잡는 쪽이다(최선 행동이 바뀐 것은 407개 중 1개). v0b에서 되살린다.
+* 쏟아짐: 정적 액면 근사로 넘치거나, 충격 — 상대와의 닿음(contact), 비켜서다 옆의 숨은 장애물에 닿음(side_contact), 장애물 넘어섬
+  (overrun) — 이 있고 뚜껑이 없으면 쏟아진 것으로 센다(v0 근사; 옆 장애물 닿음은 Task v0b에서 되살렸다 — 리뷰 1 재검증 m-b).
 * 회전: 접근 구간 전체에 걸친 필요한 감속으로 줄인다 — 편안함 하한과 최대 감속 사이(리뷰 1 I2).
 * p5_braking의 지연: 목표(장애물 앞, 몸별 허용치) 앞에 일찍 서면 남은 거리를 gentle로 다시 다가가는 시간(삼각 속도 꼴 2·√(d/a))이다 —
   급제동이 '공짜'가 아니다(리뷰 1 I3).
@@ -34,7 +33,8 @@ from robo_jev.simgen.catalog import SimgenConfig
 from robo_jev.simgen.observation import Observation
 from robo_jev.simgen.spec import Batch, RobotSpec, fill_bins
 
-__all__ = ["STOP_LEVELS", "TURN_RATIOS", "Outcomes", "available_options", "max_accel", "rollout", "time_grid", "turn_profile"]
+__all__ = ["STOP_LEVELS", "TURN_RATIOS", "Outcomes", "available_options", "max_accel", "robot_static", "rollout", "static_encounter", "time_grid",
+           "turn_profile"]
 
 STOP_LEVELS = {"stop_gentle": "gentle", "stop_moderate": "moderate", "stop_hard": "hard"}
 TURN_RATIOS = {"turn_100": 1.0, "turn_80": 0.8, "turn_60": 0.6, "turn_45": 0.45, "turn_30": 0.3}
@@ -51,8 +51,12 @@ class Outcomes:
     cost_items: dict[str, str] = field(default_factory=dict)   # 사건 → 가치표의 비용 항목
     impact: dict[str, np.ndarray] = field(default_factory=dict)  # 사건 → 충격 속도 (A, K)
     hard_brake: np.ndarray | None = None                        # (A,) 급제동을 쓰는 선택지
+    aux: dict[str, np.ndarray] = field(default_factory=dict)    # 진단용(정답에 쓰지 않는다): 'contact_robot_speed' (A, K) — 처음 닿을 때 로봇의 속도
     body: str = ""                                              # 비용표의 몸별 값(급제동 비용·v_ref)을 고르려고
     loaded: bool = False
+    weights: np.ndarray | None = None                           # (K,) 세계의 사후 무게(없으면 같은 무게) — Batch.weights
+    voi: object | None = None                                   # 'look_again'의 신호 모형(voi.DiscreteSignal / GaussianSignal)
+    policy: object | None = None                                # 참 세계: 결정 규칙을 정할 사후의 Outcomes(정답 쪽)
 
     def index(self, option: str) -> int:
         return self.options.index(option)
@@ -68,7 +72,14 @@ def available_options(obs: Observation) -> tuple[str, ...]:
     r = obs.robot
     arm = obs.body == "arm"
     base = ("continue", "slow", "stop_gentle", "stop_moderate", "stop_hard")
-    if obs.scene in ("p1_step_in", "p1p5_step_in_carrying"):
+    from robo_jev.simgen.catalog import scene_kind
+
+    kind = scene_kind(obs.scene)
+    if kind is not None and obs.scene not in ("p1p3_step_in_carrying_tall", "p1p6_emerging_step_in"):
+        from robo_jev.simgen import p3, p4, p6
+
+        return {"p3": p3, "p4": p4, "p6": p6}[kind].available(obs)
+    if obs.scene in ("p1_step_in", "p1p5_step_in_carrying", "p1p6_emerging_step_in", "p1p3_step_in_carrying_tall"):
         opts = list(base) + (["retract"] if arm else [])
         if r.can_sidestep and obs.env.sides is not None:
             opts += [f"sidestep_{side}" for side, s in zip(("left", "right"), obs.env.sides, strict=True) if s.status != "blocked"]
@@ -144,17 +155,21 @@ def _closeness(min_dist: np.ndarray, r_sum: np.ndarray, arm: bool) -> np.ndarray
 
 
 def _container_outcomes(obs: Observation, batch: Batch, options, impact: np.ndarray | None, accels=None):
-    """(spill, headroom, rim_reached) 각각 (A, K) — 정적 근사 + 충격(닿음·넘어섬). rim_reached는 뚜껑과 무관하게 액면이 림에 닿나."""
+    """(spill, headroom, rim_reached) 각각 (A, K) — 정적 근사 + 충격(닿음·옆 장애물·넘어섬).
+
+    세 사건은 같은 뜻의 원인을 센다(v0c 진단의 반대 상관 점검, Task v0b): 충돌이 있으면 액면은 림(뚜껑)까지 친다 — rim_reached는 참,
+    headroom(빈 높이 사용)은 1이고, 뚜껑이 없으면 쏟아진다. 옛 정의는 headroom·rim_reached에서 충돌을 빼서 "멈추지 않고 가면 쏟아짐
+    1.0 / 빈 높이 사용 0.03"처럼 한 요청 안에서 기준 문구('1 = 림에 닿거나 쏟아짐')와 어긋났다."""
     c, r = obs.container, obs.robot
     spill, headroom, rim = [], [], []
     for i, option in enumerate(options):
         a = max_accel(option, r) if accels is None else accels[i]
         rise = ph.liquid_rise(c.diameter, a, batch["k"], batch["tilt"])
         reached = np.asarray(batch["fill"]) * c.height + rise > c.height
-        hit = impact[i] & (batch["lid"] < 0.5) if impact is not None else False
-        spill.append((reached & (batch["lid"] < 0.5)) | hit)
-        rim.append(reached)
-        headroom.append(ph.headroom_used(batch["fill"], c.height, rise))
+        hit = np.asarray(impact[i], dtype=bool) if impact is not None else np.zeros(batch.size, dtype=bool)
+        spill.append((reached | hit) & (batch["lid"] < 0.5))
+        rim.append(reached | hit)
+        headroom.append(np.where(hit, 1.0, ph.headroom_used(batch["fill"], c.height, rise)))
     return np.array(spill), np.array(headroom), np.array(rim)
 
 
@@ -225,8 +240,27 @@ def _step_in(cfg: SimgenConfig, obs: Observation, batch: Batch, options) -> Outc
         out.world_events["ball_stops_in_lane"] = np.abs(rest) < r_sum
     out.states = {"intent": b["intent"]}
     if obs.container is not None:
-        _add_container(cfg, obs, batch, options, out, np.array(contact))
+        _add_container(cfg, obs, batch, options, out, np.array(contact) | np.array(side_contact))  # 옆 장애물 닿음도 충격(m-b)
     return out
+
+
+def static_encounter(cfg: SimgenConfig, encounter, remaining, v, decel, distracted, static_u, decided, fail, never):
+    """멈춘(또는 아주 느린) 로봇을 처음 마주친 세계에서 피하지 못할지 한 번 정한다(수정 1 I3, catalog static_avoidance).
+
+    처음 마주친 남은 거리가 자기 반응 거리 + 멈춤 거리(걸음 속도 × reaction_s + v²/(2·감속))보다 짧으면 '가깝다'; 주의가 흐트러졌으면
+    실패 확률이 높다 — 주의가 흐트러지고 아주 가까울 때만 높다. ``never``(공)는 언제나 피하지 못한다. 돌려준다: (decided, fail)."""
+    spec = cfg.catalog["static_avoidance"]
+    close = remaining < v * spec["reaction_s"] + v * v / (2.0 * np.maximum(decel, 1e-6))
+    far_p = np.where(distracted, spec["fail"]["distracted"], spec["fail"]["attentive"])
+    near_p = np.where(distracted, spec["fail_close"]["distracted"], spec["fail_close"]["attentive"])
+    fails = never | (static_u < np.where(close, near_p, far_p))
+    new = encounter & ~decided
+    return decided | encounter, np.where(new, fails, fail)
+
+
+def robot_static(cfg: SimgenConfig, x_r: np.ndarray, dt: float) -> np.ndarray:
+    """로봇이 구간마다 '멈춘 물체'로 보이나(구간 속도 < static_avoidance.speed_max): x_r (…, T) → (…, T − 1)."""
+    return np.diff(x_r, axis=-1) / dt < cfg.catalog["static_avoidance"]["speed_max"]
 
 
 def _crossing(cfg: SimgenConfig, obs: Observation, batch: Batch, options) -> Outcomes:
@@ -251,25 +285,38 @@ def _crossing(cfg: SimgenConfig, obs: Observation, batch: Batch, options) -> Out
     v_free = np.diff(s_free, axis=1) / dt
     reacts = b["reacts"] > 0.5
     decel = b["agent_decel"]
-    contact, delay, closeness, speed = [], [], [], []
+    distracted = b["distracted"] > 0.5
+    never = np.full(k, obs.agent.group == "ball")
+    contact, delay, closeness, speed, robot_v = [], [], [], [], []
     for option in options:
         x_r = _longitudinal(option, r, t)
-        # 늦은 반응: 로봇 몸이 상대의 줄을 덮고 있고(앞뒤로 겹침) 상대가 멈춤 거리 + 여유 안에 들어오면 agent_decel로 선다.
+        static = robot_static(cfg, x_r, dt)
+        # 늦은 반응: 로봇 몸이 상대의 줄을 덮고 있고(앞뒤로 겹침) 상대가 멈춤 거리 + 여유 안에 들어오면 agent_decel로 선다 — 움직이는
+        # 로봇이면 reacts(단서에 묶인 확률), 멈춘(아주 느린) 로봇이면 거의 언제나(처음 마주칠 때 주의·거리로 실패를 정함 — 수정 1 I3).
         s = np.zeros((k, len(t)))
         v = v_free[:, 0].copy()
         braking = np.zeros(k, dtype=bool)
+        decided = np.zeros(k, dtype=bool)
+        fail = np.zeros(k, dtype=bool)
         for i in range(1, len(t)):
             on_line = np.abs(x_r[i - 1] - b["ahead"]) < r_sum + 0.1
             remaining = b["dist"] - s[:, i - 1] - r_sum
-            trigger = reacts & on_line & (remaining > -b["ra"]) & (remaining <= b["react_standoff"] + v**2 / (2.0 * decel))
+            approaching = remaining > -b["ra"]
+            in_range = remaining <= b["react_standoff"] + v**2 / (2.0 * decel)
+            if static[i - 1]:
+                decided, fail = static_encounter(cfg, on_line & approaching, remaining, v, decel, distracted, b["static_u"], decided, fail, never)
+                trigger = on_line & approaching & decided & ~fail & in_range
+            else:
+                trigger = reacts & on_line & approaching & in_range
             braking = braking | trigger
             v_next = np.where(braking, np.minimum(np.maximum(v - decel * dt, 0.0), v_free[:, i - 1]), v_free[:, i - 1])
             s[:, i] = s[:, i - 1] + 0.5 * (v + v_next) * dt
             v = v_next
         y_a = col("from_sign") * (col("dist") - s)
-        hit, v_imp, d_min = ph.first_contact(x_r[None, :], 0.0, col("ahead"), y_a, r_sum, dt)
+        hit, v_imp, d_min, step = ph.first_contact(x_r[None, :], 0.0, col("ahead"), y_a, r_sum, dt, with_step=True)
         contact.append(hit)
         speed.append(v_imp)
+        robot_v.append(np.where(hit, (np.diff(x_r) / dt)[np.maximum(step, 0)], np.nan))
         delay.append(np.full(k, _delay(float(x_r[-1]), r, horizon)))
         closeness.append(_closeness(d_min, r_sum, obs.body == "arm"))
     out = Outcomes(tuple(options), hard_brake=_hard_brake(options))
@@ -277,6 +324,7 @@ def _crossing(cfg: SimgenConfig, obs: Observation, batch: Batch, options) -> Out
     out.impact = {"contact": np.array(speed)}
     out.quantities = {"delay": np.array(delay), "closeness": np.array(closeness)}
     out.cost_items = {"contact": cfg.agent(obs.agent.kind)["contact"]}
+    out.aux = {"contact_robot_speed": np.array(robot_v)}
     safety = cfg.catalog["margins"]["safety_s"]
     t_arr = (b["dist"] - r_sum) / b["va"]
     if obs.variant == "stopped":
@@ -404,15 +452,28 @@ def _turning(cfg: SimgenConfig, obs: Observation, batch: Batch, options) -> Outc
     return out
 
 
-def rollout(cfg: SimgenConfig, obs: Observation, batch: Batch, options=None) -> Outcomes:
-    """선택지 × 세계의 결과. options가 없으면 가능한 선택지 전부."""
+def rollout(cfg: SimgenConfig, obs: Observation, batch: Batch, options=None, rng: np.random.Generator | None = None) -> Outcomes:
+    """선택지 × 세계의 결과. options가 없으면 가능한 선택지 전부. ``rng``는 행동 결과가 확률인 장면(P4)의 참 세계에서 결과를 뽑는다."""
     options = tuple(options or available_options(obs))
     builders = {
         "p1_step_in": _step_in, "p1p5_step_in_carrying": _step_in, "p1_crossing": _crossing, "p1_head_on": _head_on,
         "p5_braking": _braking, "p5_turning": _turning,
     }  # fmt: skip
-    if obs.scene not in builders:
+    from robo_jev.simgen.catalog import scene_kind
+
+    kind = scene_kind(obs.scene)
+    if kind in ("p3", "p6"):
+        from robo_jev.simgen import p3, p6
+
+        out = {"p3": p3, "p6": p6}[kind].rollout(cfg, obs, batch, options)
+    elif kind == "p4":
+        from robo_jev.simgen import p4
+
+        out = p4.rollout(cfg, obs, batch, options, rng)
+    elif obs.scene in builders:
+        out = builders[obs.scene](cfg, obs, batch, options)
+    else:
         raise ValueError(obs.scene)
-    out = builders[obs.scene](cfg, obs, batch, options)
     out.body, out.loaded = obs.robot.body, obs.robot.loaded
+    out.weights = batch.weights
     return out

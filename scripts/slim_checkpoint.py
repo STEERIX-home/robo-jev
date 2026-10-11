@@ -19,7 +19,10 @@
    (b) optimizer 밖의 키(run_id·step·status·scheduler·rng·sampler·progress·config·manifest·history)가 원본과 같다; (c) **평가 경로가 그 파일을
    받는다** — C2·D가 쓰는 :func:`robo_jev.harness.model_policy.load_serving_judge` 를 CPU에서 그 임시 파일로 부른다(계약 digest 대조 →
    rank → `load_readout_checkpoint`의 `state["model"]` 적재 — backbone은 실제 2B bf16을 CPU에 싣는다) 그리고 실린 파라미터가 파일의 tensor와
-   비트 단위로 같은지 본다. GPU forward는 A3의 GPU 적재가 겸한다.
+   비트 단위로 같은지 본다. GPU forward는 A3의 GPU 적재가 겸한다. **판단 학습 체크포인트**(Task v0d, manifest kind ``decisions-train-v0``)는
+   평가 경로가 진단 도구의 적재 함수 :func:`robo_jev.decisions.train.apply_checkpoint` 다 — 기반 모델을 CPU에 싣고(실제 2B는 bf16) 그 함수로
+   adapter(LoRA) 또는 전체 가중치를 얹은 뒤(기반 모델·tokenizer·프롬프트 고정 문구가 다르면 거기서 거절) 실린 값을 파일과 비트 단위로 견준다
+   (:func:`decisions_load_check`; 체크포인트의 kind로 고른다 — :func:`evaluation_load_check`).
 4. 셋 다 통과할 때만 ``os.replace``로 원본을 대체하고 디렉터리를 fsync한다 → 새 파일의 크기·sha256("후"). 하나라도 떨어지면 임시 파일을 지우고
    **원본은 건드리지 않은 채** 이유를 적는다.
 
@@ -97,12 +100,31 @@ APPROVALS = (
             "artifacts/runs/r14-t1-fp32-2b-s19/checkpoint.pt",
         ),
     },
+    {
+        "date": "2026-10-09",
+        "basis": "standing rule (user approval 2026-10-09, HANDOFF §5) — Task v0d's own smoke-run checkpoint (2B LoRA), after its before/after diagnosis runs",
+        "standing_rule": True,
+        "paths": ("artifacts/runs/v0d/v0d-smoke-lora-2b/checkpoint.pt",),
+    },
+    {
+        "date": "2026-10-09",
+        "basis": "standing rule (user approval 2026-10-09, HANDOFF §5) — Task v0d fix round 1's own three v0c-p3 smoke checkpoints "
+                 "(2B LoRA fp32 adapter / bf16 adapter / bf16 adapter without the code-mass term), after their diagnosis runs",
+        "standing_rule": True,
+        "paths": (
+            "artifacts/runs/v0d/v0d-smoke-p3-lora-fp32/checkpoint.pt",
+            "artifacts/runs/v0d/v0d-smoke-p3-lora-bf16/checkpoint.pt",
+            "artifacts/runs/v0d/v0d-smoke-p3-lora-bf16-nomass/checkpoint.pt",
+        ),
+    },
 )
 #: 승인된 경로 전부 (승인 순서).
 APPROVED = tuple(path for approval in APPROVALS for path in approval["paths"])
 #: R8의 1.0과 같은 검사·같은 대체 규칙이다 — 1.1은 승인 묶음(날짜·근거)을 행마다 적고, 실행한 작업 트리의 변경 파일을 적고, 상시 규칙 묶음의 완주
-#: 확인을 더했다 (Task R14 A1).
-SCRIPT_VERSION = "slim-checkpoint-1.1"
+#: 확인을 더했다 (Task R14 A1). 1.2는 판단 학습 체크포인트(Task v0d)의 평가 경로 검사를 더했다(체크포인트의 kind로 고른다 — Judge 체크포인트는 그대로).
+SCRIPT_VERSION = "slim-checkpoint-1.2"
+#: 판단 학습 체크포인트의 manifest kind (:data:`robo_jev.decisions.train.TRAIN_KIND`).
+DECISIONS_KIND = "decisions-train-v0"
 
 
 def approval_of(path: str) -> dict[str, Any]:
@@ -209,6 +231,52 @@ def serving_load_check(path: Path, model: dict[str, torch.Tensor]) -> dict[str, 
     finally:
         del bundle
         gc.collect()
+
+
+def decisions_load_check(path: Path, model: dict[str, torch.Tensor]) -> dict[str, Any]:
+    """판단 학습 체크포인트(Task v0d)의 평가 경로 검사: 진단 도구의 적재 함수(:func:`robo_jev.decisions.train.apply_checkpoint`)를 CPU에서 이 파일로
+    부른다 — 기반 모델(실제 모델은 bf16을 CPU에, 소형은 같은 seed로 다시 만든다)·tokenizer(지금 체크아웃의 해시)·프롬프트 고정 문구가 학습 때와
+    다르면 거기서 거절된다. 실린 adapter(LoRA) 또는 전체 가중치를 파일의 tensor와 비트 단위로 견준다. bf16 adapter(`lora_dtype: bfloat16`)는 평가가
+    fp32 adapter로 싣는다(같은 값) — 파일의 dtype으로 되돌려 견주고 그 이름을 적는다."""
+    from robo_jev.decisions.train import TINY_MODEL, apply_checkpoint
+    from robo_jev.model.backbone_qwen import QwenBackbone
+    from robo_jev.model.tokenizer import available_tokenizer, describe_tokenizer
+
+    state = load_model_checkpoint(path, mmap=True)
+    config, base = state["config"], (state["manifest"].get("model") or {}).get("base") or {}
+    model_id = str(config["model_id"])
+    dtype = getattr(torch, str(base.get("dtype") or "bfloat16"))
+    del state
+    started = time.perf_counter()
+    if model_id == TINY_MODEL:
+        backbone = QwenBackbone.tiny(seed=int(config["tiny_seed"]), vocab_size=int(base["vocab_size"]))
+        backbone.model.to(dtype)
+    else:
+        backbone = QwenBackbone.load(model_id, device="cpu", dtype=dtype)
+    try:
+        tokenizer_sha256 = describe_tokenizer(available_tokenizer()[0])["sha256"]
+        info = apply_checkpoint(backbone, path, tokenizer_sha256=tokenizer_sha256)
+        if info["mode"] == "lora":
+            raw = {name: p.detach() for name, p in backbone.text.named_parameters() if "lora_" in name}
+        else:
+            raw = {name: t.detach() for name, t in backbone.model.state_dict().items()}
+        cast = sorted(key for key in raw if key in model and raw[key].dtype != model[key].dtype)
+        loaded = {key: (value.to(model[key].dtype) if key in cast else value) for key, value in raw.items()}
+        out = loaded_state_check(loaded, model, contract_sha256=None)
+        out.update({"function": "robo_jev.decisions.train.apply_checkpoint (device=cpu)", "model_id": model_id, "mode": info["mode"],
+                    "tokenizer_sha256": tokenizer_sha256, "dtype_cast_for_comparison": len(cast), "seconds": round(time.perf_counter() - started, 1)})  # fmt: skip
+        return out
+    finally:
+        del backbone
+        gc.collect()
+
+
+def evaluation_load_check(path: Path, model: dict[str, torch.Tensor]) -> dict[str, Any]:
+    """체크포인트의 kind로 평가 경로 검사를 고른다 — 판단 학습(:data:`DECISIONS_KIND`)은 :func:`decisions_load_check`, 그 밖(Judge)은 :func:`serving_load_check`."""
+    manifest = load_model_checkpoint(path, mmap=True).get("manifest") or {}
+    if manifest.get("kind") == DECISIONS_KIND:
+        return decisions_load_check(path, model)
+    return serving_load_check(path, model)
 
 
 def _fsync_directory(directory: Path) -> None:
@@ -330,7 +398,8 @@ def cmd_run(args: argparse.Namespace) -> int:
     # 이 실행이 쓴 코드의 sha256 — 도구·저장 형식·평가 적재 경로(작업 트리가 dirty여도 나중에 커밋된 파일과 바이트로 대조할 수 있게)
     report["tool_files_sha256"] = {
         name: (hashlib.sha256((REPO / name).read_bytes()).hexdigest() if (REPO / name).is_file() else None)
-        for name in ("scripts/slim_checkpoint.py", "src/robo_jev/checkpoint.py", "src/robo_jev/train.py", "src/robo_jev/harness/model_policy.py")
+        for name in ("scripts/slim_checkpoint.py", "src/robo_jev/checkpoint.py", "src/robo_jev/train.py", "src/robo_jev/harness/model_policy.py",
+                     "src/robo_jev/decisions/train.py")
     }  # fmt: skip
     _log(f"{len(paths)} file(s) · / free {report['disk_free_before_bytes'] / 1e9:.2f} GB · dry run {args.dry_run} · git {report['git']} dirty {report['git_dirty_files']}")
     out = Path(args.out)
@@ -345,7 +414,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             if not completed:  # 상시 규칙: 끝나지 않은 run의 재개 상태는 지우지 않는다 — 읽지도 않고 그대로 둔다
                 report["files"].append({"path": name, "approval": approval, "replaced": False, "error": f"standing rule: {reason} — the original is untouched"})
                 continue
-        row = slim_one(path, evaluate=None if args.no_evaluation else serving_load_check, dry_run=args.dry_run)
+        row = slim_one(path, evaluate=None if args.no_evaluation else evaluation_load_check, dry_run=args.dry_run)
         row["path"] = name
         row["approval"] = approval
         row["disk_free_after_bytes"] = disk_free(root)

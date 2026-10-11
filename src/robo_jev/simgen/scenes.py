@@ -23,12 +23,23 @@ v0 근사(보고서에 적음): 관측 나이 동안 상대는 관측 시점의 
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, replace
 
 import numpy as np
 
 from robo_jev.simgen import physics as ph
-from robo_jev.simgen.catalog import INTENTS, SCENE_MARGINS, SimgenConfig, reaction_probability
+from robo_jev.simgen.catalog import (
+    GROUPS,
+    INTENTS,
+    SCENE_BODIES,
+    SimgenConfig,
+    distraction_probability,
+    pair_targets,
+    reaction_probability,
+    scene_kind,
+    scene_margins,
+)
 from robo_jev.simgen.observation import (
     AgentObs,
     ContainerObs,
@@ -54,6 +65,7 @@ __all__ = [
     "flip_numeric",
     "margins_of",
     "observe",
+    "prior_redraw",
 ]
 
 G = ph.G
@@ -64,7 +76,7 @@ class Infeasible(Exception):
 
 @dataclass(frozen=True)
 class Context:
-    """레코드의 틀: 분야·몸·장면·변형·상대 종류·감각 구성·서술 문체."""
+    """레코드의 틀: 분야·몸·장면·변형·상대 종류·감각 구성·서술 문체·상황·언어·움직임 갈래·뽑기 범위."""
 
     domain: str
     body: str
@@ -74,6 +86,17 @@ class Context:
     sensor_suite: str
     style: str
     setting: int = 0                  # 분야 카드의 상황 번호(그 태그가 용기·장소·과제·문구를 고른다 — 의미 일관성)
+    lang: str = "en"                  # 상황 옷·글의 언어(en / ko)
+    maneuver: str | None = None       # P3 나르기: brake / turn / start; 경사로: down / up
+    ranges: tuple = ()                # 빼 둔 칸(T3)이 정한 뽑기 범위: ((변수, 하한, 상한), …) — holdout.ranges_for
+
+    def range(self, var: str, base=(-1e9, 1e9)) -> tuple[float, float]:
+        """변수의 뽑기 범위(기본 범위와 빼 둔 칸 범위의 교집합)."""
+        lo, hi = float(base[0]), float(base[1])
+        for name, a, b in self.ranges:
+            if name == var:
+                lo, hi = max(lo, a), min(hi, b)
+        return lo, hi
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -110,16 +133,25 @@ def _speed_for_stop(stop_dist: float, latency: float, decel: float) -> float:
 # ----------------------------------------------------------------------------------------------------------------
 
 
-def draw_context(cfg: SimgenConfig, rng: np.random.Generator, domain: str, forced: dict | None = None) -> Context:
-    """분야는 주어진 것(층화), 나머지는 분야 카드와 속성 목록의 가중치로 뽑는다. ``forced``는 예시용(body·scene·style·agent_kind)."""
+def draw_context(cfg: SimgenConfig, rng: np.random.Generator, domain: str, forced: dict | None = None, split=None, holdout=None) -> Context:
+    """분야는 주어진 것(층화). 장면은 현상·조합 묶음을 고르게 고른 뒤(Task v0b §5 — 그 분야의 몸으로 할 수 있는 장면만) 그 묶음 안에서,
+    몸은 분야 카드의 가중치를 그 장면의 몸으로 줄여서 고른다. ``split``(기본 학습)이 고를 수 있는 묶음·문체·상황·언어 비율과 빼 둔 칸의
+    뽑기 범위를 정한다(holdout). ``forced``는 시험 세트·예시용(group·scene·body·style·setting·lang·agent_kind·variant·maneuver)."""
+    from robo_jev.simgen.holdout import load_holdout, ranges_for, split_for
+
     forced = dict(forced or {})
+    holdout = holdout or load_holdout()
+    split = split or split_for("train", holdout)
     card = cfg.domain(domain)
-    scene_forced = forced.get("scene")
-    bodies = dict(card["bodies"])
-    if scene_forced:
-        bodies = {b: w for b, w in bodies.items() if scene_forced in cfg.catalog["scenes_by_body"][b]} or bodies
+    doable = [s for s in GROUPS.get(forced.get("group", ""), ()) or () if any(card["bodies"].get(b, 0) > 0 for b in SCENE_BODIES[s])]
+    groups = [forced["group"]] if forced.get("group") else [g for g in split.groups if any(card["bodies"].get(b, 0) > 0 for s in GROUPS[g] for b in SCENE_BODIES[s])]
+    group = groups[int(rng.integers(len(groups)))]
+    scenes = doable or [s for s in GROUPS[group] if any(card["bodies"].get(b, 0) > 0 for b in SCENE_BODIES[s])]
+    scene = forced.get("scene") or scenes[int(rng.integers(len(scenes)))]
+    bodies = {b: w for b, w in card["bodies"].items() if w > 0 and b in SCENE_BODIES[scene]}
+    if not bodies:
+        raise ValueError(f"{domain} has no body for {scene}")
     body = forced.get("body") or _pick(rng, bodies)
-    scene = scene_forced or _pick(rng, cfg.catalog["scenes_by_body"][body])
     variant = "moving"
     stopped_draw = rng.random()
     if scene == "p1_crossing" and stopped_draw < cfg.catalog["crossing_stopped_share"]:
@@ -128,12 +160,36 @@ def draw_context(cfg: SimgenConfig, rng: np.random.Generator, domain: str, force
     family = cfg.agent_family(scene, body)
     agent_kind = None
     if family is not None:
-        agent_kind = forced.get("agent_kind") or _pick(rng, card["agents"][family])
+        kinds = dict(card["agents"][family])
+        if scene == "p6_stale_track":
+            # '아직 그 자리에 있나'는 스스로 자리를 뜨는 상대만(떠나는 비율이 속성 목록에 있는 종류 — 공은 빠진다)
+            kinds = {k: w for k, w in kinds.items() if k in cfg.catalog["p6"]["stale"]["leave_rate"]}
+        agent_kind = forced.get("agent_kind") or _pick(rng, kinds)
     suite = _pick(rng, cfg.body(body)["sensor_suites"])
-    style = forced.get("style") or ("facts", "prose", "planner")[int(rng.integers(3))]
+    styles = [s for s in split.styles if s in ("facts", "prose", "planner")] or list(split.styles)
+    style = forced.get("style") or styles[int(rng.integers(len(styles)))]
+    held = set(holdout.heldout_settings(domain))
     allowed = [i for i, entry in enumerate(card["settings"]) if setting_allows(entry, body)]
+    if split.settings == "train":
+        allowed = [i for i in allowed if i not in held]
+    elif split.settings == "heldout":
+        allowed = [i for i in allowed if i in held] or allowed
     setting = int(forced.get("setting", allowed[int(rng.integers(len(allowed)))]))
-    return Context(domain, body, scene, variant, agent_kind, suite, style, setting)
+    maneuver = None
+    draw = rng.random()
+    if scene in ("p3_carrying_tall", "p3p5_carrying_mixed"):
+        weights = dict(cfg.catalog["p3"]["maneuvers"])
+        if scene == "p3p5_carrying_mixed":
+            weights.pop("start")
+        names = list(weights)
+        cum = np.cumsum([weights[n] for n in names]) / sum(weights.values())
+        maneuver = names[min(int(np.searchsorted(cum, draw, side="right")), len(names) - 1)]
+    elif scene == "p3_ramp":
+        maneuver = "down" if draw < cfg.catalog["p3"]["ramp_directions"]["down"] else "up"
+    maneuver = forced.get("maneuver", maneuver)
+    lang = forced.get("lang") or ("ko" if rng.random() < split.ko_share else "en")
+    ranges = tuple(sorted((var, lo, hi) for var, (lo, hi) in ranges_for(holdout, split, scene, body).items()))
+    return Context(domain, body, scene, variant, agent_kind, suite, style, setting, lang, maneuver, ranges)
 
 
 def draw_margin(cfg: SimgenConfig, name: str, body: str, rng: np.random.Generator) -> float:
@@ -146,7 +202,23 @@ def draw_margin(cfg: SimgenConfig, name: str, body: str, rng: np.random.Generato
 
 
 def draw_margins(cfg: SimgenConfig, ctx: Context, rng: np.random.Generator) -> dict[str, float]:
-    return {name: draw_margin(cfg, name, ctx.body, rng) for name in SCENE_MARGINS[ctx.scene]}
+    return {name: draw_margin(cfg, name, ctx.body, rng) for name in scene_margins(ctx.scene, ctx.maneuver)}
+
+
+def uniform_in(rng: np.random.Generator, ctx: Context, var: str, base) -> float:
+    """기본 범위 ∩ 빼 둔 칸 범위에서 균등 하나(비면 Infeasible)."""
+    lo, hi = ctx.range(var, base)
+    if hi < lo:
+        raise Infeasible(f"{var} range empty")
+    return float(rng.uniform(lo, hi))
+
+
+def speed_range(cfg: SimgenConfig, ctx: Context) -> tuple[float, float]:
+    """로봇 속도의 뽑기 범위(몸의 범위 ∩ 빼 둔 칸)."""
+    lo, hi = ctx.range("robot_speed", cfg.body(ctx.body)["speed"])
+    if hi < lo:
+        raise Infeasible("speed range empty")
+    return lo, hi
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -179,6 +251,8 @@ def _robot_params(cfg: SimgenConfig, body: str, rng: np.random.Generator, loaded
         p["retract_speed"] = round_to(_u(rng, spec["retract"]["speed"]), 0.05)
     lo, hi = spec["decel"]["moderate"]
     p["_moderate_range"] = (lo * factor, hi * factor)
+    lo, hi = spec["decel"]["hard"]
+    p["_hard_range"] = (lo * factor, hi * factor)
     return p
 
 
@@ -208,7 +282,7 @@ def _choose_carry_for_decel(cfg, ctx, m_spill: float, p: dict, rng) -> tuple[dic
         entry = entries[int(idx)]
         spec = cfg.container(entry["kind"])
         c = _spill_coef(cfg, entry["kind"])
-        f_lo, f_hi = spec["fill"]
+        f_lo, f_hi = fill_range(ctx, spec["fill"])
         d_a, d_b = max(lo, (1.0 - m_spill - f_hi) / c), min(hi, (1.0 - m_spill - f_lo) / c)
         grid = [round_to(x, 0.1) for x in np.arange(math.ceil(d_a / 0.1 - 1e-9) * 0.1, d_b + 1e-9, 0.1)]
         grid = [d for d in grid if d_a - 1e-9 <= d <= d_b + 1e-9]
@@ -219,6 +293,18 @@ def _choose_carry_for_decel(cfg, ctx, m_spill: float, p: dict, rng) -> tuple[dic
         if f_lo - 1e-9 <= fill <= f_hi + 1e-9:
             return entry, d_m, float(min(max(fill, f_lo), f_hi))
     raise Infeasible("no container realises the spill margin")
+
+
+def fill_range(ctx: Context, base) -> tuple[float, float]:
+    """닻 채움의 범위: 빼 둔 칸 '높은 채움'(보고 > 0.92)이 학습 쪽이면 0.92 아래로(보고가 넘으면 관측 검사가 다시 뽑는다), 시험 쪽이면
+    0.89 위로(보고가 그 칸에 닿기 쉽게)."""
+    lo, hi = ctx.range("fill_reading", (-1e9, 1e9))
+    f_lo, f_hi = float(base[0]), float(base[1])
+    if hi < 1e8:
+        f_hi = min(f_hi, hi)
+    if lo > -1e8:
+        f_lo = max(f_lo, lo - 0.03)
+    return f_lo, f_hi
 
 
 def _container_hidden(cfg, ctx, entry: dict, rng) -> tuple[dict, dict]:
@@ -257,11 +343,20 @@ def _roll_decel(cfg, ctx, rng) -> float:
     return _u(rng, cfg.catalog["floors"][floor]) * G
 
 
-def _age(cfg, rng) -> float:
+def _age(cfg, rng, ctx: Context | None = None) -> float:
+    """관측 나이(신선 / 오래됨 섞기). 빼 둔 칸이 범위를 정하면(학습: ≤ 1.0 s, T3: > 1.0 s) 그 안으로 옮긴다(같은 난수 수)."""
     spec = cfg.catalog["observation"]["age"]
     fresh = rng.random() < spec["fresh_share"]
     a, b = _u(rng, spec["fresh"]), _u(rng, spec["stale"])
-    return round_to(a if fresh else b, 0.05)
+    u = rng.random()
+    value = a if fresh else b
+    if ctx is not None:
+        lo, hi = ctx.range("track_age", (spec["fresh"][0], spec["stale"][1]))
+        if not lo <= value <= hi:
+            if hi < lo:
+                raise Infeasible("age range empty")
+            value = lo + u * (hi - lo)
+    return round_to(value, 0.05)
 
 
 def _sides(cfg, ctx, can_sidestep: bool, rng) -> tuple[tuple[str, str], tuple[float, float]]:
@@ -291,12 +386,15 @@ def _solve_speed_for_gap(cfg, ctx, p: dict, r_sum: float, m: float, d_m: float, 
     s_hi = body["range_max"] - r_sum - m
     if s_hi <= s_lo:
         raise Infeasible("gap range empty")
-    v_lo = max(body["speed"][0], _speed_for_stop(s_lo, t, d_m))
-    v_hi = min(body["speed"][1], _speed_for_stop(s_hi, t, d_m))
+    sp_lo, sp_hi = speed_range(cfg, ctx)
+    v_lo = max(sp_lo, _speed_for_stop(s_lo, t, d_m))
+    v_hi = min(sp_hi, _speed_for_stop(s_hi, t, d_m))
     if v_lo > v_hi:
         raise Infeasible("no speed realises the step-in margin")
     v0 = round_to(rng.uniform(v_lo, v_hi), body["speed_resolution"])
     v0 = min(max(v0, body["speed"][0]), body["speed"][1])
+    if not sp_lo - 1e-9 <= v0 <= sp_hi + 1e-9:
+        raise Infeasible("rounded speed left the allowed range")
     gap = m + ph.stopping_distance(v0, t, d_m) + r_sum
     if gap - r_sum < 0.5 * body["gap_min"] or gap > body["range_max"] + 0.5:
         raise Infeasible("rounded speed broke the gap")
@@ -307,13 +405,13 @@ def _step_in_agent(cfg, ctx, ra: float, r_sum: float, rng) -> tuple[dict, dict]:
     agent = cfg.agent(ctx.agent_kind)
     motion = cfg.catalog["intent_motion"]
     direction = 1.0 if rng.random() < 0.5 else -1.0
-    offset = rng.uniform(0.0, 0.6) * r_sum
+    offset = rng.uniform(0.0, cfg.catalog["intent_motion"]["step_in_band"]) * r_sum  # 글의 전제 띠(사후와 같은 띠)
     lat0 = -direction * offset
     if agent["group"] == "ball":
         u0 = _u(rng, motion["ball_lateral_speed"])
     else:
         u0 = _u(rng, motion["step_in_lateral_speed"]) * agent["speed"][1]
-    age = _age(cfg, rng)
+    age = _age(cfg, rng, ctx)
     # 마지막 위치 보고가 진로 중심선에서 last_fix_max보다 멀지 않게 나이를 줄인다(리뷰 1 질문 5: '끼어든다'는 글과 2 m 밖의 보고가 어긋나 보인다).
     age_max = max(0.0, (cfg.body(ctx.body)["last_fix_max"] - offset) / u0)
     if age > age_max:
@@ -362,12 +460,12 @@ def _build_crossing(cfg, ctx, margins, rng) -> World:
     # 상대가 지나는 줄(교차선)은 로봇 앞면 너머에 둔다 — 로봇이 이미 그 줄을 막고 있지 않게(멈춤이 길을 막는 경우를 만들지 않는다).
     ahead_min = r_sum + body["gap_min"]
     if ctx.variant == "stopped":
-        cruise = round_to(_u(rng, body["speed"]), body["speed_resolution"])
+        cruise = round_to(rng.uniform(*speed_range(cfg, ctx)), body["speed_resolution"])
         ahead = round_to(ahead_min + rng.uniform(0.0, 0.8) * scale, 0.01)
         t_clear = ph.clear_time_from_rest(ahead + r_sum, p["latency"], p["accel"], cruise)
         v0 = 0.0
     else:
-        v0 = round_to(_u(rng, body["speed"]), body["speed_resolution"])
+        v0 = round_to(rng.uniform(*speed_range(cfg, ctx)), body["speed_resolution"])
         cruise = v0
         t_lo = max(0.8, 0.3 - m - safety, (ahead_min + r_sum) / v0)
         if t_lo > 2.6:
@@ -382,7 +480,7 @@ def _build_crossing(cfg, ctx, margins, rng) -> World:
         raise Infeasible("agent beyond sensor range")
     va = rng.uniform(agent["speed"][0], min(agent["speed"][1], va_cap))
     dist = r_sum + va * t_arr
-    age = _age(cfg, rng)
+    age = _age(cfg, rng, ctx)
     i_obs, cue, i_now = _intent(cfg, ctx.agent_kind, "crossing", age, rng)
     react_draw = rng.random()
     values = {
@@ -394,6 +492,8 @@ def _build_crossing(cfg, ctx, margins, rng) -> World:
         # 로봇이 자기 줄을 막고 있으면 늦게라도 서나(단서에 묶인 확률; 리뷰 1 질문 4) — 숨은 값
         "reacts": float(react_draw < reaction_probability(cfg, ctx.agent_kind, cue)),
         "react_standoff": _u(rng, cfg.catalog["crossing_reaction"]["standoff"]) * scale,
+        "distracted": float(rng.random() < distraction_probability(cfg, ctx.agent_kind, cue)),
+        "static_u": float(rng.random()),
     }  # fmt: skip
     world = World(ctx.scene, ctx.domain, ctx.variant, _make_robot(p, v0, cruise), ctx.agent_kind, None, values, {"intent_obs": i_obs, "cue": cue, "age": age})
     return _with_margins(cfg, world)
@@ -405,7 +505,7 @@ def _build_head_on(cfg, ctx, margins, rng) -> World:
     motion = cfg.catalog["intent_motion"]
     ra = _u(rng, agent["radius"])
     r_sum = p["radius"] + ra
-    v0 = round_to(_u(rng, body["speed"]), body["speed_resolution"])
+    v0 = round_to(rng.uniform(*speed_range(cfg, ctx)), body["speed_resolution"])
     width = margins["head_on"] + p["passing_clearance"] + 2.0 * r_sum
     t_meet = rng.uniform(1.2, 2.6)
     va_cap = (body["range_max"] - r_sum) / t_meet - v0
@@ -415,7 +515,7 @@ def _build_head_on(cfg, ctx, margins, rng) -> World:
     dist = r_sum + (v0 + va) * t_meet
     robot_lateral = round_to(rng.uniform(-0.1, 0.1) * (width / 2.0 - p["radius"]), 0.01)
     lat_a = rng.uniform(-0.15, 0.15) * max(width / 2.0 - ra, 0.0)
-    age = _age(cfg, rng)
+    age = _age(cfg, rng, ctx)
     i_obs, cue, i_now = _intent(cfg, ctx.agent_kind, "head_on", age, rng)
     values = {
         "dist": dist, "lat_a": lat_a, "width": width, "va": va, "ra": ra,
@@ -439,8 +539,9 @@ def _build_braking(cfg, ctx, margins, rng) -> World:
     t = p["latency"]
     s_lo = max(0.0, body["gap_min"] - m)
     s_hi = body["range_max"] - p["radius"] - m
-    v_lo = max(body["speed"][0], _speed_for_stop(s_lo, t, p["decel_moderate"]))
-    v_hi = min(body["speed"][1], _speed_for_stop(s_hi, t, p["decel_moderate"]))
+    sp_lo, sp_hi = speed_range(cfg, ctx)
+    v_lo = max(sp_lo, _speed_for_stop(s_lo, t, p["decel_moderate"]))
+    v_hi = min(sp_hi, _speed_for_stop(s_hi, t, p["decel_moderate"]))
     if v_lo > v_hi:
         raise Infeasible("no speed realises the stop margin")
     v0 = min(max(round_to(rng.uniform(v_lo, v_hi), body["speed_resolution"]), body["speed"][0]), body["speed"][1])
@@ -460,10 +561,10 @@ def _build_turning(cfg, ctx, margins, rng) -> World:
     entries = _carried(cfg, ctx, rng)
     for idx in rng.permutation(len(entries)):
         entry = entries[int(idx)]
-        f_lo, f_hi = cfg.container(entry["kind"])["fill"]
+        f_lo, f_hi = fill_range(ctx, cfg.container(entry["kind"])["fill"])
         c = _spill_coef(cfg, entry["kind"])
         for _ in range(40):
-            v0 = min(max(round_to(_u(rng, body["speed"]), body["speed_resolution"]), body["speed"][0]), body["speed"][1])
+            v0 = min(max(round_to(rng.uniform(*speed_range(cfg, ctx)), body["speed_resolution"]), body["speed"][0]), body["speed"][1])
             radius = round_to(_u(rng, body["turn_radius"]), radius_res)
             fill = 1.0 - m - c * v0 * v0 / radius
             if f_lo <= fill <= f_hi:
@@ -491,6 +592,18 @@ def build_world(cfg: SimgenConfig, ctx: Context, margins: dict[str, float], rng:
         return _build_braking(cfg, ctx, margins, rng)
     if ctx.scene == "p5_turning":
         return _build_turning(cfg, ctx, margins, rng)
+    if ctx.scene in ("p3_carrying_tall", "p3_ramp", "p3_place_stack", "p3p5_carrying_mixed", "p1p3_step_in_carrying_tall"):
+        from robo_jev.simgen import p3_world
+
+        return p3_world.build(cfg, ctx, margins, rng)
+    if ctx.scene in ("p4_place_check", "p4_insert", "p4p6_stale_check"):
+        from robo_jev.simgen import p4_world
+
+        return p4_world.build(cfg, ctx, margins, rng)
+    if ctx.scene in ("p6_stale_track", "p6_blind_corner", "p6_sensor_conflict", "p1p6_emerging_step_in"):
+        from robo_jev.simgen import p6_world
+
+        return p6_world.build(cfg, ctx, margins, rng)
     raise ValueError(ctx.scene)
 
 
@@ -503,7 +616,12 @@ def margins_of(cfg: SimgenConfig, world: World) -> dict[str, float]:
     """참 세계의 결정 여유(정의는 catalog `margins` 주석). 풀이와 따로 계산한다."""
     r, v = world.robot, world.values
     out: dict[str, float] = {}
-    for name in SCENE_MARGINS[world.scene]:
+    if world.scene not in ("p1_step_in", "p1_crossing", "p1_head_on", "p5_braking", "p5_turning", "p1p5_step_in_carrying"):
+        from robo_jev.simgen import p3_world, p4_world, p6_world
+
+        module = {"p3": p3_world, "p4": p4_world, "p6": p6_world}[scene_kind(world.scene)]
+        return module.margins_of(cfg, world)
+    for name in scene_margins(world.scene):
         if name == "step_in":
             out[name] = v["gap"] - ph.stopping_distance(r.speed, r.latency, r.decel_moderate) - (r.radius + v["ra"])
         elif name == "crossing":
@@ -535,10 +653,21 @@ def _with_margins(cfg: SimgenConfig, world: World) -> World:
 
 
 def flip_numeric(cfg: SimgenConfig, world: World, rng: np.random.Generator):
-    """결정 변수 하나만 경계 너머로 옮긴 세계와 그 여유 이름의 후보들(앞의 것부터 — 생성기가 관측이 실제로 바뀌는 첫 후보를 고른다).
-    다른 값은 그대로다. 옮길 수 없으면 아무것도 내지 않는다."""
-    names = list(SCENE_MARGINS[world.scene])
-    name = names[int(rng.integers(len(names)))]
+    """결정 변수 하나만 경계 너머로 옮긴 세계와 그 여유 이름의 후보들(앞의 것부터 — 생성기가 관측이 실제로 바뀌고 핵심 정답이 0.5를 넘는
+    첫 후보를 고른다). 옮기는 변수는 핵심 질문이 묻는 여유다(:func:`~robo_jev.simgen.catalog.pair_targets` — 수정 1 I4). 다른 값은 그대로다.
+    옮길 수 없으면 아무것도 내지 않는다."""
+    for name in pair_targets(world.scene):
+        if world.scene not in ("p1_step_in", "p1_crossing", "p1_head_on", "p5_braking", "p5_turning", "p1p5_step_in_carrying"):
+            from robo_jev.simgen import p3_world, p4_world, p6_world
+
+            module = {"p3": p3_world, "p4": p4_world, "p6": p6_world}[scene_kind(world.scene)]
+            yield from module.flip(cfg, world, name, rng)
+        else:
+            yield from _flip_v0a(cfg, world, name)
+
+
+def _flip_v0a(cfg: SimgenConfig, world: World, name: str):
+    """v0a 장면(P1·P5)의 결정 변수 하나: 간격(step_in)·장애물 거리(stop)·상대 거리(crossing)·통로 폭(head_on)·채움(spill)."""
     m = world.margins[name]
     sigma = cfg.catalog["margins"][name]["sigma"][world.robot.body]
     sign = 1.0 if m >= 0 else -1.0
@@ -572,6 +701,20 @@ def flip_numeric(cfg: SimgenConfig, world: World, rng: np.random.Generator):
 # ----------------------------------------------------------------------------------------------------------------
 # 관측(감각 모형)
 # ----------------------------------------------------------------------------------------------------------------
+
+
+def prior_redraw(cfg: SimgenConfig, world: World, rng: np.random.Generator) -> World:
+    """순방향 SBC용 세계: 닻이 여유에 맞춰 푼 숨은 값을 정답의 사전에서 다시 뽑는다(용기의 채움 ~ 속성 목록 범위 균등 + 새 현상 모듈의
+    숨은 값). 관측된 양(거리·속도·치수)은 닻의 값을 둔다 — 넓은 여유로 퍼뜨리면 사후의 국소적으로 평평한 사전과 맞는다."""
+    if world.container is not None:
+        lo, hi = cfg.container(world.container["kind"])["fill"]
+        world = world.with_values(fill=float(rng.uniform(lo, hi)))
+    kind = scene_kind(world.scene)
+    if kind is not None:
+        from robo_jev.simgen import p3_world, p4_world, p6_world
+
+        world = {"p3": p3_world, "p4": p4_world, "p6": p6_world}[kind].prior_redraw(cfg, world, rng)
+    return _with_margins(cfg, world)
 
 
 def _distance_sigma(cfg, suite: str, distance: float, u: float) -> float:
@@ -613,7 +756,7 @@ def _skin(cfg, ctx: Context, world: World, rng: np.random.Generator) -> dict:
     u = rng.random(16)
     names = usable(card.get("body_names", {}).get(ctx.body) or cfg.skins["body_names"][ctx.body])
     name = _pick_from(names, u[1])
-    carry_scene = world.container is not None
+    carry_scene = world.container is not None or "load" in world.parts
     own_tasks = name.get("carry_tasks" if carry_scene else "tasks") if isinstance(name, dict) else None
     tasks = usable(own_tasks) if own_tasks else usable(card["carry_tasks" if carry_scene else "tasks"][ctx.body])
     places = card["places"]
@@ -626,18 +769,26 @@ def _skin(cfg, ctx: Context, world: World, rng: np.random.Generator) -> dict:
     }
     container_phrase = None
     task = entry_text(_pick_from(tasks, u[4]))
-    if carry_scene:
+    load_phrase = None
+    if "load" in world.parts:
+        load_phrase = _pick_from(world.parts["load"]["phrases"], u[3])
+    if world.container is not None:
         container_phrase = _pick_from(world.container["phrases"], u[3])
-        task = task.format(container=container_phrase)
+    if carry_scene:
+        task = task.format(container=load_phrase or container_phrase)
+    out["task_template"] = entry_text(_pick_from(tasks, u[4]))
     out["task"] = task
+    out["task_object"] = load_phrase or container_phrase
     out["container_phrase"] = container_phrase
-    if ctx.agent_kind is not None:
+    out["load_phrase"] = load_phrase
+    if ctx.agent_kind is not None and ctx.scene != "p6_blind_corner":
         d = _pick_from(usable(card["descriptors"][ctx.agent_kind]), u[5])
         out["descriptor"] = Descriptor(d["np"], d["ref"])
         cue = world.at_observation.get("cue")
         if cue is not None:
             group = cfg.agent(ctx.agent_kind)["group"]
             template = _pick_from(cfg.skins["cue_phrases"][group][cue], u[6])
+            out["cue_template"] = template
             out["cue_phrase"] = template.format(Ref=_cap(d["ref"]), ref=d["ref"])
     out["obstacle"] = entry_text(_pick_from(usable(card["bench_obstacles"] if ctx.body == "arm" else card["obstacles"]), u[7]))
     occluders = [entry_text(e) for e in usable(card["occluders"])]
@@ -650,7 +801,82 @@ def _skin(cfg, ctx: Context, world: World, rng: np.random.Generator) -> dict:
     n_distract = _pick_from((0, 1, 1, 2, 2, 3), u[12])
     order = rng.permutation(len(distractors))
     out["distractors"] = tuple(distractors[int(i)] for i in order[:n_distract])
+    _skin_v0b(cfg, ctx, world, rng, usable, out)
+    if ctx.lang == "ko":
+        _skin_ko(cfg, ctx, out)
     return out
+
+
+def _skin_v0b(cfg, ctx: Context, world: World, rng: np.random.Generator, usable, out: dict) -> None:
+    """새 장면(Task v0b)의 상황 옷 문구: 키 큰 물건·받침 표면, 경사로, 쌓기, 놓는 물건, 오래된 추적·모퉁이·센서 불일치."""
+    card = cfg.domain(ctx.domain)
+    u = rng.random(12)
+    if out.get("load_phrase"):
+        out["load_ref"] = _object_ref(out["load_phrase"])
+        out["deck_phrase"] = world.parts["deck"]["text"]
+    if ctx.scene == "p3_ramp":
+        # 경사로 문구의 방향('… down to …' / '… up to …')이 움직임 갈래와 맞는 것만(방향 없는 문구는 둘 다)
+        ramps = [e for e in usable(card["ramps"]) if not re.search(r"\b" + ("up" if ctx.maneuver == "down" else "down") + r"\b", entry_text(e))]
+        out["ramp"] = entry_text(_pick_from(ramps, u[0]))
+        out["ramp_end"] = entry_text(_pick_from(usable(card["ramp_ends"]), u[1]))
+        out["detour"] = entry_text(_pick_from(usable(card["detours"]), u[2]))
+    if ctx.scene == "p3_place_stack":
+        phrase = _pick_from(world.parts["stack_item"]["phrases"], u[3])
+        out.update(stack_phrase=phrase, stack_ref=_object_ref(phrase), stack_spot=entry_text(_pick_from(usable(card["stack_spots"]), u[4])))
+    if "item" in world.parts:
+        out.update(item=world.parts["item"]["item"], target=world.parts["item"]["target"])
+        if ctx.scene == "p4p6_stale_check":
+            out["stale_reason"] = _pick_from(cfg.skins["stale_camera"][ctx.body], u[5])
+    if ctx.scene in ("p6_stale_track", "p1p6_emerging_step_in"):
+        out["occluder"] = entry_text(_pick_from(usable(card["occluders"]), u[6]))
+    if ctx.scene == "p6_stale_track":
+        group = cfg.agent(world.agent_kind)["group"]
+        out["pronoun"] = "them" if group == "person" else "it"
+        out["spot"] = entry_text(_pick_from(usable(card["places"]["floor"]), u[7]))
+    if ctx.scene == "p6_blind_corner":
+        out["corner"] = entry_text(_pick_from(usable(card["corners"]), u[8]))
+    if ctx.scene == "p6_sensor_conflict":
+        out["conflict_phrase"] = _pick_from(world.parts["entry"]["phrases"], u[9])
+        out["detour_generic"] = "around it"
+
+
+def _object_ref(phrase: str) -> str:
+    """'a vase of fresh tulips' → 'the vase'; 'a stack of three shoe boxes' → 'the stack'."""
+    from robo_jev.simgen.phrases import container_ref
+
+    return container_ref(phrase)
+
+
+def _skin_ko(cfg, ctx: Context, out: dict) -> None:
+    """상황 옷 문구를 한국어로(같은 고름 — 같은 난수 소비; skins-ko-v0.2.yaml). 조사는 한국어 서술기가 붙인다."""
+    from robo_jev.simgen.korean import kfmt, ko_skins
+
+    ko = ko_skins()
+    t = ko.t
+    obj_np = {}
+    for key in ("container_phrase", "load_phrase", "stack_phrase"):
+        if out.get(key):
+            np_, ref = ko.obj(out[key])
+            obj_np[key] = np_
+            out[key] = np_
+            out[key.replace("phrase", "ref")] = ref
+    task_object = obj_np.get("load_phrase") or obj_np.get("container_phrase")
+    out["task"] = kfmt(t(out["task_template"]), container=task_object) if "{container" in t(out["task_template"]) else t(out["task_template"])
+    if "descriptor" in out:
+        np_, ref = ko.descriptor(out["descriptor"].np)
+        out["descriptor"] = Descriptor(np_, ref)
+        if out.get("cue_template"):
+            out["cue_phrase"] = kfmt(ko.cue(out["cue_template"]), ref=ref)
+    for key in ("setting", "body_name", "carry_where", "place", "obstacle", "deck_phrase", "ramp", "ramp_end", "detour", "stack_spot", "item", "target",
+                "stale_reason", "occluder", "spot", "corner", "conflict_phrase"):
+        if out.get(key):
+            out[key] = t(out[key])
+    out["occluders"] = tuple(t(x) for x in out["occluders"])
+    out["blockers"] = tuple(t(x) for x in out["blockers"])
+    out["distractors"] = tuple(t(x) for x in out["distractors"])
+    if out.get("detour_generic"):
+        out["detour_generic"] = "돌아가는 길"
+    out["pronoun"] = None
 
 
 def _cap(text: str) -> str:
@@ -684,14 +910,14 @@ def observe(
     v, r = world.values, world.robot
 
     agent = None
-    if ctx.agent_kind is not None:
+    if ctx.agent_kind is not None and ctx.scene not in ("p6_stale_track", "p6_blind_corner"):
         group = cfg.agent(ctx.agent_kind)["group"]
         age = world.at_observation["age"]
         ages = (round_to(age + fix_dt, 0.05), age) if two_fix else (age,)
         # 거리는 감각이 재는 면 사이 간격으로 보고한다(로봇 앞면 → 상대의 가까운 면; 진로 가장자리 → 상대의 가까운 면).
         # 중심 거리로 되돌리려면 상대의 반지름이 필요하다 — step_in·crossing에서는 숨은 값(사전 분포), head_on에서는 폭 보고에서.
         r_sum = r.radius + v["ra"]
-        if ctx.scene in ("p1_step_in", "p1p5_step_in_carrying"):
+        if ctx.scene in ("p1_step_in", "p1p5_step_in_carrying", "p1p6_emerging_step_in", "p1p3_step_in_carrying_tall"):
             coord_now, rate = v["lat0"], -v["dir"] * v["u0"]
             track_sigma, track_res = lat_sigma, lat_res
             surface = v["gap"] - r_sum
@@ -720,7 +946,7 @@ def observe(
             }
         fixes = []
         noise = (z[1], z[2]) if two_fix else (z[2],)
-        lateral_track = ctx.scene in ("p1_step_in", "p1p5_step_in_carrying")  # 옆 위치는 부호가 있는 값 — 바닥이 없다
+        lateral_track = ctx.scene in ("p1_step_in", "p1p5_step_in_carrying", "p1p6_emerging_step_in", "p1p3_step_in_carrying_tall")  # 옆 위치는 부호가 있다
         for a, zz in zip(ages, noise, strict=True):
             fixes.append(_reading(coord_now + rate * a, track_sigma, track_res, zz, floor=None if lateral_track else track_res))
         speed = None if two_fix else _reading(speed_true, speed_sigma, speed_res, z[3], floor=speed_res)
@@ -745,10 +971,11 @@ def observe(
         container = ContainerObs(
             kind=world.container["kind"], content=world.container["content"], phrase=skin["container_phrase"],
             diameter=spec["diameter"], height=spec["height"], fill=fill, fill_mode=mode, lid=world.at_observation["lid_view"],
+            ref=skin.get("container_ref"),
         )  # fmt: skip
 
     env_kwargs: dict = {"place": skin["place"]}
-    if ctx.scene in ("p1_step_in", "p1p5_step_in_carrying") and r.can_sidestep:
+    if ctx.scene in ("p1_step_in", "p1p5_step_in_carrying", "p1p6_emerging_step_in", "p1p3_step_in_carrying_tall") and r.can_sidestep:
         views = world.at_observation["sides"]
         sides = []
         for i, view in enumerate(views):
@@ -767,8 +994,17 @@ def observe(
         env_kwargs.update(turn_radius=g["radius"], turn_angle_deg=g["angle_deg"])
         env_kwargs["turn_approach"] = Reading(g["approach"], 0.0, 0.01 if arm else 0.05)
 
-    skin_text = SkinText(ctx.domain, skin["setting"], skin["body_name"], skin["task"], skin["distractors"], skin["carry_where"])
+    extra: dict = {}
+    if ctx.scene not in ("p1_step_in", "p1_crossing", "p1_head_on", "p5_braking", "p5_turning", "p1p5_step_in_carrying"):
+        from robo_jev.simgen import p3_world, p4_world, p6_world
+
+        module = {"p3": p3_world, "p4": p4_world, "p6": p6_world}[scene_kind(ctx.scene)]
+        u2 = obs_rng.random(16)
+        z2 = obs_rng.standard_normal(16)
+        extra, env_extra = module.observe_parts(cfg, world, ctx, u2, z2, skin)
+        env_kwargs.update({k: v for k, v in env_extra.items() if v is not None})
+    skin_text = SkinText(ctx.domain, skin["setting"], skin["body_name"], skin["task"], skin["distractors"], skin["carry_where"], ctx.lang)
     return Observation(
         scene=ctx.scene, domain=ctx.domain, body=ctx.body, sensor_suite=ctx.sensor_suite, variant=ctx.variant,
-        robot=world.robot, agent=agent, container=container, env=EnvObs(**env_kwargs), skin=skin_text, fmt=fmt,
+        robot=world.robot, agent=agent, container=container, env=EnvObs(**env_kwargs), skin=skin_text, fmt=fmt, **extra,
     )  # fmt: skip

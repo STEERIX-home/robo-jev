@@ -15,11 +15,13 @@
 * ``choice`` — 선택지 줄 ``<코드>. <키>: <설명>``. 키를 보이는 이유: 상태 글의 계획기 권고가 선택지를 키로 부른다. 섞기는
   정렬한 키 목록에 seed 순열을 건다(요청 안의 순서와 무관 — 쌍의 두 레코드가 같은 순서를 본다). seed가 None이면 요청 순서.
 * ``noul`` — 코드 둘 ``Yes``·``No``(순서도 섞는다) → ``p_yes`` = Yes 코드의 확률.
-* ``score`` — [0, 1]을 6구간 코드로 묻는다: 0.0–0.1 · 0.1–0.3 · 0.3–0.5 · 0.5–0.7 · 0.7–0.9 · 0.9–1.0. 점수 = 구간 중앙값
-  (0.05 · 0.2 · 0.4 · 0.6 · 0.8 · 0.95)의 기대값. 양 끝 구간을 좁게 둔 것은 점수가 대개 확률이고(기획서 §5) 0·1 가까운 값의
-  구별이 중요해서다 — 그 대가로 읽을 수 있는 값이 [0.05, 0.95] 안이다(정답 0이면 바닥 로그 손실 −log 0.95). 구간은 순서가
-  있는 척도라 마구 섞지 않고 **오름·내림 방향만** seed로 고른다(첫 자리 = 낮은 값이라는 상관을 끊는다). 질문의 criteria(0·1의
-  뜻)를 ``Scale:`` 줄로 보인다.
+* ``score`` — 판(:data:`PROMPT_VERSIONS`)마다 다르다. **v0c-p3(기본, Task v0d fix round 1)**: [0, 1]을 **기준점 11개**
+  0.0 · 0.1 · … · 1.0(코드 A–K)으로 묻고 점수 = 기준점의 기대값이다 — [0, 1] 전체에 닿는다(학습 목표는 이웃한 두 기준점 사이의
+  선형 보간, :mod:`robo_jev.decisions.examples`). **v0c-p2(재현용)**: 6구간 0.0–0.1 · 0.1–0.3 · 0.3–0.5 · 0.5–0.7 · 0.7–0.9 ·
+  0.9–1.0, 점수 = 구간 중앙값(0.05 · 0.2 · 0.4 · 0.6 · 0.8 · 0.95)의 기대값 — 읽을 수 있는 값이 [0.05, 0.95] 안이라(v0a.1 점수
+  정답의 32 %가 그 밖) p3로 바꿨다. 어느 판이든 척도는 순서가 있어 마구 섞지 않고 **오름·내림 방향만** seed로 고른다(첫 자리 = 낮은
+  값이라는 상관을 끊는다; 같은 열쇠·질문·seed면 두 판의 방향이 같다). 질문의 criteria(0·1의 뜻)를 ``Scale:`` 줄로 보인다.
+  **choice·noul의 글은 두 판에서 바이트 단위로 같다** — 바뀐 것은 score 질문의 지시 한 줄과 선택지 줄뿐이다.
 
 **두 형식** (:data:`FORMATS`): ``plain``(맨 글)과 ``chat``(Qwen3.5의 chat template — system·user 차례, 생각 없는 답이면
 ``<think>\\n\\n</think>\\n\\n`` 뒤, 생각하는 답이면 ``<think>\\n`` 뒤; 공식 ``chat_template.jinja``(2B revision 15852e8)를 그린
@@ -38,8 +40,9 @@
 :func:`check_displayed_lines` 는 글에 보이는 ``X. …`` 줄을 다시 읽어 기록된 ``options``·``values``와 맞는지 본다(리뷰 1 I5 —
 섞기와 되돌리기가 같은 목록을 쓰므로 그것만으로는 어긋남이 안 보인다). 진단은 채점 전에 모든 프롬프트를 이것으로 검사한다.
 
-고정 문구(지시·설명 지시·구간 이름 등)는 :data:`PROMPT_VERSION` 과 함께 고정한다 — 문구를 바꾸면 버전을 올린다(검사가
-:func:`fixed_text_digest` 로 둘을 묶어 둔다).
+고정 문구(지시·설명 지시·구간·기준점 이름 등)는 판마다 고정한다 — 문구를 바꾸면 판을 올린다(검사가 판마다
+:func:`fixed_text_digest` 를 고정해 둔다). :data:`PROMPT_VERSION` 은 지금의 기본 판(진단·학습·평가 — p3)이고, 모든 함수가
+``version``으로 다른 판(p2 재현)을 받는다. 프롬프트 dict의 ``version``이 그 프롬프트를 만든 판이다.
 """
 
 from __future__ import annotations
@@ -63,6 +66,9 @@ __all__ = [
     "NOUL_LINES",
     "ORDERS",
     "PROMPT_VERSION",
+    "PROMPT_VERSIONS",
+    "SCORE_ANCHORS",
+    "SCORE_ANCHOR_TEXT",
     "SCORE_BINS",
     "SCORE_CENTERS",
     "SCORE_TEXT",
@@ -74,9 +80,14 @@ __all__ = [
     "option_order",
     "reasoning_close",
     "record_prompts",
+    "score_layout",
+    "score_values",
 ]
 
-PROMPT_VERSION = "v0c-p2"
+#: 판들 — v0c-p2(재현용: 점수 6구간), v0c-p3(점수 기준점 11개; choice·noul은 p2와 바이트 단위로 같다).
+PROMPT_VERSIONS = ("v0c-p2", "v0c-p3")
+#: 지금의 기본 판 — 진단·학습·평가 모두 (Task v0d fix round 1, 통제자 결정 1).
+PROMPT_VERSION = "v0c-p3"
 FORMATS = ("plain", "chat")
 MODES = ("direct", "reasoning")
 ORDERS = ("counterbalanced", "seeded")
@@ -96,8 +107,10 @@ EXPLAIN_TEXT = (
     "In at most three short sentences, work out the key quantity that decides this (a distance, time, speed or "
     'acceleration). Then write "Answer:" followed by one letter.'
 )
-#: score 질문의 구간 앞 지시.
+#: score 질문의 구간 앞 지시 (v0c-p2).
 SCORE_TEXT = "Pick the range that contains your estimate."
+#: score 질문의 기준점 앞 지시 (v0c-p3).
+SCORE_ANCHOR_TEXT = "Pick the value closest to your estimate."
 ANSWER_CUE = "Answer:"
 _PLAIN_EXPLAIN_CUE = "Explanation:"
 _CHAT_SYSTEM = "<|im_start|>system\n"
@@ -108,24 +121,54 @@ _THINK_EMPTY = "<think>\n\n</think>\n\n"
 _OPTIONS_HEAD = "\nOptions:\n"
 _OPTION_LINE = re.compile(r"^([A-Z])\. (.*)$")
 _BIN_LINE = re.compile(r"^(\d+\.\d) to (\d+\.\d)$")
+_ANCHOR_LINE = re.compile(r"^(\d\.\d)$")
 
-#: score의 6구간과 중앙값 (모듈 설명).
+#: v0c-p2의 score 6구간과 중앙값 (모듈 설명).
 SCORE_BINS: tuple[tuple[float, float], ...] = ((0.0, 0.1), (0.1, 0.3), (0.3, 0.5), (0.5, 0.7), (0.7, 0.9), (0.9, 1.0))
 SCORE_CENTERS: tuple[float, ...] = tuple(round((lo + hi) / 2, 6) for lo, hi in SCORE_BINS)
+#: v0c-p3의 score 기준점 11개 0.0, 0.1, …, 1.0 (코드 A–K).
+SCORE_ANCHORS: tuple[float, ...] = tuple(round(i / 10, 1) for i in range(11))
 #: noul의 두 선택지 (내부 키, 보이는 글).
 NOUL_LINES: tuple[tuple[str, str], ...] = (("yes", "Yes"), ("no", "No"))
 _REQUEST_KEYS = frozenset({"state", "questions"})
 
 
-def fixed_text_digest() -> str:
-    """고정 문구 전부의 sha256 — 검사가 :data:`PROMPT_VERSION` 과 함께 고정한다."""
-    fixed = {
-        "version": PROMPT_VERSION, "system": SYSTEM_TEXT, "explain": EXPLAIN_TEXT, "score": SCORE_TEXT, "answer": ANSWER_CUE,
+def _check_version(version: str) -> str:
+    if version not in PROMPT_VERSIONS:
+        raise ValueError(f"prompt version: {list(PROMPT_VERSIONS)} 중 하나 (받은 값: {version!r})")
+    return version
+
+
+def score_layout(version: str = PROMPT_VERSION) -> dict[str, list[Any]]:
+    """판의 score 선택지 (오름차순): ``{"names": 내부 키, "lines": 보이는 글, "values": 읽는 값}`` — p2는 6구간(이름 ``lo-hi``, 글
+    ``lo to hi``, 값 = 중앙값), p3는 기준점 11개(이름·글 ``0.3``, 값 = 기준점)."""
+    if _check_version(version) == "v0c-p2":
+        return {
+            "names": [_bin_name(lo, hi) for lo, hi in SCORE_BINS], "lines": [f"{lo:.1f} to {hi:.1f}" for lo, hi in SCORE_BINS],
+            "values": [float(c) for c in SCORE_CENTERS],
+        }
+    return {"names": [f"{v:.1f}" for v in SCORE_ANCHORS], "lines": [f"{v:.1f}" for v in SCORE_ANCHORS], "values": [float(v) for v in SCORE_ANCHORS]}
+
+
+def score_values(version: str = PROMPT_VERSION) -> tuple[float, ...]:
+    """판의 score 읽기 값 (오름차순) — p2 구간 중앙값, p3 기준점. 읽을 수 있는 범위 = [첫 값, 끝 값]."""
+    return tuple(score_layout(version)["values"])
+
+
+def fixed_text_digest(version: str = PROMPT_VERSION) -> str:
+    """판의 고정 문구 전부의 sha256 — 검사가 판마다 고정한다 (p2의 값은 v0c 때와 같다)."""
+    fixed: dict[str, Any] = {
+        "version": _check_version(version), "system": SYSTEM_TEXT, "explain": EXPLAIN_TEXT, "score": SCORE_TEXT, "answer": ANSWER_CUE,
         "plain_explain": _PLAIN_EXPLAIN_CUE, "bins": [list(b) for b in SCORE_BINS], "noul": [list(n) for n in NOUL_LINES],
         "chat": [_CHAT_SYSTEM, _CHAT_USER, _CHAT_END, _CHAT_ASSISTANT, _THINK_EMPTY],
         "layout": ["Situation:\n", "Question: ", "Scale:\n", "Options:\n", "{code}. {key}: {description}"],
         "orders": ["seeded: one seeded permutation", "counterbalanced: n cyclic shifts (choice), both directions (noul, score)"],
     }
+    if version == "v0c-p3":
+        del fixed["bins"]
+        fixed["score"] = SCORE_ANCHOR_TEXT
+        fixed["anchors"] = list(SCORE_ANCHORS)
+        fixed["layout"] = fixed["layout"] + ["{code}. {anchor:.1f}"]
     return hashlib.sha256(json.dumps(fixed, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
 
 
@@ -150,8 +193,8 @@ def _bin_name(lo: float, hi: float) -> str:
     return f"{lo:.1f}-{hi:.1f}"
 
 
-def _displayed(name: str, question: dict, *, key: str, seed: int | None) -> dict[str, Any]:
-    """보이는 순서의 선택지: ``{"options": [키], "lines": [줄 글], "values": [score 값] | None}``."""
+def _displayed(name: str, question: dict, *, key: str, seed: int | None, version: str = PROMPT_VERSION) -> dict[str, Any]:
+    """보이는 순서의 선택지: ``{"options": [키], "lines": [줄 글], "values": [score 값] | None}`` (score는 판의 :func:`score_layout`)."""
     kind = question.get("type")
     if kind == "choice":
         criteria = question.get("criteria")
@@ -165,20 +208,21 @@ def _displayed(name: str, question: dict, *, key: str, seed: int | None) -> dict
         pairs = [NOUL_LINES[i] for i in option_order(key, name, len(NOUL_LINES), seed)]
         return {"options": [k for k, _ in pairs], "lines": [line for _, line in pairs], "values": None}
     if kind == "score":
-        index = list(range(len(SCORE_BINS)))
+        layout = score_layout(version)
+        index = list(range(len(layout["values"])))
         if seed is not None and _rng(key, name, int(seed), "direction").random() < 0.5:
             index.reverse()
         return {
-            "options": [_bin_name(*SCORE_BINS[i]) for i in index],
-            "lines": [f"{SCORE_BINS[i][0]:.1f} to {SCORE_BINS[i][1]:.1f}" for i in index],
-            "values": [SCORE_CENTERS[i] for i in index],
+            "options": [layout["names"][i] for i in index],
+            "lines": [layout["lines"][i] for i in index],
+            "values": [layout["values"][i] for i in index],
         }
     raise ValueError(f"질문 {name!r}: 알 수 없는 type {kind!r} (choice·noul·score)")
 
 
-def _listings(name: str, question: dict, *, key: str, seed: int | None, orders: str) -> list[dict[str, Any]]:
+def _listings(name: str, question: dict, *, key: str, seed: int | None, orders: str, version: str = PROMPT_VERSION) -> list[dict[str, Any]]:
     """질문 하나의 보이는 배치들 (모듈 설명의 "배치"). 0번은 언제나 :func:`_displayed` 의 seed 배치다."""
-    base = _displayed(name, question, key=key, seed=seed)
+    base = _displayed(name, question, key=key, seed=seed, version=version)
     if orders == "seeded":
         return [base]
     if orders != "counterbalanced":
@@ -197,14 +241,14 @@ def _prefix(state: str, fmt: str) -> str:
     return _CHAT_SYSTEM + SYSTEM_TEXT + _CHAT_END + _CHAT_USER + body
 
 
-def _question_block(question: dict, codes: Sequence[str], lines: Sequence[str]) -> str:
+def _question_block(question: dict, codes: Sequence[str], lines: Sequence[str], version: str = PROMPT_VERSION) -> str:
     out = ["Question: " + _one_line(question.get("instructions", ""))]
     if question.get("type") == "score":
         criteria = [_one_line(item) for item in (question.get("criteria") or []) if _one_line(item)]
         if criteria:
             out.append("Scale:")
             out.extend(f"- {item}" for item in criteria)
-        out.append(SCORE_TEXT)
+        out.append(SCORE_TEXT if version == "v0c-p2" else SCORE_ANCHOR_TEXT)
     out.append("Options:")
     out.extend(f"{code}. {line}" for code, line in zip(codes, lines))
     return "\n".join(out)
@@ -228,14 +272,16 @@ def reasoning_close(fmt: str) -> str:
 
 
 def build_prompts(
-    request: dict[str, Any], tokenizer: Any, *, key: str, seed: int | None, fmt: str = "plain", mode: str = "direct", orders: str = "seeded"
+    request: dict[str, Any], tokenizer: Any, *, key: str, seed: int | None, fmt: str = "plain", mode: str = "direct", orders: str = "seeded",
+    version: str = PROMPT_VERSION,
 ) -> list[dict[str, Any]]:
     """요청(``state``·``questions``만 있는 dict) → 질문 × 배치마다 프롬프트 dict (요청의 질문 순서, 질문 안에서는 배치 순서).
 
     각 dict: ``question``, ``type``, ``listing``·``n_listings``(배치 번호·수), ``options``(보이는 순서의 키), ``option_lines``,
     ``values``(score 중앙값; 아니면 None), ``codes``, ``code_ids``, ``tokens``(접두 토큰 + 질문 토큰), ``prefix_tokens``, ``text``,
-    ``prefix_chars``, ``format``, ``mode``, ``version``. `key`·`seed`·`orders`는 선택지 순서만 정한다.
+    ``prefix_chars``, ``format``, ``mode``, ``version``(만든 판). `key`·`seed`·`orders`는 선택지 순서만 정한다.
     """
+    _check_version(version)
     if fmt not in FORMATS:
         raise ValueError(f"format: {list(FORMATS)} 중 하나 (받은 값: {fmt!r})")
     if mode not in MODES:
@@ -249,10 +295,10 @@ def build_prompts(
         raise ValueError(f"orders: {list(ORDERS)} 중 하나 (받은 값: {orders!r})")
     out = []
     for name, question in request["questions"].items():
-        listings = _listings(str(name), question, key=key, seed=seed, orders=orders)
+        listings = _listings(str(name), question, key=key, seed=seed, orders=orders, version=version)
         for index, shown in enumerate(listings):
             codes, code_ids = verify_codes(tokenizer, len(shown["options"]))
-            suffix = _suffix(_question_block(question, codes, shown["lines"]), fmt, mode)
+            suffix = _suffix(_question_block(question, codes, shown["lines"], version), fmt, mode)
             suffix_ids = list(tokenizer.encode(suffix, add_special_tokens=False).ids)
             out.append(
                 {
@@ -260,19 +306,21 @@ def build_prompts(
                     "options": list(shown["options"]), "option_lines": list(shown["lines"]),
                     "values": list(shown["values"]) if shown["values"] is not None else None, "codes": codes, "code_ids": code_ids,
                     "tokens": prefix_ids + suffix_ids, "prefix_tokens": len(prefix_ids), "text": prefix + suffix, "prefix_chars": len(prefix),
-                    "format": fmt, "mode": mode, "version": PROMPT_VERSION,
+                    "format": fmt, "mode": mode, "version": version,
                 }
             )
     return out
 
 
 def record_prompts(
-    record: dict[str, Any], tokenizer: Any, *, seed: int | None, fmt: str = "plain", mode: str = "direct", orders: str = "seeded"
+    record: dict[str, Any], tokenizer: Any, *, seed: int | None, fmt: str = "plain", mode: str = "direct", orders: str = "seeded",
+    version: str = PROMPT_VERSION,
 ) -> list[dict[str, Any]]:
     """기록 → 프롬프트들. 모델 입력은 ``record["request"]``뿐이고, id·``meta.pair``는 순서의 열쇠(:func:`shuffle_key`)로만 쓴다."""
     request = record["request"]
     prompts = build_prompts(
-        {"state": request["state"], "questions": request["questions"]}, tokenizer, key=shuffle_key(record), seed=seed, fmt=fmt, mode=mode, orders=orders
+        {"state": request["state"], "questions": request["questions"]}, tokenizer, key=shuffle_key(record), seed=seed, fmt=fmt, mode=mode, orders=orders,
+        version=version,
     )
     for p in prompts:
         p["record_id"] = str(record.get("id") or "")
@@ -280,7 +328,8 @@ def record_prompts(
 
 
 def answer_from_codes(prompt: dict[str, Any], probabilities: Any) -> dict[str, Any]:
-    """코드 위 확률(보이는 순서) → 질문의 답: choice ``{"probabilities": {키: p}}``, noul ``{"p_yes"}``, score ``{"value", "bins"}``."""
+    """코드 위 확률(보이는 순서) → 질문의 답: choice ``{"probabilities": {키: p}}``, noul ``{"p_yes"}``, score ``{"value", "bins"}``
+    (``value`` = 보이는 값(p2 구간 중앙값, p3 기준점)의 기대값; ``bins`` = 이름 → 확률 — p3에서는 기준점마다)."""
     probs = [float(p) for p in (probabilities.tolist() if hasattr(probabilities, "tolist") else probabilities)]
     if len(probs) != len(prompt["options"]):
         raise ValueError(f"확률 {len(probs)}개 ≠ 선택지 {len(prompt['options'])}개 ({prompt.get('question')})")
@@ -297,7 +346,8 @@ def check_displayed_lines(prompt: dict[str, Any]) -> list[str]:
     """글에 보이는 선택지 줄(``X. …``)을 다시 읽어 기록된 ``codes``·``options``·``values``와 맞는지 본다 → 문제 문장 목록(빈 목록 = 통과).
 
     줄 j는 코드 ``codes[j]``로 시작하고, choice면 ``options[j] + ":"``(설명이 없으면 키 그대로), noul이면 ``options[j]``에 맞는
-    ``Yes``/``No``, score면 ``options[j]``라는 이름의 구간(``lo to hi``)이고 그 중앙값이 ``values[j]``여야 한다. 글은 기록과 따로
+    ``Yes``/``No``, score면 프롬프트의 판에 따라 ``options[j]``라는 이름의 구간(p2, ``lo to hi``; 그 중앙값이 ``values[j]``) 또는
+    기준점(p3, ``0.3``; 그 값이 ``values[j]``)이어야 한다. 글은 기록과 따로
     다시 읽으므로, ``options``·줄·``values``가 어긋나면(섞기와 되돌리기가 같은 목록을 써서 다른 검사로는 안 보이는 일) 여기서 떨어진다.
     """
     suffix = prompt["text"][int(prompt.get("prefix_chars", 0)) :]
@@ -314,6 +364,7 @@ def check_displayed_lines(prompt: dict[str, Any]) -> list[str]:
         if ended:
             break
     options, codes, values = list(prompt["options"]), list(prompt["codes"]), prompt.get("values")
+    version = str(prompt.get("version") or PROMPT_VERSION)
     problems = []
     if len(parsed) != len(options) or len(codes) != len(options):
         return [f"{len(parsed)} option lines in the text vs {len(options)} recorded options / {len(codes)} codes"]
@@ -327,7 +378,7 @@ def check_displayed_lines(prompt: dict[str, Any]) -> list[str]:
             expected = dict(NOUL_LINES).get(key)
             if expected is None or rest != expected:
                 problems.append(f"line {j}: {rest!r} does not read as the recorded {key!r}")
-        else:
+        elif version == "v0c-p2":
             found = _BIN_LINE.match(rest)
             if not found:
                 problems.append(f"line {j}: {rest!r} is not a score range")
@@ -337,4 +388,14 @@ def check_displayed_lines(prompt: dict[str, Any]) -> list[str]:
                 problems.append(f"line {j}: range {rest!r} vs recorded bin {key!r}")
             if values is None or abs((lo + hi) / 2 - float(values[j])) > 1e-9:
                 problems.append(f"line {j}: range {rest!r} midpoint vs recorded value {None if values is None else values[j]!r}")
+        else:
+            found = _ANCHOR_LINE.match(rest)
+            if not found:
+                problems.append(f"line {j}: {rest!r} is not a score anchor")
+                continue
+            anchor = float(found.group(1))
+            if f"{anchor:.1f}" != key:
+                problems.append(f"line {j}: anchor {rest!r} vs recorded anchor {key!r}")
+            if values is None or abs(anchor - float(values[j])) > 1e-9:
+                problems.append(f"line {j}: anchor {rest!r} vs recorded value {None if values is None else values[j]!r}")
     return problems

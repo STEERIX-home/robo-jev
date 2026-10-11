@@ -19,7 +19,15 @@ import yaml
 from robo_jev.simgen.skins import compatible, entry_text, setting_allows
 
 __all__ = [
+    "AGENT_COLUMN",
     "AGENT_FAMILIES",
+    "GROUPS",
+    "HELDOUT_GROUPS",
+    "SCENE_BODIES",
+    "SCENE_GROUP",
+    "TRAIN_GROUPS",
+    "scene_kind",
+    "scene_margins",
     "BODIES",
     "CATALOG_PATH",
     "CONTENTS",
@@ -36,20 +44,25 @@ __all__ = [
     "config_errors",
     "default_config",
     "load_config",
+    "distraction_probability",
     "reaction_probability",
 ]
 
 REPO = Path(__file__).resolve().parents[3]
 CONFIG_DIR = REPO / "configs" / "simgen"
-CATALOG_PATH = CONFIG_DIR / "catalog-v0.1.yaml"
-SKINS_PATH = CONFIG_DIR / "skins-v0.1.yaml"
+CATALOG_PATH = CONFIG_DIR / "catalog-v0.2.yaml"
+SKINS_PATH = CONFIG_DIR / "skins-v0.2.yaml"
 VALUES_PATH = CONFIG_DIR / "values-v0.yaml"
 VALUES_V01_PATH = CONFIG_DIR / "values-v0.1.yaml"
 
 #: 분야 10개 (지시서 §3.10의 순서: 창고, 공장 라인, 카페·식당, 병원 복도, 실험대, 보도·거리, 가정, 매장, 온실·농장, 공항·역).
 DOMAINS = ("warehouse", "factory", "cafe", "hospital", "lab", "sidewalk", "home", "retail", "greenhouse", "transit")
 BODIES = ("mobile_base", "humanoid", "forklift_amr", "arm")
-SCENES = ("p1_step_in", "p1_crossing", "p1_head_on", "p5_braking", "p5_turning", "p1p5_step_in_carrying")
+SCENES = (
+    "p1_step_in", "p1_crossing", "p1_head_on", "p5_braking", "p5_turning", "p1p5_step_in_carrying",
+    "p3_carrying_tall", "p3_ramp", "p3_place_stack", "p4_place_check", "p4_insert", "p6_stale_track", "p6_blind_corner", "p6_sensor_conflict",
+    "p3p5_carrying_mixed", "p1p6_emerging_step_in", "p4p6_stale_check", "p1p3_step_in_carrying_tall",
+)  # fmt: skip
 CONTENTS = ("hot", "chemical", "other")
 
 #: 장면 → 레코드의 `meta.phenomena`.
@@ -60,15 +73,59 @@ SCENE_PHENOMENA = {
     "p5_braking": ("P5",),
     "p5_turning": ("P5",),
     "p1p5_step_in_carrying": ("P1", "P5"),
+    "p3_carrying_tall": ("P3",),
+    "p3_ramp": ("P3",),
+    "p3_place_stack": ("P3",),
+    "p4_place_check": ("P4",),
+    "p4_insert": ("P4",),
+    "p6_stale_track": ("P6",),
+    "p6_blind_corner": ("P6",),
+    "p6_sensor_conflict": ("P6",),
+    "p3p5_carrying_mixed": ("P3", "P5"),
+    "p1p6_emerging_step_in": ("P1", "P6"),
+    "p4p6_stale_check": ("P4", "P6"),
+    "p1p3_step_in_carrying_tall": ("P1", "P3"),
 }
-#: 장면 → 상대 주체의 갈래(의도 집합·단서 표의 열쇠). P5 단독 장면에는 상대가 없다.
-SCENE_FAMILY = {
+#: 현상·조합 묶음(학습은 묶음을 고르게 — Task v0b §5). P1+P3은 시험 세트 T4 전용이다(학습 생성기는 만들지 못한다 — holdout-v0b.yaml).
+GROUPS = {
+    "P1": ("p1_step_in", "p1_crossing", "p1_head_on"),
+    "P3": ("p3_carrying_tall", "p3_ramp", "p3_place_stack"),
+    "P4": ("p4_place_check", "p4_insert"),
+    "P5": ("p5_braking", "p5_turning"),
+    "P6": ("p6_stale_track", "p6_blind_corner", "p6_sensor_conflict"),
+    "P1+P5": ("p1p5_step_in_carrying",),
+    "P3+P5": ("p3p5_carrying_mixed",),
+    "P1+P6": ("p1p6_emerging_step_in",),
+    "P4+P6": ("p4p6_stale_check",),
+    "P1+P3": ("p1p3_step_in_carrying_tall",),
+}
+HELDOUT_GROUPS = ("P1+P3",)
+TRAIN_GROUPS = tuple(g for g in GROUPS if g not in HELDOUT_GROUPS)
+SCENE_GROUP = {scene: group for group, scenes in GROUPS.items() for scene in scenes}
+#: 장면 → 그 일을 하는 몸(분야 카드의 몸 가중치를 이 안으로 줄여 고른다).
+SCENE_BODIES = {
+    "p1_step_in": BODIES, "p1_crossing": BODIES, "p1_head_on": ("mobile_base", "humanoid", "forklift_amr"),
+    "p5_braking": BODIES, "p5_turning": BODIES, "p1p5_step_in_carrying": BODIES,
+    "p3_carrying_tall": ("mobile_base", "humanoid", "forklift_amr"), "p3_ramp": ("mobile_base", "humanoid", "forklift_amr"),
+    "p3_place_stack": ("arm", "humanoid", "forklift_amr"), "p4_place_check": ("arm", "humanoid", "forklift_amr"), "p4_insert": ("arm", "humanoid"),
+    "p6_stale_track": ("mobile_base", "humanoid", "forklift_amr"), "p6_blind_corner": ("mobile_base", "humanoid", "forklift_amr"),
+    "p6_sensor_conflict": ("mobile_base", "humanoid", "forklift_amr"), "p3p5_carrying_mixed": ("mobile_base", "humanoid"),
+    "p1p6_emerging_step_in": ("mobile_base", "humanoid", "forklift_amr"), "p4p6_stale_check": ("arm", "humanoid", "forklift_amr"),
+    "p1p3_step_in_carrying_tall": ("mobile_base", "humanoid"),
+}  # fmt: skip
+#: 장면 → 상대 주체의 의도 갈래(의도 집합·단서 표의 열쇠). 의도를 묻지 않는 장면은 None.
+SCENE_FAMILY = {scene: None for scene in SCENES} | {
     "p1_step_in": "step_in",
     "p1_crossing": "crossing",
     "p1_head_on": "head_on",
-    "p5_braking": None,
-    "p5_turning": None,
     "p1p5_step_in_carrying": "step_in",
+    "p1p6_emerging_step_in": "step_in",
+    "p1p3_step_in_carrying_tall": "step_in",
+}
+#: 장면 → 상대 종류를 고르는 분야 카드 칸(의도가 없어도 상대가 있는 P6 장면 포함). 팔은 언제나 "arm"(작업 영역의 손).
+AGENT_COLUMN = {scene: family for scene, family in SCENE_FAMILY.items() if family is not None} | {
+    "p6_stale_track": "step_in",
+    "p6_blind_corner": "crossing",
 }
 #: 갈래별 이산 의도(상태 choice의 선택지).
 INTENTS = {
@@ -76,7 +133,7 @@ INTENTS = {
     "crossing": ("cross", "yield", "hurry"),
     "head_on": ("keep", "aside_left", "aside_right", "stop"),
 }
-#: 장면 → 그 장면이 정의하는 결정 여유(catalog `margins`의 열쇠). 첫 것이 쌍(사실 하나 바꾸기)의 기본 변수다.
+#: 장면 → 그 장면이 정의하는 결정 여유(catalog `margins`의 열쇠). 움직임 갈래가 있는 장면은 :func:`scene_margins`.
 SCENE_MARGINS = {
     "p1_step_in": ("step_in",),
     "p1_crossing": ("crossing",),
@@ -84,7 +141,52 @@ SCENE_MARGINS = {
     "p5_braking": ("spill", "stop"),
     "p5_turning": ("spill",),
     "p1p5_step_in_carrying": ("step_in", "spill"),
+    "p3_ramp": ("tip",),
+    "p3_place_stack": ("stack",),
+    "p4_place_check": ("seat",),
+    "p4_insert": ("seat",),
+    "p4p6_stale_check": ("seat",),
+    "p6_stale_track": ("sight",),
+    "p6_blind_corner": ("corner",),
+    "p6_sensor_conflict": ("late",),
+    "p1p6_emerging_step_in": ("step_in",),
+    "p1p3_step_in_carrying_tall": ("step_in", "tip"),
 }
+_MANEUVER_MARGINS = {
+    ("p3_carrying_tall", "brake"): ("tip", "stop"), ("p3_carrying_tall", "turn"): ("tip",), ("p3_carrying_tall", "start"): ("tip",),
+    ("p3p5_carrying_mixed", "brake"): ("tip", "spill", "stop"), ("p3p5_carrying_mixed", "turn"): ("tip", "spill"),
+}  # fmt: skip
+
+
+_KIND = {"p3": "p3", "p1p3": "p3", "p3p5": "p3", "p4": "p4", "p4p6": "p4", "p6": "p6", "p1p6": "p6"}
+
+
+def scene_kind(scene: str) -> str | None:
+    """새 현상 모듈의 이름(p3 / p4 / p6) — v0a 장면(P1·P5)이면 None."""
+    return _KIND.get(scene.split("_")[0])
+
+
+#: 숫자 쌍이 옮기는 결정 변수(앞의 것부터) — 핵심 질문이 묻는 것을 정하는 여유(수정 1 I4: 라운드 0은 장면의 여유 가운데 하나를 무작위로
+#: 옮겨, 핵심이 묻지 않는 여유를 옮긴 쌍(쏟아짐을 옮겼는데 핵심은 멈춤)·핵심 정답이 그대로인 쌍이 있었다). 오래된 추적의 핵심(아직 있나)은
+#: 본 지 얼마나 됐나(나이)가 정한다; 센서 불일치의 핵심(정말 있나)은 이산 보고(단서·두 센서)만 정해 숫자 하나로 넘길 수 없다 — 단어 쌍만.
+PAIR_TARGETS = {
+    "p1_step_in": ("step_in",), "p1_crossing": ("crossing",), "p1_head_on": ("head_on",), "p5_braking": ("spill", "stop"), "p5_turning": ("spill",),
+    "p1p5_step_in_carrying": ("step_in",), "p3_carrying_tall": ("tip",), "p3p5_carrying_mixed": ("tip",), "p3_ramp": ("tip",),
+    "p3_place_stack": ("stack",), "p4_place_check": ("seat",), "p4_insert": ("seat",), "p4p6_stale_check": ("seat",), "p6_stale_track": ("age",),
+    "p6_blind_corner": ("corner",), "p6_sensor_conflict": (), "p1p6_emerging_step_in": ("step_in",), "p1p3_step_in_carrying_tall": ("step_in",),
+}  # fmt: skip
+
+
+def pair_targets(scene: str) -> tuple[str, ...]:
+    """숫자 쌍이 옮길 결정 변수(핵심 질문이 묻는 여유) — 비면 그 장면은 단어 쌍만."""
+    return PAIR_TARGETS[scene]
+
+
+def scene_margins(scene: str, maneuver: str | None = None) -> tuple[str, ...]:
+    """장면(과 움직임 갈래)이 정의하는 결정 여유 이름 — 첫 것이 쌍(사실 하나 바꾸기)의 기본 변수다."""
+    if (scene, maneuver) in _MANEUVER_MARGINS:
+        return _MANEUVER_MARGINS[(scene, maneuver)]
+    return SCENE_MARGINS[scene]
 #: 상대 주체를 고르는 분야 카드 칸: 팔은 언제나 "arm"(작업 영역의 손), 그 밖은 장면 갈래.
 AGENT_FAMILIES = ("step_in", "crossing", "head_on", "arm")
 _P5_SCENES = ("p5_braking", "p5_turning", "p1p5_step_in_carrying")
@@ -116,7 +218,7 @@ class SimgenConfig:
 
     def agent_family(self, scene: str, body: str) -> str | None:
         """그 장면·몸에서 상대 주체를 고르는 분야 카드 칸(없으면 None)."""
-        family = SCENE_FAMILY[scene]
+        family = AGENT_COLUMN.get(scene)
         if family is None:
             return None
         return "arm" if body == "arm" else family
@@ -128,6 +230,15 @@ def reaction_probability(config: SimgenConfig, kind: str, cue: str | None) -> fl
     base = spec["base"][config.agent(kind)["group"]]
     factor = spec["cue_factor"].get(cue, 1.0) if cue else 1.0
     return float(min(spec["max"], base * factor))
+
+
+def distraction_probability(config: SimgenConfig, kind: str, cue: str | None) -> float:
+    """주의가 딴 데 있을 확률: 단서가 정해 주면 그 값(static_avoidance.distracted_cue), 아니면 갈래의 사전값. 공은 0(피하지 않으므로 무의미)."""
+    spec = config.catalog["static_avoidance"]
+    group = config.agent(kind)["group"]
+    if cue is not None and cue in spec["distracted_cue"]:
+        return float(spec["distracted_cue"][cue])
+    return float(spec["distracted_prior"][group])
 
 
 def _read_yaml(path: Path) -> dict:
@@ -177,11 +288,23 @@ def _catalog_errors(catalog: dict) -> list[str]:
         for suite in spec.get("sensor_suites", {}):
             if suite not in catalog.get("sensor_suites", {}):
                 errors.append(f"body {name}: unknown sensor suite {suite}")
-    for body, weights in catalog.get("scenes_by_body", {}).items():
-        if body not in BODIES:
-            errors.append(f"scenes_by_body: unknown body {body}")
-        if not _sums_to_one(weights) or not set(weights) <= set(SCENES):
-            errors.append(f"scenes_by_body.{body}: weights must be a distribution over known scenes")
+    for kind, spec in catalog.get("loads", {}).items():
+        if not all(_is_range(spec.get(k)) for k in ("height", "base", "com_ratio")) or not set(spec.get("bodies", [])) <= set(BODIES):
+            errors.append(f"load {kind}: bad ranges or bodies")
+        if spec.get("fall") not in ("fall_light", "fall_fragile", "fall_heavy", "fall_chemical"):
+            errors.append(f"load {kind}: unknown fall cost {spec.get('fall')}")
+    for kind, spec in catalog.get("decks", {}).items():
+        if not _is_range(spec.get("mu")):
+            errors.append(f"deck {kind}: mu must be a range")
+    for kind, spec in catalog.get("p4", {}).get("items", {}).items():
+        family = spec.get("family")
+        if family not in ("place", "insert") or spec.get("class") not in catalog["p4"][family]["classes"]:
+            errors.append(f"p4 item {kind}: bad family/class")
+    for family in ("place", "insert"):
+        for name, cls in catalog.get("p4", {}).get(family, {}).get("classes", {}).items():
+            states = catalog["p4"][family]["states"]
+            if set(cls["prior"]) != set(states) or not _sums_to_one(cls["prior"]):
+                errors.append(f"p4 {family}.{name}: prior must be a distribution over {states}")
     for kind, spec in catalog.get("agents", {}).items():
         if spec.get("group") not in ("person", "vehicle", "robot", "hand", "ball"):
             errors.append(f"agent {kind}: unknown group {spec.get('group')}")
@@ -215,7 +338,9 @@ def _catalog_errors(catalog: dict) -> list[str]:
     return errors
 
 
-_CARRY_SCENES = ("p5_braking", "p5_turning", "p1p5_step_in_carrying")
+_CARRY_SCENES = ("p5_braking", "p5_turning", "p1p5_step_in_carrying", "p3p5_carrying_mixed")
+_LOAD_SCENES = ("p3_carrying_tall", "p3_ramp", "p3p5_carrying_mixed", "p1p3_step_in_carrying_tall")
+_STEP_IN_SCENES = ("p1_step_in", "p1p5_step_in_carrying", "p1p6_emerging_step_in", "p1p3_step_in_carrying_tall")
 _PLACE_KEY = {"p1_crossing": "crossing", "p1_head_on": "corridor", "p5_turning": "turn"}
 
 
@@ -277,14 +402,15 @@ def _skins_errors(config: SimgenConfig) -> list[str]:
             for body, weight in bodies.items():
                 if weight <= 0 or not setting_allows(setting, body):
                     continue
-                for scene in catalog.get("scenes_by_body", {}).get(body, {}):
-                    errors.extend(_combination_errors(config, domain, card, tags, body, scene, f"{where} setting {index} {body} {scene}"))
+                for scene in SCENES:
+                    if body in SCENE_BODIES[scene]:
+                        errors.extend(_combination_errors(config, domain, card, tags, body, scene, f"{where} setting {index} {body} {scene}"))
     return sorted(set(errors))
 
 
 def _combination_errors(config: SimgenConfig, domain: str, card: dict, tags, body: str, scene: str, where: str) -> list[str]:
     errors: list[str] = []
-    carry = scene in _CARRY_SCENES
+    carry = scene in _CARRY_SCENES or scene in _LOAD_SCENES
 
     def need(entries, what: str, at_least: int = 1):
         ok = compatible(entries or [], tags, body, scene)
@@ -301,6 +427,36 @@ def _combination_errors(config: SimgenConfig, domain: str, card: dict, tags, bod
             errors.append(f"{where}: carry task without {{container}}")
     places = card.get("places", {})
     need(places.get("bench") if body == "arm" else places.get(_PLACE_KEY.get(scene, "floor")), "places")
+    catalog = config.catalog
+    if scene in _LOAD_SCENES:
+        loads = [e for e in compatible(card.get("loads", []), tags, body, scene) if body in catalog["loads"][e["kind"]]["bodies"]]
+        if not loads:
+            errors.append(f"{where}: no load a {body} can carry")
+        if not config.skins.get("decks", {}).get(body):
+            errors.append(f"{where}: no deck phrases for {body}")
+    if scene == "p3_ramp":
+        need(card.get("ramps"), "ramps")
+        need(card.get("ramp_ends"), "ramp_ends")
+        need(card.get("detours"), "detours")
+    if scene == "p3_place_stack":
+        items = [e for e in compatible(card.get("stack_items", []), tags, body, scene) if body in catalog["stack_items"][e["kind"]]["bodies"]]
+        if not items:
+            errors.append(f"{where}: no stack item a {body} can place")
+        need(card.get("stack_spots"), "stack_spots")
+    if scene in ("p4_place_check", "p4_insert", "p4p6_stale_check"):
+        family = "insert" if scene == "p4_insert" else "place"
+        items = [e for e in compatible(card.get("p4_items", []), tags, body, scene)
+                 if catalog["p4"]["items"][e["kind"]]["family"] == family and body in catalog["p4"]["items"][e["kind"]]["bodies"]]  # fmt: skip
+        if not items:
+            errors.append(f"{where}: no {family} item for {body}")
+        if scene == "p4p6_stale_check" and not config.skins.get("stale_camera", {}).get(body):
+            errors.append(f"{where}: no stale-camera phrases for {body}")
+    if scene == "p6_blind_corner":
+        need(card.get("corners"), "corners")
+    if scene == "p6_sensor_conflict":
+        need(card.get("conflicts"), "conflicts")
+    if scene in ("p6_stale_track", "p1p6_emerging_step_in"):
+        need(card.get("occluders"), "occluders")
     family = config.agent_family(scene, body)
     if family is not None:
         weights = card.get("agents", {}).get(family)
@@ -320,13 +476,13 @@ def _combination_errors(config: SimgenConfig, domain: str, card: dict, tags, bod
                     usable = need(card.get("descriptors", {}).get(kind), f"descriptors.{kind}")
                     if not all(d.get("np") and d.get("ref") for d in usable):
                         errors.append(f"{where}: descriptors.{kind} missing np/ref")
-    if carry:
+    if scene in _CARRY_SCENES:
         containers = [c for c in compatible(card.get("containers", []), tags, body, scene) if body in config.catalog["containers"][c["kind"]]["bodies"]]
         if not containers:
             errors.append(f"{where}: no container a {body} can carry")
-    if scene == "p5_braking":
+    if scene in ("p5_braking", "p3_carrying_tall", "p3p5_carrying_mixed"):
         need(card.get("bench_obstacles") if body == "arm" else card.get("obstacles"), "obstacles")
-    if scene in ("p1_step_in", "p1p5_step_in_carrying") and config.catalog["bodies"][body]["can_sidestep"]:
+    if scene in _STEP_IN_SCENES and config.catalog["bodies"][body]["can_sidestep"]:
         need(card.get("occluders"), "occluders", 2)
         need(card.get("blockers"), "blockers", 2)
     need(card.get("distractors"), "distractors", 3)
