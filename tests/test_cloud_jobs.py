@@ -423,7 +423,9 @@ def test_every_shipped_step_parses_with_the_merged_tools_and_refers_only_to_ship
             assert args.model in models, f"{step['name']}: {args.model}의 고정 revision이 모델 manifest에 없다"
             if args.checkpoint is not None:
                 run_name = Path(args.checkpoint).parent.name
-                assert str(args.checkpoint).startswith("/r/run/runs/") and run_name in trained, f"{step['name']}: 앞 단계가 만든 체크포인트가 아니다"
+                produced = str(args.checkpoint).startswith("/r/run/runs/") and run_name in trained
+                uploaded = str(args.checkpoint) in inputs  # 올려 보낸 체크포인트 — 예: v0.1 main의 같은 하드웨어 기준(v0 adapter, Task v0.1b)
+                assert produced or uploaded, f"{step['name']}: 앞 단계가 만든 체크포인트도, job inputs로 올려 보낸 체크포인트도 아니다"
             assert not args.preview or "simgen/v0b/tests" not in str(args.input), f"{step['name']}: 봉인 시험 세트에 '미리보기' 머리를 달지 않는다"
         elif script == "scripts/fetch_backbone.py":
             assert argv[2:4] == ["--from-manifest", "artifacts/models/manifest.json"] and argv[4] == "--id", argv

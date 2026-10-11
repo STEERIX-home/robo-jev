@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 __all__ = [
+    "CHOICE_KINDS",
     "LABEL_SUM_TOL",
     "MAX_QUESTIONS",
     "MAX_STATE_CHARS",
@@ -49,6 +50,8 @@ MAX_QUESTIONS = 12
 OPTION_RANGE = (2, 8)
 QUESTION_TYPES = ("choice", "noul", "score")
 LABEL_SUM_TOL = 1e-6
+#: choice 정답의 kind — 없음, v0a 엔진의 action·state·rule, 일반 능력 시험 G1의 probe(Task v0.1b — 지표에서 ``choice/other``로 따로 묶인다).
+CHOICE_KINDS = (None, "action", "state", "rule", "probe")
 
 
 def read_records(path: str | Path) -> list[dict[str, Any]]:
@@ -128,8 +131,8 @@ def _validate_label(name: str, question: dict, label: Any) -> list[str]:
             problems.append(f"label {name!r}: expected_cost keys must equal the option keys")
         elif not all(isinstance(c, (int, float)) and not isinstance(c, bool) and math.isfinite(float(c)) for c in costs.values()):
             problems.append(f"label {name!r}: expected_cost values must be finite numbers")
-    if label.get("kind") not in (None, "action", "state", "rule"):
-        problems.append(f"label {name!r}: kind {label.get('kind')!r} not in [action, state, rule]")
+    if label.get("kind") not in CHOICE_KINDS:
+        problems.append(f"label {name!r}: kind {label.get('kind')!r} not in {[k for k in CHOICE_KINDS if k]}")
     return problems
 
 

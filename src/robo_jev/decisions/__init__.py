@@ -8,4 +8,6 @@
 * :mod:`~robo_jev.decisions.zero_shot` — 실제 backbone에서 코드 확률 읽기(바로 답 / 생각하고 답).
 * :mod:`~robo_jev.decisions.metrics` — 정답(사후 확률)과의 지표: 두 읽기(한 순서·순서 평균), 기준선 대비 짝지은 구간, 기준 계열별 후회, 어려움 축, 묶음, 쌍, 권고, 위치 편향.
 * :mod:`~robo_jev.decisions.report` — 요약 JSON → 사람이 읽는 markdown 표.
+* :mod:`~robo_jev.decisions.single_probe` — 일반 능력 시험 G1(Task v0.1b): 옛 비로봇 단일 요청(`judgment-v0`) → 판단 요청 기록, 두 run의
+  묶음별(분야·언어·종류) 짝지은 비교.
 """
