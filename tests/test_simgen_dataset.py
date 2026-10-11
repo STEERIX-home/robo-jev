@@ -197,6 +197,7 @@ def test_numeric_pairs_change_only_the_flipped_fact_and_cross_the_key(forced_pai
         assert (p0 - 0.5) * (p1 - 0.5) < 0, (variant["id"], p0, p1)
         rb, rv = bm["recommendation"], vm["recommendation"]
         assert (rv["present"], rv["canonical"], rv["option"]) == (rb["present"], rb["canonical"], rb["option"]) and rv.get("kept") is True
+        assert set(rv["costs"]) == set(rb["costs"]), variant["id"]       # 가능한 선택지가 그대로(옮긴 값이 선택지를 바꾸지 않는다)
         # 질문은 글자 그대로 같다(규칙 질문의 문턱도 기준의 값에 — 변형 자신의 값에 놓으면 문턱이 달라진다)
         assert base["request"]["questions"] == variant["request"]["questions"], variant["id"]
         tb, tv = _request_texts(base), _request_texts(variant)

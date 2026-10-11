@@ -553,7 +553,8 @@ PAIR_TRIES = 5
 def pair_records(cfg: SimgenConfig, base: Moment, domain: str, moment_forced: dict, kind: str, split, indices, *, id_prefix: str = ID_PREFIX, **common) -> list[dict]:
     """쌍 단위(기준 + 변형) 두 레코드 — 학습 세트와 T5가 같이 쓴다(수정 1 I4).
 
-    숫자 쌍: 핵심 질문이 묻는 결정 변수(:func:`~robo_jev.simgen.catalog.pair_targets`) 하나만 경계 너머로 옮기고, 변형은 기준의 계획기 권고를
+    숫자 쌍: 핵심 질문이 묻는 결정 변수(:func:`~robo_jev.simgen.catalog.pair_targets`) 하나만 경계 너머로 옮기고(가능한 선택지가 그대로인
+    후보만 — 재검토 1 N1 뒤로 모퉁이의 '앞에서 멈추기'가 옮긴 거리에 따라 나타나거나 사라질 수 있다), 변형은 기준의 계획기 권고를
     그대로 보이며(틀림·간격만 그 순간의 비용으로 — ``meta.recommendation.kept``), 규칙 질문의 문턱도 기준의 값에 둔다 — 그래서 두 요청은 옮긴
     값(과 그에 딸린 표시값) 말고는 같다. 핵심 질문의 정답이 0.5를 실제로 넘는 후보만 받는다(``meta.pair.target`` = 그 핵심 질문); 넘는 후보가
     없으면 단어 쌍(같은 사실·다른 상황 문구)."""
@@ -570,6 +571,8 @@ def pair_records(cfg: SimgenConfig, base: Moment, domain: str, moment_forced: di
             moment = build_moment(cfg, base.seed, domain, moment_forced, "numeric", split, pair_skip=skip)
             if moment.variant != "numeric":
                 break
+            if available_options(moment.obs) != available_options(base.obs):
+                continue   # 옮긴 값이 가능한 선택지를 바꾸면(모퉁이 앞에서 멈추기를 할 수 없게 되는 등) 사실 둘이 바뀐다 — 받지 않는다
             cand = assemble(cfg, moment, j, id_prefix=id_prefix, t6={"recommendation": keep}, threshold_obs=base.obs, **common)
             p1 = cand["labels"][key]["p_yes"] if cand["meta"]["key_question"] == key else None
             if p1 is not None and (p0 - 0.5) * (p1 - 0.5) < 0:
