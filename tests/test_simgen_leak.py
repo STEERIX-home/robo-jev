@@ -23,6 +23,7 @@ SIMGEN = Path(generate.__file__).resolve().parent
 OBSERVATION_SIDE = (
     "narrate.py", "narrate_ko.py", "questions.py", "phrases.py", "phrases_ko.py", "phrases_ko_data.py", "state_text.py", "rule_text.py", "korean.py",
     "posterior.py", "rollout.py", "labels.py", "textfmt.py", "observation.py", "spec.py", "p3.py", "p4.py", "p6.py", "voi.py", "holdout.py", "perturb.py",
+    "phrasing.py", "phrases_v01.py", "phrases_ko_v01.py",
 )  # fmt: skip
 
 #: 세계에만 있는 값의 이름(굴리기 batch 열쇠 가운데 관측에 없는 것)과 지시서가 든 이름.
