@@ -4,6 +4,9 @@
 선택지와 함께 옮겨지는지, score 정답 → 6구간 분포의 기대값이 정답과 같은지(읽을 수 있는 범위 [0.05, 0.95] 안; 밖은 끝 구간),
 질문 뽑기(요청마다 최대 q개, 종류별로 고르게), 레코드 id 해시의 dev 나눔(쌍은 함께), epoch 계획의 결정성, 프롬프트에 요청 말고는
 아무것도 들어가지 않음을 본다. 모델은 쓰지 않는다(tokenizer만).
+
+Task v0d fix round 1: 기본 판 v0c-p3에서는 score 정답이 [0, 1] 어디든 이웃한 두 기준점의 선형 보간으로 **그대로** 닿는다(잘림 없음);
+v0c-p2(재현용)의 끝 구간 잘림은 그대로 남는다.
 """
 
 import collections
@@ -16,7 +19,7 @@ import pytest
 from helpers import FIXTURES
 
 from robo_jev.decisions import examples as E
-from robo_jev.decisions.prompt import SCORE_CENTERS, answer_from_codes, check_displayed_lines, record_prompts
+from robo_jev.decisions.prompt import SCORE_ANCHORS, SCORE_CENTERS, answer_from_codes, check_displayed_lines, record_prompts
 from robo_jev.decisions.records import read_records, shuffle_key
 from robo_jev.model.tokenizer import available_tokenizer, load_tokenizer
 
@@ -36,9 +39,20 @@ def fixtures() -> list[dict]:
 # -- score 정답 → 구간 분포 --------------------------------------------------------------------------
 
 
+@pytest.mark.parametrize("value", [0.0, 0.001, 0.03, 0.05, 0.1, 0.27, 0.43, 0.5, 0.71, 0.9, 0.95, 0.97, 0.999, 1.0])
+def test_a_p3_score_label_anywhere_in_zero_one_becomes_two_adjacent_anchors_whose_mean_is_the_label(value):
+    probs, clamped = E.score_target(value)  # 기본 판 v0c-p3
+    assert not clamped and len(probs) == len(SCORE_ANCHORS) == 11
+    assert sum(probs) == pytest.approx(1.0, abs=1e-12) and min(probs) >= 0.0
+    assert sum(p * c for p, c in zip(probs, SCORE_ANCHORS)) == pytest.approx(value, abs=1e-12)
+    nonzero = [i for i, p in enumerate(probs) if p > 0]
+    assert 1 <= len(nonzero) <= 2 and nonzero[-1] - nonzero[0] <= 1
+    assert E.SCORE_READABLE["v0c-p3"] == (0.0, 1.0)
+
+
 @pytest.mark.parametrize("value", [0.05, 0.051, 0.1, 0.2, 0.27, 0.4, 0.43, 0.5, 0.6, 0.71, 0.8, 0.9, 0.949, 0.95])
 def test_a_score_inside_the_readable_range_becomes_two_adjacent_bins_whose_mean_is_the_label(value):
-    probs, clamped = E.score_target(value)
+    probs, clamped = E.score_target(value, version="v0c-p2")
     assert not clamped and len(probs) == len(SCORE_CENTERS)
     assert sum(probs) == pytest.approx(1.0, abs=1e-12) and min(probs) >= 0.0
     assert sum(p * c for p, c in zip(probs, SCORE_CENTERS)) == pytest.approx(value, abs=1e-12)
@@ -47,14 +61,17 @@ def test_a_score_inside_the_readable_range_becomes_two_adjacent_bins_whose_mean_
 
 
 def test_a_score_on_a_bin_centre_is_one_bin_and_scores_outside_the_range_go_to_the_end_bin():
+    """v0c-p2(재현용): 구간 중앙값 위면 한 구간, [0.05, 0.95] 밖은 끝 구간 + clamped."""
     for i, centre in enumerate(SCORE_CENTERS):
-        probs, clamped = E.score_target(centre)
+        probs, clamped = E.score_target(centre, version="v0c-p2")
         assert probs == [1.0 if j == i else 0.0 for j in range(6)] and not clamped
     for value in (0.0, 0.01, 0.049):
-        assert E.score_target(value) == ([1.0, 0.0, 0.0, 0.0, 0.0, 0.0], True)
+        assert E.score_target(value, version="v0c-p2") == ([1.0, 0.0, 0.0, 0.0, 0.0, 0.0], True)
     for value in (0.951, 0.99, 1.0):
-        assert E.score_target(value) == ([0.0, 0.0, 0.0, 0.0, 0.0, 1.0], True)
-    assert E.SCORE_READABLE == (0.05, 0.95)
+        assert E.score_target(value, version="v0c-p2") == ([0.0, 0.0, 0.0, 0.0, 0.0, 1.0], True)
+    assert E.SCORE_READABLE["v0c-p2"] == (0.05, 0.95)
+    for i, anchor in enumerate(SCORE_ANCHORS):  # p3: 기준점 위면 그 기준점 하나
+        assert E.score_target(anchor) == ([1.0 if j == i else 0.0 for j in range(11)], False)
 
 
 def test_a_score_outside_zero_one_is_refused():
@@ -88,10 +105,9 @@ def test_order_augmentation_moves_the_label_with_the_options(fixtures):
                 elif example["type"] == "noul":
                     for key, p in zip(example["options"], target):
                         assert p == pytest.approx(label["p_yes"] if key == "yes" else 1.0 - label["p_yes"], abs=1e-12)
-                else:
-                    assert sum(p * v for p, v in zip(target, example["values"])) == pytest.approx(
-                        min(max(label["value"], 0.05), 0.95), abs=1e-12
-                    )
+                else:  # v0c-p3: 잘림 없이 정답 그대로
+                    assert sum(p * v for p, v in zip(target, example["values"])) == pytest.approx(label["value"], abs=1e-12)
+                    assert example["clamped"] is False
                 # 같은 대응을 진단 도구의 읽기(answer_from_codes)로 되읽으면 정답이 나온다
                 read = answer_from_codes(example, target)
                 if example["type"] == "choice":
@@ -99,7 +115,7 @@ def test_order_augmentation_moves_the_label_with_the_options(fixtures):
                 elif example["type"] == "noul":
                     assert read["p_yes"] == pytest.approx(label["p_yes"], abs=1e-12)
                 else:
-                    assert read["value"] == pytest.approx(min(max(label["value"], 0.05), 0.95), abs=1e-12)
+                    assert read["value"] == pytest.approx(label["value"], abs=1e-12)
     # 순서는 seed마다 실제로 바뀐다 — noul은 둘, score는 두 방향, choice는 여럿(선택지 둘이면 둘)
     for record in fixtures:
         for name, question in record["request"]["questions"].items():
@@ -111,25 +127,30 @@ def test_order_augmentation_moves_the_label_with_the_options(fixtures):
 
 
 def test_the_score_example_flags_a_label_the_reading_cannot_reach(fixtures):
+    """p2(재현용)에서만 0.05 밖의 정답이 잘린다; p3는 0.01도 그대로 닿는다(기대값 = 0.01)."""
     record = copy.deepcopy(fixtures[0])
     name = next(n for n, q in record["request"]["questions"].items() if q["type"] == "score")
     record["labels"][name]["value"] = 0.01
+    (example,) = E.build_examples(record, [name], tokenizer(), order_seed=3, fmt="chat", version="v0c-p2")
+    assert example["clamped"] is True and example["version"] == "v0c-p2"
     (example,) = _examples(record, [name], 3)
-    assert example["clamped"] is True
+    assert example["clamped"] is False and example["version"] == "v0c-p3"
+    assert sum(p * v for p, v in zip(example["target"], example["values"])) == pytest.approx(0.01, abs=1e-12)
     record["labels"][name]["value"] = 0.5
-    (example,) = _examples(record, [name], 3)
+    (example,) = E.build_examples(record, [name], tokenizer(), order_seed=3, fmt="chat", version="v0c-p2")
     assert example["clamped"] is False
 
 
 # -- 프롬프트 동일성 (학습 = 평가) ------------------------------------------------------------------------
 
 
-def test_training_prompts_are_byte_identical_to_the_diagnosis_prompts_for_the_same_order(fixtures):
+@pytest.mark.parametrize("version", ["v0c-p2", "v0c-p3"])
+def test_training_prompts_are_byte_identical_to_the_diagnosis_prompts_for_the_same_order(fixtures, version):
     for record in fixtures:
         names = list(record["request"]["questions"])
         for seed in (0, 1, 7, 123456789):
-            evaluation = {p["question"]: p for p in record_prompts(record, tokenizer(), seed=seed, fmt="chat", mode="direct", orders="seeded")}
-            for example in _examples(record, names, seed):
+            evaluation = {p["question"]: p for p in record_prompts(record, tokenizer(), seed=seed, fmt="chat", mode="direct", orders="seeded", version=version)}
+            for example in E.build_examples(record, names, tokenizer(), order_seed=seed, fmt="chat", version=version):
                 twin = evaluation[example["question"]]
                 assert example["text"].encode("utf-8") == twin["text"].encode("utf-8")
                 assert example["tokens"] == twin["tokens"] and example["code_ids"] == twin["code_ids"] and example["options"] == twin["options"]

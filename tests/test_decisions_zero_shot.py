@@ -256,16 +256,18 @@ class _StubBackbone:
 
 
 def _favour(lines: list[str]) -> str:
-    """고르는 규칙(위치와 무관): Yes 줄, "0.7 to 0.9" 줄, 그 밖(choice)이면 키가 사전순으로 가장 큰 줄."""
+    """고르는 규칙(위치와 무관): Yes 줄, "0.7 to 0.9" 줄(p2)·"0.8" 줄(p3), 그 밖(choice)이면 키가 사전순으로 가장 큰 줄."""
     for line in lines:
-        if line[3:] in ("Yes", "0.7 to 0.9"):
+        if line[3:] in ("Yes", "0.7 to 0.9", "0.8"):
             return line
     return max(lines, key=lambda line: line[3:].split(":")[0])
 
 
+@pytest.mark.parametrize("version", P.PROMPT_VERSIONS)
 @pytest.mark.parametrize("fmt", P.FORMATS)
-def test_the_code_printed_next_to_a_key_maps_back_to_that_key_in_every_listing(fixtures, fmt):
-    preds = Z.diagnose_records(fixtures, _StubBackbone(_favour), tokenizer(), model_id="stub", fmt=fmt, seed=2)
+def test_the_code_printed_next_to_a_key_maps_back_to_that_key_in_every_listing(fixtures, fmt, version):
+    preds = Z.diagnose_records(fixtures, _StubBackbone(_favour), tokenizer(), model_id="stub", fmt=fmt, seed=2, version=version)
+    assert {p["prompt_version"] for p in preds} == {version}
     for record, pred in zip(fixtures, preds):
         for name, q in pred["questions"].items():
             question = record["request"]["questions"][name]

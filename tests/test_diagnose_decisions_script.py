@@ -45,7 +45,7 @@ def test_a_tiny_run_writes_the_summary_the_predictions_and_the_markdown(tmp_path
     predictions = [json.loads(line) for line in out.with_suffix(".predictions.jsonl").read_text(encoding="utf-8").splitlines()]
     markdown = out.with_suffix(".md").read_text(encoding="utf-8")
     assert summary["config"]["model"] == "tiny" and summary["config"]["mode"] == "direct" and summary["config"]["records"] == 8
-    assert summary["config"]["prompt_version"] == "v0c-p2" and summary["config"]["orders"] == "counterbalanced" and len(summary["config"]["input_sha256"]) == 64
+    assert summary["config"]["prompt_version"] == "v0c-p3" and summary["config"]["orders"] == "counterbalanced" and len(summary["config"]["input_sha256"]) == 64
     assert summary["validation"] == {"read": 8, "invalid": 0, "problems": {}}
     assert [p["id"] for p in predictions] == [f"fx-00{i}" for i in range(1, 9)]
     readings = summary["summary"]["readings"]
@@ -168,3 +168,26 @@ def test_without_a_checkpoint_the_run_is_bit_identical_to_scoring_the_untouched_
         direct = diagnose_records(read_records(REQUESTS), QwenBackbone.tiny(seed=4, vocab_size=tokenizer.get_vocab_size()), tokenizer, model_id="tiny",
                                   mode="direct", fmt="chat", seed=1, orders="counterbalanced", batch=1)
     assert saved == json.loads(json.dumps(direct))
+
+
+def test_the_prompt_version_flag_reproduces_p2_and_p3_is_the_default(tmp_path):
+    """Task v0d fix round 1: 기본 판은 v0c-p3; ``--prompt-version v0c-p2``는 v0c 결과의 재현용 — choice·noul의 예측은 두 판에서 같고(글이 바이트
+    단위로 같다), score만 다르다(6구간 대 기준점 11개)."""
+    p2, p3 = tmp_path / "p2.json", tmp_path / "p3.json"
+    assert _run(["--model", "tiny", "--input", str(REQUESTS), "--out", str(p2), "--n-boot", "10", "--prompt-version", "v0c-p2", "--batch", "1"]) == 0
+    assert _run(["--model", "tiny", "--input", str(REQUESTS), "--out", str(p3), "--n-boot", "10", "--batch", "1"]) == 0
+    c2, c3 = (json.loads(path.read_text(encoding="utf-8"))["config"] for path in (p2, p3))
+    assert (c2["prompt_version"], c3["prompt_version"]) == ("v0c-p2", "v0c-p3") and c2["prompt_digest"] != c3["prompt_digest"]
+    rows2 = [json.loads(line) for line in p2.with_suffix(".predictions.jsonl").read_text(encoding="utf-8").splitlines()]
+    rows3 = [json.loads(line) for line in p3.with_suffix(".predictions.jsonl").read_text(encoding="utf-8").splitlines()]
+    for a, b in zip(rows2, rows3):
+        assert (a["prompt_version"], b["prompt_version"]) == ("v0c-p2", "v0c-p3")
+        for name, q in a["questions"].items():
+            other = b["questions"][name]
+            if q["type"] == "score":
+                assert len(q["listings"][0]["codes"]) == 6 and len(other["listings"][0]["codes"]) == 11
+            else:
+                assert q["listings"] == other["listings"]
+    with pytest.raises(SystemExit):
+        script().main(["--model", "tiny", "--prompt-version", "v0c-p1", "--input", str(REQUESTS), "--out", str(tmp_path / "x.json")])
+

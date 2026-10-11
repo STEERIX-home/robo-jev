@@ -7,7 +7,10 @@ Qwen3.5의 공식 chat template이 그리는 글과 같다; 고정 문구는 버
 
 Fix round 1(리뷰 1 I5·통제자 결정): **글에 보이는 선택지 줄을 다시 읽어** 기록된 키·Yes/No·구간 중앙값과 맞는지 본다(키·구간이
 어긋난 변이체는 떨어진다); 결정적 균형 배치(choice는 순환 이동으로 각 선택지가 각 자리에 한 번, noul·score는 정순·역순);
-v0c-p2의 "짧게 보이는 설명 뒤 답"(생각 블록 없이)."""
+v0c-p2의 "짧게 보이는 설명 뒤 답"(생각 블록 없이).
+
+Task v0d fix round 1: 판 v0c-p3(기본) — score를 기준점 11개(0.0 … 1.0, 코드 A–K)로 묻고 기대값으로 읽는다; choice·noul의 글은 p2와 바이트
+단위로 같다; p2는 재현용으로 남고 판마다 고정 문구 digest가 고정돼 있다."""
 
 import copy
 import functools
@@ -45,9 +48,19 @@ def _all_prompts(records, **kw):
 
 
 def test_the_fixed_wording_is_pinned_to_its_version():
-    """문구를 바꾸면 버전도 올려야 한다 — 고정 문구 전부의 해시가 버전과 함께 고정돼 있다."""
-    assert P.PROMPT_VERSION == "v0c-p2"
-    assert P.fixed_text_digest() == "3d075458260069584d91d5d400b9a3eb1ace1748294d9ab6ea65907424c4e6ff"
+    """문구를 바꾸면 판도 올려야 한다 — 고정 문구 전부의 해시가 판마다 고정돼 있다 (p2의 값은 v0c 때와 같다)."""
+    assert P.PROMPT_VERSIONS == ("v0c-p2", "v0c-p3") and P.PROMPT_VERSION == "v0c-p3"
+    assert P.fixed_text_digest("v0c-p2") == "3d075458260069584d91d5d400b9a3eb1ace1748294d9ab6ea65907424c4e6ff"
+    assert P.fixed_text_digest("v0c-p3") == "06b3497fddf92ed51c55fa78481d23eff379c7fd34044b819cc6a16ce8eafd90" == P.fixed_text_digest()
+    with pytest.raises(ValueError):
+        P.fixed_text_digest("v0c-p9")
+
+
+def test_the_p3_score_anchors_are_eleven_tenths_from_zero_to_one():
+    assert P.SCORE_ANCHORS == (0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0)
+    layout = P.score_layout("v0c-p3")
+    assert layout["names"] == layout["lines"] == [f"{v:.1f}" for v in P.SCORE_ANCHORS] and layout["values"] == list(P.SCORE_ANCHORS)
+    assert P.score_values("v0c-p2") == P.SCORE_CENTERS and P.score_values() == P.SCORE_ANCHORS
 
 
 def test_score_bins_cover_zero_to_one_and_their_centers_are_the_midpoints():
@@ -132,7 +145,8 @@ def test_noul_uses_two_shuffled_codes_and_reads_p_yes_from_the_yes_code(fixtures
 
 
 def test_score_reads_the_expected_bin_center_whichever_direction_the_bins_are_listed(fixtures):
-    scores = [p for p in _all_prompts(fixtures, seed=1, fmt="plain", mode="direct") if p["type"] == "score"]
+    """v0c-p2(재현용): 6구간, 구간 중앙값의 기대값."""
+    scores = [p for p in _all_prompts(fixtures, seed=1, fmt="plain", mode="direct", version="v0c-p2") if p["type"] == "score"]
     assert {tuple(p["values"]) == tuple(sorted(p["values"])) for p in scores} == {True, False}  # 오름·내림 둘 다 나온다
     for p in scores:
         assert sorted(p["values"]) == pytest.approx(list(P.SCORE_CENTERS)) and len(p["codes"]) == 6
@@ -151,15 +165,58 @@ def test_score_reads_the_expected_bin_center_whichever_direction_the_bins_are_li
             assert line in p["text"]
 
 
-def test_ascending_and_descending_listings_give_the_same_value_for_the_same_bin_mass():
+def test_the_p3_score_reads_the_expected_anchor_whichever_direction_the_anchors_are_listed(fixtures):
+    """v0c-p3(기본): 기준점 11개(코드 A–K), 기준점 값의 기대값 — 0과 1에도 닿는다; 지시 글과 기준점 줄."""
+    scores = [p for p in _all_prompts(fixtures, seed=1, fmt="plain", mode="direct") if p["type"] == "score"]
+    assert scores and {p["version"] for p in scores} == {"v0c-p3"}
+    assert {tuple(p["values"]) == tuple(sorted(p["values"])) for p in scores} == {True, False}
+    for p in scores:
+        assert sorted(p["values"]) == list(P.SCORE_ANCHORS) and p["codes"] == list("ABCDEFGHIJK")
+        top, bottom = p["values"].index(1.0), p["values"].index(0.0)
+        for index, expected in ((top, 1.0), (bottom, 0.0)):
+            onehot = torch.zeros(11)
+            onehot[index] = 1.0
+            assert P.answer_from_codes(p, onehot)["value"] == pytest.approx(expected)
+        mixed = torch.zeros(11)
+        mixed[p["values"].index(0.0)], mixed[p["values"].index(0.6)] = 0.5, 0.5
+        answer = P.answer_from_codes(p, mixed)
+        assert answer["value"] == pytest.approx(0.3) and answer["bins"]["0.6"] == pytest.approx(0.5)
+        assert P.SCORE_ANCHOR_TEXT in p["text"] and P.SCORE_TEXT not in p["text"]
+        block = p["text"][p["text"].rfind("Options:\n") :]
+        assert [line.split(". ", 1)[1] for line in block.split("\n")[1:12]] == [f"{v:.1f}" for v in p["values"]]
+
+
+@pytest.mark.parametrize("version, mass", [
+    ("v0c-p2", {0.05: 0.1, 0.2: 0.2, 0.4: 0.3, 0.6: 0.2, 0.8: 0.1, 0.95: 0.1}),
+    ("v0c-p3", {0.0: 0.1, 0.1: 0.0, 0.2: 0.2, 0.3: 0.0, 0.4: 0.3, 0.5: 0.0, 0.6: 0.2, 0.7: 0.0, 0.8: 0.1, 0.9: 0.0, 1.0: 0.1}),
+])
+def test_ascending_and_descending_listings_give_the_same_value_for_the_same_bin_mass(version, mass):
     request = {"state": "s", "questions": {"risk": {"type": "score", "instructions": "How risky?", "criteria": ["0 = none", "1 = certain"]}}}
     seen = {}
     for i in range(40):
-        p = P.build_prompts(request, tokenizer(), key=f"k{i}", seed=1)[0]
-        mass = {0.05: 0.1, 0.2: 0.2, 0.4: 0.3, 0.6: 0.2, 0.8: 0.1, 0.95: 0.1}
+        p = P.build_prompts(request, tokenizer(), key=f"k{i}", seed=1, version=version)[0]
         probs = torch.tensor([mass[v] for v in p["values"]])
         seen[p["values"][0] < p["values"][-1]] = P.answer_from_codes(p, probs)["value"]
-    assert set(seen) == {True, False} and seen[True] == pytest.approx(seen[False]) == pytest.approx(0.46)
+    expected = sum(v * m for v, m in mass.items())
+    assert set(seen) == {True, False} and seen[True] == pytest.approx(seen[False]) == pytest.approx(expected)
+
+
+def test_choice_and_noul_prompts_are_byte_identical_between_p2_and_p3_and_score_changes_only_its_block(fixtures):
+    """통제자 결정 1: 예/아니오·선택의 프롬프트는 p2와 바이트 단위로 같다 — 바뀌는 것은 score 질문의 지시 한 줄과 선택지 줄뿐."""
+    for fmt in P.FORMATS:
+        for mode in P.MODES:
+            for record in fixtures:
+                old = P.record_prompts(record, tokenizer(), seed=1, fmt=fmt, mode=mode, orders="counterbalanced", version="v0c-p2")
+                new = P.record_prompts(record, tokenizer(), seed=1, fmt=fmt, mode=mode, orders="counterbalanced", version="v0c-p3")
+                assert [(p["question"], p["listing"]) for p in old] == [(p["question"], p["listing"]) for p in new]
+                for a, b in zip(old, new):
+                    if a["type"] == "score":
+                        assert a["text"] != b["text"] and a["text"][: a["prefix_chars"]] == b["text"][: b["prefix_chars"]]
+                        assert a["tokens"][: a["prefix_tokens"]] == b["tokens"][: b["prefix_tokens"]]
+                        assert (a["values"][0] < a["values"][-1]) == (b["values"][0] < b["values"][-1])  # 같은 방향
+                    else:
+                        assert a["text"].encode() == b["text"].encode() and a["tokens"] == b["tokens"] and a["options"] == b["options"]
+                    assert (a["version"], b["version"]) == ("v0c-p2", "v0c-p3")
 
 
 # -- 상태 글 ---------------------------------------------------------------------------------------------------------
@@ -281,7 +338,7 @@ def test_a_record_with_an_unknown_question_type_is_refused():
 
 def test_prompt_metadata_names_the_record_question_and_format(fixtures):
     p = P.record_prompts(fixtures[3], tokenizer(), seed=1, fmt="chat", mode="reasoning")[0]
-    assert (p["record_id"], p["question"], p["format"], p["mode"], p["version"]) == ("fx-004", "decision", "chat", "reasoning", "v0c-p2")
+    assert (p["record_id"], p["question"], p["format"], p["mode"], p["version"]) == ("fx-004", "decision", "chat", "reasoning", "v0c-p3")
     assert (p["listing"], p["n_listings"]) == (0, 1)
     assert json.loads(json.dumps({k: v for k, v in p.items() if k != "tokens"})) is not None
     assert hashlib.sha256(p["text"].encode()).hexdigest() == hashlib.sha256(tokenizer().decode(p["tokens"], skip_special_tokens=False).encode()).hexdigest()
@@ -315,15 +372,16 @@ def _mutants_fail(p: dict) -> None:
             assert P.check_displayed_lines(texts), ("text swap passed", p["question"])
 
 
+@pytest.mark.parametrize("version", P.PROMPT_VERSIONS)
 @pytest.mark.parametrize("fmt", P.FORMATS)
 @pytest.mark.parametrize("mode", P.MODES)
 @pytest.mark.parametrize("orders", P.ORDERS)
-def test_every_displayed_line_matches_the_recorded_key_yes_no_or_bin(fixtures, fmt, mode, orders):
+def test_every_displayed_line_matches_the_recorded_key_yes_no_or_bin(fixtures, fmt, mode, orders, version):
     """글에서 ``X. …`` 줄을 다시 읽어: choice는 줄 j가 ``options[j] + ":"``로 시작하고, noul은 options[j]에 맞는 Yes/No이고,
     score는 중앙값이 values[j]이고 이름이 options[j]인 구간이다 — 세 종류, 두 형식, 두 방식, 두 배치, seed 넷."""
     checked = Counter()
     for seed in (1, 2, 3, 4):
-        for p in _all_prompts(fixtures, seed=seed, fmt=fmt, mode=mode, orders=orders):
+        for p in _all_prompts(fixtures, seed=seed, fmt=fmt, mode=mode, orders=orders, version=version):
             assert P.check_displayed_lines(p) == [], (p["record_id"], p["question"], p["listing"])
             checked[p["type"]] += 1
     assert set(checked) == {"choice", "noul", "score"}
@@ -331,9 +389,13 @@ def test_every_displayed_line_matches_the_recorded_key_yes_no_or_bin(fixtures, f
 
 def test_desynced_keys_bins_or_lines_fail_the_line_check(fixtures):
     """리뷰 1 I5: 키·구간·줄을 어긋나게 한 변이체는 떨어진다 (옛 시험은 같은 목록을 정답으로 써서 이것을 못 잡았다)."""
-    for fmt in P.FORMATS:
-        for p in _all_prompts(fixtures, seed=3, fmt=fmt, orders="counterbalanced"):
-            _mutants_fail(p)
+    for version in P.PROMPT_VERSIONS:
+        for fmt in P.FORMATS:
+            for p in _all_prompts(fixtures, seed=3, fmt=fmt, orders="counterbalanced", version=version):
+                _mutants_fail(p)
+    # 판을 바꿔 적은 변이체(p3 글에 p2 표지)도 떨어진다
+    p3 = next(p for p in _all_prompts(fixtures, seed=3, fmt="chat") if p["type"] == "score")
+    assert P.check_displayed_lines({**p3, "version": "v0c-p2"})
 
 
 # -- Fix round 1: 결정적 균형 배치 (통제자 결정) -----------------------------------------------------------------------

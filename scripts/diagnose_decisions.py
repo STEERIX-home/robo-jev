@@ -25,6 +25,9 @@
 두 읽기); 예측의 ``model``은 ``<model>+<방식>:<run id>@<step>``이고 요약의 ``config.checkpoint``에 체크포인트의 정체가 남는다.
 `--checkpoint`가 없으면 결과는 v0c의 실행기와 비트 단위로 같다(검사).
 
+`--prompt-version`(Task v0d fix round 1): 프롬프트 판 — 기본 ``v0c-p3``(score 기준점 11개, [0, 1] 전체를 읽는다; choice·noul은 p2와 바이트
+단위로 같다), ``v0c-p2``는 v0c 결과의 재현용. `--checkpoint`의 판은 학습 때의 판과 같아야 한다(다르면 거절).
+
 GPU 규칙(GB10 통합 메모리): 첫 CUDA 할당 전에 울타리(`--gpu-memory-fraction`, 기본 0.6), 적재 전에 여유 확인(2B ≥ 20 GiB,
 4B ≥ 30 GiB — 근거는 :data:`robo_jev.decisions.zero_shot.MIN_FREE_BYTES`), 처음과 끝의 메모리 보고. ``--model tiny``는 검사 전용의
 소형 난수 Qwen(CPU)이다.
@@ -46,7 +49,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from robo_jev.gpu import DEFAULT_FRACTION, limit_gpu_memory, memory_report, require_free  # noqa: E402
 
-SCRIPT_VERSION = "v0d-diagnose-3"
+SCRIPT_VERSION = "v0d-diagnose-4"
 TINY = "tiny"
 #: 모르는 모델 id의 적재 전 여유 (보수적으로 4B의 값).
 FALLBACK_MIN_FREE = 30 * 2**30
@@ -99,7 +102,7 @@ def _load_valid(path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
 
 
 def _parser() -> argparse.ArgumentParser:
-    from robo_jev.decisions.prompt import DEFAULT_FORMAT, DEFAULT_ORDERS, FORMATS, MODES, ORDERS
+    from robo_jev.decisions.prompt import DEFAULT_FORMAT, DEFAULT_ORDERS, FORMATS, MODES, ORDERS, PROMPT_VERSION, PROMPT_VERSIONS
     from robo_jev.decisions.zero_shot import DEFAULT_BATCH, DEFAULT_GEN_BATCH, REASONING_MAX_NEW_TOKENS
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -125,6 +128,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--preview", action="store_true", help="보고서 머리에 '봉인된 시험 세트가 아닌 생성 표본의 미리보기'를 단다")
     parser.add_argument("--labels", nargs=2, default=("a", "b"), metavar=("LABEL_A", "LABEL_B"), help="--compare의 열 이름")
     parser.add_argument("--gpu-memory-fraction", type=float, default=DEFAULT_FRACTION)
+    parser.add_argument("--prompt-version", choices=PROMPT_VERSIONS, default=PROMPT_VERSION,
+                        help=f"프롬프트 판 (기본 {PROMPT_VERSION}; v0c-p2는 v0c 결과의 재현용)")
     parser.add_argument("--checkpoint", type=Path, default=None,
                         help="(--model과 함께) 학습한 가중치 — Task v0d의 체크포인트(LoRA adapter 또는 전체 가중치; 재개용·model-only 모두)")
     return parser
@@ -206,7 +211,7 @@ def _run(args: argparse.Namespace) -> int:
     memory_start = memory_report()
     _log(f"gpu guard {guard} · memory at start {memory_start}")
     from robo_jev.decisions.metrics import merge_runs, summarize_all
-    from robo_jev.decisions.prompt import PROMPT_VERSION, fixed_text_digest
+    from robo_jev.decisions.prompt import fixed_text_digest
     from robo_jev.decisions.records import file_sha256, select_records
     from robo_jev.decisions.report import PREVIEW_NOTE
     from robo_jev.decisions.zero_shot import MIN_FREE_BYTES, diagnose_records
@@ -227,7 +232,7 @@ def _run(args: argparse.Namespace) -> int:
     if args.checkpoint is not None:
         from robo_jev.decisions.train import apply_checkpoint
 
-        checkpoint = apply_checkpoint(backbone, args.checkpoint, tokenizer_sha256=describe_tokenizer(tokenizer_id)["sha256"])
+        checkpoint = apply_checkpoint(backbone, args.checkpoint, tokenizer_sha256=describe_tokenizer(tokenizer_id)["sha256"], prompt_version=args.prompt_version)
         checkpoint["sha256"] = file_sha256(args.checkpoint)
         model_label = f"{args.model}+{checkpoint['mode']}:{checkpoint['run_id']}@{checkpoint['step']}"
         _log(f"applied {checkpoint['mode']} checkpoint {args.checkpoint} (run {checkpoint['run_id']}, step {checkpoint['step']}) · memory {memory_report()}")
@@ -239,7 +244,7 @@ def _run(args: argparse.Namespace) -> int:
     for shuffle_seed in seeds:
         runs.append(diagnose_records(
             chosen, backbone, tokenizer, model_id=model_label, mode=args.mode, fmt=args.fmt, seed=shuffle_seed, orders=args.orders,
-            batch=args.batch, gen_batch=args.gen_batch, max_new_tokens=args.max_new_tokens, log=_log,
+            batch=args.batch, gen_batch=args.gen_batch, max_new_tokens=args.max_new_tokens, log=_log, version=args.prompt_version,
         ))
     seconds = time.perf_counter() - started
     predictions, merge = merge_runs(runs) if len(runs) > 1 else (runs[0], None)
@@ -249,8 +254,8 @@ def _run(args: argparse.Namespace) -> int:
     peak = int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else None
     summary = summarize_all(chosen, predictions, n_boot=args.n_boot, seed=args.seed, merge=merge)
     config = {
-        "model": model_label, "mode": args.mode, "format": args.fmt, "orders": args.orders, "prompt_version": PROMPT_VERSION,
-        "prompt_digest": fixed_text_digest(), "seed": args.seed, "shuffle_seed": seeds[0], "shuffle_seeds": seeds, "limit": args.limit,
+        "model": model_label, "mode": args.mode, "format": args.fmt, "orders": args.orders, "prompt_version": args.prompt_version,
+        "prompt_digest": fixed_text_digest(args.prompt_version), "seed": args.seed, "shuffle_seed": seeds[0], "shuffle_seeds": seeds, "limit": args.limit,
         "records": len(chosen), "record_ids": [str(r["id"]) for r in chosen],
         "selection": f"pair-preserving random sample, seed {args.seed}, limit {args.limit}" if args.limit else "all valid records",
         "input": str(args.input), "input_sha256": file_sha256(args.input), "batch": args.batch, "gen_batch": args.gen_batch,

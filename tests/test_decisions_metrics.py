@@ -354,7 +354,8 @@ def test_permutation_sensitivity_counts_only_pairs_of_listings_whose_order_diffe
     merged, stats = M.merge_runs([[a], [b], [c]])
     assert stats["duplicate_listings_skipped"] == {"choice": 2, "noul": 1, "score": 1}
     sens = M.permutation_sensitivity(merged)
-    assert sens["noul"] == {"questions": 1, "pairs": 1, "shift_mean": pytest.approx(0.2), "flip_rate": 1.0, "identical_pairs_skipped": 0}
+    assert sens["noul"] == {"questions": 1, "pairs": 1, "shift_mean": pytest.approx(0.2), "flip_rate": 1.0, "decisive_flip_rate": 0.0, "decisive_flips": 0,
+                            "identical_pairs_skipped": 0}  # 0.41은 0.5에서 0.1 안이라 결정적인 바뀜이 아니다
     label = record["labels"]["decision"]["probabilities"]
     tv = 0.5 * sum(abs(label[k] - v) for k, v in {"proceed": 0.7, "slow_down": 0.1, "stop_moderate": 0.1, "stop_hard": 0.1}.items())
     assert sens["choice"]["questions"] == 2 and sens["choice"]["shift_mean"] == pytest.approx(tv / 2) and sens["choice"]["flip_rate"] == 0.5
@@ -365,7 +366,21 @@ def test_permutation_sensitivity_counts_only_pairs_of_listings_whose_order_diffe
         q["listings"].append(copy.deepcopy(q["listings"][0]))
     again = M.permutation_sensitivity(doubled)
     assert again["noul"]["pairs"] == 2 and again["noul"]["identical_pairs_skipped"] == 1
-    assert M.permutation_sensitivity([a]) == {"_all": {"questions": 0, "pairs": 0, "shift_mean": None, "flip_rate": None, "identical_pairs_skipped": 0}}
+    assert M.permutation_sensitivity([a]) == {"_all": {"questions": 0, "pairs": 0, "shift_mean": None, "flip_rate": None, "decisive_flip_rate": None,
+                                                       "decisive_flips": 0, "identical_pairs_skipped": 0}}
+
+
+def test_a_decisive_flip_needs_both_answers_away_from_one_half_and_the_verdict_uses_at_least_one_half():
+    """통제자 결정 6: 판정 = 값 >= 0.5 (dev와 같은 규칙); 결정적인 바뀜 = 두 답이 모두 0.5에서 0.1 이상 떨어진 채 바뀐 것만
+    (choice는 두 답 모두 1등이 2등을 0.2 이상 앞선 채 argmax가 바뀐 것)."""
+    shift = M._answer_shift
+    assert shift("noul", {"p_yes": 0.3}, {"p_yes": 0.7})[1:] == (True, True)
+    assert shift("noul", {"p_yes": 0.45}, {"p_yes": 0.7})[1:] == (True, False)
+    assert shift("noul", {"p_yes": 0.5}, {"p_yes": 0.49})[1:] == (True, False)  # 0.5는 예 쪽 (>=)
+    assert shift("noul", {"p_yes": 0.5}, {"p_yes": 0.9})[1:] == (False, False)
+    assert shift("score", {"value": 0.4}, {"value": 0.6})[1:] == (True, True)
+    assert shift("choice", {"probabilities": {"a": 0.7, "b": 0.3}}, {"probabilities": {"a": 0.3, "b": 0.7}})[1:] == (True, True)
+    assert shift("choice", {"probabilities": {"a": 0.55, "b": 0.45}}, {"probabilities": {"a": 0.3, "b": 0.7}})[1:] == (True, False)
 
 
 def test_side_agreement_counts_the_same_side_of_one_half_and_skips_ambiguous_labels():
@@ -650,3 +665,38 @@ def test_pair_direction_follows_the_engine_roles(fixtures):
     numeric = M.summarize(records, list(preds.values()), n_boot=10)["pairs"]["numeric"]
     assert numeric["pairs"] == 1 and numeric["by_type"]["noul"]["direction_correct"] == 1
     assert M.pair_deltas(records, M.question_rows(records, list(preds.values())))["numeric"][0]["base"] == "fx-001"
+
+
+def test_score_questions_whose_label_lies_outside_the_p2_range_are_grouped_and_reported_separately(fixtures):
+    """통제자 결정 1: 점수 지표에 "정답이 [0.05, 0.95] 밖인 것" 묶음을 따로 — 행의 묶음 ``score_label_range``(outside·inside·n/a),
+    묶음 표·신호 표, 그리고 bootstrap·run 비교의 머리 지표 ``score.<지표>[label_outside|label_inside]``."""
+    records = copy.deepcopy(fixtures)
+    scored = [(r, n) for r in records for n, q in r["request"]["questions"].items() if q["type"] == "score"]
+    assert len(scored) >= 3
+    for (record, name), value in zip(scored, (0.02, 0.97, 0.5)):
+        record["labels"][name]["value"] = value
+    outside = {(r["id"], n) for (r, n), v in zip(scored, (0.02, 0.97, 0.5)) if v in (0.02, 0.97)}
+    predictions = [_oracle(r) for r in records]
+    for prediction in predictions:  # 모델은 언제나 0.3을 답한다 → 묶음마다 다른 손실
+        for q in prediction["questions"].values():
+            if q["type"] == "score":
+                q["answer"] = {"value": 0.3}
+                for listing in q.get("listings") or []:
+                    listing["answer"] = {"value": 0.3}
+    rows = M.question_rows(records, predictions)
+    ranges = {(r["record_id"], r["question"]): r["groups"]["score_label_range"] for r in rows}
+    for row in rows:
+        key = (row["record_id"], row["question"])
+        assert row["groups"]["score_label_range"] == ("outside" if key in outside else "inside" if row["type"] == "score" else "n/a")
+    assert M.score_label_range("score", {"value": 0.05}) == "inside" and M.score_label_range("score", {"value": 0.049}) == "outside"
+    assert M.score_label_range("noul", {"p_yes": 0.01}) == "n/a"
+    summary = M.summarize(records, predictions, n_boot=50, seed=0)
+    boot = summary["bootstrap"]
+    assert boot["score.mae[label_outside]"]["n"] == len(outside)
+    expected_out = sum(abs(0.3 - v) for v in (0.02, 0.97)) / 2
+    assert boot["score.mae[label_outside]"]["value"] == pytest.approx(expected_out)
+    assert boot["score.mae[label_inside]"]["n"] == sum(1 for v in ranges.values() if v == "inside")
+    assert set(summary["groups"]["score_label_range"]) >= {"outside", "inside", "n/a"}
+    assert summary["signal"]["score_label_range"]["outside"]["score"]["n"] == len(outside)
+    cmp = M.compare_runs(records, predictions, [_oracle(r) for r in records], n_boot=50, seed=0)
+    assert cmp["readings"]["single_order"]["differences"]["score.mae[label_outside]"]["value"] == pytest.approx(expected_out)

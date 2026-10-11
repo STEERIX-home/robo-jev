@@ -48,12 +48,14 @@ _GROUP_ORDER = (
     ("criterion", "By action criterion"), ("family", "By question family"), ("pair", "By pair membership"),
     ("label_position", "By position of the best option (choice only; 1 = first listed)"), ("key_style", "By option-key style"),
     ("agent", "By moving agent"), ("distractors", "By number of irrelevant facts"), ("distance_unit", "By distance unit"),
+    ("score_label_range", "Score questions by label range (outside vs inside [0.05, 0.95])"),
 )
 _DIFFICULTY = (
     ("margin_norm_band", "Normalized decision margin |m / σ_m| (v0a `meta.margin_norm`; near < 0.5 ≤ mid < 1.5 ≤ far)"),
     ("key_entropy_band", "Label entropy of the record's key question (bits; low < 1/3 ≤ mid < 2/3 ≤ high = near 0.5)"),
     ("label_entropy_band", "Label entropy of the question itself"),
     ("margin_band", "Legacy: raw-margin tertiles per margin name (units differ; not a difficulty axis)"),
+    ("score_label_range", "Score label range: outside [0.05, 0.95] (unreachable for the v0c-p2 bins; reachable for the v0c-p3 anchors) vs inside"),
 )
 
 
@@ -266,9 +268,13 @@ def render_markdown(summary: dict[str, Any], *, config: dict[str, Any], title: s
     permutation = order.get("permutation") or {}
     if permutation:
         lines += ["### Verdict changes between listings", "", "Pairs of listings of the same question whose option order differs (identical "
-                  "listings are skipped and counted). Shift = total-variation distance of the key-mapped distributions (choice) or |Δ| (noul, score).", ""]
-        lines += _table(["type", "questions", "distinct-listing pairs", "identical pairs skipped", "mean shift", "flip rate"],
-                        [[t, str(e["questions"]), str(e["pairs"]), str(e.get("identical_pairs_skipped", 0)), _f(e["shift_mean"]), _f(e["flip_rate"])] for t, e in permutation.items()]) + [""]
+                  "listings are skipped and counted). **Mean shift is the primary measure**: total-variation distance of the key-mapped "
+                  "distributions (choice) or |Δ| (noul, score). A flip = the verdict changed (noul/score: value ≥ 0.5; choice: argmax); a decisive "
+                  "flip = it changed while both answers were at least 0.1 from 0.5 (choice: top-1 ahead of top-2 by ≥ 0.2). Plain flip rates swing "
+                  "when answers sit near 0.5.", ""]
+        lines += _table(["type", "questions", "distinct-listing pairs", "identical pairs skipped", "mean shift (primary)", "flip rate", "decisive flip rate"],
+                        [[t, str(e["questions"]), str(e["pairs"]), str(e.get("identical_pairs_skipped", 0)), _f(e["shift_mean"]), _f(e["flip_rate"]),
+                          _f(e.get("decisive_flip_rate"))] for t, e in permutation.items()]) + [""]
 
     pairs = single.get("pairs", {})
     lines += ["## Fact-changed pairs (order-averaged answers)", ""]
@@ -283,7 +289,8 @@ def render_markdown(summary: dict[str, Any], *, config: dict[str, Any], title: s
         ) + [""]
     wording = pairs.get("wording", {})
     lines += [f"Wording pairs (numbers unchanged, situation words changed): {wording.get('pairs', 0)} pairs, {wording.get('questions', 0)} shared questions; "
-              f"model shift {_f(wording.get('model_shift_mean'))} (label shift {_f(wording.get('label_shift_mean'))}), decision flips {_f(wording.get('flip_rate'))}.", ""]
+              f"model shift {_f(wording.get('model_shift_mean'))} (label shift {_f(wording.get('label_shift_mean'))}), decision flips {_f(wording.get('flip_rate'))} "
+              f"(decisive {_f(wording.get('decisive_flip_rate'))}).", ""]
 
     for reading, summary_r in readings.items():
         boot = summary_r.get("bootstrap") or {}
