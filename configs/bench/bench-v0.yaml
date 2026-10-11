@@ -80,9 +80,12 @@ pilot:
   expect: {records: 100, questions: 562, ids_sha256: d5be2722341101c0b29571d1be179b3bbb90ba94df0beb2599a85e8152835460}
 
 # 요청 변환 (src/robo_jev/bench/openrouter.py): choice는 criteria 맵 그대로, noul은 instructions 그대로(criteria 없음),
-# score는 11단계 0.0 … 1.0(양 끝 단계에 원래 기준점 글) — 값 = 기대 단계 / 10. 상태 글은 문자열 그대로.
+# score는 **원래 기준점 둘 그대로**(단계 2: 0 = …, 1 = …) — 값 = 기대 단계(= 단계 1의 확률). 상태 글은 문자열 그대로.
+# 시운전(2026-10-12, T1 밖 100 레코드, 여섯 모델, 데이터 수집 거부, $0.0199)으로 정했다: API는 "A Score accepts at most 10 levels"(HTTP 422)라
+# 11단계는 다섯 모델이 거절했고(Tev1 4B만 받음), 받은 Tev1에서 11단계 − 2단계 score Brier = +0.001 [−0.031, +0.032](차이 발견되지 않음).
+# 2단계는 우리 요청 형식 그대로 — Decisions API가 쓰라고 만든 꼴이다.
 request:
-  score_levels: 11
+  score_levels: 2
   endpoint: https://openrouter.ai/api/alpha/decisions
 
 # OpenRouter 결정 모델 — 기본 선택 여섯 (사용자 결정 2026-10-12: 목록의 19개를 다 돌리지 않는다). 실행 인자 --models로 바꿀 수 있다.
