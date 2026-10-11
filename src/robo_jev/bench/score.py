@@ -36,6 +36,7 @@ __all__ = [
     "pooled_brier",
     "probe_summary",
     "readme_table",
+    "render_details",
     "render_pilot",
     "resolve_ours",
     "set_metrics",
@@ -307,6 +308,86 @@ def readme_table(results: dict[str, Any], *, date: str) -> str:
         "OpenRouter models were asked once, in the stored option order, through the Decisions API (score questions as an 11-level 0.0–1.0 scale); "
         "our models' numbers are the expectation over balanced option orders (single-order reading). Action metrics use our value table and are not shown here.",
     ]
+    return "\n".join(lines) + "\n"
+
+
+def _cell(model: dict[str, Any], set_name: str, key: str, *, reading: str = "single_order", digits: int = 3) -> str:
+    value = _get(model, "sets", set_name, "readings", reading, key)
+    return _fmt(value, digits)
+
+
+def _ours_cell(model: dict[str, Any], set_name: str, key: str, digits: int = 3) -> str:
+    """한 순서 읽기, 우리 모델(배치가 여럿)은 괄호 안에 순서 평균 읽기."""
+    single = _cell(model, set_name, key, digits=digits)
+    if model.get("role") in ("ours", "baseline"):
+        averaged = _cell(model, set_name, key, reading="order_averaged", digits=digits)
+        return f"{single} ({averaged})" if averaged != "—" else single
+    return single
+
+
+def render_details(results: dict[str, Any]) -> str:
+    """결과의 모든 지표를 표로 (보고서용): 값 없는 물리, 값 있는 행동(우리 가치표), 상태·규칙, 권고, ECE(T7), T5, T6, 일반 읽기, 답한 비율."""
+    models = results["models"]
+    physics = [s for s in PHYSICS_SETS if any(s in m["sets"] for m in models)]
+    lines = [f"# bench-v0 results — all metrics ({results.get('date', '')})", "",
+             "Single-order reading (deployment condition). For our models (several balanced listings per question) the order-averaged reading "
+             "follows in parentheses; OpenRouter models were asked once in the stored order, so their two readings are the same. "
+             "Rows marked FAKE are pipeline-test values, not results.", ""]
+
+    def table(title: str, key: str, sets: list[str], note: str = "", digits: int = 3) -> None:
+        lines.extend([f"## {title}", ""] + ([note, ""] if note else []))
+        lines.append("| model | " + " | ".join(sets) + " |")
+        lines.append("|---|" + "---|" * len(sets))
+        for model in models:
+            lines.append(f"| {model['label']} | " + " | ".join(_ours_cell(model, s, key, digits) for s in sets) + " |")
+        lines.append("")
+
+    lines += ["## Pooled physics (T2+T3+T4, yes/no + score questions)", "", "| model | questions | Brier | always-0.5 Brier | skill |", "|---|---|---|---|---|"]
+    for model in models:
+        pooled = (model.get("pooled") or {}).get("unseen")
+        lines.append(f"| {model['label']} | {pooled['questions'] if pooled else '—'} | {_fmt(pooled and pooled['brier'])} | "
+                     f"{_fmt(pooled and pooled['uniform_brier'])} | {_fmt(pooled and pooled['skill'])} |")
+    lines.append("")
+    table("Value-free: yes/no (noul) Brier ↓", "noul_brier", physics)
+    table("Value-free: score Brier ↓", "score_brier", physics)
+    table("Value-dependent: action accuracy ↑", "action_accuracy", physics,
+          "Best action = minimum expected cost under OUR value table (values-v0). The OpenRouter models never saw that table.")
+    table("Value-dependent: regret, default criterion ↓", "regret_default", physics, digits=2)
+    table("Value-dependent: regret, stated criterion ↓", "regret_stated", physics, "Stated criteria (avoid_*, time_critical) put violations near 1,000.", digits=1)
+    table("State accuracy ↑", "state_accuracy", physics)
+    table("Rule accuracy ↑", "rule_accuracy", physics)
+    table("Follows a WRONG planner recommendation ↓", "follow_wrong", physics)
+    table("Follows a RIGHT planner recommendation", "follow_right", physics)
+    lines += ["## Calibration on T7 (ECE ↓)", "", "| model | noul | score | state |", "|---|---|---|---|"]
+    for model in models:
+        lines.append(f"| {model['label']} | {_ours_cell(model, 'T7', 'noul_ece')} | {_ours_cell(model, 'T7', 'score_ece')} | {_ours_cell(model, 'T7', 'state_ece')} |")
+    lines += ["", "## T5 one-fact pairs (order-averaged answers)", "",
+              "| model | numeric: direction correct ↑ | numeric: moved questions | wording: mean shift ↓ | wording: flip rate ↓ |", "|---|---|---|---|---|"]
+    for model in models:
+        lines.append(f"| {model['label']} | {_cell(model, 'T5', 'direction_correct')} | {_cell(model, 'T5', 'numeric_moved', digits=0)} | "
+                     f"{_cell(model, 'T5', 'wording_shift')} | {_cell(model, 'T5', 'wording_flip')} |")
+    kinds = sorted({k for m in models for k in (_get(m, "sets", "T6", "t6", "kinds") or {})})
+    if kinds:
+        lines += ["", "## T6 invariance — mean |answer change| vs the base record (order-averaged) ↓", "",
+                  "Label-preserving kinds should not move the answer; `key_change` changes the label, so its column is the excess over the label change.", "",
+                  "| model | invariant (10 kinds) | " + " | ".join(kinds) + " |", "|---|---|" + "---|" * len(kinds)]
+        for model in models:
+            t6 = _get(model, "sets", "T6", "t6") or {}
+            cells = []
+            for kind in kinds:
+                entry = (t6.get("kinds") or {}).get(kind) or {}
+                cells.append(_fmt(entry.get("excess_mean" if kind == "key_change" else "shift_mean")))
+            lines.append(f"| {model['label']} | {_fmt(_get(t6, 'invariant', 'shift_mean'))} | " + " | ".join(cells) + " |")
+    lines += ["", "## General reading (accuracy ↑)", "", "| model | G1 | G2 | G2 BoolQ | G2 MultiNLI | G2 chance |", "|---|---|---|---|---|---|"]
+    for model in models:
+        domains = _get(model, "sets", "G2", "readings", "single_order", "by_domain") or {}
+        lines.append(f"| {model['label']} | {_ours_cell(model, 'G1', 'accuracy')} | {_ours_cell(model, 'G2', 'accuracy')} | "
+                     f"{_fmt(_get(domains, 'public:boolq', 'accuracy'))} | {_fmt(_get(domains, 'public:multinli', 'accuracy'))} | "
+                     f"{_cell(model, 'G2', 'chance_accuracy')} |")
+    lines += ["", "## Coverage (answered questions / questions)", "", "| model | " + " | ".join(physics + ["G1", "G2"]) + " |",
+              "|---|" + "---|" * (len(physics) + 2)]
+    for model in models:
+        lines.append(f"| {model['label']} | " + " | ".join(_cell(model, s, "coverage") for s in physics + ["G1", "G2"]) + " |")
     return "\n".join(lines) + "\n"
 
 

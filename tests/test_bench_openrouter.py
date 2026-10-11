@@ -211,6 +211,26 @@ def test_the_three_answer_kinds_of_a_real_response_become_one_listing_each():
     assert prediction["format"] == "openrouter-decisions" and prediction["orders"] == "stored"
 
 
+def test_choice_probabilities_that_do_not_sum_to_one_are_renormalized():
+    record = _records()[3]
+    payload = api_request(record, "m")
+    response = auto_answer(payload)
+    choice = next(n for n, q in payload["questions"].items() if q["type"] == "choice")
+    keys = list(payload["questions"][choice]["criteria"])
+    response["answers"][choice]["probabilities"] = {k: (0.5 if i == 0 else 0.0) for i, k in enumerate(keys)} | {keys[-1]: 0.49}
+    prediction, problems = to_prediction(record, payload, response, model="m", levels=11)
+    answer = prediction["questions"][choice]["answer"]
+    assert not problems and sum(answer["probabilities"].values()) == pytest.approx(1.0) and answer["raw_sum"] == pytest.approx(0.99)
+
+
+def test_a_200_without_answers_is_not_cached(tmp_path):
+    cache = ResponseCache(tmp_path / "cache")
+    with FakeServer([(200, {"error": {"code": 502, "message": "Provider returned error"}}, {}, 0)]) as server:
+        out = run_requests("m", _jobs(_records()[:1]), client=_client(server.url), cache=cache, ledger=Ledger(None, max_total_usd=1.0, max_model_usd=1.0),
+                           price={}, concurrency=1)
+    assert out["problems"] and not out["predictions"] and not list((tmp_path / "cache").rglob("*.json"))
+
+
 def test_a_choice_without_probabilities_is_one_hot_and_bad_answers_are_reported():
     record = _records()[3]
     payload = api_request(record, "m")
@@ -336,12 +356,14 @@ def test_the_cap_stops_before_it_would_be_exceeded(tmp_path):
     assert saved["totals"]["calls"] == 3 and saved["models"]["m"]["cost_from_usage"] == 3
     again = Ledger(tmp_path / "ledger.json", max_total_usd=0.0065, max_model_usd=1.0)  # 장부는 누적이다
     assert again.spent() == pytest.approx(ledger.spent())
-    with pytest.raises(BudgetExceeded):
+    with pytest.raises(BudgetExceeded) as caught:
         again.reserve("m", 1e-3)
+    assert caught.value.scope == "total"
     per_model = Ledger(None, max_total_usd=1.0, max_model_usd=0.003)
     per_model.reserve("a", 1e-3)
-    with pytest.raises(BudgetExceeded, match="per-model"):
+    with pytest.raises(BudgetExceeded, match="per-model") as caught:
         per_model.reserve("a", 1e-3)
+    assert caught.value.scope == "model"
     per_model.reserve("b", 1e-3)  # 다른 모델은 제 몫이 있다
     with pytest.raises(ValueError):
         Ledger(None, max_total_usd=None, max_model_usd=1.0)

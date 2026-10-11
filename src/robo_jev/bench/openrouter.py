@@ -108,7 +108,11 @@ class DecisionsError(RuntimeError):
 
 
 class BudgetExceeded(RuntimeError):
-    """이 요청을 보내면 상한을 넘는다 — 보내지 않았다."""
+    """이 요청을 보내면 상한을 넘는다 — 보내지 않았다. ``scope``는 ``"model"``(그 모델만 멈춘다) 또는 ``"total"``(전체가 멈춘다)."""
+
+    def __init__(self, message: str, *, scope: str):
+        super().__init__(message)
+        self.scope = scope
 
 
 # --------------------------------------------------------------------------
@@ -253,7 +257,12 @@ def _answer(question: dict[str, Any], raw: Any, levels: int) -> tuple[dict[str, 
             values = {k: _number(probabilities.get(k, 0.0)) for k in keys}
             if any(v is None or v < 0 for v in values.values()):
                 raise ValueError("choice 확률이 수가 아니다")
+            total = sum(values.values())
+            if total <= 0:
+                raise ValueError("choice 확률의 합이 0이다")
             answer = {"probabilities": {k: float(v) for k, v in values.items()}}
+            if abs(total - 1.0) > 1e-6:  # 합이 1이 아니면(반올림 등) 나눠 분포로 — 원래 합은 남긴다
+                answer = {"probabilities": {k: float(v) / total for k, v in values.items()}, "raw_sum": total}
         elif raw.get("choice") in keys:
             answer = {"probabilities": {k: (1.0 if k == raw["choice"] else 0.0) for k in keys}, "one_hot": True}
         else:
@@ -463,10 +472,10 @@ class Ledger:
             amount = max(0.0, float(estimate_usd)) * max(self.reserve_factor, self._factor.get(model, 0.0))
             model_after = self.spent(model) + self._reserved.get(model, 0.0) + amount
             total_after = self.spent() + sum(self._reserved.values()) + amount
-            if model_after > self.max_model_usd + 1e-12:
-                raise BudgetExceeded(f"{model}: ${model_after:.6f} would exceed the per-model cap ${self.max_model_usd:.4f}")
             if total_after > self.max_total_usd + 1e-12:
-                raise BudgetExceeded(f"total ${total_after:.6f} would exceed the cap ${self.max_total_usd:.4f}")
+                raise BudgetExceeded(f"total ${total_after:.6f} would exceed the cap ${self.max_total_usd:.4f}", scope="total")
+            if model_after > self.max_model_usd + 1e-12:
+                raise BudgetExceeded(f"{model}: ${model_after:.6f} would exceed the per-model cap ${self.max_model_usd:.4f}", scope="model")
             self._reserved[model] = self._reserved.get(model, 0.0) + amount
             return amount
 
@@ -683,7 +692,7 @@ def run_requests(
             reserved = ledger.reserve(model, job.estimate_usd)
         except BudgetExceeded as error:
             model_stop.set()
-            if "total" in str(error):
+            if error.scope == "total":
                 stop.set()
             with lock:
                 out["skipped"][rid] = "budget"
@@ -716,7 +725,8 @@ def run_requests(
         ledger.save()
         meta = {"resolved_model": response.get("model"), "provider": response.get("provider"), "generation_id": response.get("id"),
                 "usage": usage, "cost_usd": actual, "attempts": info["attempts"], "seconds": info["seconds"]}
-        cache.put(model, rid, job.sha, response, meta=meta)
+        if isinstance(response.get("answers"), dict):  # 답이 없는 200(오류 몸)은 캐시하지 않는다 — 다시 돌리면 다시 묻는다
+            cache.put(model, rid, job.sha, response, meta=meta)
         note(calls_log, {"time": time.time(), "model": model, "record_id": rid, "request_sha256": job.sha, **meta})
         with lock:
             out["stats"]["sent"] += 1

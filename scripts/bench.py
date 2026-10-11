@@ -11,7 +11,8 @@
     uv run python scripts/bench.py pilot --max-cost-usd 5 --max-cost-per-model-usd 0.5
     # (유료 — 승인 뒤 통제자만) 본 실행: 세트 × 모델, 캐시에 있으면 다시 보내지 않는다
     uv run python scripts/bench.py run --max-cost-usd 5 --max-cost-per-model-usd 1.5
-    # 점수 (CPU): 우리 모델의 이미 있는 예측에서 벤치 부분집합을 골라(artifacts/bench/v0/ours/) API 결과와 같은 지표로 → results.json·.md
+    # 점수 (CPU): 우리 모델의 이미 있는 예측에서 벤치 부분집합을 골라(artifacts/bench/v0/ours/) API 결과와 같은 지표로
+    #   → results.json, results.md(README 표), results-detail.md(모든 지표)
     uv run python scripts/bench.py score
     # 그래프·점수 장치 시험용 가짜 API 예측 (실제 결과로 쓰지 않는다) → 점수 → 미리보기 그래프
     uv run python scripts/bench.py fake-api && uv run python scripts/bench.py score --api-dir artifacts/bench/v0/fake-api --results artifacts/bench/v0/results-fake.json
@@ -389,7 +390,7 @@ def cmd_score(args: argparse.Namespace) -> int:
     """우리 모델(이미 있는 예측의 벤치 부분집합)과 API 모델(run이 쓴 예측)을 같은 지표로 → results.json + results.md(README 표)."""
     from robo_jev.bench.define import load_config
     from robo_jev.bench.openrouter import price_of
-    from robo_jev.bench.score import describe_source, pooled_brier, readme_table, resolve_ours, set_metrics, subset_predictions
+    from robo_jev.bench.score import describe_source, pooled_brier, readme_table, render_details, resolve_ours, set_metrics, subset_predictions
     from robo_jev.decisions.records import read_records
 
     config = load_config(args.config)
@@ -445,6 +446,7 @@ def cmd_score(args: argparse.Namespace) -> int:
     path = args.results or (args.out / "results.json")
     _write_json(path, results)
     path.with_suffix(".md").write_text(readme_table(results, date=date), encoding="utf-8")
+    path.with_name(path.stem + "-detail.md").write_text(render_details(results), encoding="utf-8")
     _log(f"{len(models)} models scored → {path} (+ .md)")
     return 0
 

@@ -95,6 +95,8 @@ def test_run_writes_predictions_ledger_and_reuses_the_cache_then_score_reads_the
     assert results["models"][1]["price_per_m_input"] == pytest.approx(0.1)
     assert results["models"][0]["sets"]["G2"]["readings"]["single_order"]["coverage"] == 1.0
     assert "| vendor/a |" in (out / "results.md").read_text(encoding="utf-8")
+    detail = (out / "results-detail.md").read_text(encoding="utf-8")
+    assert "Value-dependent: action accuracy" in detail and "General reading" in detail and detail.count("| vendor/b |") >= 10
 
 
 def test_paid_commands_need_both_caps_and_refuse_a_spent_ledger(tmp_path):
