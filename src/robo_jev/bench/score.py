@@ -342,7 +342,13 @@ def render_details(results: dict[str, Any]) -> str:
             lines.append(f"| {model['label']} | " + " | ".join(_ours_cell(model, s, key, digits) for s in sets) + " |")
         lines.append("")
 
-    lines += ["## Pooled physics (T2+T3+T4, yes/no + score questions)", "", "| model | questions | Brier | always-0.5 Brier | skill |", "|---|---|---|---|---|"]
+    lines += ["## Models", "", "| model | role | resolved version(s) | $/M input | sets |", "|---|---|---|---|---|"]
+    for model in models:
+        resolved = sorted({v for source in (model.get("sources") or {}).values() for v in (source.get("resolved_models") or [])})
+        price = model.get("price_per_m_input")
+        lines.append(f"| {model['label']} | {model.get('role')} | {', '.join(resolved) or '—'} | {'self-hosted' if price is None else f'{price:.3f}'} | "
+                     f"{', '.join(model['sets'])} |")
+    lines += ["", "## Pooled physics (T2+T3+T4, yes/no + score questions)", "", "| model | questions | Brier | always-0.5 Brier | skill |", "|---|---|---|---|---|"]
     for model in models:
         pooled = (model.get("pooled") or {}).get("unseen")
         lines.append(f"| {model['label']} | {pooled['questions'] if pooled else '—'} | {_fmt(pooled and pooled['brier'])} | "
