@@ -523,7 +523,10 @@ class DecisionTrainer:
     # -- 데이터 --
 
     def mix_plan(self, epoch: int) -> list[tuple[int, str, int]]:
-        """일반 능력 보호 갈고리 — 다른 판단 데이터를 섞을 자리(모듈 설명). 지금은 언제나 빈 목록이다."""
+        """일반 능력 보호 갈고리 — 다른 판단 데이터를 섞을 자리(모듈 설명). 지금은 언제나 빈 목록이다.
+
+        채울 때 할 일: 섞는 데이터의 기록(지금 계획의 index는 `train_records`를 가리킨다)과 그 몫을 정하고, epoch당 예 수
+        (:attr:`examples_per_epoch` → `steps_per_epoch`·`max_steps`)에 섞는 예를 더하고, 재개 정체(manifest의 data)에 그 데이터의 digest를 넣는다."""
         return []
 
     def _plan(self, epoch: int) -> list[tuple[int, str, int]]:
