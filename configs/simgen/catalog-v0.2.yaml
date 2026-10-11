@@ -1,11 +1,12 @@
-# 속성 목록 v0.1 — 의미(몸·움직이는 주체·용기·감각)를 물리 값의 분포로 잇는 다리 (docs/12 §4, Task v0a 지시서 §3).
+# 속성 목록 v0.2 — 의미(몸·움직이는 주체·용기·감각)를 물리 값의 분포로 잇는 다리 (docs/12 §4, Task v0a·v0b 지시서 §3).
+# v0.2(Task v0b): 끼어듦의 글 전제 띠(intent_motion.step_in_band — 사후와 생성기가 같은 띠를 쓴다), P3·P4·P6 항목.
 # v0.1(리뷰 1 반영): 몸별 회전 감속 하한(comfort_decel)·정지 허용치(stop_tolerance)·끼어듦 마지막 위치 상한(last_fix_max), 가로지르는
 # 상대의 늦은 반응(crossing_reaction), 뚜껑 보임 약 5 %(lid_view), 용기 셋 추가(measuring_cylinder, glue_pot, paint_can).
 #
 # 범위는 [하한, 상한]이고 균등분포로 뽑는다(따로 적지 않으면). 값의 근거는 항목마다 주석에 적었다. 이 파일의 값을 바꾸면
 # `version`을 올린다 — 레코드의 `generator.catalog`가 이 문자열이고, (생성기 버전, 속성 목록 버전, seed)로 레코드를 다시 만든다.
 # 범위 검사는 tests/test_simgen_catalog.py가 한다(지시서 §3.2 표·§3.3 주체 목록의 범위 안인지).
-version: catalog-v0.1
+version: catalog-v0.2
 
 g: 9.81                 # m/s²
 horizon_s: 3.0          # 갈라 굴리기 지평 H (지시서 §3.3)
@@ -235,6 +236,10 @@ agents:
 # 거리 매개변수(standoff)는 손이면 `arm_scale`을 곱한다(작업 영역의 크기).
 intent_motion:
   step_in_lateral_speed: [0.3, 0.8]  # 끼어드는 옆 속도 = 그 주체의 최고 평소 속도 × 이 비율 (공은 ball_lateral_speed)
+  # 글의 전제 "당신의 차선으로 들어오고 있다"의 뜻(Task v0b, 리뷰 1 재검증의 끼어듦 잔여): 상대의 몸 중심이 지금 들어오는 쪽에서 진로
+  # 중심선까지 (로봇 반지름 + 상대 반지름) × 이 비율 안에 있고 아직 중심선을 넘지 않았다. 생성기는 이 띠 안에 상대를 두고, 사후는 옆 위치를
+  # 이 띠로 자른다(오래된 추적에서 사후가 상대를 차선 밖에 두어 닿음을 낮게 잡던 +0.05를 없앤다).
+  step_in_band: 0.6
   ball_lateral_speed: [0.3, 1.5]
   stay: {stay_s: [1.5, 6.0]}         # 옆으로 가던 걸음을 멈추고 이만큼 머문 뒤 마저 건넌다
   cross: {accel: [1.0, 2.0]}         # 옆 속도를 그 주체의 평소 속도(speed 범위)까지 올린다
@@ -420,3 +425,211 @@ margins:
     unit: m
     sigma: {mobile_base: 0.15, humanoid: 0.12, forklift_amr: 0.30, arm: 0.02}
     half_range: {mobile_base: 0.40, humanoid: 0.35, forklift_amr: 0.80, arm: 0.05}
+  # Task v0b 결정 여유(같은 혼합분포):
+  #   tip      = b_eff/h − a_ref/g   (경사로는 b_eff/h − 쏠림 비) — 기준 움직임(단단한 제동·지금 속도의 회전·보통 출발·보통 경사로)  [무차원]
+  #   slide    = μ − a_ref/g (경사로 μ − 쏠림 비)                                                                                       [무차원]
+  #   stack    = L_low/2 − |d + c|                                                                                                       [m]
+  #   seat     = logit P(제대로 | 측정) — 닻 측정의 사후 로그 오즈(0 근처 = 측정만으로 갈리지 않음)                                           [무차원]
+  #   sight    = d_vis − (반응 거리 + 최대 제동 거리) — 오래된 추적: 다시 보이는 거리 안에 서나                                      [m]
+  #   corner   = v·w/u_nom − r_sum − (반응 거리 + 최대 제동 거리) — 모퉁이: 이름난 속도의 상대가 나와도 서거나 먼저 지나가나          [m]
+  #   late     = d_late − (반응 거리 + 최대 제동 거리)(센서 불일치 — 있다면 늦게 보고도 서나)                                              [m]
+  tip: {unit: ratio, sigma: {mobile_base: 0.05, humanoid: 0.05, forklift_amr: 0.05}, half_range: {mobile_base: 0.14, humanoid: 0.14, forklift_amr: 0.14}}
+  slide: {unit: ratio, sigma: {mobile_base: 0.05, humanoid: 0.05, forklift_amr: 0.05}, half_range: {mobile_base: 0.14, humanoid: 0.14, forklift_amr: 0.14}}
+  stack: {unit: m, sigma: {arm: 0.015, humanoid: 0.025, forklift_amr: 0.05}, half_range: {arm: 0.04, humanoid: 0.07, forklift_amr: 0.14}}
+  seat: {unit: logit, sigma: {arm: 1.5, humanoid: 1.5, forklift_amr: 1.5}, half_range: {arm: 4.0, humanoid: 4.0, forklift_amr: 4.0}}
+  late: {unit: m, sigma: {mobile_base: 0.08, humanoid: 0.07, forklift_amr: 0.15}, half_range: {mobile_base: 0.20, humanoid: 0.18, forklift_amr: 0.40}}
+  sight: {unit: m, sigma: {mobile_base: 0.20, humanoid: 0.15, forklift_amr: 0.40}, half_range: {mobile_base: 0.50, humanoid: 0.40, forklift_amr: 1.00}}
+  corner: {unit: m, sigma: {mobile_base: 0.25, humanoid: 0.20, forklift_amr: 0.50}, half_range: {mobile_base: 0.60, humanoid: 0.50, forklift_amr: 1.20}}
+
+# ===============================================================================================================
+# Task v0b — 새 현상 P3·P4·P6 (지시서 §1). 모두 계산식(MuJoCo 없음). 숨은 값은 사후에서 이 사전 분포로 뽑고, 관측된 값은 감각 잡음의 역으로.
+# ===============================================================================================================
+
+# ---------------------------------------------------------------------------------------------------------------
+# P3 받침 위의 키 큰 물건: 넘어짐·미끄러짐(준정적). 받침이 가속 a로 움직이면(감속은 앞으로, 출발은 뒤로, 회전은 옆으로 쏠림)
+#   넘어짐:   min(a, μg)·h > g·b_eff        (h = 무게중심 높이, b_eff = 쏠리는 쪽 가장자리까지 무게중심의 수평 거리 = 바닥 반폭 ∓ 치우침)
+#   미끄러짐: a > μg 이고 넘어지지 않을 때 — 미끄러진 거리 s = v²/(2μg) − v²/(2a)(감속·출발 — 받침이 v에서 서거나 v까지 가는 동안 물건은
+#             마찰 μg로만 따라간다), 회전은 s = (a − μg)·T²/2(호를 도는 시간 T 동안); s가 그쪽 가장자리까지 거리보다 길면 떨어진다.
+#   경사로:   기울기 φ에서 받침이 a로 서면(내려가며 멈춤) 쏠림 비 = (sin φ + a/g)/cos φ — 넘어짐 비 > b_eff/h, 미끄러짐 비 > μ.
+#             미끄러진 거리는 물건의 감속 g(μcos φ − sin φ)로 같은 식(μcos φ ≤ sin φ면 계속 미끄러져 떨어진다).
+# 숨은 값: 무게중심 높이 비율 h/H(com_ratio), 앞뒤 치우침(바닥 반폭 × offset 안에서 균등, 부호 무작위), 마찰 μ(받침 표면 decks).
+# 관측: 물건의 종류·높이·바닥 폭(측정 잡음), 가장자리까지 거리, 받침 표면의 종류(말 — 그 표면의 μ 범위가 사전이다).
+# fall = 떨어지거나 넘어졌을 때의 비용 항목(가치표).
+# ---------------------------------------------------------------------------------------------------------------
+loads:
+  water_bottle: {height: [0.24, 0.34], base: [0.075, 0.10], com_ratio: [0.34, 0.48], offset: 0.10, fall: fall_light, bodies: [mobile_base, humanoid]}
+  glass_bottle: {height: [0.26, 0.33], base: [0.068, 0.085], com_ratio: [0.34, 0.46], offset: 0.05, fall: fall_fragile, bodies: [mobile_base, humanoid]}
+  flower_vase: {height: [0.32, 0.50], base: [0.08, 0.13], com_ratio: [0.48, 0.66], offset: 0.15, fall: fall_fragile, bodies: [mobile_base, humanoid]}
+  tall_glass: {height: [0.14, 0.19], base: [0.055, 0.075], com_ratio: [0.33, 0.47], offset: 0.05, fall: fall_fragile, bodies: [mobile_base, humanoid]}
+  reagent_bottle: {height: [0.18, 0.26], base: [0.075, 0.10], com_ratio: [0.36, 0.48], offset: 0.05, fall: fall_chemical, bodies: [mobile_base, humanoid]}
+  box_stack: {height: [0.50, 0.90], base: [0.25, 0.40], com_ratio: [0.36, 0.62], offset: 0.25, fall: fall_heavy, bodies: [mobile_base, humanoid]}
+  crate_stack: {height: [1.10, 1.80], base: [0.60, 0.80], com_ratio: [0.38, 0.62], offset: 0.25, fall: fall_heavy, bodies: [forklift_amr]}
+  drum: {height: [0.85, 0.95], base: [0.56, 0.60], com_ratio: [0.28, 0.55], offset: 0.15, fall: fall_chemical, bodies: [forklift_amr]}
+  plant_pot: {height: [0.45, 0.90], base: [0.14, 0.24], com_ratio: [0.30, 0.55], offset: 0.15, fall: fall_light, bodies: [mobile_base, humanoid, forklift_amr]}
+  paint_tins: {height: [0.38, 0.60], base: [0.16, 0.20], com_ratio: [0.40, 0.56], offset: 0.15, fall: fall_heavy, bodies: [mobile_base, humanoid, forklift_amr]}
+# 받침 표면 → 마찰 μ의 사전 범위(물건 바닥 재질과의 짝을 거칠게 덮는다).
+decks:
+  rubber_mat: {mu: [0.55, 0.90]}
+  antislip_tray: {mu: [0.45, 0.75]}
+  wood_deck: {mu: [0.32, 0.55]}
+  plastic_tray: {mu: [0.22, 0.45]}
+  steel_forks: {mu: [0.20, 0.40]}
+  steel_tray: {mu: [0.15, 0.32]}
+p3:
+  measure_sigma: {height: 0.01, base: 0.005, edge: 0.01}     # 카메라로 잰 높이·바닥 폭·가장자리 거리 σ (m) — 지게차는 forklift_scale배
+  forklift_scale: 3.0
+  edge: {mobile_base: [0.03, 0.20], humanoid: [0.03, 0.15], forklift_amr: [0.05, 0.35]}   # 물건 → 받침 가장자리(앞·뒤·옆) m
+  maneuvers: {brake: 0.45, turn: 0.35, start: 0.20}          # p3_carrying_tall의 움직임 갈래 비율
+  start_levels: {start_gentle: 0.5, start_normal: 1.0, start_quick: 1.6}   # 출발 가속 = 몸의 accel × 이 비율(quick은 hard 감속 이하)
+  secure_s: {mobile_base: [6.0, 12.0], humanoid: [5.0, 10.0], forklift_amr: [10.0, 20.0]}   # 멈추고 고정하는 시간(글에 적는다)
+  ramp_angle_deg: {mobile_base: [2.0, 9.0], humanoid: [2.0, 8.0], forklift_amr: [2.0, 8.0]}   # 경사로 기울기(지도·자세 센서 — 관측됨)
+  ramp_length: [2.0, 8.0]
+  ramp_slow_ratio: 0.5
+  detour_s: [12.0, 60.0]                                     # 경사로를 피해 돌아가는 시간(글에 적는다)
+  ramp_directions: {down: 0.6, up: 0.4}
+# 쌓기(p3_place_stack): 위에 놓을 물건의 무게중심이 아래 받침면 안에 있나. 위 물건 중심의 계획 위치 d(관측, 아래 물건 중심 기준),
+# 놓기 오차 ε ~ N(0, σ_place)(몸별, 글에 적는다), 무게중심 치우침 c ~ U(±c_max·L/2)(숨은 값; 들어 올릴 때의 쏠림 단서가 부호를 알려 준다 —
+# 맞을 확률 cue_reliability). 서 있을 조건 |d + ε + c| < L_low/2. 다시 맞추기(recentre) = d를 0으로, 다른 곳에 놓기 = 위험 없음,
+# 무게 확인(check_weight = 다시 보기) = c를 σ_check로 재고 정한다.
+stack_items:
+  carton: {length: [0.30, 0.60], c_max: 0.35, fall: fall_heavy, bodies: [arm, humanoid]}
+  tote: {length: [0.40, 0.60], c_max: 0.30, fall: fall_light, bodies: [arm, humanoid]}
+  crate: {length: [0.40, 0.60], c_max: 0.30, fall: fall_heavy, bodies: [arm, humanoid]}
+  parcel: {length: [0.20, 0.50], c_max: 0.40, fall: fall_fragile, bodies: [arm, humanoid]}
+  pallet_load: {length: [1.00, 1.20], c_max: 0.25, fall: fall_heavy, bodies: [forklift_amr]}
+stack:
+  sigma_place: {arm: [0.003, 0.008], humanoid: [0.008, 0.02], forklift_amr: [0.02, 0.05]}
+  offset_frac: [0.0, 0.45]          # 계획 위치 |d| / (L_low/2)의 범위(여유를 맞출 때)
+  cue_share: 0.5                    # 쏠림 단서가 있는 비율(나머지는 단서 없음)
+  cue_reliability: 0.8
+  recentre_s: [3.0, 6.0]
+  elsewhere_s: [10.0, 30.0]
+  check_s: [3.0, 5.0]
+  sigma_check: 0.25                 # 무게 확인으로 잰 c의 잡음 = c_max·L/2 × 이 비율
+
+# ---------------------------------------------------------------------------------------------------------------
+# P4 안착·정렬 확인(측정의 베이즈). 상태 s ∈ {seated, perched(가이드·턱 위에 걸침), tilted(기울어 끼임)}(끼우기: {inserted, stuck(덜 들어가
+# 걸림), misaligned(어긋나 끼임)}). 상태마다 참 측정값 x ~ N(μ_s, σ_s), 센서 보고 m = x + N(0, σ_e) — 그래서 p(m | s) = N(μ_s,
+# √(σ_s² + σ_e²))이고 사후 P(s | m) ∝ 사전 × Π p(m_j | s)가 닫힌 꼴이다. 기울기는 부호 있는 각(기울어 끼임은 ± 반반 — 두 정규의 섞임).
+# 다시 재기(look_again)는 같은 x를 새 잡음으로 다시 잰다(같은 상태 안에서 두 보고는 x를 통해 상관). 클래스(fine/medium/coarse)가 눈금을 정한다.
+# ---------------------------------------------------------------------------------------------------------------
+p4:
+  place:
+    states: [seated, perched, tilted]
+    classes:
+      fine:    # 판·튜브·정밀 부품(mm 이하)
+        prior: {seated: 0.75, perched: 0.15, tilted: 0.10}
+        tolerance: {height_mm: 0.5, tilt_deg: 1.0}
+        height_mm: {seated: [0.0, 0.15], perched: [1.5, 0.45], tilted: [1.0, 0.5]}
+        tilt_deg: {seated: [0.0, 0.25], perched: [0.0, 0.5], tilted: [2.8, 0.9]}
+        force_n: {seated: [4.0, 0.8], perched: [2.2, 0.8], tilted: [6.5, 1.5]}
+        sensor_sigma: {height_mm: [0.10, 0.25], tilt_deg: [0.20, 0.40], force_n: [0.3, 0.8]}
+      medium:  # 컵·쟁반·화분·접시(수 mm)
+        prior: {seated: 0.75, perched: 0.15, tilted: 0.10}
+        tolerance: {height_mm: 2.0, tilt_deg: 2.0}
+        height_mm: {seated: [0.0, 0.6], perched: [6.0, 2.0], tilted: [4.0, 2.0]}
+        tilt_deg: {seated: [0.0, 0.6], perched: [0.0, 1.0], tilted: [5.0, 1.8]}
+        force_n: {seated: [10.0, 2.0], perched: [5.0, 2.0], tilted: [14.0, 3.0]}
+        sensor_sigma: {height_mm: [0.5, 1.5], tilt_deg: [0.4, 0.8], force_n: [0.8, 1.5]}
+      coarse:  # 상자·짐·팔레트(cm) — 힘은 재지 않는다
+        prior: {seated: 0.75, perched: 0.15, tilted: 0.10}
+        tolerance: {height_mm: 10.0, tilt_deg: 2.0}
+        height_mm: {seated: [0.0, 3.0], perched: [25.0, 8.0], tilted: [15.0, 8.0]}
+        tilt_deg: {seated: [0.0, 0.8], perched: [0.0, 1.5], tilted: [5.0, 2.0]}
+        sensor_sigma: {height_mm: [2.0, 6.0], tilt_deg: [0.5, 1.0]}
+  insert:
+    states: [inserted, stuck, misaligned]
+    classes:
+      fine:    # 커넥터·핀·바이알
+        prior: {inserted: 0.75, stuck: 0.15, misaligned: 0.10}
+        tolerance: {depth_mm: 0.5}
+        depth_mm: {inserted: [0.0, 0.25], stuck: [3.5, 1.2], misaligned: [1.5, 0.7]}
+        force_n: {inserted: [12.0, 3.0], stuck: [30.0, 6.0], misaligned: [25.0, 6.0]}
+        lateral_n: {inserted: [1.0, 0.5], stuck: [1.5, 0.8], misaligned: [6.0, 2.0]}
+        sensor_sigma: {depth_mm: [0.10, 0.30], force_n: [0.5, 1.5], lateral_n: [0.3, 0.8]}
+      medium:  # 플러그·카트리지·필터 바스켓·호스 이음
+        prior: {inserted: 0.75, stuck: 0.15, misaligned: 0.10}
+        tolerance: {depth_mm: 2.0}
+        depth_mm: {inserted: [0.0, 1.0], stuck: [8.0, 3.0], misaligned: [4.0, 2.0]}
+        force_n: {inserted: [20.0, 5.0], stuck: [45.0, 10.0], misaligned: [38.0, 10.0]}
+        lateral_n: {inserted: [2.0, 1.0], stuck: [3.0, 1.5], misaligned: [10.0, 3.0]}
+        sensor_sigma: {depth_mm: [0.5, 1.5], force_n: [1.0, 3.0], lateral_n: [0.5, 1.5]}
+  measured_share: {force_n: 0.75, lateral_n: 0.75, tilt_deg: 0.8}   # 이 측정이 있는 비율(높이·깊이는 늘 있다)
+  # 행동의 결과(상태별): fix = 바로잡힐 확률, damage = 망가질 확률(그 나머지는 그대로). reseat/retry = 처음부터 다시(성공 확률), 시간은 글에 적는다.
+  actions:
+    place:
+      continue: {time: 0.0}
+      press_down: {time: [1.0, 2.0], fix: {perched: 0.85, tilted: 0.20}, damage: {tilted: 0.25}}
+      reseat: {time: [4.0, 8.0], success: 0.92}
+      call_human: {time: [20.0, 40.0]}
+      look_again: {time: [0.8, 1.5]}
+    insert:
+      continue: {time: 0.0}
+      push_harder: {time: [1.0, 2.0], fix: {stuck: 0.60, misaligned: 0.15}, damage: {stuck: 0.10, misaligned: 0.35}}
+      reseat: {time: [3.0, 6.0], success: 0.90}
+      call_human: {time: [20.0, 40.0]}
+      look_again: {time: [0.8, 1.5]}
+  # 놓거나 끼우는 물건의 종류 → 갈래(place/insert)·눈금 클래스·두고 갔을 때의 비용 항목(가치표)·그 일을 하는 몸.
+  items:
+    well_plate: {family: place, class: fine, fail: unseated_major, bodies: [arm]}
+    sample_tube: {family: place, class: fine, fail: unseated_major, bodies: [arm, humanoid]}
+    fixture_part: {family: place, class: fine, fail: unseated_major, bodies: [arm]}
+    seedling_plug: {family: place, class: fine, fail: unseated_minor, bodies: [arm]}
+    cup_saucer: {family: place, class: medium, fail: unseated_minor, bodies: [arm, humanoid]}
+    meal_tray: {family: place, class: medium, fail: unseated_minor, bodies: [humanoid]}
+    dish_rack: {family: place, class: medium, fail: unseated_minor, bodies: [arm, humanoid]}
+    pot_tray: {family: place, class: medium, fail: unseated_minor, bodies: [arm, humanoid]}
+    shelf_tote: {family: place, class: coarse, fail: unseated_minor, bodies: [arm, humanoid]}
+    shelf_box: {family: place, class: coarse, fail: unseated_minor, bodies: [humanoid]}
+    locker_parcel: {family: place, class: coarse, fail: unseated_minor, bodies: [humanoid]}
+    luggage_rack: {family: place, class: coarse, fail: unseated_major, bodies: [humanoid]}
+    rack_pallet: {family: place, class: coarse, fail: unseated_major, bodies: [forklift_amr]}
+    dolly_load: {family: place, class: coarse, fail: unseated_minor, bodies: [forklift_amr]}
+    connector: {family: insert, class: fine, fail: unseated_major, bodies: [arm]}
+    dowel_pin: {family: insert, class: fine, fail: unseated_major, bodies: [arm]}
+    vial_rotor: {family: insert, class: fine, fail: unseated_major, bodies: [arm]}
+    tool_bit: {family: insert, class: fine, fail: unseated_major, bodies: [arm, humanoid]}
+    portafilter: {family: insert, class: medium, fail: unseated_minor, bodies: [arm]}
+    cartridge: {family: insert, class: medium, fail: unseated_minor, bodies: [arm, humanoid]}
+    plug: {family: insert, class: medium, fail: unseated_minor, bodies: [arm, humanoid]}
+    hose_fitting: {family: insert, class: medium, fail: unseated_minor, bodies: [arm, humanoid]}
+    capsule: {family: insert, class: medium, fail: unseated_major, bodies: [humanoid]}
+  # P4+P6(오래된 카메라): 카메라 측정(높이·기울기)은 나이 a초 전 것 — 그 뒤 상태가 바뀌었을 수 있다(흔들림·부딪힘): P(지금 | 그때) =
+  # (1 − q)·같음 + q·사전, q = 1 − e^{−λa}. 힘은 지금 값.
+  stale: {age: [0.5, 4.0], hazard_per_s: [0.05, 0.15]}
+
+# ---------------------------------------------------------------------------------------------------------------
+# P6 오래된 관측·가림·센서 불일치.
+# ---------------------------------------------------------------------------------------------------------------
+p6:
+  # 마지막으로 본 것이 아직 있나(p6_stale_track): 진로에 서 있던 것을 a초 전에 봤고 지금은 가려졌다. 떠날 위험률 λ(초당, 숨은 값 — 종류별
+  # 범위)로 P(아직 있음) = E[e^{−λ(a + t)}]. 있으면 로봇이 그 자리에서 d_vis 앞(가림이 걷히는 거리 — 지도에서, 관측)에 왔을 때 보고 최대로
+  # 선다 — 반응 거리 + 제동 거리가 d_vis보다 길면 닿는다. 다시 보기 = 잠깐 서서 다시 살핌(시간, 있으면 detect, 없으면 false_alarm로 '있다').
+  stale:
+    leave_rate: {adult: [0.08, 0.40], child: [0.20, 0.80], elder_walker: [0.03, 0.15], cart: [0.05, 0.30], other_robot: [0.10, 0.50], forklift: [0.05, 0.30]}
+    age: [0.5, 6.0]
+    sight: {mobile_base: [0.5, 3.0], humanoid: [0.5, 2.5], forklift_amr: [1.5, 6.0]}
+    spot_ahead: [0.5, 2.0]             # 가림이 걷히는 곳에서 그 자리까지 더 가야 하는 거리 = 진행 방향 앞 거리 − d_vis의 여유 m
+    look: {time: [0.8, 1.5], detect: 0.95, false_alarm: 0.03}
+  # 모퉁이 뒤에서 누가 나올 위험(p6_blind_corner): 출현 위험률 λ(초당, 숨은 값 — 분야 카드의 범위), 나오면 그때 보이고 로봇은 최대로 선다.
+  # 나온 상대는 진로 쪽으로 걷는다(가로지름과 같은 물리, 늦은 반응 포함). 다시 보기 = 모퉁이에 서서 내다봄(시간) — 앞으로 window_s 안에
+  # 나올 상대가 있으면 detect로 알린다.
+  corner:
+    lateral: {mobile_base: [0.3, 1.8], humanoid: [0.3, 1.5], forklift_amr: [0.5, 2.5]}   # 가림 가장자리 → 진로 가장자리(관측)
+    look: {time: [1.5, 3.0], detect: 0.9, false_alarm: 0.03, window_s: 3.0}
+  # 라이다·카메라 불일치(p6_sensor_conflict): 단서(유리·먼지·햇빛·검은 표면·김)가 센서마다 [P(있다 | 있음), P(있다 | 없음)]을 정한다.
+  # 있으면 가까운 거리 감지(late, 숨은 값 범위)에서 최대로 선다. 다시 보기 = 멈춰서 다른 각도로 다시 잼(두 센서 새 보고, 같은 신뢰도).
+  conflict:
+    cues:
+      glass: {lidar: [0.70, 0.08], camera: [0.25, 0.05], late: [0.25, 0.60]}
+      dust: {lidar: [0.92, 0.40], camera: [0.85, 0.05], late: [0.30, 0.80]}
+      glare: {lidar: [0.92, 0.05], camera: [0.35, 0.08], late: [0.20, 0.50]}
+      black: {lidar: [0.35, 0.03], camera: [0.85, 0.08], late: [0.20, 0.45]}
+      steam: {lidar: [0.90, 0.35], camera: [0.55, 0.15], late: [0.25, 0.60]}
+    distance: {mobile_base: [1.0, 4.0], humanoid: [1.0, 3.5], forklift_amr: [2.0, 8.0]}   # 보고된 거리
+    look: {time: [1.0, 2.0]}
+    detour_s: [6.0, 20.0]
+  # P1+P6(가린 곳에서 나와 끼어듦): 방금 가림 뒤에서 나와 차선으로 들어오는 상대 + 그 뒤를 따라 나올 수 있는 둘째 상대(숨은 값: 있음 확률
+  # follow — 종류별, 나오는 시각 U(follow_delay), 같은 쪽에서 같은 방향으로 자기 속도로 가로지른다).
+  follow: {adult: 0.30, child: 0.50, elder_walker: 0.20, cart: 0.15, cyclist: 0.30, other_robot: 0.15, forklift: 0.10}
+  follow_delay: [0.4, 1.8]

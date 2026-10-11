@@ -307,7 +307,7 @@ def _step_in_agent(cfg, ctx, ra: float, r_sum: float, rng) -> tuple[dict, dict]:
     agent = cfg.agent(ctx.agent_kind)
     motion = cfg.catalog["intent_motion"]
     direction = 1.0 if rng.random() < 0.5 else -1.0
-    offset = rng.uniform(0.0, 0.6) * r_sum
+    offset = rng.uniform(0.0, cfg.catalog["intent_motion"]["step_in_band"]) * r_sum  # 글의 전제 띠(사후와 같은 띠)
     lat0 = -direction * offset
     if agent["group"] == "ball":
         u0 = _u(rng, motion["ball_lateral_speed"])

@@ -7,6 +7,9 @@
 score 1~2개, 상태 choice(50 %), 규칙 적용 choice(35 %). 행동 choice의 약 20 %는 지시문에 기준을 적고 그 기준의 비용 덮어쓰기를
 조리법에 넣는다. 선택지 열쇠 문체(단어 / 짧은 코드 / 동사형)는 레코드마다, 선택지 순서와 질문 순서는 섞는다.
 
+**한 요청 안에서 같은 것을 두 번 묻지 않는다**(리뷰 1 재검증 m-c): 질문마다 묻는 것의 정체(:func:`identity` — 사건·선택지·상태·
+기준)가 있고, 후보 묶음은 이미 물은 정체를 뺀 뒤에 고른다. 사건 확률을 묻는 score는 같은 사건의 noul과 같은 질문이다.
+
 뚜껑이 보이는 용기(약 5 %)에서는 쏟아짐이 늘 0이라 쏟아짐 질문 대신 '액면이 뚜껑까지 차오르나'(사건 rim_reached)를 묻고, avoid_spill
 기준을 쓰지 않는다(리뷰 1 질문 7). 지연 score는 그 지연의 정의(장면마다)를 지시문에 적는다(리뷰 1 m3): P1은 '앞으로 3초 동안 잃는
 진행', 감속(P5)은 '목표 앞에 일찍 서서 남은 거리를 다시 다가가는 시간', 회전은 '회전을 마치는 시각이 늦어지는 만큼'.
@@ -34,7 +37,7 @@ from robo_jev.simgen.phrases import (
 )
 from robo_jev.simgen.spec import Reading
 
-__all__ = ["KEY_STYLES", "Question", "QuestionSet", "write_questions"]
+__all__ = ["KEY_STYLES", "Question", "QuestionSet", "identity", "write_questions"]
 
 KEY_STYLES = ("word", "code", "verb")
 
@@ -60,6 +63,41 @@ class QuestionSet:
     key_style: str
     primary_action: str              # 계획기 권고가 겨누는 행동 질문의 이름
     key_question: str                # 핵심 noul의 이름
+
+
+def identity(recipe: dict) -> tuple:
+    """질문이 묻는 것의 정체(정답 조리법에서): 같은 정체의 두 질문은 같은 정답을 갖는 같은 질문이다(m-c).
+
+    행동 = (기준, 선택지 집합); 사건 확률(noul, 사건 확률 score, 세계 사건 상태 choice) = (갈래, 사건, 선택지, 부정); 양 score =
+    (양, 선택지, 변환); 상태 = 상태 이름; 규칙 = 갈래 집합."""
+    kind = recipe["kind"]
+    if kind == "action":
+        return ("action", recipe.get("criterion"), tuple(sorted(recipe["options"].values())))
+    if kind == "noul":
+        return ("event", recipe["source"], recipe["event"], recipe.get("option"), bool(recipe.get("negate")))
+    if kind == "score":
+        if recipe["source"] == "event":
+            return ("event", "event", recipe["name"], recipe["option"], False)
+        return ("quantity", recipe["name"], recipe["option"], recipe.get("transform"))
+    if kind == "state":
+        if "world_event" in recipe:
+            return ("event", "world", recipe["world_event"], None, False)
+        return ("state", recipe["state"])
+    if kind == "rule":
+        return ("rule", tuple(sorted(recipe["classes"].values())))
+    raise ValueError(kind)
+
+
+@dataclass
+class _Cand:
+    """후보 질문 하나: 정체(만들기 전에 안다)와 만드는 함수."""
+
+    ident: tuple
+    build: object
+
+
+def _ev(source: str, event: str, option: str | None = None) -> tuple:
+    return ("event", source, event, option, False)
 
 
 _OPT_NAME = {
@@ -273,45 +311,46 @@ def _extra_nouls(c: _Ctx, options: tuple[str, ...]) -> list:
     if obs.agent is not None:
         for option in options:
             if option not in ("go_now", "creep", "wait") or obs.variant == "stopped":
-                cands.append(lambda o=option: _contact_noul(c, o))
+                cands.append(_Cand(_ev("event", "contact", option), lambda o=option: _contact_noul(c, o)))
     if obs.scene in ("p1_step_in", "p1p5_step_in_carrying"):
         if obs.agent.group == "ball":
-            cands.append(lambda: _noul(c, c.name("ball_stops_in_lane", "ball_stays_in_path"), [
+            cands.append(_Cand(_ev("world", "ball_stops_in_lane"), lambda: _noul(c, c.name("ball_stops_in_lane", "ball_stays_in_path"), [
                 "Will {ref} come to rest inside your lane?", "Does {ref} stop rolling before it leaves your lane?", "Is {ref} going to stop in your path?",
-            ], {"source": "world", "event": "ball_stops_in_lane"}))  # fmt: skip
+            ], {"source": "world", "event": "ball_stops_in_lane"})))  # fmt: skip
         else:
-            cands.append(lambda: _noul(c, c.name("still_in_lane_2s", "in_path_in_2s"), [
+            cands.append(_Cand(_ev("world", "in_lane_2s"), lambda: _noul(c, c.name("still_in_lane_2s", "in_path_in_2s"), [
                 "Will {ref} still be in {lane} 2 seconds from now?", "Two seconds from now, is {ref} still inside {lane}?",
                 "Is {ref} going to be in your way 2 s from now?",
-            ], {"source": "world", "event": "in_lane_2s"}))  # fmt: skip
+            ], {"source": "world", "event": "in_lane_2s"})))  # fmt: skip
         if obs.env.sides is not None:
             for side, s in zip(("left", "right"), obs.env.sides, strict=True):
                 if s.status == "occluded":
-                    cands.append(lambda side=side: _noul(c, c.name(f"{side}_side_free", f"room_{side}"), [
+                    cands.append(_Cand(_ev("world", f"side_free_{side}"), lambda side=side: _noul(c, c.name(f"{side}_side_free", f"room_{side}"), [
                         "Is the space you cannot see on your {side} actually free for a swerve?", "If you swerve {side}, is there room (nothing out of sight there)?",
                         "Is the area you cannot see on your {side} empty?",
-                    ], {"source": "world", "event": f"side_free_{side}"}, side=side))  # fmt: skip
+                    ], {"source": "world", "event": f"side_free_{side}"}, side=side)))  # fmt: skip
     if obs.scene == "p1_crossing" and obs.agent.group == "ball":
-        cands.append(lambda: _noul(c, c.name("ball_reaches_path", "ball_gets_to_path"), [
+        cands.append(_Cand(_ev("world", "ball_reaches_path"), lambda: _noul(c, c.name("ball_reaches_path", "ball_gets_to_path"), [
             "Will {ref} actually reach your path before it stops rolling?", "Does {ref} roll far enough to enter your path?", "Will {ref} make it into your path?",
-        ], {"source": "world", "event": "ball_reaches_path"}))  # fmt: skip
+        ], {"source": "world", "event": "ball_reaches_path"})))  # fmt: skip
     if obs.scene == "p1_head_on" and "stop_moderate" in options:
-        cands.append(lambda: _noul(c, c.name("stuck_if_stop", "blocked_if_stop"), [
+        cands.append(_Cand(_ev("event", "blocked", "stop_moderate"), lambda: _noul(c, c.name("stuck_if_stop", "blocked_if_stop"), [
             "If you brake firmly to a stop now, will you and {ref} end up stuck facing each other?",
             "Stopping now, do the two of you end up blocking each other at a standstill?",
             "If you stop here, are you and {ref} left facing each other with no one able to pass?",
-        ], {"source": "event", "event": "blocked", "option": "stop_moderate"}))  # fmt: skip
+        ], {"source": "event", "event": "blocked", "option": "stop_moderate"})))  # fmt: skip
     if obs.container is not None:
         for option in options:
             if option not in ("continue",):
-                cands.append(lambda o=option: _spill_noul(c, o))
+                event = "rim_reached" if _lid_visible(obs) else "spill"
+                cands.append(_Cand(_ev("event", event, option), lambda o=option: _spill_noul(c, o)))
     if obs.scene == "p5_braking":
         for option in ("stop_gentle", "stop_moderate"):
             action = option_short(option, obs)
-            cands.append(lambda o=option, a=action: _noul(c, c.name(f"hit_if_{_OPT_NAME[o]}", f"overrun_{_OPT_NAME[o]}"), [
+            cands.append(_Cand(_ev("event", "overrun", option), lambda o=option, a=action: _noul(c, c.name(f"hit_if_{_OPT_NAME[o]}", f"overrun_{_OPT_NAME[o]}"), [
                 "If you {action}, will you hit {obstacle} before you stop?", "Suppose you {action}. Do you reach {obstacle} before coming to rest?",
                 "Would you run into {obstacle} if you {action}?",
-            ], {"source": "event", "event": "overrun", "option": o}, action=a))  # fmt: skip
+            ], {"source": "event", "event": "overrun", "option": o}, action=a)))  # fmt: skip
     return cands
 
 
@@ -350,48 +389,48 @@ def _score_candidates(c: _Ctx, options: tuple[str, ...]) -> list:
         action = option_short(option, obs)
         short = _OPT_NAME[option]
         if obs.agent is not None and (option not in ("go_now", "creep", "wait") or obs.variant == "stopped"):
-            cands.append(lambda o=option, a=action, s=short: Question(
+            cands.append(_Cand(_ev("event", "contact", option), lambda o=option, a=action, s=short: Question(
                 c.name(f"contact_risk_{s}", f"risk_{s}"), "score",
                 c.fmt(c.pick(["How likely is contact with {ref} if you {action}?", "Rate the risk of touching {ref} if you {action}.",
                               "What is the chance that you touch {ref} if you {action}?"]), action=a),
-                ["0 = no chance of contact", "1 = contact is certain"], {"kind": "score", "source": "event", "name": "contact", "option": o}))  # fmt: skip
-            cands.append(lambda o=option, a=action, s=short: Question(
+                ["0 = no chance of contact", "1 = contact is certain"], {"kind": "score", "source": "event", "name": "contact", "option": o})))  # fmt: skip
+            cands.append(_Cand(("quantity", "closeness", option, None), lambda o=option, a=action, s=short: Question(
                 c.name(f"closeness_{s}", f"how_close_{s}"), "score",
                 c.fmt(c.pick(["How close will you come to {ref} if you {action}?", "Rate how near you pass {ref} if you {action}.",
                               "If you {action}, how tight is your closest approach to {ref}?"]), action=a),
-                [f"0 = you stay at least {near} clear of {c.ref}", f"1 = you touch {c.ref}"], {"kind": "score", "source": "quantity", "name": "closeness", "option": o}))  # fmt: skip
+                [f"0 = you stay at least {near} clear of {c.ref}", f"1 = you touch {c.ref}"], {"kind": "score", "source": "quantity", "name": "closeness", "option": o})))  # fmt: skip
         if obs.container is not None:
-            cands.append(lambda o=option, a=action, s=short: Question(
+            cands.append(_Cand(("quantity", "headroom", option, None), lambda o=option, a=action, s=short: Question(
                 c.name(f"rim_reach_{s}", f"headroom_used_{s}"), "score",
                 c.fmt(c.pick(["How much of the free space above the liquid in {cref} gets used up if you {action}?",
                               "Rate how close the liquid in {cref} comes to the rim if you {action}.",
                               "If you {action}, how near does the surface in {cref} climb to the rim?"]), action=a),
-                ["0 = the surface barely moves", "1 = it reaches the rim (or spills)"], {"kind": "score", "source": "quantity", "name": "headroom", "option": o}))  # fmt: skip
+                ["0 = the surface barely moves", "1 = it reaches the rim (or spills)"], {"kind": "score", "source": "quantity", "name": "headroom", "option": o})))  # fmt: skip
             if _lid_visible(obs):
-                cands.append(lambda o=option, a=action, s=short: Question(
+                cands.append(_Cand(_ev("event", "rim_reached", option), lambda o=option, a=action, s=short: Question(
                     c.name(f"lid_reach_risk_{s}", f"reaches_lid_chance_{s}"), "score",
                     c.fmt(c.pick(["How likely is the liquid in {cref} to surge up to the lid if you {action}?",
                                   "Rate the chance that the surface in {cref} reaches the lid if you {action}.",
                                   "If you {action}, what is the chance that the liquid in {cref} touches the lid?"]), action=a),
                     ["0 = it certainly stays below the lid", "1 = it certainly reaches the lid"],
-                    {"kind": "score", "source": "event", "name": "rim_reached", "option": o}))  # fmt: skip
+                    {"kind": "score", "source": "event", "name": "rim_reached", "option": o})))  # fmt: skip
             else:
-                cands.append(lambda o=option, a=action, s=short: Question(
+                cands.append(_Cand(_ev("event", "spill", option), lambda o=option, a=action, s=short: Question(
                     c.name(f"spill_risk_{s}", f"spill_chance_{s}"), "score",
                     c.fmt(c.pick(["How likely is a spill from {cref} if you {action}?", "Rate the chance that {cref} spills if you {action}.",
                                   "What is the risk of spilling from {cref} if you {action}?"]), action=a),
-                    ["0 = no chance of a spill", "1 = a spill is certain"], {"kind": "score", "source": "event", "name": "spill", "option": o}))  # fmt: skip
+                    ["0 = no chance of a spill", "1 = a spill is certain"], {"kind": "score", "source": "event", "name": "spill", "option": o})))  # fmt: skip
         if option not in ("continue", "go_now", "turn_100"):
             templates = _delay_templates(obs)
-            cands.append(lambda o=option, a=action, s=short, t=templates: Question(
+            cands.append(_Cand(("quantity", "delay", option, "per_3s"), lambda o=option, a=action, s=short, t=templates: Question(
                 c.name(f"delay_{s}", f"time_cost_{s}"), "score", c.fmt(c.pick(t), action=a),
-                ["0 = no time lost", "1 = 3 seconds or more"], {"kind": "score", "source": "quantity", "name": "delay", "option": o, "transform": "per_3s"}))  # fmt: skip
+                ["0 = no time lost", "1 = 3 seconds or more"], {"kind": "score", "source": "quantity", "name": "delay", "option": o, "transform": "per_3s"})))  # fmt: skip
         if obs.scene == "p5_braking" and option != "continue":
-            cands.append(lambda o=option, a=action, s=short: Question(
+            cands.append(_Cand(_ev("event", "overrun", option), lambda o=option, a=action, s=short: Question(
                 c.name(f"overrun_risk_{s}", f"hit_risk_{s}"), "score",
                 c.fmt(c.pick(["How likely are you to hit {obstacle} if you {action}?", "Rate the risk of reaching {obstacle} before you stop if you {action}.",
                               "What is the chance of running into {obstacle} if you {action}?"]), action=a),
-                ["0 = you certainly stop short", "1 = you certainly hit it"], {"kind": "score", "source": "event", "name": "overrun", "option": o}))  # fmt: skip
+                ["0 = you certainly stop short", "1 = you certainly hit it"], {"kind": "score", "source": "event", "name": "overrun", "option": o})))  # fmt: skip
     return cands
 
 
@@ -446,7 +485,7 @@ def _state_candidates(c: _Ctx, style: str) -> list:
             return Question(c.name("their_next_move", "likely_move", "what_they_do"), "choice", instructions, criteria,
                             {"kind": "state", "state": "intent", "options": options})  # fmt: skip
 
-        cands.append(intent_q)
+        cands.append(_Cand(("state", "intent"), intent_q))
     if obs.agent is not None and obs.agent.group == "ball" and obs.scene in ("p1_step_in", "p1p5_step_in_carrying", "p1_crossing"):
 
         def ball_q():
@@ -463,7 +502,8 @@ def _state_candidates(c: _Ctx, style: str) -> list:
             return Question(c.name("ball_outcome", "where_ball_ends"), "choice", c.fmt("Where does {ref} end up?"), criteria,
                             {"kind": "state", "world_event": event, "options": options})  # fmt: skip
 
-        cands.append(ball_q)
+        event = "ball_reaches_path" if obs.scene == "p1_crossing" else "ball_stops_in_lane"
+        cands.append(_Cand(_ev("world", event), ball_q))
     if obs.container is not None:
 
         def fill_q():
@@ -474,7 +514,7 @@ def _state_candidates(c: _Ctx, style: str) -> list:
             instructions = c.fmt(c.pick(["How full is {cref} most likely?", "Which fill range best matches {cref}?", "Estimate the fill level of {cref}."]))
             return Question(c.name("fill_level", "how_full"), "choice", instructions, criteria, {"kind": "state", "state": "fill_bin", "options": options})
 
-        cands.append(fill_q)
+        cands.append(_Cand(("state", "fill_bin"), fill_q))
         if obs.container.lid == "unknown":
 
             def lid_q():
@@ -483,7 +523,7 @@ def _state_candidates(c: _Ctx, style: str) -> list:
                 instructions = c.fmt(c.pick(["Does {cref} have a lid on?", "Is {cref} covered?", "Is there a lid on {cref}?"]))
                 return Question(c.name("lid_on", "has_lid"), "choice", instructions, criteria, {"kind": "state", "state": "lid", "options": options})
 
-            cands.append(lid_q)
+            cands.append(_Cand(("state", "lid"), lid_q))
     return cands
 
 
@@ -662,18 +702,31 @@ def write_questions(cfg: SimgenConfig, obs: Observation, options: tuple[str, ...
     primary = _action_question(c, options, style, "a", criterion())
     questions = [primary]
     if rng.random() < 0.25:
-        questions.append(_action_question(c, options, style, "b", criterion()))
+        second = _action_question(c, options, style, "b", criterion())
+        if identity(second.recipe) != identity(primary.recipe):  # 같은 기준·같은 선택지면 같은 질문이다(m-c)
+            questions.append(second)
     key = _key_noul(c)
     questions.append(key)
-    extra = _extra_nouls(c, options)
+    used = {identity(q.recipe) for q in questions}
+
+    def fresh(cands: list) -> list:
+        return [cand for cand in cands if cand.ident not in used]
+
+    def take(cand: _Cand) -> None:
+        q = cand.build()
+        assert identity(q.recipe) == cand.ident, (cand.ident, q.recipe)
+        questions.append(q)
+        used.add(cand.ident)
+
+    extra = fresh(_extra_nouls(c, options))
     for i in rng.permutation(len(extra))[: int(rng.integers(0, 3))]:
-        questions.append(extra[int(i)]())
-    scores = _score_candidates(c, options)
+        take(extra[int(i)])
+    scores = fresh(_score_candidates(c, options))
     for i in rng.permutation(len(scores))[: int(rng.integers(1, 3))]:
-        questions.append(scores[int(i)]())
-    states = _state_candidates(c, style)
+        take(scores[int(i)])
+    states = fresh(_state_candidates(c, style))
     if states and rng.random() < 0.5:
-        questions.append(states[int(rng.integers(len(states)))]())
+        take(states[int(rng.integers(len(states)))])
     rules = _rule_candidates(c, style)
     if rules and rng.random() < 0.35:
         rule = rules[int(rng.integers(len(rules)))]()

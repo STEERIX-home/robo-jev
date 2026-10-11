@@ -33,9 +33,9 @@ def within(inner, outer) -> bool:
     return outer[0] - 1e-12 <= inner[0] <= inner[1] <= outer[1] + 1e-12
 
 
-def test_config_versions_are_the_fix_round_1_files(config):
-    """리뷰 1 수정: 속성 목록·상황 옷은 v0.1(몸별 허용치·반응 확률·카드 태그), 가치표는 사용자가 고르기 전까지 values-v0."""
-    assert config.catalog["version"] == "catalog-v0.1"
+def test_config_versions_are_the_current_files(config):
+    """Task v0b: 속성 목록 v0.2(끼어듦 전제 띠, P3·P4·P6), 상황 옷 v0.1, 가치표는 사용자가 고르기 전까지 values-v0."""
+    assert config.catalog["version"] == "catalog-v0.2"
     assert config.skins["version"] == "skins-v0.1"
     assert config.values["version"] == "values-v0"
     assert cat.load_config(values_path=cat.VALUES_V01_PATH).values["version"] == "values-v0.1"
@@ -115,11 +115,16 @@ def test_containers_are_physically_plausible(config):
 
 
 def test_values_table_is_the_brief_proposal(config):
+    """v0a 항목은 지시서의 제안값 그대로이고, Task v0b는 새 현상의 사고 항목만 더했다(P1·P5 정답은 바뀌지 않는다)."""
     costs = config.values["costs"]
     assert costs == {
         "contact_person": 100, "contact_vulnerable": 150, "contact_vehicle": 120, "contact_object": 15,
         "spill_hot": 25, "spill_chemical": 40, "spill_other": 8, "delay_per_s": 1.0,
+        "fall_light": 8, "fall_fragile": 20, "fall_heavy": 40, "fall_chemical": 45,
+        "unseated_minor": 15, "unseated_major": 45, "damage": 40, "human_call": 5,
     }  # fmt: skip
+    v01 = cat.load_config(values_path=cat.VALUES_V01_PATH).values
+    assert v01["costs"] == costs and v01["criteria"] == config.values["criteria"]  # 두 표는 두 기제만 다르다
     assert config.values["tau"] == 2.0
     for criterion in config.values["criteria"].values():
         assert set(criterion) <= set(costs)
