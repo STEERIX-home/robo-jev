@@ -35,7 +35,7 @@ from robo_jev.launch import cloud as cloud_module
 from robo_jev.launch.cloud import LaunchNotApproved, PodContext, down, finish, launch_pod, pod_lifetime, run_cap_usd, start_script, watchdog_script
 from robo_jev.launch.jobs import format_plan, plan_job
 from robo_jev.launch.launcher import prepare_job
-from robo_jev.launch.ledger import DEFAULT_PHASE, Ledger, LedgerError, PhaseCapExceeded
+from robo_jev.launch.ledger import DEFAULT_PHASE, Ledger, LedgerError, PhaseCapExceeded, reconcile
 from robo_jev.launch.manifest import Budget, load_manifest, validate
 from robo_jev.launch.providers.local import LocalBackend
 from robo_jev.launch.providers.runpod import (
@@ -434,6 +434,19 @@ def test_a_full_pod_round_trip_creates_runs_fetches_deletes_and_closes_the_ledge
     assert int(body["env"]["ROBOJEV_TERMINATE_AT"]) <= pod["create_requested_epoch"] + 0.5 * 3600 - 60
     assert "RUNPOD_API_KEY" not in body["env"] and KEY not in json.dumps(body), "계정 키는 pod에 가지 않는다"
     assert KEY not in path.read_text(encoding="utf-8")
+
+
+def test_the_billed_amount_is_read_back_into_the_ledger_and_the_larger_figure_counts(pod_world):
+    """돈을 쓴 뒤 장부에 실제 청구액을 적는다 — 읽기 전용 청구 기록에서. 추정보다 많이 청구됐으면 그쪽을 센다."""
+    manifest, path = _prepared(pod_world, _unique("cloud1-bill"))
+    launch_pod(manifest, manifest_path=path, ctx=pod_world["ctx"], yes=True, dest=pod_world["tmp"] / "f")
+    estimate = pod_world["ledger"].summary()["runs"][0]["spent_usd_estimate"]
+    pod_world["api"].billed["fakepod001"] = round(estimate + 0.25, 4)
+    reader = RunPodClient(Secret(KEY), transport=pod_world["api"], read_only=True)
+    rows = reconcile(pod_world["ledger"], reader)
+    assert rows == [{"run_id": manifest["run_id"], "pod_id": "fakepod001", "billed_usd": round(estimate + 0.25, 4), "estimate_usd": estimate}]
+    assert pod_world["ledger"].committed_usd() == pytest.approx(round(estimate + 0.25, 4)), "추정보다 많이 청구됐다 — 청구액을 센다"
+    assert pod_world["api"].calls("GET", "billing/pods")[0]["query"]["podId"] == "fakepod001"
 
 
 def test_the_pod_deadline_and_the_runner_deadline_fit_inside_the_cap(pod_world):

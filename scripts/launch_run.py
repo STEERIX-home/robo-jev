@@ -302,6 +302,8 @@ def build_parser() -> argparse.ArgumentParser:
     book.add_argument("--ledger", default=None)
     book.add_argument("--set-phase-cap", dest="set_phase_cap", type=float, default=None)
     book.add_argument("--reason", default=None)
+    book.add_argument("--reconcile", action="store_true", help="(읽기 전용) pod를 만든 run마다 RunPod 청구 기록을 장부에 적는다")
+    book.add_argument("--key-file", dest="key_file", default=None)
     return parser
 
 
@@ -392,6 +394,15 @@ def main(argv: list[str] | None = None) -> int:
         ledger = _ledger(args.ledger)
         if args.set_phase_cap is not None:
             ledger.set_phase_cap(args.set_phase_cap, reason=args.reason or "")
+        if args.reconcile:
+            from robo_jev.launch.ledger import reconcile
+            from robo_jev.launch.providers.runpod import RunPodError
+
+            try:
+                rows = reconcile(ledger, _runpod(args, read_only=True).client)
+            except RunPodError as exc:
+                raise SystemExit(f"[launch_run] RunPod 읽기 실패: {exc}") from None
+            print(json.dumps({"reconciled": rows}, ensure_ascii=False, indent=1))
         print(json.dumps(ledger.summary(), ensure_ascii=False, indent=1))
         return 0
 

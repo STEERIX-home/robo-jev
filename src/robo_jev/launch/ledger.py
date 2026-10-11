@@ -24,7 +24,7 @@ from typing import Any
 
 from robo_jev.launch.manifest import REPO, now
 
-__all__ = ["DEFAULT_LEDGER", "DEFAULT_PHASE", "Ledger", "LedgerError", "PhaseCapExceeded"]
+__all__ = ["DEFAULT_LEDGER", "DEFAULT_PHASE", "Ledger", "LedgerError", "PhaseCapExceeded", "reconcile"]
 
 DEFAULT_LEDGER = REPO / "artifacts" / "cloud" / "runpod-ledger.json"
 #: 첫 클라우드 단계 — 2026-10-11 사용자 승인(통제자 전달): 누적 $150.
@@ -213,3 +213,21 @@ class Ledger:
             if name:
                 data["phase"]["name"] = name
             data["history"].append({"at": now(), "note": f"단계 상한 변경 {before} → {data['phase']} — 이유: {reason}"})
+
+
+def reconcile(ledger: Ledger, client: Any) -> list[dict[str, Any]]:
+    """pod를 만든 run마다 RunPod의 **청구 기록**(읽기 전용 `GET /v2/billing/pods?podId=…`, 지난 30일)을 장부에 적는다.
+
+    청구는 늦게 잡힐 수 있으므로(시간 단위 묶음) 닫힌 run은 추정과 청구 중 **큰 쪽**으로 센다(:meth:`Ledger.committed_usd`).
+    `client`는 읽기 전용이면 된다(:class:`robo_jev.launch.providers.runpod.RunPodClient`). 돌려주는 것은 run마다 (run, pod, 청구액).
+    """
+    out = []
+    for run in ledger.read()["runs"]:
+        if not run.get("pod_id") or run.get("status") not in ("closed", "delete-unconfirmed", "active"):
+            continue
+        data = client.pod_billing(pod_id=run["pod_id"], bucket="day")
+        totals = ((data or {}).get("metadata") or {}).get("totals") or {}
+        billed = float(totals.get("totalAmount") or 0.0)
+        ledger.record_billed(run["run_id"], billed_usd=billed, source=f"GET /v2/billing/pods?podId={run['pod_id']} ({now()})")
+        out.append({"run_id": run["run_id"], "pod_id": run["pod_id"], "billed_usd": billed, "estimate_usd": run.get("spent_usd_estimate")})
+    return out

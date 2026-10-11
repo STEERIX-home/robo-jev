@@ -47,6 +47,8 @@ class FakeRunPodApi:
         self.created: list[dict[str, Any]] = []
         self.deleted: list[str] = []
         self.volumes: list[dict[str, Any]] = []
+        #: pod id → 청구액 (GET /billing/pods가 돌려준다)
+        self.billed: dict[str, float] = {}
         self._next = 0
 
     # -- 기록에서 고르기 --
@@ -101,7 +103,9 @@ class FakeRunPodApi:
         if method == "GET" and path == "network-volumes":
             return self._json(200, {"networkVolumes": self.volumes})
         if method == "GET" and path == "billing/pods":
-            return self._json(200, {"records": [], "metadata": {"totals": {"totalAmount": 0.0}}})
+            amount = float(self.billed.get(query.get("podId"), 0.0))
+            return self._json(200, {"records": [{"podId": query.get("podId"), "totalAmount": amount}] if amount else [],
+                                    "metadata": {"totals": {"totalAmount": amount, "gpuAmount": amount, "cpuAmount": 0.0, "diskAmount": 0.0}}})  # fmt: skip
         return self._json(404, {"title": "Not Found", "status": 404, "detail": f"no route {method} {path}"})
 
     # -- 안쪽 --
