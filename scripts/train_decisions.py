@@ -33,7 +33,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from robo_jev.gpu import DEFAULT_FRACTION, limit_gpu_memory, memory_report, require_free  # noqa: E402
 
-SCRIPT_VERSION = "v0d-train-1"
+SCRIPT_VERSION = "v0d-train-2"
 
 
 def _log(message: str) -> None:
@@ -132,19 +132,19 @@ def cmd_lengths(args: argparse.Namespace) -> int:
     tokenizer = load_tokenizer(tokenizer_id)
     per_question: dict[str, list[int]] = {}
     for record in records:
-        for prompt in record_prompts(record, tokenizer, seed=1, fmt=args.format, mode="direct", orders="seeded"):
+        for prompt in record_prompts(record, tokenizer, seed=1, fmt=args.format, mode="direct", orders="seeded", version=args.prompt_version):
             per_question.setdefault(prompt["type"], []).append(len(prompt["tokens"]))
     plan = epoch_plan(records, seed=args.seed, epoch=0, q=args.questions_per_request, augment=True)
     planned: dict[str, list[int]] = {}
     for index, name, order_seed in plan:
-        (example,) = build_examples(records[index], [name], tokenizer, order_seed=order_seed, fmt=args.format)
+        (example,) = build_examples(records[index], [name], tokenizer, order_seed=order_seed, fmt=args.format, version=args.prompt_version)
         planned.setdefault(example["type"], []).append(len(example["tokens"]))
     everything = [n for values in per_question.values() for n in values]
     sampled = [n for values in planned.values() for n in values]
     rng = random.Random(0)
     payload = {
         "script_version": SCRIPT_VERSION, "input": str(args.input), "input_sha256": file_sha256(args.input), "validation": validation,
-        "tokenizer": describe_tokenizer(tokenizer_id), "format": args.format, "records": len(records),
+        "tokenizer": describe_tokenizer(tokenizer_id), "format": args.format, "prompt_version": args.prompt_version, "records": len(records),
         "every_question": {"all": length_summary(everything), **{kind: length_summary(values) for kind, values in sorted(per_question.items())}},
         "training_plan_epoch0": {
             "questions_per_request": args.questions_per_request, "seed": args.seed, "examples": len(plan),
@@ -179,6 +179,7 @@ def build_parser() -> argparse.ArgumentParser:
     lengths.add_argument("--format", default="chat", choices=("chat", "plain"))
     lengths.add_argument("--questions-per-request", type=int, default=2)
     lengths.add_argument("--seed", type=int, default=0)
+    lengths.add_argument("--prompt-version", default="v0c-p3", choices=("v0c-p2", "v0c-p3"))
     lengths.set_defaults(func=cmd_lengths)
     return parser
 

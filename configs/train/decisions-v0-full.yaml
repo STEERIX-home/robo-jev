@@ -9,6 +9,9 @@ out_dir: artifacts/runs/decisions-v0
 run_name: null               # null = decisions-v0-full-<시각>
 mode: full
 format: chat
+prompt_version: v0c-p3          # 학습·dev·평가가 같은 판 — p3: score 기준점 11개 0.0…1.0, [0, 1] 전체를 읽는다 (Task v0d fix round 1)
+code_mass_weight: 0.2           # 보조 항 −λ·log(코드 질량): 보여 준 코드에 확률이 모이게 (통제자 결정 3)
+selection: final                # 평가하는 모델은 마지막 체크포인트 — 미리 정한다; dev 최선은 metrics.json에 기록만 (통제자 결정 4)
 augment: true                # 학습 예마다 선택지 순서·예/아니오 순서·점수 방향을 무작위로 (정답도 같이)
 questions_per_request: 2     # 요청마다 epoch당 최대 2개, 종류별로 고르게
 type_weights: {choice: 1.0, noul: 1.0, score: 1.0}
@@ -40,3 +43,4 @@ stop_after_steps: null
 mix: []                      # 일반 능력 보호용 데이터 섞기 — 자리만 있다 (지금은 비어 있어야 한다)
 device: cuda
 dtype: bfloat16
+allow_large_activations: false   # step 메모리 추정이 울타리의 90 %를 넘으면 시작하지 않는다

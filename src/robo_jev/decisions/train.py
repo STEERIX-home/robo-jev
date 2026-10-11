@@ -5,7 +5,11 @@
 투영해 코드 위 softmax를 얻고(진단의 :func:`~robo_jev.decisions.zero_shot.score_code_prompts` 와 같은 수학), 정답의 코드 분포
 (:func:`~robo_jev.decisions.examples.code_target`)와의 **soft-label 교차 엔트로피**를 줄인다. 보고하는 값은 KL(= 교차 엔트로피 − 정답의
 엔트로피, 0이 바닥)이고 gradient는 교차 엔트로피와 같다. 프롬프트의 다른 토큰에는 손실이 없다(검사가 hidden의 gradient가 답 자리 밖에서
-0임을 본다). step 손실 = Σ 예 w_type · KL / 예 수 — 종류별 가중치(`type_weights`, 기본 모두 1)는 그 종류 예의 기여에 곱하는 배수다.
+0임을 본다). **보조 항** (Task v0d fix round 1, 통제자 결정 3): 같은 답 자리에서 −λ·log(코드 질량), λ = `code_mass_weight`(기본 0.2).
+코드 질량 = 전체 어휘 softmax가 **보여 준 코드들**에 준 몫 = exp(logsumexp(코드 logits) − logsumexp(전체 logits)) — 진단의 ``code_mass``와 같은
+수학(fp32 LM head). 주 항(코드 행 위 KL)만으로는 보여 주지 않은 글자(다른 질문의 코드 C–H 등)로 확률이 새어 나간다(시운전 1: noul 0.975 → 0.54).
+step 손실 = Σ 예 (w_type · KL + λ · (−log 코드 질량)) / 예 수 — 종류별 가중치(`type_weights`, 기본 모두 1)는 KL 항에만 곱하는 배수이고 보조 항은
+모든 예에 같다(형식의 문제라서).
 
 **두 방식** (`mode`):
 
@@ -27,20 +31,29 @@
 
 **dev.** 학습 파일에서 레코드 열쇠 해시로 2 %를 뗀다(:func:`~robo_jev.decisions.examples.split_dev`). dev 손실은 dev 레코드의 **모든 질문 × 균형
 배치 전부**(진단과 같은 프롬프트, shuffle seed 1)의 KL이다 — 질문마다 배치 평균, 종류마다 질문 평균, 머리 값은 종류 평균의 `type_weights` 가중
-평균. 위치 쏠림도 같이 적는다: noul의 예-먼저 쏠림(예가 먼저일 때의 p_yes − 나중일 때), noul 판정이 배치 사이에 바뀌는 비율, score의 방향 쏠림
-(오름차순일 때의 점수 − 내림차순일 때). dev 채점은 길이로 묶어 한 번에 읽는다(진단의 배치 1과 bf16 잡음만큼 다를 수 있다 — 추세용).
-고르기(`keep_best` → ``checkpoint-best.pt``)와 멈추기(`early_stop_patience`번 연속 나아지지 않으면 ``stopped_early``)는 **dev로만** 한다.
+평균(보조 항은 넣지 않는다 — 코드 질량은 따로 적는다). 위치 쏠림도 같이 적는다: 평균 이동이 주 지표(noul 예-먼저 쏠림 = 예가 먼저일 때의 p_yes −
+나중일 때, score 방향 쏠림 = 오름 − 내림), 판정 바뀜(판정 = 값 ``>= 0.5``, 진단과 같은 규칙)과 **결정적인 바뀜**(두 답이 모두 0.5에서 0.1 이상
+떨어진 채 바뀐 것 — 통제자 결정 6). 코드 질량은 종류별 평균과 0.5 아래인 배치의 몫. dev 채점은 길이로 묶어 한 번에 읽는다(진단의 배치 1과
+bf16 잡음만큼 다를 수 있다 — 추세용). `dev_max_records`를 넘는 dev 레코드는 학습에도 dev에도 쓰지 않고 manifest에 그 수를 적는다.
+
+**고르기는 미리 정한다** (통제자 결정 4, `selection: final`): **평가하는 모델은 마지막 체크포인트**다. dev 최선은 ``metrics.json``의 ``best``에
+기록으로만 남는다(`keep_best`면 ``checkpoint-best.pt``도 쓰지만 평가에 쓰지 않는다). 멈추기(`early_stop_patience`번 연속 나아지지 않으면
+``stopped_early``)는 dev로만 한다 — 한 epoch 본 학습에서는 발산을 막는 장치일 뿐이다.
 
 **일반 능력 보호 갈고리.** 다른 판단 데이터(나중에 일반 결정 묶음)를 섞을 자리만 있다: 설정의 ``mix``(지금은 비어 있어야 한다)와
 :meth:`DecisionTrainer.mix_plan` (지금은 언제나 빈 목록). 섞는 방식은 그 데이터가 생길 때 정한다.
 
 **운영 규칙**(GB10 통합 메모리): 진입점(``scripts/train_decisions.py``)이 첫 CUDA 할당 전에 울타리를 걸고 적재 전 여유를 확인한다
-(:data:`MIN_FREE_TRAIN_BYTES`). 체크포인트를 쓰기 전마다 run 디렉터리 파일 시스템의 여유가 `min_free_disk_gb`(기본 60 GB) 이상인지 본다 —
-모자라면 쓰지 않고 :class:`DiskSpaceError` (전체 미세조정의 저장 단위는 2B에서 ≈ 26 GB다).
+(:data:`MIN_FREE_TRAIN_BYTES`). 적재 뒤에는 **step의 메모리를 추정**해(적재된 것 + optimizer 상태 + micro-batch의 activation — 토큰당 값은 2B에서
+잰 것, :data:`ACTIVATION_BYTES_PER_TOKEN`) 울타리의 90 %를 넘으면 시작하지 않는다(`allow_large_activations: true`로만 넘긴다) — gradient
+checkpointing 없이 16 K 토큰 micro-batch를 쓴 측정이 울타리에 닿아 상자 전체의 여유가 1.5 GB까지 내려갔다(리뷰 1 Minor 6).
+체크포인트를 쓰기 전마다 run 디렉터리 파일 시스템의 여유가 `min_free_disk_gb`(기본 60 GB) 이상인지 본다 — 모자라면 쓰지 않고
+:class:`DiskSpaceError` (전체 미세조정의 저장 단위는 2B에서 ≈ 26 GB다).
 
 **평가 적재** (:func:`apply_checkpoint`): 진단 도구(``scripts/diagnose_decisions.py --checkpoint``)가 기반 backbone을 실은 뒤 학습한 가중치를
 얹는다 — LoRA는 같은 설정으로 adapter를 붙이고 adapter 값을, 전체는 모델 가중치를 싣는다. 재개용 저장 단위와 model-only(슬림) 파일을 둘 다
-받는다. 기반 모델·tokenizer·프롬프트 고정 문구(:func:`~robo_jev.decisions.prompt.fixed_text_digest`)가 학습 때와 다르면 거절한다.
+받는다. 기반 모델·tokenizer·프롬프트 판과 고정 문구(:func:`~robo_jev.decisions.prompt.fixed_text_digest`)가 학습 때와 다르면 거절한다.
+프롬프트 판(`prompt_version`, 기본 v0c-p3)은 학습·dev·평가가 같은 것을 쓴다.
 """
 
 from __future__ import annotations
@@ -80,12 +93,13 @@ from robo_jev.decisions.examples import (
     examples_per_epoch,
     split_dev,
 )
-from robo_jev.decisions.prompt import FORMATS, PROMPT_VERSION, fixed_text_digest
+from robo_jev.decisions.prompt import FORMATS, PROMPT_VERSION, PROMPT_VERSIONS, fixed_text_digest
 from robo_jev.decisions.records import file_sha256, read_records, validate_record
 from robo_jev.train import DEFAULT_LORA as JUDGE_LORA
 from robo_jev.train import MasterWeightAdamW, attach_lora, clip_gradients, lr_factor
 
 __all__ = [
+    "ACTIVATION_BYTES_PER_TOKEN",
     "DEFAULTS",
     "DEFAULT_LORA",
     "DiskSpaceError",
@@ -98,11 +112,14 @@ __all__ = [
     "apply_checkpoint",
     "base_identity",
     "code_kl",
+    "check_step_memory",
     "disk_free_bytes",
+    "estimate_step_memory",
     "load_training_records",
     "pack_micro_batches",
     "records_digest",
     "resolve_config",
+    "summarize_dev",
 ]
 
 TRAIN_KIND = "decisions-train-v0"
@@ -120,6 +137,13 @@ DEFAULT_LORA = {"r": 32, "alpha": 64, "dropout": 0.0, "targets": list(JUDGE_LORA
 #: LoRA는 훨씬 덜 쓰지만(≈ 10 GiB) 같은 문턱을 둔다 — 학습 유닛은 하나의 규칙으로 띄운다.
 MIN_FREE_TRAIN_BYTES = 60 * 2**30
 DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16}
+#: micro-batch activation의 토큰(패딩 포함)당 바이트 — Qwen3.5-2B(hidden 2,048 × 24층)의 LoRA(fp32 adapter) 측정: gradient checkpointing을 켜면
+#: 16 K 토큰에서 peak − 적재 = 5.7 GB(≈ 0.35 MB/토큰), 끄면 71.5 GB(≈ 4.4 MB/토큰). 다른 크기는 hidden × 층 수에 비례해 늘린다. 여기에
+#: micro-batch마다 1 GB를 더한다(작은 micro-batch의 고정 몫).
+ACTIVATION_BYTES_PER_TOKEN = {"checkpointed": 0.36e6, "not_checkpointed": 4.4e6}
+_ACTIVATION_REFERENCE = 2048 * 24
+#: 메모리 추정이 울타리의 이 몫을 넘으면 시작하지 않는다.
+FENCE_SHARE = 0.9
 
 DEFAULTS: dict[str, Any] = {
     "kind": TRAIN_KIND,
@@ -131,6 +155,9 @@ DEFAULTS: dict[str, Any] = {
     "lora": DEFAULT_LORA,
     "lora_dtype": "float32",  # adapter 파라미터의 계산 dtype — bfloat16이면 fp32 master(MasterWeightAdamW)로 갱신한다 (모듈 설명)
     "format": "chat",
+    "prompt_version": PROMPT_VERSION,  # 학습·dev·평가가 같은 판 (기본 v0c-p3; v0c-p2는 재현용)
+    "code_mass_weight": 0.2,  # 보조 항 −λ·log(코드 질량)의 λ (통제자 결정 3; 0이면 끈다)
+    "selection": "final",  # 평가하는 모델 — 마지막 체크포인트로 미리 정한다 (통제자 결정 4); dev 최선은 기록만
     "augment": True,
     "questions_per_request": DEFAULT_QUESTIONS_PER_REQUEST,
     "type_weights": {"choice": 1.0, "noul": 1.0, "score": 1.0},
@@ -163,6 +190,7 @@ DEFAULTS: dict[str, Any] = {
     "device": "cuda",
     "dtype": "bfloat16",
     "tiny_seed": 4,
+    "allow_large_activations": False,  # 메모리 추정이 울타리의 90 %를 넘어도 시작한다 (명시적 확인 — 보통은 거절)
 }
 #: 재개할 때 체크포인트의 설정과 달라도 되는 키 — 중단·예산 밖의 운영 값·경로뿐이다(입력 파일은 경로가 아니라 내용 digest로 대조한다).
 RESUME_FREE_KEYS = (
@@ -198,6 +226,10 @@ def resolve_config(config: dict[str, Any]) -> dict[str, Any]:
     _need(out["mode"] in MODES, f"mode: {list(MODES)} 중 하나 (받은 값: {out['mode']!r})")
     _need(out["format"] in FORMATS, f"format: {list(FORMATS)} 중 하나 (받은 값: {out['format']!r})")
     _need(out["dtype"] in DTYPES, f"dtype: {list(DTYPES)} 중 하나 (받은 값: {out['dtype']!r})")
+    _need(out["prompt_version"] in PROMPT_VERSIONS, f"prompt_version: {list(PROMPT_VERSIONS)} 중 하나 (받은 값: {out['prompt_version']!r})")
+    _need(_is_number(out["code_mass_weight"]) and out["code_mass_weight"] >= 0, "code_mass_weight: 0 이상")
+    out["code_mass_weight"] = float(out["code_mass_weight"])
+    _need(out["selection"] == "final", "selection: 'final'만 — 평가하는 모델은 마지막 체크포인트로 미리 정했다 (dev 최선은 기록으로만 남는다)")
     lora = {**DEFAULT_LORA, **(out["lora"] or {})}
     _need(set(lora) == set(DEFAULT_LORA), f"lora: 키는 {sorted(DEFAULT_LORA)} (받은 값: {sorted(lora)})")
     _need(_is_int(lora["r"]) and lora["r"] >= 1 and _is_number(lora["alpha"]) and lora["alpha"] > 0, "lora: r ≥ 1 정수, alpha > 0")
@@ -230,7 +262,7 @@ def resolve_config(config: dict[str, Any]) -> dict[str, Any]:
         isinstance(out["mix"], list) and not out["mix"],
         "mix: 일반 능력 보호용 데이터 섞기는 자리만 있다(Task v0d) — 지금은 빈 목록이어야 한다 (섞는 방식은 그 데이터가 생길 때 정한다)",
     )
-    for key in ("augment", "gradient_checkpointing", "save_checkpoints", "keep_best"):
+    for key in ("augment", "gradient_checkpointing", "save_checkpoints", "keep_best", "allow_large_activations"):
         _need(isinstance(out[key], bool), f"{key}: true/false")
     return out
 
@@ -287,11 +319,13 @@ def pack_micro_batches(lengths: Sequence[int], max_tokens: int) -> list[list[int
 # --------------------------------------------------------------------------
 
 
-def code_kl(backbone: Any, examples: Sequence[dict[str, Any]]) -> dict[str, Any]:
+def code_kl(backbone: Any, examples: Sequence[dict[str, Any]], *, code_mass: bool = False, head32: torch.Tensor | None = None) -> dict[str, Any]:
     """예들(``tokens``·``code_ids``·``target``)을 오른쪽 padding으로 한 번에 forward → 답 자리의 코드 분포와 정답의 KL·교차 엔트로피.
 
     돌려주는 것: ``kl``·``ce``(``[B]`` fp32 tensor — gradient가 켜져 있으면 미분 가능), ``probs``(예마다 보이는 순서의 코드 확률 목록).
-    코드 logits = 답 자리 hidden(fp32) · LM head 코드 행(fp32) — 진단의 읽기와 같은 수학이다.
+    코드 logits = 답 자리 hidden(fp32) · LM head 코드 행(fp32) — 진단의 읽기와 같은 수학이다. `code_mass`면 ``log_code_mass``(``[B]``,
+    미분 가능 — 보조 항)와 ``code_mass``(목록)도: 전체 어휘 logits = hidden(fp32) · LM head(fp32) — `head32`(고정된 head의 fp32 사본; LoRA)를
+    주면 그것을, 아니면 ``head.float()``(전체 미세조정: gradient가 묶인 head로 간다)를 쓴다.
     """
     device = backbone.device
     lengths = [len(e["tokens"]) for e in examples]
@@ -321,11 +355,18 @@ def code_kl(backbone: Any, examples: Sequence[dict[str, Any]]) -> dict[str, Any]
     ce = -(target * logp).sum(dim=-1)
     entropy = -torch.special.xlogy(target, target).sum(dim=-1)
     probs = torch.softmax(logits.detach(), dim=-1).cpu()
-    return {
+    out = {
         "kl": ce - entropy,
         "ce": ce,
         "probs": [probs[row, : len(e["code_ids"])].tolist() for row, e in enumerate(examples)],
     }
+    if code_mass:
+        full = head32 if head32 is not None else head.float()
+        lse_all = torch.logsumexp(states.to(full.device) @ full.T, dim=-1)  # [B] — 전체 어휘
+        log_mass = torch.clamp(torch.logsumexp(logits, dim=-1) - lse_all.to(logits.device), max=0.0)
+        out["log_code_mass"] = log_mass
+        out["code_mass"] = log_mass.detach().exp().cpu().tolist()
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -415,6 +456,43 @@ def _load_model_state(backbone: Any, mode: str, saved: dict[str, torch.Tensor]) 
         raise ValueError(f"전체 가중치의 키가 맞지 않는다: {result}")
 
 
+def estimate_step_memory(backbone: Any, trainable: list[tuple[str, torch.Tensor]], config: dict[str, Any], *, allocated: int) -> dict[str, Any]:
+    """학습 step의 장치 메모리 추정 (바이트): 지금 할당된 것(가중치·fp32 master·고정 head 사본) + optimizer 상태(gradient, AdamW 모멘트 둘,
+    master가 있으면 step 안의 fp32 gradient 버퍼) + micro-batch activation(:data:`ACTIVATION_BYTES_PER_TOKEN` × hidden·층 비례 × 토큰 + 1 GB)
+    + 전체 미세조정의 보조 항이 micro-batch마다 만드는 head의 fp32 사본과 그 gradient. 보수적으로 더한다(동시에 다 들지는 않는다)."""
+    cfg = backbone.text.config
+    scale = (int(cfg.hidden_size) * int(cfg.num_hidden_layers)) / _ACTIVATION_REFERENCE
+    per_token = ACTIVATION_BYTES_PER_TOKEN["checkpointed" if config["gradient_checkpointing"] else "not_checkpointed"] * scale
+    activations = 1e9 + per_token * int(config["micro_batch_tokens"])
+    optimizer = 0.0
+    for _, p in trainable:
+        master = p.dtype != torch.float32
+        optimizer += p.numel() * (p.element_size() + 8 + (4 if master else 0))
+    head = backbone.model.lm_head.weight
+    aux = 2 * head.numel() * 4 if config["mode"] == "full" and config["code_mass_weight"] > 0 else 0
+    total = float(allocated) + optimizer + activations + aux
+    return {"allocated": int(allocated), "optimizer": int(optimizer), "activations": int(activations), "aux_head": int(aux), "total": int(total),
+            "per_token": per_token, "checkpointed": bool(config["gradient_checkpointing"])}
+
+
+def check_step_memory(estimate: dict[str, Any], *, limit_bytes: float, config: dict[str, Any], log: Callable[[str], None] | None = None) -> dict[str, Any]:
+    """추정(:func:`estimate_step_memory`)이 울타리(`limit_bytes`)의 :data:`FENCE_SHARE` 를 넘으면 ``ValueError`` — `allow_large_activations`면 경고만.
+    돌려주는 것: 추정에 울타리·문턱을 더한 dict (manifest에 남는다)."""
+    out = {**estimate, "fence_bytes": int(limit_bytes), "refuse_above": int(FENCE_SHARE * limit_bytes)}
+    if out["total"] > FENCE_SHARE * limit_bytes:
+        message = (
+            f"step 메모리 추정 {out['total'] / 1e9:.1f} GB > 울타리 {limit_bytes / 1e9:.1f} GB의 {FENCE_SHARE:.0%} "
+            f"(activation {out['activations'] / 1e9:.1f} GB — micro_batch_tokens {config['micro_batch_tokens']}, "
+            f"gradient_checkpointing {config['gradient_checkpointing']}) — micro-batch를 줄이거나 checkpointing을 켠다"
+        )
+        if not config["allow_large_activations"]:
+            raise ValueError(message + " (그래도 돌리려면 allow_large_activations: true)")
+        if log:
+            log("경고: " + message + " — allow_large_activations: true로 계속한다")
+        out["override"] = True
+    return out
+
+
 def disk_free_bytes(path: str | Path) -> int:
     """`path`(없으면 가장 가까운 있는 상위 디렉터리)가 있는 파일 시스템의 여유 바이트."""
     target = Path(path)
@@ -429,6 +507,67 @@ def _git_sha() -> str | None:
         return subprocess.run(["git", "-C", str(root), "rev-parse", "--short", "HEAD"], capture_output=True, text=True, check=True, timeout=10).stdout.strip() or None
     except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
         return None
+
+
+def summarize_dev(
+    examples: Sequence[dict[str, Any]], *, kl: Sequence[float], probs: Sequence[Sequence[float]], mass: Sequence[float], type_weights: dict[str, float]
+) -> dict[str, Any]:
+    """dev 예(질문 × 균형 배치)마다의 KL·코드 확률·코드 질량 → dev 요약 (모듈 설명): 손실(종류 평균의 가중 평균), 종류별 KL·코드 질량,
+    0.5 아래 코드 질량의 몫(배치 단위), noul·score의 평균 이동(주 지표)·판정(``>= 0.5``) 바뀜·결정적인 바뀜(두 값 모두 0.5에서
+    :data:`robo_jev.decisions.metrics.DECISIVE_MARGIN` 이상)."""
+    from robo_jev.decisions.metrics import DECISIVE_MARGIN, FLIP_THRESHOLD
+
+    questions: dict[tuple[str, str], list[int]] = {}
+    for i, example in enumerate(examples):
+        questions.setdefault((example["record_id"], example["question"]), []).append(i)
+    by_type: dict[str, list[float]] = {}
+    mass_by_type: dict[str, list[float]] = {}
+    shifts: dict[str, list[float]] = {"noul": [], "score": []}
+    flips: dict[str, list[float]] = {"noul": [], "score": []}
+    decisive: dict[str, list[float]] = {"noul": [], "score": []}
+
+    def pair(kind: str, first: float, second: float) -> None:
+        shifts[kind].append(first - second)
+        flip = (first >= FLIP_THRESHOLD) != (second >= FLIP_THRESHOLD)
+        flips[kind].append(float(flip))
+        sure = min(abs(first - FLIP_THRESHOLD), abs(second - FLIP_THRESHOLD)) >= DECISIVE_MARGIN - 1e-9
+        decisive[kind].append(float(flip and sure))
+
+    for members in questions.values():
+        kind = examples[members[0]]["type"]
+        by_type.setdefault(kind, []).append(statistics.fmean(kl[i] for i in members))
+        mass_by_type.setdefault(kind, []).append(statistics.fmean(mass[i] for i in members))
+        if kind == "noul" and len(members) == 2:
+            p_yes = {}
+            for i in members:
+                options = examples[i]["options"]
+                p_yes[options[0]] = probs[i][options.index("yes")]
+            if set(p_yes) == {"yes", "no"}:
+                pair("noul", p_yes["yes"], p_yes["no"])
+        if kind == "score" and len(members) == 2:
+            values = {}
+            for i in members:
+                shown = examples[i]["values"]
+                values["up" if shown[0] < shown[-1] else "down"] = sum(p * v for p, v in zip(probs[i], shown))
+            if set(values) == {"up", "down"}:
+                pair("score", values["up"], values["down"])
+    kl_by_type = {kind: statistics.fmean(values) for kind, values in sorted(by_type.items())}
+    weights = {kind: type_weights[kind] for kind in kl_by_type}
+    denominator = sum(weights.values())
+
+    def mean(values: list[float]) -> float | None:
+        return statistics.fmean(values) if values else None
+
+    return {
+        "loss": (sum(weights[k] * v for k, v in kl_by_type.items()) / denominator) if denominator > 0 else None,
+        "kl_by_type": kl_by_type, "questions_by_type": {kind: len(values) for kind, values in sorted(by_type.items())},
+        "questions": len(questions), "prompts": len(examples),
+        "code_mass": mean([v for values in mass_by_type.values() for v in values]),
+        "code_mass_by_type": {kind: statistics.fmean(values) for kind, values in sorted(mass_by_type.items())},
+        "code_mass_below_half": mean([1.0 if m < 0.5 else 0.0 for m in mass]),
+        "noul_yes_first_shift": mean(shifts["noul"]), "noul_flip_rate": mean(flips["noul"]), "noul_decisive_flip_rate": mean(decisive["noul"]),
+        "score_direction_shift": mean(shifts["score"]), "score_flip_rate": mean(flips["score"]), "score_decisive_flip_rate": mean(decisive["score"]),
+    }
 
 
 # --------------------------------------------------------------------------
@@ -466,7 +605,8 @@ class DecisionTrainer:
         self.train_records, dev_records = split_dev(records, fraction=cfg["dev_fraction"], salt=cfg["dev_salt"])
         _need(bool(self.train_records), "dev를 떼고 나니 학습 기록이 없다")
         self.dev_records = dev_records[: cfg["dev_max_records"]] if cfg["dev_max_records"] else dev_records
-        self.dev = dev_examples(self.dev_records, tokenizer, fmt=cfg["format"])
+        self.dev_unused = len(dev_records) - len(self.dev_records)  # dev로 뗐지만 dev에도 학습에도 쓰지 않는 레코드 (리뷰 1 Minor 7 — manifest에 적는다)
+        self.dev = dev_examples(self.dev_records, tokenizer, fmt=cfg["format"], version=cfg["prompt_version"])
         self.examples_per_epoch = examples_per_epoch(self.train_records, q=cfg["questions_per_request"])
         self.steps_per_epoch = math.ceil(self.examples_per_epoch / cfg["batch_examples"])
         if cfg["max_steps"] is None:
@@ -481,6 +621,15 @@ class DecisionTrainer:
         self.trainable = _trainable(self.backbone, cfg)
         self.backbone.activation_checkpointing = bool(cfg["gradient_checkpointing"])
         self.optimizer = _optimizer(self.trainable, cfg)
+        # 고정된 LM head의 fp32 사본 (LoRA: 코드 질량의 전체 어휘 logsumexp — 보조 항과 dev). 전체 미세조정은 head가 학습되므로 그때그때 만든다.
+        head = self.backbone.model.lm_head.weight
+        self._head32 = head.detach().float() if cfg["mode"] == "lora" else None
+        self.memory_estimate = None
+        if self.backbone.device.type == "cuda":
+            estimate = estimate_step_memory(self.backbone, self.trainable, cfg, allocated=int(torch.cuda.memory_allocated()))
+            fraction = float(torch.cuda.get_per_process_memory_fraction(self.backbone.device))
+            limit = fraction * float(torch.cuda.get_device_properties(self.backbone.device).total_memory)
+            self.memory_estimate = check_step_memory(estimate, limit_bytes=limit, config=cfg, log=self.log)
         self.scheduler = torch.optim.lr_scheduler.LambdaLR(
             self.optimizer, lambda step: lr_factor(step, max_steps=self.max_steps, warmup_ratio=float(cfg["warmup_ratio"]))
         )
@@ -497,12 +646,16 @@ class DecisionTrainer:
                 "state_scope": "text_model_lora" if cfg["mode"] == "lora" else "causal_lm_state_dict",
             },
             "tokenizer": {"id": tokenizer_block.get("id"), "sha256": tokenizer_block.get("sha256"), "revision": tokenizer_block.get("revision")},
-            "prompt": {"version": PROMPT_VERSION, "digest": fixed_text_digest(), "format": cfg["format"], "mode": "direct"},
+            "prompt": {"version": cfg["prompt_version"], "digest": fixed_text_digest(cfg["prompt_version"]), "format": cfg["format"], "mode": "direct"},
+            "objective": {"main": "soft-label KL over the shown code rows at the answer position", "code_mass_weight": cfg["code_mass_weight"],
+                          "aux": "-log(code mass) at the answer position (full-vocabulary logsumexp, fp32 head)" if cfg["code_mass_weight"] > 0 else None},
+            "selection": {"evaluated": "final checkpoint (pre-registered)", "best_on_dev": "recorded in metrics.json `best` only — not used for evaluation"},
+            "memory_estimate": self.memory_estimate,
             "data": {
                 "train_input": cfg["train_input"], "file_sha256": file_sha256(cfg["train_input"]) if cfg["train_input"] else None,
                 "records_sha256": records_digest(records), "records": len(records), "validation": validation,
                 "train_records": len(self.train_records), "dev_records": len(self.dev_records),
-                "dev_ids": [str(r.get("id")) for r in self.dev_records], "dev_prompts": len(self.dev),
+                "dev_ids": [str(r.get("id")) for r in self.dev_records], "dev_prompts": len(self.dev), "dev_unused_records": self.dev_unused,
                 "examples_per_epoch": self.examples_per_epoch, "steps_per_epoch": self.steps_per_epoch, "mix": [],
             },
             "git": _git_sha(),
@@ -543,33 +696,42 @@ class DecisionTrainer:
         chunk = self._plan(epoch)[index * size : (index + 1) * size]
         out = []
         for record_index, name, order_seed in chunk:
-            out.extend(build_examples(self.train_records[record_index], [name], self.tokenizer, order_seed=order_seed, fmt=self.config["format"]))
+            out.extend(build_examples(self.train_records[record_index], [name], self.tokenizer, order_seed=order_seed, fmt=self.config["format"],
+                                      version=self.config["prompt_version"]))
             out[-1]["epoch"] = epoch
         return out
 
     # -- 학습 step --
 
     def step_loss(self, examples: list[dict[str, Any]], *, backward: bool) -> tuple[float, dict[str, Any]]:
-        """한 step의 예들 → (가중 손실 Σ w·KL / 예 수, 예별 값). `backward`면 micro-batch마다 backward해 gradient를 쌓는다."""
+        """한 step의 예들 → (손실 Σ (w·KL + λ·(−log 코드 질량)) / 예 수, 예별 값). `backward`면 micro-batch마다 backward해 gradient를 쌓는다.
+
+        예별 값: ``kl``·``ce``·``code_mass``; 합: ``kl_loss``(Σ w·KL / n)·``aux_loss``(λ · Σ −log m / n) — ``kl_loss + aux_loss`` = 손실."""
         weights = [self.config["type_weights"][e["type"]] for e in examples]
+        lam = float(self.config["code_mass_weight"])
         groups = pack_micro_batches([len(e["tokens"]) for e in examples], self.config["micro_batch_tokens"])
         kl: list[float] = [0.0] * len(examples)
         ce: list[float] = [0.0] * len(examples)
-        total = 0.0
+        mass: list[float] = [0.0] * len(examples)
+        total = kl_total = aux_total = 0.0
         padded = 0
         for group in groups:
             batch = [examples[i] for i in group]
             with torch.set_grad_enabled(backward):
-                out = code_kl(self.backbone, batch)
+                out = code_kl(self.backbone, batch, code_mass=True, head32=self._head32)
                 w = torch.tensor([weights[i] for i in group], dtype=torch.float32, device=out["kl"].device)
-                loss = (w * out["kl"]).sum() / len(examples)
+                kl_part = (w * out["kl"]).sum() / len(examples)
+                aux_part = lam * (-out["log_code_mass"]).sum() / len(examples)
+                loss = kl_part + aux_part if lam > 0 else kl_part
             if backward:
                 loss.backward()
             total += float(loss.detach())
+            kl_total += float(kl_part.detach())
+            aux_total += float(aux_part.detach())
             for j, i in enumerate(group):
-                kl[i], ce[i] = float(out["kl"][j].detach()), float(out["ce"][j].detach())
+                kl[i], ce[i], mass[i] = float(out["kl"][j].detach()), float(out["ce"][j].detach()), float(out["code_mass"][j])
             padded += len(batch) * max(len(e["tokens"]) for e in batch)
-        return total, {"kl": kl, "ce": ce, "micro_batches": len(groups), "padded_tokens": padded}
+        return total, {"kl": kl, "ce": ce, "code_mass": mass, "kl_loss": kl_total, "aux_loss": aux_total, "micro_batches": len(groups), "padded_tokens": padded}
 
     def train_step(self) -> dict[str, Any]:
         """step 하나: 예 만들기 → micro-batch마다 forward·backward → clip → optimizer → 일정. 지표를 history에 더하고 돌려준다."""
@@ -589,7 +751,8 @@ class DecisionTrainer:
             by_type.setdefault(example["type"], []).append(value)
         tokens = sum(len(e["tokens"]) for e in examples)
         metrics = {
-            "step": self.step + 1, "epoch": examples[0]["epoch"] if examples else None, "loss": loss,
+            "step": self.step + 1, "epoch": examples[0]["epoch"] if examples else None, "loss": loss, "kl_loss": parts["kl_loss"],
+            "aux_loss": parts["aux_loss"], "code_mass_mean": statistics.fmean(parts["code_mass"]) if examples else None,
             "kl_mean": statistics.fmean(parts["kl"]) if examples else None,
             "kl_by_type": {kind: statistics.fmean(values) for kind, values in sorted(by_type.items())},
             "examples_by_type": {kind: len(values) for kind, values in sorted(by_type.items())},
@@ -605,51 +768,22 @@ class DecisionTrainer:
     # -- dev --
 
     def evaluate_dev(self) -> dict[str, Any]:
-        """dev 손실(모든 질문 × 균형 배치)과 위치 쏠림 — 모듈 설명. gradient 없이 길이로 묶어 읽는다."""
+        """dev 손실(모든 질문 × 균형 배치)·코드 질량·위치 쏠림 — 모듈 설명. gradient 없이 길이로 묶어 읽는다.
+
+        요약은 :func:`summarize_dev`."""
         started = time.perf_counter()
         budget = self.config["dev_batch_tokens"] or self.config["micro_batch_tokens"]
         kl = [0.0] * len(self.dev)
+        mass = [0.0] * len(self.dev)
         probs: list[list[float]] = [[] for _ in self.dev]
         with torch.no_grad():
+            head32 = self._head32 if self._head32 is not None else self.backbone.model.lm_head.weight.detach().float()
             for group in pack_micro_batches([len(e["tokens"]) for e in self.dev], budget):
-                out = code_kl(self.backbone, [self.dev[i] for i in group])
+                out = code_kl(self.backbone, [self.dev[i] for i in group], code_mass=True, head32=head32)
                 for j, i in enumerate(group):
-                    kl[i], probs[i] = float(out["kl"][j]), out["probs"][j]
-        questions: dict[tuple[str, str], list[int]] = {}
-        for i, example in enumerate(self.dev):
-            questions.setdefault((example["record_id"], example["question"]), []).append(i)
-        by_type: dict[str, list[float]] = {}
-        yes_shift, flips, score_shift = [], [], []
-        for members in questions.values():
-            kind = self.dev[members[0]]["type"]
-            by_type.setdefault(kind, []).append(statistics.fmean(kl[i] for i in members))
-            if kind == "noul" and len(members) == 2:
-                p_yes = {}
-                for i in members:
-                    options = self.dev[i]["options"]
-                    p_yes[options[0]] = probs[i][options.index("yes")]
-                if set(p_yes) == {"yes", "no"}:
-                    yes_shift.append(p_yes["yes"] - p_yes["no"])
-                    flips.append(float((p_yes["yes"] > 0.5) != (p_yes["no"] > 0.5)))
-            if kind == "score" and len(members) == 2:
-                values = {}
-                for i in members:
-                    shown = self.dev[i]["values"]
-                    values["up" if shown[0] < shown[-1] else "down"] = sum(p * v for p, v in zip(probs[i], shown))
-                if set(values) == {"up", "down"}:
-                    score_shift.append(values["up"] - values["down"])
-        kl_by_type = {kind: statistics.fmean(values) for kind, values in sorted(by_type.items())}
-        weights = {kind: self.config["type_weights"][kind] for kind in kl_by_type}
-        denominator = sum(weights.values())
-        return {
-            "loss": (sum(weights[k] * v for k, v in kl_by_type.items()) / denominator) if denominator > 0 else None,
-            "kl_by_type": kl_by_type, "questions_by_type": {kind: len(values) for kind, values in sorted(by_type.items())},
-            "questions": len(questions), "prompts": len(self.dev),
-            "noul_yes_first_shift": statistics.fmean(yes_shift) if yes_shift else None,
-            "noul_flip_rate": statistics.fmean(flips) if flips else None,
-            "score_direction_shift": statistics.fmean(score_shift) if score_shift else None,
-            "seconds": time.perf_counter() - started,
-        }
+                    kl[i], probs[i], mass[i] = float(out["kl"][j]), out["probs"][j], float(out["code_mass"][j])
+            del head32
+        return {**summarize_dev(self.dev, kl=kl, probs=probs, mass=mass, type_weights=self.config["type_weights"]), "seconds": time.perf_counter() - started}
 
     def _dev_round(self) -> bool:
         """dev를 재고 기록한다; 고르기(keep_best)·멈추기(patience)를 판정한다 → 멈춰야 하면 True."""
@@ -663,7 +797,8 @@ class DecisionTrainer:
             return False  # step 0(학습 전)은 기준값일 뿐 — 고르기의 후보가 아니다
         if self.best is None or loss < self.best["loss"]:
             path = self.run_dir / "checkpoint-best.pt"
-            self.best = {"step": self.step, "loss": float(loss), "checkpoint": str(path) if self.config["keep_best"] else None}
+            self.best = {"step": self.step, "loss": float(loss), "checkpoint": str(path) if self.config["keep_best"] else None,
+                         "role": "record only — the evaluated model is the final checkpoint (selection: final, pre-registered)"}
             if self.config["keep_best"]:
                 self.save(path)
             return False
@@ -797,11 +932,11 @@ class DecisionTrainer:
 # --------------------------------------------------------------------------
 
 
-def apply_checkpoint(backbone: Any, path: str | Path, *, tokenizer_sha256: str | None) -> dict[str, Any]:
-    """학습한 가중치를 기반 backbone에 얹는다 (모듈 설명의 "평가 적재"). 돌려주는 것: 경로·run id·step·status·방식·형식.
+def apply_checkpoint(backbone: Any, path: str | Path, *, tokenizer_sha256: str | None, prompt_version: str = PROMPT_VERSION) -> dict[str, Any]:
+    """학습한 가중치를 기반 backbone에 얹는다 (모듈 설명의 "평가 적재"). 돌려주는 것: 경로·run id·step·status·방식·형식·프롬프트 판.
 
-    기반 모델의 정체(:func:`base_identity`), tokenizer 해시(`tokenizer_sha256`; None이면 대조하지 않는다), 프롬프트 고정 문구 digest가
-    학습 때와 다르면 ``ValueError`` — 학습한 모델은 같은 프롬프트를 기대한다.
+    기반 모델의 정체(:func:`base_identity`), tokenizer 해시(`tokenizer_sha256`; None이면 대조하지 않는다), 프롬프트 판(평가가 쓸
+    `prompt_version`)과 그 판의 고정 문구 digest가 학습 때와 다르면 ``ValueError`` — 학습한 모델은 같은 프롬프트를 기대한다.
     """
     state = load_model_checkpoint(path, mmap=True)  # mmap: 전체 미세조정의 재개용 파일(≈ 26 GB)에서 `model`만 페이지가 올라온다
     manifest = state.get("manifest") or {}
@@ -814,9 +949,11 @@ def apply_checkpoint(backbone: Any, path: str | Path, *, tokenizer_sha256: str |
     saved_tokenizer = (manifest.get("tokenizer") or {}).get("sha256")
     _need(tokenizer_sha256 is None or saved_tokenizer == tokenizer_sha256, f"{path}: tokenizer 해시가 학습 때와 다르다 ({saved_tokenizer} vs {tokenizer_sha256})")
     prompt = manifest.get("prompt") or {}
+    _need(prompt_version in PROMPT_VERSIONS, f"prompt_version: {list(PROMPT_VERSIONS)} 중 하나 (받은 값: {prompt_version!r})")
     _need(
-        prompt.get("version") == PROMPT_VERSION and prompt.get("digest") == fixed_text_digest(),
-        f"{path}: prompt 고정 문구가 학습 때와 다르다 ({prompt.get('version')}/{str(prompt.get('digest'))[:12]} vs {PROMPT_VERSION}/{fixed_text_digest()[:12]})",
+        prompt.get("version") == prompt_version and prompt.get("digest") == fixed_text_digest(prompt_version),
+        f"{path}: prompt 판·고정 문구가 학습 때와 다르다 (학습 {prompt.get('version')}/{str(prompt.get('digest'))[:12]} vs 평가 "
+        f"{prompt_version}/{fixed_text_digest(prompt_version)[:12]}) — 같은 판으로 평가한다 (--prompt-version)",
     )
     mode = model.get("mode")
     _need(mode in MODES, f"{path}: 알 수 없는 학습 방식 {mode!r}")

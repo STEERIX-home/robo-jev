@@ -75,7 +75,8 @@ def test_a_tiny_training_run_writes_its_records_and_the_diagnosis_reads_its_chec
     run = tmp_path / "runs" / "tiny"
     metrics = json.loads((run / "metrics.json").read_text(encoding="utf-8"))
     assert metrics["status"] == "completed" and metrics["step"] == metrics["config"]["max_steps"] and metrics["dev"] and metrics["dev"][0]["step"] == 0
-    assert metrics["manifest"]["run_env"]["script_version"] == "v0d-train-1" and metrics["manifest"]["data"]["file_sha256"]
+    assert metrics["manifest"]["run_env"]["script_version"] == "v0d-train-2" and metrics["manifest"]["data"]["file_sha256"]
+    assert metrics["manifest"]["prompt"]["version"] == "v0c-p3" and metrics["dev"][0]["code_mass"] > 0
     state = load_checkpoint(run / "checkpoint.pt")
     assert state["manifest"]["model"]["mode"] == "lora" and state["step"] == metrics["step"]
     base, after = tmp_path / "base.json", tmp_path / "after.json"
@@ -86,6 +87,10 @@ def test_a_tiny_training_run_writes_its_records_and_the_diagnosis_reads_its_chec
     summary = json.loads(after.read_text(encoding="utf-8"))
     assert summary["config"]["checkpoint"]["run_id"] == "tiny" and summary["config"]["checkpoint"]["mode"] == "lora"
     assert summary["config"]["model"] == f"tiny+lora:tiny@{metrics['step']}" and len(summary["config"]["checkpoint"]["sha256"]) == 64
+    assert summary["config"]["checkpoint"]["prompt_version"] == "v0c-p3" == summary["config"]["prompt_version"]
+    with torch_reference_kernels(), pytest.raises(ValueError, match="prompt"):  # p3로 학습한 것을 p2로 평가하지 않는다
+        diagnose_script().main(["--model", "tiny", "--checkpoint", str(run / "checkpoint.pt"), "--prompt-version", "v0c-p2", "--input", str(REQUESTS),
+                                "--out", str(tmp_path / "p2.json"), "--n-boot", "10"])
     rows_base = [json.loads(line) for line in base.with_suffix(".predictions.jsonl").read_text(encoding="utf-8").splitlines()]
     rows_after = [json.loads(line) for line in after.with_suffix(".predictions.jsonl").read_text(encoding="utf-8").splitlines()]
     assert [r["id"] for r in rows_base] == [r["id"] for r in rows_after]

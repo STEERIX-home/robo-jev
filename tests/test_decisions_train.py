@@ -7,13 +7,19 @@ KL인지, 오른쪽 padding이 손실을 바꾸지 않는지, 길이별 묶음 +
 metrics.json의 완주 표시, **재개 후 결정성**(끊었다 이은 run = 한 번에 돈 run, 비트 단위), 다른 설정·데이터의 재개 거절, dev 손실의
 보고, dev로만 하는 고르기·멈추기, 디스크 여유 문턱, 평가 적재(:func:`apply_checkpoint`), 비어 있는 일반 데이터 섞기 자리.
 
+Task v0d fix round 1: 프롬프트 판 v0c-p3(기본), 보조 항 −λ·log(코드 질량)(진단의 code_mass와 같은 값, 답 자리에만), 누적 시험은
+**gradient 자체**를 비교(리뷰 1 Minor 1), dev의 코드 질량·결정적인 바뀜·``>= 0.5`` 판정, 미리 정한 고르기(마지막 체크포인트), step 메모리
+추정과 울타리 거절(리뷰 1 Minor 6), 남는 dev 레코드 수의 기록(Minor 7).
+
 GPU 검사(`real_2b` — 실제 Qwen3.5-2B와 CUDA가 있을 때만, 전체 suite는 GPU 유닛 안에서)는 r = 32 LoRA의 학습 대상 수와 한 step을 본다.
 """
 
 import copy
 import functools
 import json
+from types import SimpleNamespace
 import math
+import statistics
 
 import pytest
 import torch
@@ -22,6 +28,7 @@ from helpers import FIXTURES, REPO
 
 from robo_jev.checkpoint import CHECKPOINT_FORMAT, REQUIRED_KEYS, load_checkpoint, model_only_state, save_checkpoint
 from robo_jev.decisions import examples as E
+from robo_jev.decisions import prompt as P
 from robo_jev.decisions import train as T
 from robo_jev.decisions import zero_shot as Z
 from robo_jev.decisions.records import read_records
@@ -95,11 +102,13 @@ def test_the_config_fills_defaults_and_refuses_unknown_keys_and_bad_values(tmp_p
     config = T.resolve_config({"train_input": "x.jsonl"})
     assert config["mode"] == "lora" and config["lora"]["r"] == 32 and config["questions_per_request"] == 2 and config["format"] == "chat"
     assert config["type_weights"] == {"choice": 1.0, "noul": 1.0, "score": 1.0} and config["dev_fraction"] == 0.02 and config["mix"] == []
+    assert config["prompt_version"] == "v0c-p3" and config["code_mass_weight"] == 0.2 and config["selection"] == "final"
     assert set(config["lora"]["targets"]) >= {"q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"}
     for bad in (
         {"nope": 1}, {"mode": "qlora"}, {"questions_per_request": 0}, {"type_weights": {"choice": 1.0}},
         {"type_weights": {"choice": -1.0, "noul": 1.0, "score": 1.0}}, {"format": "xml"}, {"batch_examples": 0},
         {"mix": [{"path": "general.jsonl", "share": 0.1}]}, {"dev_fraction": 0.7}, {"warmup_ratio": 1.5},
+        {"prompt_version": "v0c-p9"}, {"code_mass_weight": -0.1}, {"selection": "best_dev"}, {"allow_large_activations": "yes"},
     ):
         with pytest.raises(ValueError):
             T.resolve_config({"train_input": "x.jsonl", **bad})
@@ -111,6 +120,8 @@ def test_the_shipped_configs_resolve(name, mode):
     resolved = T.resolve_config(config)
     assert resolved["mode"] == mode and resolved["model_id"] == "Qwen/Qwen3.5-2B" and resolved["format"] == "chat" and resolved["augment"]
     assert resolved["questions_per_request"] == 2 and resolved["dev_fraction"] == 0.02 and resolved["min_free_disk_gb"] == 60 and resolved["mix"] == []
+    assert resolved["prompt_version"] == "v0c-p3" and resolved["code_mass_weight"] == 0.2 and resolved["selection"] == "final" and resolved["epochs"] == 1
+    assert resolved["keep_best"] is False and resolved["allow_large_activations"] is False
     if mode == "lora":
         assert resolved["lora"] == T.DEFAULT_LORA and resolved["lr"] == 2e-4 and resolved["micro_batch_tokens"] == 1024
     else:
@@ -146,8 +157,8 @@ def test_the_loss_reaches_only_the_answer_position(tmp_path, fixtures, monkeypat
         return out
 
     monkeypatch.setattr(trainer.backbone, "forward", spy)
-    out = T.code_kl(trainer.backbone, examples)
-    out["kl"].sum().backward()
+    out = T.code_kl(trainer.backbone, examples, code_mass=True)  # 주 항 + 보조 항 둘 다
+    (out["kl"].sum() - 0.2 * out["log_code_mass"].sum()).backward()
     grad = captured["hidden"].grad
     for row, example in enumerate(examples):
         answer = len(example["tokens"]) - 1
@@ -166,15 +177,44 @@ def test_right_padding_does_not_change_an_examples_loss(tmp_path, fixtures):
     assert torch.allclose(together, alone, atol=1e-5)
 
 
-def test_type_weights_multiply_each_types_contribution(tmp_path, fixtures):
-    trainer = make_trainer(tmp_path, fixtures, type_weights={"choice": 2.0, "noul": 1.0, "score": 0.0})
+def test_type_weights_multiply_each_types_kl_and_the_code_mass_term_is_added_for_every_example(tmp_path, fixtures):
+    trainer = make_trainer(tmp_path, fixtures, type_weights={"choice": 2.0, "noul": 1.0, "score": 0.0}, code_mass_weight=0.3)
     examples = trainer.step_examples(0)
     loss, parts = trainer.step_loss(examples, backward=False)
     by_type = {}
     for example, kl in zip(examples, parts["kl"]):
         by_type.setdefault(example["type"], []).append(kl)
-    expected = (2.0 * sum(by_type.get("choice", [])) + sum(by_type.get("noul", []))) / len(examples)
-    assert loss == pytest.approx(expected, rel=1e-5)
+    expected_kl = (2.0 * sum(by_type.get("choice", [])) + sum(by_type.get("noul", []))) / len(examples)
+    expected_aux = 0.3 * sum(-math.log(m) for m in parts["code_mass"]) / len(examples)  # 보조 항은 종류 가중치 없이 모든 예에
+    assert parts["kl_loss"] == pytest.approx(expected_kl, rel=1e-5) and parts["aux_loss"] == pytest.approx(expected_aux, rel=1e-5)
+    assert loss == pytest.approx(expected_kl + expected_aux, rel=1e-5)
+    off = make_trainer(tmp_path / "off", fixtures, type_weights={"choice": 2.0, "noul": 1.0, "score": 0.0}, code_mass_weight=0.0)
+    loss_off, parts_off = off.step_loss(examples, backward=False)
+    assert loss_off == pytest.approx(expected_kl, rel=1e-5) and parts_off["aux_loss"] == 0.0
+
+
+def test_the_code_mass_is_the_diagnosis_code_mass_and_the_term_moves_mass_onto_the_shown_codes(tmp_path, fixtures):
+    """보조 항의 코드 질량 = 진단의 ``code_mass``(전체 어휘 softmax가 보여 준 코드에 준 몫, fp32 head) — 그리고 그 항이 있으면 몇 step 뒤 그 몫이
+    오르고(λ = 1) 없으면 거의 그대로다(λ = 0)."""
+    trainer = make_trainer(tmp_path, fixtures)
+    examples = [e for r in fixtures[:2] for e in E.build_examples(r, list(r["request"]["questions"])[:3], tokenizer(), order_seed=4, fmt="chat")]
+    with torch.no_grad():
+        out = T.code_kl(trainer.backbone, examples, code_mass=True)
+    reading = Z.score_code_prompts(trainer.backbone, examples, batch=1, code_mass=True)
+    for mass, read in zip(out["code_mass"], reading):
+        assert mass == pytest.approx(read["code_mass"], rel=1e-4)
+    masses, before = {}, None
+    for lam in (0.0, 1.0):  # 소형 난수 모델의 어휘는 24만 — 코드 질량을 빨리 움직이려고 전체 미세조정으로 (LoRA r 4는 몇 step에 거의 못 움직인다)
+        run = make_trainer(tmp_path / f"lam{lam}", fixtures, mode="full", code_mass_weight=lam, lr=5e-3, warmup_ratio=0.0)
+        batch = run.step_examples(0)
+        if before is None:
+            before = statistics.fmean(run.step_loss(batch, backward=False)[1]["code_mass"])
+        for _ in range(6):
+            run.optimizer.zero_grad(set_to_none=True)
+            run.step_loss(batch, backward=True)
+            run.optimizer.step()
+        masses[lam] = statistics.fmean(run.step_loss(batch, backward=False)[1]["code_mass"])
+    assert masses[1.0] > 5 * before and masses[1.0] > 5 * masses[0.0], (before, masses)
 
 
 # -- 묶음과 누적 --------------------------------------------------------------------------------------------
@@ -192,16 +232,33 @@ def test_micro_batches_are_length_sorted_cover_the_step_once_and_respect_the_tok
 
 
 def test_gradient_accumulation_over_micro_batches_equals_one_batch(tmp_path, fixtures):
-    one = make_trainer(tmp_path / "a", fixtures, micro_batch_tokens=100000)
-    many = make_trainer(tmp_path / "b", fixtures, micro_batch_tokens=1)  # 예 하나씩
-    one.train_step()
-    many.train_step()
-    assert one.history[-1]["micro_batches"] == 1 and many.history[-1]["micro_batches"] == one.history[-1]["examples"]
-    assert one.history[-1]["loss"] == pytest.approx(many.history[-1]["loss"], rel=1e-5)
-    a, b = lora_state(one), lora_state(many)
-    assert set(a) == set(b)
-    for name in a:
-        assert torch.allclose(a[name], b[name], atol=1e-6, rtol=1e-4), name
+    """리뷰 1 Minor 1: optimizer step **전에 gradient 자체를** 비교한다 — AdamW의 첫 갱신은 거의 lr·sign(g)라 파라미터 비교는 크기만 틀린
+    누적(예: micro-batch마다 자기 크기로 나누기)을 놓친다. 종류 가중치를 고르지 않게 하고 보조 항을 켠 채, 예 하나씩 쌓은 gradient = 한 번에
+    묶은 gradient (모든 학습 대상 tensor, 가장 큰 gradient 대비 1e-6 안)."""
+    kw = {"type_weights": {"choice": 2.0, "noul": 1.0, "score": 0.5}, "code_mass_weight": 0.3}
+    one = make_trainer(tmp_path / "a", fixtures, micro_batch_tokens=100000, **kw)
+    many = make_trainer(tmp_path / "b", fixtures, micro_batch_tokens=1, **kw)  # 예 하나씩
+    examples = one.step_examples(0)
+    assert [e["tokens"] for e in examples] == [e["tokens"] for e in many.step_examples(0)]
+    loss_one, parts_one = one.step_loss(examples, backward=True)
+    loss_many, parts_many = many.step_loss(examples, backward=True)
+    assert parts_one["micro_batches"] == 1 and parts_many["micro_batches"] == len(examples) > 1
+    assert loss_one == pytest.approx(loss_many, rel=1e-5)
+    grads_one, grads_many = dict(one.trainable), dict(many.trainable)
+    assert set(grads_one) == set(grads_many)
+    largest = max(float(p.grad.abs().max()) for p in grads_one.values() if p.grad is not None)
+    compared = 0
+    for name, param in grads_one.items():
+        other = grads_many[name]
+        assert (param.grad is None) == (other.grad is None), name
+        if param.grad is None:
+            continue
+        assert torch.allclose(param.grad, other.grad, rtol=1e-4, atol=1e-6 * largest), name
+        compared += int(torch.count_nonzero(param.grad) > 0)
+    assert compared > 0 and largest > 0
+    norm_one = torch.sqrt(sum((p.grad.double() ** 2).sum() for p in grads_one.values() if p.grad is not None))
+    norm_many = torch.sqrt(sum((p.grad.double() ** 2).sum() for p in grads_many.values() if p.grad is not None))
+    assert float(norm_one) == pytest.approx(float(norm_many), rel=1e-5)
 
 
 # -- 학습 방식: LoRA·전체 미세조정 -------------------------------------------------------------------------------
@@ -356,6 +413,31 @@ def test_dev_loss_is_reported_by_type_with_the_position_bias_on_counterbalanced_
     assert set(first["kl_by_type"]) <= {"choice", "noul", "score"} and first["questions"] == sum(len(r["request"]["questions"]) for r in trainer.dev_records)
     assert math.isfinite(first["loss"]) and "noul_yes_first_shift" in first and "noul_flip_rate" in first and "score_direction_shift" in first
     assert first["prompts"] == len(trainer.dev)
+    for key in ("noul_decisive_flip_rate", "score_flip_rate", "score_decisive_flip_rate", "code_mass", "code_mass_below_half"):
+        assert key in first
+    assert set(first["code_mass_by_type"]) == set(first["kl_by_type"]) and 0.0 < first["code_mass"] <= 1.0
+    assert "code_mass_mean" in trainer.history[0] and trainer.history[0]["loss"] == pytest.approx(trainer.history[0]["kl_loss"] + trainer.history[0]["aux_loss"])
+
+
+def _dev_example(rid: str, name: str, kind: str, options: list[str], values: list[float] | None = None) -> dict:
+    return {"record_id": rid, "question": name, "type": kind, "options": options, "values": values}
+
+
+def test_the_dev_summary_reads_verdicts_with_at_least_one_half_and_counts_decisive_flips_apart():
+    """통제자 결정 6 / 리뷰 1 Minor 2: dev의 판정도 ``>= 0.5``(진단과 같다); 평균 이동이 주 지표, 결정적인 바뀜은 두 값 모두 0.5에서 0.1 이상."""
+    examples, probs = [], []
+    for rid, yes_first, no_first in (("a", 0.5, 0.49), ("b", 0.3, 0.7), ("c", 0.55, 0.45)):
+        examples += [_dev_example(rid, "q", "noul", ["yes", "no"]), _dev_example(rid, "q", "noul", ["no", "yes"])]
+        probs += [[yes_first, 1 - yes_first], [1 - no_first, no_first]]
+    examples += [_dev_example("d", "s", "score", ["0.0", "1.0"], [0.0, 1.0]), _dev_example("d", "s", "score", ["1.0", "0.0"], [1.0, 0.0])]
+    probs += [[0.7, 0.3], [0.4, 0.6]]  # 오름 0.3, 내림 0.4 — 같은 쪽
+    n = len(examples)
+    out = T.summarize_dev(examples, kl=[0.1] * n, probs=probs, mass=[0.9] * (n - 1) + [0.4], type_weights={"choice": 1.0, "noul": 1.0, "score": 1.0})
+    assert out["noul_flip_rate"] == pytest.approx(3 / 3)  # a: 0.5(예) vs 0.49(아니오) — >= 0.5라서 바뀜
+    assert out["noul_decisive_flip_rate"] == pytest.approx(1 / 3)  # b만 (0.3 vs 0.7)
+    assert out["noul_yes_first_shift"] == pytest.approx(((0.5 - 0.49) + (0.3 - 0.7) + (0.55 - 0.45)) / 3)
+    assert out["score_direction_shift"] == pytest.approx(0.3 - 0.4) and out["score_flip_rate"] == 0.0
+    assert out["code_mass_below_half"] == pytest.approx(1 / n) and out["code_mass_by_type"]["score"] == pytest.approx(0.65)
 
 
 def test_keep_best_and_early_stopping_follow_the_dev_loss_only(tmp_path, fixtures, monkeypatch):
@@ -364,7 +446,8 @@ def test_keep_best_and_early_stopping_follow_the_dev_loss_only(tmp_path, fixture
     monkeypatch.setattr(trainer, "evaluate_dev", lambda: {"loss": next(scripted)})
     result = trainer.run()
     assert result["status"] == "stopped_early" and trainer.step == 4  # step 2의 3.0 뒤로 두 번(3.5·3.2) 나아지지 않음
-    assert trainer.best == {"step": 2, "loss": 3.0, "checkpoint": str(trainer.run_dir / "checkpoint-best.pt")}
+    assert {k: v for k, v in trainer.best.items() if k != "role"} == {"step": 2, "loss": 3.0, "checkpoint": str(trainer.run_dir / "checkpoint-best.pt")}
+    assert "record only" in trainer.best["role"]  # 미리 정한 고르기: 평가하는 모델은 마지막 체크포인트
     best = load_checkpoint(trainer.run_dir / "checkpoint-best.pt")
     assert best["step"] == 2
 
@@ -401,6 +484,9 @@ def test_apply_checkpoint_loads_the_trained_weights_into_a_fresh_backbone(tmp_pa
 def test_apply_checkpoint_refuses_another_base_model_tokenizer_or_prompt(tmp_path, fixtures):
     trainer = make_trainer(tmp_path, fixtures)
     path = trainer.run()["checkpoint"]
+    assert trainer.manifest["prompt"]["version"] == "v0c-p3"
+    with pytest.raises(ValueError, match="prompt"):  # p3로 학습한 것을 p2 프롬프트로 평가하지 않는다
+        T.apply_checkpoint(QwenBackbone.tiny(seed=4, vocab_size=tokenizer().get_vocab_size()), path, tokenizer_sha256=None, prompt_version="v0c-p2")
     with pytest.raises(ValueError, match="base"):
         T.apply_checkpoint(QwenBackbone.tiny(seed=5, vocab_size=tokenizer().get_vocab_size()), path, tokenizer_sha256=trainer.manifest["tokenizer"]["sha256"])
     with pytest.raises(ValueError, match="tokenizer"):
@@ -420,6 +506,38 @@ def test_the_general_data_mixing_hook_is_an_empty_slot(tmp_path, fixtures):
     trainer = make_trainer(tmp_path, fixtures)
     assert trainer.mix_plan(0) == []
     assert trainer.manifest["data"]["mix"] == []
+
+
+def test_the_evaluated_model_is_pre_registered_as_the_final_checkpoint_and_unused_dev_records_are_counted(tmp_path, fixtures):
+    trainer = make_trainer(tmp_path, fixtures, dev_fraction=0.4, dev_max_records=1)
+    assert trainer.config["selection"] == "final" and trainer.manifest["selection"]["evaluated"].startswith("final checkpoint")
+    total_dev = len(E.split_dev(fixtures, fraction=0.4, salt=trainer.config["dev_salt"])[1])
+    assert len(trainer.dev_records) == 1 and trainer.manifest["data"]["dev_unused_records"] == total_dev - 1 > 0
+    assert trainer.manifest["objective"]["code_mass_weight"] == 0.2 and trainer.manifest["prompt"]["digest"] == P.fixed_text_digest("v0c-p3")
+
+
+def test_the_step_memory_estimate_refuses_a_setting_past_the_fence_unless_overridden():
+    """리뷰 1 Minor 6: gradient checkpointing 없이 16 K 토큰 micro-batch(2B)는 activation만 ≈ 73 GB — 울타리(≈ 78 GB)의 90 %를 넘어 시작하지 않는다;
+    checkpointing을 켜거나 micro-batch를 줄이면 통과한다. 추정 = 할당된 것 + optimizer 상태 + activation (+ 전체 미세조정 보조 항의 head 사본)."""
+    two_b = SimpleNamespace(text=SimpleNamespace(config=SimpleNamespace(hidden_size=2048, num_hidden_layers=24)),
+                            model=SimpleNamespace(lm_head=SimpleNamespace(weight=torch.empty(248320, 1, device="meta"))))
+    adapter = [("lora", torch.empty(31_260_672, dtype=torch.float32, device="meta"))]
+    fence = 0.6 * 130.6e9
+    base = {"mode": "lora", "code_mass_weight": 0.2, "allow_large_activations": False}
+    risky = T.estimate_step_memory(two_b, adapter, {**base, "gradient_checkpointing": False, "micro_batch_tokens": 16384}, allocated=int(5.9e9))
+    assert risky["activations"] == pytest.approx(1e9 + 4.4e6 * 16384) and risky["total"] > 0.9 * fence
+    with pytest.raises(ValueError, match="allow_large_activations"):
+        T.check_step_memory(risky, limit_bytes=fence, config={**base, "gradient_checkpointing": False, "micro_batch_tokens": 16384})
+    warned = []
+    allowed = T.check_step_memory(risky, limit_bytes=fence, config={**base, "gradient_checkpointing": False, "micro_batch_tokens": 16384,
+                                                                    "allow_large_activations": True}, log=warned.append)
+    assert allowed["override"] is True and warned and "경고" in warned[0]
+    for setting in ({"gradient_checkpointing": True, "micro_batch_tokens": 16384}, {"gradient_checkpointing": False, "micro_batch_tokens": 2048}):
+        fine = T.estimate_step_memory(two_b, adapter, {**base, **setting}, allocated=int(5.9e9))
+        assert T.check_step_memory(fine, limit_bytes=fence, config={**base, **setting})["total"] < 0.9 * fence
+    full = [("all", torch.empty(1_881_825_088, dtype=torch.bfloat16, device="meta"))]
+    estimate = T.estimate_step_memory(two_b, full, {**base, "mode": "full", "gradient_checkpointing": True, "micro_batch_tokens": 2048}, allocated=int(11.3e9))
+    assert estimate["optimizer"] == 1_881_825_088 * (2 + 8 + 4) and estimate["aux_head"] == 2 * 248320 * 4  # bf16 grad + Adam 둘 + fp32 버퍼
 
 
 # -- 실제 2B (GPU 유닛 안에서만) ------------------------------------------------------------------------------------------
