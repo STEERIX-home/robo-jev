@@ -1,0 +1,54 @@
+# Task v0d — 본 학습 설정: train-50k 한 epoch, H100 80 GB 한 장 (RunPod — 사용자 결정 2026-10-11 21:16: Spark보다 빠르면 H100에서).
+#   uv run python scripts/train_decisions.py train --config configs/train/decisions-v0-lora-h100.yaml --set train_input=<train-50k.jsonl> \
+#       --set run_name=<이름> [--gpu-memory-fraction 0.95]     # 울타리 0.6은 Spark(통합 메모리)용 기본값 — 전용 H100에서는 실행기 인자로 올린다
+# 방식은 fix round 1의 결정(통제자 결정 2·3·4·5): LoRA r 32, bf16 adapter 계산 + fp32 master(MasterWeightAdamW), 보조 항 λ = 0.2,
+# 평가 모델 = 마지막 체크포인트(미리 정함), 한 epoch. 프롬프트는 v0c-p3 — 진단 도구의 기본과 같다.
+# H100의 처리량은 아직 재지 않았다 — micro_batch_tokens·gradient_checkpointing은 덮어쓸 수 있게 둔 첫 값이다(--set으로 바꾼다).
+kind: decisions-train-v0
+model_id: Qwen/Qwen3.5-2B
+train_input: null              # v0b의 train-50k (시험 세트 T1–T7은 넣지 않는다)
+out_dir: artifacts/runs/decisions-v0
+run_name: null
+mode: lora
+lora:
+  r: 32
+  alpha: 64
+  dropout: 0.0
+  targets: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj, in_proj_qkv, in_proj_z, out_proj]
+lora_dtype: bfloat16           # bf16 adapter 계산 + fp32 master 갱신 (fix round 1 A/B로 확인)
+format: chat
+prompt_version: v0c-p3
+code_mass_weight: 0.2
+selection: final
+augment: true
+questions_per_request: 2
+type_weights: {choice: 1.0, noul: 1.0, score: 1.0}
+dev_fraction: 0.02
+dev_salt: v0d-dev
+dev_every: 500                 # 3,125 step의 한 epoch에서 step 0, 500, …, 3,000, 3,125 — 8번
+dev_max_records: 300
+dev_batch_tokens: null         # null = micro_batch_tokens
+seed: 0
+epochs: 1
+max_steps: null                # = 3,125 (예 100,000 / 32)
+batch_examples: 32             # 시운전에서 검증한 조리법 그대로 (32예/step, lr 2e-4, warmup 5 %, cosine)
+micro_batch_tokens: 16384      # 첫 값 — HBM(≈ 3 TB/s)이 넓은 H100에서는 Spark(1,024가 최적)와 달리 큰 micro-batch가 유리할 것이다; 재고 바꾼다
+lr: 2.0e-4
+weight_decay: 0.0
+betas: [0.9, 0.999]
+eps: 1.0e-8
+warmup_ratio: 0.05
+gradient_clip: 1.0
+gradient_checkpointing: true   # 16 K 토큰에서 checkpointing 없이는 activation만 ≈ 70 GB(2B 측정) — 메모리 추정이 거절한다; 8 K 이하면 끄고 재 볼 만하다
+checkpoint_every: 500
+save_checkpoints: true
+keep_best: false
+early_stop_patience: null
+min_free_disk_gb: 10           # LoRA 저장 단위는 ≈ 0.4 GB(atomic 쓰기 중 두 배) — Spark의 60 GB 문턱은 전체 미세조정(26 GB) 몫이다
+metrics_every: 10
+max_wall_hours: null
+stop_after_steps: null
+mix: []
+device: cuda
+dtype: bfloat16
+allow_large_activations: false

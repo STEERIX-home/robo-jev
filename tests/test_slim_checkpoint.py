@@ -143,6 +143,9 @@ R14_OWN = ("artifacts/runs/r14-t1-fp32-2b-s18/checkpoint.pt", "artifacts/runs/r1
            "artifacts/runs/r14-t1-fp32-2b-s19/checkpoint.pt")
 #: 상시 규칙 — Task v0d 자신의 시운전 체크포인트(2B LoRA; 학습 전·후 진단 run이 끝난 뒤 더했다).
 V0D_OWN = ("artifacts/runs/v0d/v0d-smoke-lora-2b/checkpoint.pt",)
+#: 상시 규칙 — Task v0d fix round 1의 p3 시운전 체크포인트 셋(fp32 adapter·bf16 adapter·보조 항 없는 bf16; 학습 후 진단 run이 끝난 뒤 더했다).
+V0D_FR1 = ("artifacts/runs/v0d/v0d-smoke-p3-lora-fp32/checkpoint.pt", "artifacts/runs/v0d/v0d-smoke-p3-lora-bf16/checkpoint.pt",
+           "artifacts/runs/v0d/v0d-smoke-p3-lora-bf16-nomass/checkpoint.pt")
 
 
 def test_only_the_user_approved_checkpoints_can_be_slimmed_each_under_its_dated_approval(tmp_path):
@@ -150,8 +153,9 @@ def test_only_the_user_approved_checkpoints_can_be_slimmed_each_under_its_dated_
     셋(평가 run이 모두 끝난 뒤에 더했다 — 완주한 run만 대체한다); 승인마다 날짜·근거가 붙은 묶음이다. 목록 밖의 경로는 아무것도 읽기 전에 거절한다."""
     module = script()
     assert [(approval["date"], approval["standing_rule"], approval["paths"]) for approval in module.APPROVALS] == [
-        ("2026-09-29", False, R8_NINE), ("2026-10-09", False, R14_SEVEN), ("2026-10-09", True, R14_OWN), ("2026-10-09", True, V0D_OWN)]
-    assert module.APPROVED == R8_NINE + R14_SEVEN + R14_OWN + V0D_OWN and len(set(module.APPROVED)) == 20
+        ("2026-09-29", False, R8_NINE), ("2026-10-09", False, R14_SEVEN), ("2026-10-09", True, R14_OWN), ("2026-10-09", True, V0D_OWN),
+        ("2026-10-09", True, V0D_FR1)]
+    assert module.APPROVED == R8_NINE + R14_SEVEN + R14_OWN + V0D_OWN + V0D_FR1 and len(set(module.APPROVED)) == 23
     assert module.approval_of("artifacts/runs/r14-t1-fp32-2b-s19/checkpoint.pt")["standing_rule"] is True  # 상시 규칙 — 완주한 run만 대체한다
     assert all(path.startswith("artifacts/runs/") and path.endswith(".pt") for path in module.APPROVED)
     assert module.approval_of("artifacts/runs/r12-t1-fp32-2b-s19/checkpoint.pt") == {

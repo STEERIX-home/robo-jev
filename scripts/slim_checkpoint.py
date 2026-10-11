@@ -106,6 +106,17 @@ APPROVALS = (
         "standing_rule": True,
         "paths": ("artifacts/runs/v0d/v0d-smoke-lora-2b/checkpoint.pt",),
     },
+    {
+        "date": "2026-10-09",
+        "basis": "standing rule (user approval 2026-10-09, HANDOFF §5) — Task v0d fix round 1's own three v0c-p3 smoke checkpoints "
+                 "(2B LoRA fp32 adapter / bf16 adapter / bf16 adapter without the code-mass term), after their diagnosis runs",
+        "standing_rule": True,
+        "paths": (
+            "artifacts/runs/v0d/v0d-smoke-p3-lora-fp32/checkpoint.pt",
+            "artifacts/runs/v0d/v0d-smoke-p3-lora-bf16/checkpoint.pt",
+            "artifacts/runs/v0d/v0d-smoke-p3-lora-bf16-nomass/checkpoint.pt",
+        ),
+    },
 )
 #: 승인된 경로 전부 (승인 순서).
 APPROVED = tuple(path for approval in APPROVALS for path in approval["paths"])

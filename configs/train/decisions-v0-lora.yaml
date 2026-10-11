@@ -14,7 +14,7 @@ lora:
   dropout: 0.0
   # attention(full attention q·k·v·o, DeltaNet in_proj_qkv·in_proj_z·out_proj) + MLP(gate·up·down) — 저장소 Judge LoRA와 같은 대상
   targets: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj, in_proj_qkv, in_proj_z, out_proj]
-lora_dtype: float32          # adapter 계산 dtype (저장소 기본 fp32). bfloat16 = bf16 계산 + fp32 master 갱신 — GB10에서 step ≈ 30 % 빠름 (보고서)
+lora_dtype: bfloat16         # 본 학습 방식(통제자 결정 2): bf16 adapter 계산 + fp32 master 갱신 — fp32 adapter와 짧은 A/B에서 차이 없음, GB10에서 1.2–1.4× 빠름 (보고서 §F.3)
 format: chat
 prompt_version: v0c-p3          # 학습·dev·평가가 같은 판 — p3: score 기준점 11개 0.0…1.0, [0, 1] 전체를 읽는다 (Task v0d fix round 1)
 code_mass_weight: 0.2           # 보조 항 −λ·log(코드 질량): 보여 준 코드에 확률이 모이게 (통제자 결정 3)

@@ -114,6 +114,16 @@ def test_the_config_fills_defaults_and_refuses_unknown_keys_and_bad_values(tmp_p
             T.resolve_config({"train_input": "x.jsonl", **bad})
 
 
+def test_the_h100_main_run_config_is_bf16_lora_with_the_code_mass_term_for_one_epoch():
+    """사용자 결정(2026-10-11 21:16): 본 학습은 H100 80 GB 한 장에서도 돌 수 있게 — LoRA, bf16 adapter + fp32 master, λ = 0.2, 한 epoch, 미리 정한
+    고르기, p3; micro-batch 상한은 Spark보다 크게(덮어쓸 수 있는 첫 값)."""
+    resolved = T.resolve_config(yaml.safe_load((REPO / "configs" / "train" / "decisions-v0-lora-h100.yaml").read_text(encoding="utf-8")))
+    assert resolved["mode"] == "lora" and resolved["lora_dtype"] == "bfloat16" and resolved["lora"] == T.DEFAULT_LORA
+    assert resolved["code_mass_weight"] == 0.2 and resolved["epochs"] == 1 and resolved["max_steps"] is None and resolved["selection"] == "final"
+    assert resolved["prompt_version"] == "v0c-p3" and resolved["micro_batch_tokens"] > 1024 and resolved["gradient_checkpointing"] is True
+    assert resolved["batch_examples"] == 32 and resolved["lr"] == 2e-4 and resolved["train_input"] is None
+
+
 @pytest.mark.parametrize("name, mode", [("decisions-v0-lora.yaml", "lora"), ("decisions-v0-full.yaml", "full")])
 def test_the_shipped_configs_resolve(name, mode):
     config = yaml.safe_load((REPO / "configs" / "train" / name).read_text(encoding="utf-8"))
@@ -124,6 +134,7 @@ def test_the_shipped_configs_resolve(name, mode):
     assert resolved["keep_best"] is False and resolved["allow_large_activations"] is False
     if mode == "lora":
         assert resolved["lora"] == T.DEFAULT_LORA and resolved["lr"] == 2e-4 and resolved["micro_batch_tokens"] == 1024
+        assert resolved["lora_dtype"] == "bfloat16"  # 본 학습 방식 (fix round 1, 통제자 결정 2)
     else:
         assert resolved["lr"] == 1e-5 and resolved["micro_batch_tokens"] == 2048
 
