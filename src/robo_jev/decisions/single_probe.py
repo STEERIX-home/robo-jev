@@ -42,24 +42,33 @@ import hashlib
 import json
 import math
 import random
-from collections import Counter
+from collections import Counter, defaultdict
 from typing import Any, Iterable, Sequence
+
+import numpy as np
 
 from robo_jev.decisions.records import MAX_QUESTIONS, MAX_STATE_CHARS, NAME_RE, OPTION_RANGE, SCHEMA
 
 __all__ = [
+    "CLUSTERS",
     "CONVERTER_VERSION",
     "G1_SPLITS",
     "LABEL_KIND",
     "MIX_SPLITS",
+    "PROBE_DIMENSIONS",
+    "PROBE_METRICS",
     "SOURCE_SCHEMA",
     "TYPE_MAP",
+    "compare_probe",
     "convert_record",
     "convert_records",
     "overlap",
     "parse_state_text",
     "partition",
+    "probe_values",
+    "render_probe_comparison",
     "state_text",
+    "summarize",
     "trim_options",
 ]
 
@@ -347,3 +356,168 @@ def overlap(a: Iterable[dict[str, Any]], b: Iterable[dict[str, Any]]) -> dict[st
     groups = {r["meta"]["origin_group"] for r in a} & {r["meta"]["origin_group"] for r in b}
     sources = {r["meta"]["source_record"] for r in a} & {r["meta"]["source_record"] for r in b}
     return {"origin_groups": sorted(groups), "source_records": sorted(sources)}
+
+
+# --------------------------------------------------------------------------
+# 두 run의 묶음별 짝지은 비교 (§1-3 — v0 − 학습 없는 2B)
+# --------------------------------------------------------------------------
+
+#: 묶음 차원 — meta의 값(``source_type``은 원래 질문 종류 choice·boolean·ordinal, ``type``은 판단 종류 choice·noul).
+PROBE_DIMENSIONS = ("domain", "language", "source_type", "split", "label_kind", "label_confidence", "type")
+#: 질문마다 재는 값: 정확도(choice = argmax가 최선 집합 안; noul = 0.5의 같은 쪽 — 정답이 0/1이라 맞힘과 같다), Brier(진단의 정의 그대로 —
+#: choice Σ_k (p_k − q_k)², noul (p − y)²), 코드 질량(답 자리의 전체 어휘 softmax가 코드에 준 몫 — 형식 준수).
+PROBE_METRICS = ("accuracy", "brier", "code_mass")
+#: 뽑기 단위: origin group(번역·재표현·대조 sibling을 한 단위로 — 기본), 원본 레코드, 변환 레코드.
+CLUSTERS = ("origin_group", "source_record", "record")
+
+
+def _question_meta(record: dict[str, Any], name: str) -> dict[str, Any]:
+    return ((record.get("meta") or {}).get("questions") or {}).get(name) or {}
+
+
+def probe_values(records: Sequence[dict[str, Any]], predictions: Sequence[dict[str, Any]], *, reading: str) -> dict[tuple[str, str], dict[str, Any]]:
+    """(레코드 id, 질문) → 그 질문의 값과 묶음: ``accuracy``·``brier``·``code_mass``(한 순서 읽기는 배치들의 1/L 가중 평균 = 한 순서로
+    물었을 때의 기대값, 순서 평균 읽기는 배치 평균 답의 값), ``chance``(무작위로 하나 고르기의 정확도 — choice |최선|/n, noul 0.5),
+    ``groups``(:data:`PROBE_DIMENSIONS`), ``clusters``(:data:`CLUSTERS`). 행은 :func:`robo_jev.decisions.metrics.question_rows` 의 것이다."""
+    from robo_jev.decisions.metrics import FLIP_THRESHOLD, question_rows
+
+    by_id = {str(r.get("id")): r for r in records}
+    sums: dict[tuple[str, str], dict[str, list[float]]] = defaultdict(lambda: defaultdict(lambda: [0.0, 0.0]))
+    for row in question_rows(list(records), list(predictions), reading=reading):
+        if row.get("m") is None:
+            continue
+        m, w = row["m"], float(row["w"])
+        correct = m["match"] if row["type"] == "choice" else (m["p"] >= FLIP_THRESHOLD) == (m["y"] >= FLIP_THRESHOLD)
+        chance = row["u"]["match"] if row["type"] == "choice" else 0.5
+        acc = sums[(row["record_id"], row["question"])]
+        for key, value in (("accuracy", 1.0 if correct else 0.0), ("brier", m["brier"]), ("code_mass", row.get("code_mass")), ("chance", chance)):
+            if value is not None:
+                acc[key][0] += w * float(value)
+                acc[key][1] += w
+    out = {}
+    for (rid, name), acc in sums.items():
+        record = by_id[rid]
+        meta = record.get("meta") or {}
+        qmeta = _question_meta(record, name)
+        values = {key: (total / weight if weight > 0 else None) for key, (total, weight) in acc.items()}
+        out[(rid, name)] = {
+            **{key: values.get(key) for key in (*PROBE_METRICS, "chance")},
+            "groups": {
+                "domain": str(meta.get("domain")), "language": str(meta.get("language")), "split": str(meta.get("split")),
+                "source_type": str(qmeta.get("source_type")), "label_kind": str(qmeta.get("label_kind")),
+                "label_confidence": str(qmeta.get("label_confidence")), "type": str(record["request"]["questions"][name]["type"]),
+            },
+            "clusters": {"origin_group": str(meta.get("origin_group") or rid), "source_record": str(meta.get("source_record") or rid), "record": rid},
+        }  # fmt: skip
+    return out
+
+
+def _paired_cell(keys: list[tuple[str, str]], a: dict, b: dict, *, cluster: str, n_boot: int, rng_seed: int) -> dict[str, Any]:
+    """질문 열쇠들 위에서 지표마다 a·b의 평균과 a − b의 짝지은 cluster bootstrap 95 % 구간 (두 run이 같은 질문·같은 뽑기)."""
+    clusters = sorted({a[k]["clusters"][cluster] for k in keys})
+    index = {c: i for i, c in enumerate(clusters)}
+    cell: dict[str, Any] = {"questions": len(keys), "clusters": len(clusters)}
+    chance = [a[k]["chance"] for k in keys if a[k].get("chance") is not None]
+    cell["chance_accuracy"] = float(np.mean(chance)) if chance else None
+    rng = np.random.default_rng(int(rng_seed))
+    draws = rng.integers(0, len(clusters), size=(int(n_boot), len(clusters))) if clusters else None
+    for metric in PROBE_METRICS:
+        sa, sb, n = np.zeros(len(clusters)), np.zeros(len(clusters)), np.zeros(len(clusters))
+        for k in keys:
+            va, vb = a[k].get(metric), b[k].get(metric)
+            if va is None or vb is None:
+                continue
+            i = index[a[k]["clusters"][cluster]]
+            sa[i] += va
+            sb[i] += vb
+            n[i] += 1
+        if n.sum() == 0 or draws is None:
+            cell[metric] = None
+            continue
+        value_a, value_b = float(sa.sum() / n.sum()), float(sb.sum() / n.sum())
+        with np.errstate(invalid="ignore", divide="ignore"):
+            samples = (sa[draws].sum(1) - sb[draws].sum(1)) / n[draws].sum(1)
+        samples = samples[np.isfinite(samples)]
+        low, high = (float(np.percentile(samples, 2.5)), float(np.percentile(samples, 97.5))) if samples.size else (None, None)
+        cell[metric] = {
+            "a": value_a, "b": value_b, "diff": value_a - value_b, "low": low, "high": high, "n": int(n.sum()),
+            "excludes_zero": bool(low is not None and (low > 0 or high < 0)),
+        }
+    return cell
+
+
+def compare_probe(
+    records: Sequence[dict[str, Any]], predictions_a: Sequence[dict[str, Any]], predictions_b: Sequence[dict[str, Any]], *,
+    dimensions: Sequence[str] = PROBE_DIMENSIONS, cluster: str = "origin_group", n_boot: int = 2000, seed: int = 0,
+) -> dict[str, Any]:
+    """같은 기록의 두 run(a, b) — 두 읽기 각각에서 둘 다 채점된 질문만으로, 전체(``_all``)와 묶음 값마다 정확도·Brier·코드 질량의
+    a·b 평균과 a − b의 짝지은 bootstrap 95 % 구간. 뽑기 단위는 `cluster`(기본 origin group — 번역·재표현·대조 sibling이 같은 계보라
+    레코드보다 보수적이다); 칸마다 같은 seed로 뽑고, 한 칸의 세 지표는 같은 뽑기를 쓴다."""
+    from robo_jev.decisions.metrics import READINGS
+
+    if cluster not in CLUSTERS:
+        raise ValueError(f"cluster: {list(CLUSTERS)} 중 하나 (받은 값: {cluster!r})")
+    unknown = [d for d in dimensions if d not in PROBE_DIMENSIONS]
+    if unknown:
+        raise ValueError(f"모르는 묶음 차원 {unknown} (쓸 수 있는 것: {list(PROBE_DIMENSIONS)})")
+    ids = {str(p["id"]) for p in predictions_a} & {str(p["id"]) for p in predictions_b}
+    kept = [r for r in records if str(r.get("id")) in ids]
+    out: dict[str, Any] = {"records": len(kept), "cluster": cluster, "n_boot": int(n_boot), "seed": int(seed), "dimensions": list(dimensions), "readings": {}}
+    for reading in READINGS:
+        a = probe_values(kept, predictions_a, reading=reading)
+        b = probe_values(kept, predictions_b, reading=reading)
+        common = sorted(set(a) & set(b))
+        table: dict[str, Any] = {"_all": _paired_cell(common, a, b, cluster=cluster, n_boot=n_boot, rng_seed=seed)}
+        for dim in dimensions:
+            values = sorted({a[k]["groups"][dim] for k in common})
+            table[dim] = {v: _paired_cell([k for k in common if a[k]["groups"][dim] == v], a, b, cluster=cluster, n_boot=n_boot, rng_seed=seed)
+                          for v in values}  # fmt: skip
+        out["readings"][reading] = {"questions": len(common), "only_a": len(set(a) - set(b)), "only_b": len(set(b) - set(a)), "table": table}
+    return out
+
+
+def _fmt(value: float | None, digits: int = 3) -> str:
+    return "—" if value is None else f"{value:.{digits}f}"
+
+
+def _diff(cell: dict[str, Any] | None, digits: int = 3) -> str:
+    if not cell:
+        return "—"
+    mark = " *" if cell["excludes_zero"] else ""
+    return f"{cell['diff']:+.{digits}f} [{_fmt(cell['low'], digits)}, {_fmt(cell['high'], digits)}]{mark}"
+
+
+def render_probe_comparison(comparison: dict[str, Any], *, label_a: str, label_b: str, title: str, note: str | None = None) -> str:
+    """:func:`compare_probe` → markdown: 읽기마다 한 표(전체, 묶음 차원마다 값), 열 = 질문/cluster 수, 정확도(a, b, a − b [95 %]),
+    Brier(a, b, a − b), 코드 질량(a, b, a − b). ``*`` = 구간이 0을 빼는 칸."""
+    reading_names = {"single_order": "single order (deployment condition)", "order_averaged": "order-averaged (what it knows)"}
+    lines = [f"# {title}", ""]
+    if note:
+        lines += [f"> {note}", ""]
+    lines += [
+        f"a = **{label_a}**, b = **{label_b}**. Paired differences a − b on the same questions with a {comparison['cluster']}-cluster bootstrap "
+        f"95 % interval ({comparison['n_boot']} draws, seed {comparison['seed']} in every cell; the three metrics of a cell share its draws); "
+        f"`*` = the interval excludes 0. "
+        f"Accuracy: choice = argmax in the label's best set (valid sets count every allowed option), noul = same side of 0.5 as the 0/1 label; "
+        f"chance = a uniform random pick. Brier as in the diagnosis tool: choice Σ_k (p_k − q_k)², noul (p − y)² (lower is better; the `_all` row "
+        f"mixes the two definitions). Code mass = full-vocabulary probability on the answer codes at the answer position (format adherence).",
+        f"Records compared: {comparison['records']}.", "",
+    ]
+    for reading, block in comparison["readings"].items():
+        lines += [f"## {reading_names.get(reading, reading)} — {block['questions']} questions", ""]
+        lines.append(f"| group | questions / clusters | chance acc | acc {label_a} | acc {label_b} | Δ acc [95 %] | Brier {label_a} | Brier {label_b} | Δ Brier [95 %] "
+                     f"| mass {label_a} | mass {label_b} | Δ mass [95 %] |")
+        lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|")
+
+        def row(name: str, cell: dict[str, Any]) -> str:
+            acc, brier, mass = cell.get("accuracy"), cell.get("brier"), cell.get("code_mass")
+            return (f"| {name} | {cell['questions']} / {cell['clusters']} | {_fmt(cell.get('chance_accuracy'))} | {_fmt(acc and acc['a'])} | "
+                    f"{_fmt(acc and acc['b'])} | {_diff(acc)} | {_fmt(brier and brier['a'])} | {_fmt(brier and brier['b'])} | {_diff(brier)} | "
+                    f"{_fmt(mass and mass['a'])} | {_fmt(mass and mass['b'])} | {_diff(mass)} |")
+
+        lines.append(row("**all**", block["table"]["_all"]))
+        for dim in comparison["dimensions"]:
+            for value, cell in block["table"][dim].items():
+                lines.append(row(f"{dim} = {value}", cell))
+        lines.append("")
+    return "\n".join(lines) + "\n"
