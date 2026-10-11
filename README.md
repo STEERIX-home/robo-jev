@@ -103,11 +103,18 @@ The 2B backbone (Qwen3.5-2B) was trained once (LoRA, 50,000 generated requests, 
 **Weaknesses v0 exposed:**
 - **Wording.** A counterfactual question ("if you recentre it first, does it come off the stack?") is answered perfectly in the training wordings but worse than untrained in T2's held-out wording. Training saw only three wordings per question.
 - **Fact order.** Shuffling the order of facts moves the trained model's answers more than the untrained model's (mean shift 0.071 vs 0.034).
-- **Unmeasured so far.**
-  - General ability outside physics.
-  - Any test outside this generator family. All seven sets come from the same engine with held-out cells, so outside tests are still to come.
+- **General reading got worse.** Measured after the physics sets:
+  - On 2,082 non-robot reading questions (rules, workflows, page layouts, spatial facts; mostly Korean), accuracy fell from 0.484 to 0.429, a drop of 0.055 [0.030, 0.083].
+  - On 1,000 public questions (BoolQ and MultiNLI), it fell from 0.739 to 0.650, a drop of 0.090 [0.062, 0.116]. Nearly all of that loss is on MultiNLI, where the trained model rarely answers "contradiction".
+  - The clearest mechanism is a learned *stop* reflex. Asked which action a written rule requires, the trained model answers "stop immediately" in 97 of 105 questions; the rule requires stopping in 8, and the untrained model answers stop in 37.
+  - Physics training taught it that stopping is usually safe, and that now overrides what the text says.
+- **Not yet tested outside this generator family.** All seven sets come from the same engine with held-out cells, so outside tests are still to come.
 
-v0.1 changes only the data — more training wordings, shuffled fact order — so the difference can be attributed, and it adds a general-ability check. Its pass rule was written down before any v0.1 data existed.
+v0.1 runs as two variants:
+- **Data fixes only:** more training wordings and shuffled fact order. Only the data changes, so the difference can be attributed.
+- **Data fixes plus general data:** the same, with about 2.7 % of training examples drawn from the non-robot reading set's training split.
+
+Both variants are scored on the same sealed sets and on the two general-reading checks. The pass rule was written down before any v0.1 data existed.
 
 ## Training
 
@@ -127,7 +134,7 @@ v0.1 changes only the data — more training wordings, shuffled fact order — s
 | v0d | Trainer (LoRA bf16 + fp32 masters, code-mass term) and `--checkpoint` scoring with the same prompts | merged |
 | cloud1 | RunPod runner: hard spend caps, three deletion fences, ledger | merged; self-delete proven on H100 |
 | **v0** | First trained 2B, evaluated on T1–T7 against the untrained 2B and 4B | **done 2026-10-12 — hypothesis supported** ([First result](#first-result-v0)) |
-| v0.1 | More training wordings, shuffled fact order, general-ability check (G1) | in progress |
+| v0.1 | More training wordings, shuffled fact order; a variant with 2.7 % general data; general-reading checks (G1, G2) | running on RunPod |
 
 ## Roadmap — coarse to fine
 
