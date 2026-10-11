@@ -1,8 +1,8 @@
-"""v0.1 본 run의 job 정의 둘 (Task v0.1b) — `decisions-v01-main-h100`(v0.1a의 train-50k)·`decisions-v01-mix-h100`(그 뒤에 G1-train-mix).
+"""v0.1 본 run의 job 정의 둘 (Task v0.1b) — `decisions-v01-main-h100`(v0.1a의 train-50k)·`decisions-v01-mix-h100`(그 뒤에 G1-train-mix ×1).
 
 v0 job 정의의 시험(tests/test_cloud_jobs.py의 실어 보내는 job 검사 — 그것이 이 둘도 자기 argparse·resolve_config로 이미 읽는다)과 같은 방식으로
-더 본다: 두 job이 v0의 학습 조리법을 그대로 쓰고 학습 입력·이름만 다른지, 학습한 체크포인트로 G1과 T1~T7을 한 번씩 진단하는지(기준·v0의 G1은
-Spark에서 쟀으므로 pod에서 학습 없는 모델을 다시 재지 않는다), 봉인 세트(T1~T7·G1)가 어느 job의 학습 입력도 아닌지, 섞기용 학습 입력이
+더 본다: 두 job이 v0의 학습 조리법을 그대로 쓰고 학습 입력·이름만 다른지, 학습한 체크포인트로 G1·G2와 T1~T7을 한 번씩 진단하는지(기준·v0의
+G1·G2는 Spark에서 쟀으므로 pod에서 학습 없는 모델을 다시 재지 않는다), 봉인 세트(T1~T7·G1·G2)가 어느 job의 학습 입력도 아닌지, 섞기용 학습 입력이
 `convert_single_probe.py mix`로 봉인되지 않은 재료에서만 만들어지는지. v0.1a의 train-50k가 아직 없으면 가짜 파일로 한다. 모델·데이터는 싣지 않는다.
 """
 
@@ -30,7 +30,8 @@ TRAIN_INPUT = {"main": "artifacts/simgen/v01/train-50k.jsonl", "mix": "artifacts
 RUN_NAME = {"main": "v01-main-2b", "mix": "v01-mix-2b"}
 TESTS = [f"artifacts/simgen/v0b/tests/T{i}.jsonl" for i in range(1, 8)]
 G1 = "artifacts/simgen/probes/G1.jsonl"
-SEALED = (*TESTS, G1)
+G2 = "artifacts/simgen/probes/G2.jsonl"  # 공개 BoolQ·MultiNLI 표본 (통제자 결정 2026-10-12)
+SEALED = (*TESTS, G1, G2)
 CONTEXT = {"python": "python", "uv": "uv", "repo": "/r", "run_dir": "/r/run", "runs": "/r/run/runs", "reports": "/r/run/reports", "run_id": "x"}
 PROBES = REPO / "artifacts" / "simgen" / "probes"
 
@@ -71,9 +72,9 @@ def test_each_v01_job_trains_once_with_the_v0_recipe(which):
 
 
 @pytest.mark.parametrize("which", sorted(JOBS))
-def test_each_v01_job_diagnoses_its_own_checkpoint_on_g1_then_the_seven_sealed_sets(which):
+def test_each_v01_job_diagnoses_its_own_checkpoint_on_g1_g2_then_the_seven_sealed_sets(which):
     diagnoses = _diagnoses(JOBS[which])
-    assert [str(args.input) for _, args in diagnoses] == [G1, *TESTS], "G1이 먼저, 그다음 T1~T7 — 한 번씩"
+    assert [str(args.input) for _, args in diagnoses] == [G1, G2, *TESTS], "G1·G2가 먼저, 그다음 T1~T7 — 한 번씩"
     checkpoint = f"/r/run/runs/{RUN_NAME[which]}/checkpoint.pt"
     for name, args in diagnoses:
         assert str(args.checkpoint) == checkpoint, f"{name}: 학습 없는 모델·v0을 pod에서 다시 재지 않는다 (Spark에서 쟀다)"
@@ -104,7 +105,8 @@ def test_no_shipped_job_trains_on_a_sealed_set(job_path):
             continue
         args = _script("train_decisions.py").build_parser().parse_args(argv[2:])
         train_input = str(resolve_config(_script("train_decisions.py")._read_config(REPO / args.config, args.set))["train_input"])
-        assert train_input not in SEALED and "/tests/" not in train_input and "probes/G1.jsonl" not in train_input, f"{job_path.name}:{name}"
+        assert train_input not in SEALED and "/tests/" not in train_input and "probes/G1.jsonl" not in train_input and "probes/G2" not in train_input, (
+            f"{job_path.name}:{name}")
 
 
 def test_the_mix_training_input_is_built_only_from_unsealed_material(tmp_path):

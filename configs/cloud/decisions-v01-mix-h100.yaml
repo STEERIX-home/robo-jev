@@ -7,7 +7,7 @@
 # 섞인 몫(대리 실측 — v0b의 train-50k에 이어 붙인 것, artifacts/scratch/v01b/standin/): 섞기용 train 1,405 레코드(dev 34는 dev 상한 300
 # 밖이라 쓰이지 않는다) → epoch당 예 2,724 / 100,774 = 2.70 %, step 3,065 → 3,150; 섞기용 예는 평균 866 토큰(simgen 예 407)이라 토큰으로는
 # ≈ 5.6 %다 — 학습 단계는 ①보다 ≈ 6 % 길다(≈ 70분; 예상 시간은 ①과 같게 두었다).
-# 진단은 ①과 같다(after-v01mix: G1 → T1~T7).
+# 진단은 ①과 같다(after-v01mix: G1 → G2 → T1~T7). 섞기용은 d1 train 분할 한 번(×1)이다.
 kind: robojev-cloud-job-v0
 name: decisions-v01-mix-h100
 job:
@@ -25,6 +25,8 @@ job:
     - artifacts/simgen/v0b/tests/manifest.json
     - artifacts/simgen/probes/G1.jsonl
     - artifacts/simgen/probes/G1.manifest.json
+    - artifacts/simgen/probes/G2.jsonl
+    - artifacts/simgen/probes/G2.manifest.json
   runtime:
     env:
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
@@ -56,6 +58,11 @@ job:
       argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v01-mix-2b/checkpoint.pt", "--input", "artifacts/simgen/probes/G1.jsonl", "--out", "{reports}/after-v01mix-2b-G1.json", "--gpu-memory-fraction", "0.92"]
       max_minutes: 45
       est_minutes: 20
+      optional: true
+    - name: after-G2
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v01-mix-2b/checkpoint.pt", "--input", "artifacts/simgen/probes/G2.jsonl", "--out", "{reports}/after-v01mix-2b-G2.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 20
+      est_minutes: 2
       optional: true
     - name: after-T1
       argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v01-mix-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T1.jsonl", "--out", "{reports}/after-v01mix-2b-T1.json", "--gpu-memory-fraction", "0.92"]
@@ -120,4 +127,4 @@ estimate:
   boot_minutes: 3
   uplink_mbps: 40
   fetch_minutes: 3
-  assumption: "단계 시간은 v0 본 run(v0-main-01, H100)의 실측: 학습 62.6분, 진단 T1 26.3 · T2 26.1 · T3 25.4 · T4 14.7 · T5 13.2 · T6 53.8 · T7 26.7분; G1은 같은 처리량(≈ 7,700 토큰/s, 9.0 M 토큰)으로 ≈ 20분"
+  assumption: "단계 시간은 v0 본 run(v0-main-01, H100)의 실측: 학습 62.6분, 진단 T1 26.3 · T2 26.1 · T3 25.4 · T4 14.7 · T5 13.2 · T6 53.8 · T7 26.7분; G1은 같은 처리량(≈ 7,700 토큰/s, 9.0 M 토큰)으로 ≈ 20분, G2는 0.56 M 토큰으로 ≈ 2분"

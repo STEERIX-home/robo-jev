@@ -206,7 +206,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
         raise SystemExit(f"the two runs were not scored the same way: {mismatch} (use --allow-mismatch to compare anyway)")
     ids = {str(p["id"]) for p in a} | {str(p["id"]) for p in b}
     records = [r for r in records if str(r["id"]) in ids]
-    comparison = compare_probe(records, a, b, cluster=args.cluster, n_boot=args.n_boot, seed=args.seed)
+    from robo_jev.decisions.single_probe import PROBE_DIMENSIONS
+
+    comparison = compare_probe(records, a, b, dimensions=args.dimensions or PROBE_DIMENSIONS, cluster=args.cluster, n_boot=args.n_boot, seed=args.seed)
     payload = {
         "config": {"input": str(args.input), "input_sha256": file_sha256(args.input), "a": str(args.a), "b": str(args.b),
                    "a_sha256": file_sha256(args.a), "b_sha256": file_sha256(args.b), "labels": list(args.labels), "conditions": {"a": cond_a, "b": cond_b},
@@ -319,6 +321,8 @@ def build_parser() -> argparse.ArgumentParser:
     compare.add_argument("--seed", type=int, default=0)
     compare.add_argument("--title", default=None)
     compare.add_argument("--allow-mismatch", action="store_true", help="두 예측의 프롬프트 판·형식·배치·seed가 달라도 비교한다 (보고서에 적힌다)")
+    compare.add_argument("--dimensions", nargs="+", default=None, metavar="DIM",
+                         help="묶음 차원 (기본: 전부 — domain language source_type split label_kind label_confidence type); +로 이으면 교차 (split+source_type)")
     compare.set_defaults(func=cmd_compare)
     sample = sub.add_parser("sample", help="공개 세트(judgment-v0)에서 묶음마다 seed로 N개를 뽑아 변환한 봉인 시험 G2 + manifest (CPU)")
     sample.add_argument("--source", action="append", required=True, metavar="NAME=PATH", help="묶음 이름=judgment-v0 records.jsonl (여러 번)")

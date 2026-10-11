@@ -473,13 +473,13 @@ def compare_probe(
     dimensions: Sequence[str] = PROBE_DIMENSIONS, cluster: str = "origin_group", n_boot: int = 2000, seed: int = 0,
 ) -> dict[str, Any]:
     """같은 기록의 두 run(a, b) — 두 읽기 각각에서 둘 다 채점된 질문만으로, 전체(``_all``)와 묶음 값마다 정확도·Brier·코드 질량의
-    a·b 평균과 a − b의 짝지은 bootstrap 95 % 구간. 뽑기 단위는 `cluster`(기본 origin group — 번역·재표현·대조 sibling이 같은 계보라
+    a·b 평균과 a − b의 짝지은 bootstrap 95 % 구간. 차원을 ``+``로 이으면 교차 묶음이다(예: ``split+source_type`` → ``ood_test/choice``). 뽑기 단위는 `cluster`(기본 origin group — 번역·재표현·대조 sibling이 같은 계보라
     레코드보다 보수적이다); 칸마다 같은 seed로 뽑고, 한 칸의 세 지표는 같은 뽑기를 쓴다."""
     from robo_jev.decisions.metrics import READINGS
 
     if cluster not in CLUSTERS:
         raise ValueError(f"cluster: {list(CLUSTERS)} 중 하나 (받은 값: {cluster!r})")
-    unknown = [d for d in dimensions if d not in PROBE_DIMENSIONS]
+    unknown = [d for d in dimensions if not d or any(part not in PROBE_DIMENSIONS for part in d.split("+"))]
     if unknown:
         raise ValueError(f"모르는 묶음 차원 {unknown} (쓸 수 있는 것: {list(PROBE_DIMENSIONS)})")
     ids = {str(p["id"]) for p in predictions_a} & {str(p["id"]) for p in predictions_b}
@@ -491,9 +491,9 @@ def compare_probe(
         common = sorted(set(a) & set(b))
         table: dict[str, Any] = {"_all": _paired_cell(common, a, b, cluster=cluster, n_boot=n_boot, rng_seed=seed)}
         for dim in dimensions:
-            values = sorted({a[k]["groups"][dim] for k in common})
-            table[dim] = {v: _paired_cell([k for k in common if a[k]["groups"][dim] == v], a, b, cluster=cluster, n_boot=n_boot, rng_seed=seed)
-                          for v in values}  # fmt: skip
+            key = {k: "/".join(a[k]["groups"][part] for part in dim.split("+")) for k in common}
+            table[dim] = {v: _paired_cell([k for k in common if key[k] == v], a, b, cluster=cluster, n_boot=n_boot, rng_seed=seed)
+                          for v in sorted(set(key.values()))}  # fmt: skip
         out["readings"][reading] = {"questions": len(common), "only_a": len(set(a) - set(b)), "only_b": len(set(b) - set(a)), "table": table}
     return out
 

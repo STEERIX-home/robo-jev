@@ -423,3 +423,85 @@ def test_the_shipped_probe_files_match_their_manifests_and_share_no_lineage():
         assert {r["meta"]["split"] for r in records} <= set(splits) and all(validate_record(r) == [] for r in records)
         files[name] = records
     assert overlap(files["G1"], files["G1-train-mix"]) == {"origin_groups": [], "source_records": []}
+
+
+# --------------------------------------------------------------------------
+# G2 — 공개 세트에서 seed로 뽑은 독립 일반 시험 (통제자 결정 2026-10-12)
+# --------------------------------------------------------------------------
+
+
+def _public(name: str, n: int) -> list[dict]:
+    """공개 세트 변환본(`public-sets-v0.1`)과 같은 꼴의 손 레코드 — boolq는 예/아니오 하나, multinli는 3지선다 하나."""
+    out = []
+    for i in range(n):
+        if name == "boolq":
+            state = {"passage": f"Passage {i} says the sky is blue.", "question": f"is the sky blue {i}"}
+            question = {"id": "q_boolq", "type": "boolean", "instructions": "Given the passage, is the answer to the question yes?",
+                        "criteria": [{"id": "true", "description": "yes"}, {"id": "false", "description": "no"}]}  # fmt: skip
+            label = {"question_id": "q_boolq", "kind": "single", "answer": i % 2 == 0, "source": "boolq/validation", "label_confidence": "high"}
+        else:
+            state = {"premise": f"Premise {i}.", "hypothesis": f"Hypothesis {i}.", "genre": "fiction"}
+            question = {"id": "q_nli", "type": "choice", "instructions": "What is the relation of the hypothesis to the premise?",
+                        "criteria": [{"id": f"c_{c}", "description": c} for c in ("entailment", "neutral", "contradiction")]}  # fmt: skip
+            label = {"question_id": "q_nli", "kind": "single", "answer": "c_neutral", "source": "multinli/dev_matched", "label_confidence": "high"}
+        out.append({"schema_version": "judgment-v0", "origin_group": f"public/{name}/{i:05d}", "split": "dev",
+                    "request": {"request_id": f"{name}-{i:05d}", "state": state, "questions": [question]}, "labels": [label],
+                    "provenance": {"generator": "public-sets-v0.1", "domain": f"public:{name}", "public_source": name, "language": "en"}})  # fmt: skip
+    return out
+
+
+def test_the_g2_sample_is_seeded_keeps_file_order_and_maps_boolq_to_noul_and_multinli_to_three_options():
+    from robo_jev.decisions.single_probe import sample_and_convert
+
+    sources = {"boolq": _public("boolq", 40), "multinli": _public("multinli", 30)}
+    converted, picked = sample_and_convert(sources, per_source=10, seed=0)
+    again, _ = sample_and_convert(sources, per_source=10, seed=0)
+    other, _ = sample_and_convert(sources, per_source=10, seed=1)
+    assert converted == again and [r["id"] for r in converted] != [r["id"] for r in other]
+    assert {name: spec["sampled"] for name, spec in picked.items()} == {"boolq": 10, "multinli": 10}
+    for name in sources:
+        ids = picked[name]["request_ids"]
+        assert ids == sorted(ids) and len(set(ids)) == 10  # 원본 파일 순서
+    types = {r["meta"]["domain"]: {(q["type"], len(q.get("criteria") or {})) for q in r["request"]["questions"].values()} for r in converted}
+    assert types == {"public:boolq": {("noul", 0)}, "public:multinli": {("choice", 3)}}
+    assert all(validate_record(r) == [] and r["meta"]["split"] == "dev" for r in converted)  # dev — mix 명령이 학습에 섞을 수 없다
+    with pytest.raises(ValueError, match="뽑을 수 없다"):
+        sample_and_convert(sources, per_source=31, seed=0)
+
+
+def test_the_sample_command_records_the_seed_and_refuses_unexpected_question_types(tmp_path):
+    paths = {name: _write(tmp_path / f"{name}.jsonl", _public(name, 12)) for name in ("boolq", "multinli")}
+    argv = ["sample", "--source", f"boolq={paths['boolq']}", "--source", f"multinli={paths['multinli']}", "--per-source", "5", "--seed", "7",
+            "--name", "G2", "--out-dir", str(tmp_path / "out")]  # fmt: skip
+    assert script().main([*argv, "--expect-types", "boolq=noul", "multinli=choice:3"]) == 0
+    manifest = json.loads((tmp_path / "out" / "G2.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["seed"] == 7 and manifest["role"] == "sealed" and manifest["file"]["records"] == 10
+    assert manifest["file"]["sha256"] == file_sha256(tmp_path / "out" / "G2.jsonl")
+    assert manifest["sources"]["boolq"]["sha256"] == file_sha256(paths["boolq"]) and manifest["sources"]["multinli"]["question_types"] == ["choice:3"]
+    assert len(manifest["sources"]["boolq"]["request_ids"]) == 5 and manifest["counts"]["questions_by"]["type"] == {"choice": 5, "noul": 5}
+    with pytest.raises(SystemExit, match="expected"):
+        script().main([*argv, "--expect-types", "multinli=choice:4"])
+
+
+def test_crossed_dimensions_split_the_comparison_by_two_groups_at_once():
+    records = _probe_records()
+    good, bad = _predictions(records, right=True), _predictions(records, right=False)
+    table = compare_probe(records, good, bad, dimensions=("domain+source_type",), n_boot=50)["readings"]["single_order"]["table"]
+    assert set(table["domain+source_type"]) == {"rules/boolean", "rules/choice", "spatial/boolean", "spatial/choice"}
+    assert table["domain+source_type"]["rules/choice"]["questions"] == 2
+    with pytest.raises(ValueError, match="모르는 묶음 차원"):
+        compare_probe(records, good, bad, dimensions=("domain+nope",))
+
+
+@pytest.mark.skipif(not (PROBES / "G2.manifest.json").is_file(), reason="artifacts/simgen/probes/G2가 없다 (뽑기를 돌리지 않은 체크아웃)")
+def test_the_shipped_g2_matches_its_manifest_and_holds_five_hundred_of_each_public_set():
+    manifest = json.loads((PROBES / "G2.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["file"]["sha256"] == file_sha256(PROBES / "G2.jsonl") and manifest["converter"]["git_dirty"] is False and manifest["seed"] == 0
+    records = read_records(PROBES / "G2.jsonl")
+    domains = {}
+    for record in records:
+        assert validate_record(record) == [] and record["meta"]["split"] == "dev"
+        (question,) = record["request"]["questions"].values()
+        domains.setdefault(record["meta"]["domain"], set()).add((question["type"], len(question.get("criteria") or {})))
+    assert domains == {"public:boolq": {("noul", 0)}, "public:multinli": {("choice", 3)}}
+    assert {name: spec["sampled"] for name, spec in manifest["sources"].items()} == {"boolq": 500, "multinli": 500}
