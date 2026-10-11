@@ -361,3 +361,73 @@ def test_a_tiny_decisions_training_job_trains_evaluates_and_brings_back_the_adap
     assert metrics["config"]["max_wall_hours"] is not None, "러너가 준 벽시계 상한이 학습기에 닿았다"
     after = json.loads(Path(got["reports/after.json"]["local"]).read_text(encoding="utf-8"))
     assert after["config"]["checkpoint"]["run_id"] == "tiny"
+
+
+# --------------------------------------------------------------------------
+# 실어 보내는 job 정의가 병합된 CLI와 맞는가 (수정 1: v0 본 run 둘)
+# --------------------------------------------------------------------------
+
+SHIPPED_JOBS = sorted((REPO / "configs" / "cloud").glob("*.yaml"))
+
+
+def _script(name: str):
+    import functools
+    import importlib.util
+
+    @functools.lru_cache(maxsize=None)
+    def load(path: str):
+        spec = importlib.util.spec_from_file_location(f"shipped_{Path(path).stem}", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    return load(str(REPO / "scripts" / name))
+
+
+@pytest.mark.parametrize("job_path", SHIPPED_JOBS, ids=[p.stem for p in SHIPPED_JOBS])
+def test_every_shipped_step_parses_with_the_merged_tools_and_refers_only_to_shipped_inputs(job_path):
+    """configs/cloud/*.yaml의 단계마다: 병합된 학습기·진단기·가중치 받기의 **자기 argparse**로 인자를 읽고, 학습 설정은 학습기의 resolve_config로
+    풀어 본다(모르는 키·범위 밖 값이면 여기서 걸린다). 학습·진단의 입력 파일은 job의 inputs에 있어야 한다(올라가지 않으면 원격에 없다).
+    모델을 싣지도 데이터를 읽지도 않는다."""
+    import json as json_module
+
+    from robo_jev.decisions.train import resolve_config
+
+    spec = load_job(job_path)
+    job = spec["job"]
+    inputs = set(job["inputs"])
+    models = json_module.loads((REPO / "artifacts" / "models" / "manifest.json").read_text(encoding="utf-8"))["models"]
+    candidates = yaml.safe_load((REPO / "configs" / "model" / "candidates.yaml").read_text(encoding="utf-8"))
+    candidate_ids = {entry["id"] for entry in candidates["candidates"]}
+    trained: set[str] = set()
+    for step in job["setup"] + job["steps"]:
+        argv = expand(step["argv"], {"python": "python", "uv": "uv", "repo": "/r", "run_dir": "/r/run", "runs": "/r/run/runs",
+                                     "reports": "/r/run/reports", "model": job["model"], "step": step["name"], "run_id": "x"})  # fmt: skip
+        if argv[0] == "uv" or argv[1:3] == ["-m", "robo_jev.launch.envprobe"]:
+            continue
+        script = argv[1]
+        if script == "scripts/train_decisions.py":
+            args = _script("train_decisions.py").build_parser().parse_args(argv[2:])
+            assert args.command == "train", step["name"]
+            config = _script("train_decisions.py")._read_config(REPO / args.config, args.set)
+            resolved = resolve_config(config)
+            assert resolved["train_input"] in inputs, f"{step['name']}: 학습 입력 {resolved['train_input']}이 job inputs에 없다"
+            assert resolved["out_dir"] == "/r/run/runs", f"{step['name']}: out_dir는 {{runs}}여야 가져온다"
+            assert step.get("wall_set") == "max_wall_hours", f"{step['name']}: 학습 단계는 러너의 벽시계를 받아야 스스로 멈춘다"
+            trained.add(resolved["run_name"])
+            assert resolved["model_id"] in models, f"{step['name']}: {resolved['model_id']}의 고정 revision이 모델 manifest에 없다"
+        elif script == "scripts/diagnose_decisions.py":
+            args = _script("diagnose_decisions.py")._parser().parse_args(argv[2:])
+            assert str(args.input) in inputs, f"{step['name']}: 진단 입력 {args.input}이 job inputs에 없다"
+            assert args.model in models, f"{step['name']}: {args.model}의 고정 revision이 모델 manifest에 없다"
+            if args.checkpoint is not None:
+                run_name = Path(args.checkpoint).parent.name
+                assert str(args.checkpoint).startswith("/r/run/runs/") and run_name in trained, f"{step['name']}: 앞 단계가 만든 체크포인트가 아니다"
+            assert not args.preview or "simgen/v0b/tests" not in str(args.input), f"{step['name']}: 봉인 시험 세트에 '미리보기' 머리를 달지 않는다"
+        elif script == "scripts/fetch_backbone.py":
+            assert argv[2:4] == ["--from-manifest", "artifacts/models/manifest.json"] and argv[4] == "--id", argv
+            assert argv[5] in models and argv[5] in candidate_ids, f"{step['name']}: {argv[5]}은 manifest·후보 목록에 있어야 한다"
+        else:  # pragma: no cover - 새 도구가 생기면 여기서 알린다
+            pytest.fail(f"{job_path.name}:{step['name']}: 모르는 도구 {script}")
+    assert set(job["fetch"]) >= {"reports/*"}, "보고서는 언제나 가져온다"

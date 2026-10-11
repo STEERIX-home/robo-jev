@@ -1,6 +1,7 @@
 # Task cloud1 — 승인된 유료 시운전 한 번 (2026-10-11 사용자 승인: 1×H100, 상한 $5 · 30분, 시운전 데이터만).
 #
-# 묻는 것: (1) x86_64 + CUDA에서 lock이 풀리는가(uv sync --frozen --group backbone), (2) 2B LoRA(bf16 adapter + fp32 master)와 전체 미세조정의
+# 묻는 것: (0) pod 안의 자기 지우기 길이 실제로 지우는가(`launch --prove-self-delete`), (1) x86_64 + CUDA에서 lock이 풀리는가
+# (uv sync --frozen --group backbone), (2) 2B LoRA(bf16 adapter + fp32 master)와 전체 미세조정의
 # H100 토큰/s — GB10 기준(Task v0d §4): LoRA fp32 1,784 · LoRA bf16 2,563 · 전체 2,017 토큰/s, (3) 준비·모델 받기를 포함한 처음부터 끝까지의 벽시계.
 # 데이터: v0a.1 표본의 시운전 나눔(Task v0d `split --eval-records 400 --seed 0` — 학습 1,600 / 평가 400). v0b의 시험 세트는 열지 않는다.
 #
@@ -41,12 +42,11 @@ job:
       max_minutes: 8
       est_minutes: 1.5
     - name: lora-bf16
-      # 본 학습 방식(v0d 수정 1 결정 2): LoRA, bf16 adapter + fp32 master. H100에서 micro-batch 4,096 토큰.
-      argv: ["{python}", "scripts/train_decisions.py", "train", "--config", "configs/train/decisions-v0-lora.yaml",
+      # 본 run의 설정 그대로(v0d의 decisions-v0-lora-h100.yaml: LoRA bf16 + fp32 master, λ 0.2, p3, micro-batch 16,384) — step 수만 줄인다
+      argv: ["{python}", "scripts/train_decisions.py", "train", "--config", "configs/train/decisions-v0-lora-h100.yaml",
              "--set", "train_input=artifacts/scratch/v0d/smoke/sample-2000.v0a1-8fb1919a.train.jsonl",
-             "--set", "out_dir={runs}", "--set", "run_name=lora-bf16", "--set", "lora_dtype=bfloat16", "--set", "micro_batch_tokens=4096",
-             "--set", "max_steps=120", "--set", "dev_every=120", "--set", "checkpoint_every=0", "--set", "min_free_disk_gb=10",
-             "--gpu-memory-fraction", "0.92"]
+             "--set", "out_dir={runs}", "--set", "run_name=lora-bf16", "--set", "max_steps=120", "--set", "dev_every=120",
+             "--set", "checkpoint_every=0", "--gpu-memory-fraction", "0.92"]
       wall_set: max_wall_hours
       max_minutes: 9
       est_minutes: 4.5
