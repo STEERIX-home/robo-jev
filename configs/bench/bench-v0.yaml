@@ -1,0 +1,129 @@
+# bench-v0 — 우리 판단 모델과 OpenRouter 결정 모델의 비교 벤치마크 정의 (Task bench0, 2026-10-12). 고정·판 붙임: 무엇이든 바꾸면 bench-v1.
+#
+# 같은 요청을 보내고 같은 지표로 잰다. 레코드는 원본(봉인 시험 세트 T1~T7·일반 읽기 G1·G2)에서 아래 규칙으로 다시 뽑아
+# artifacts/bench/v0/<세트>.jsonl(커밋 안 함)에 원본 바이트 그대로 쓴다:
+#   uv run python scripts/bench.py build          # 다시 뽑아 expect와 대조 (다르면 거절)
+# 표본 규칙은 src/robo_jev/bench/define.py의 모듈 설명이다 — 층 = 대표 레코드의 meta.group × meta.language, 층마다 몫은 크기에 비례
+# (최대 나머지법), 층 안은 진단 도구의 쌍 보존 표본기(select_records, --limit와 같은 알고리즘), 층 seed = sha256("bench-v0|seed|세트|층").
+# T5는 쌍 단위(150쌍 = 300 레코드), T6는 기준 + 모든 변형의 묶음 단위(30묶음), G1·G2는 전부.
+# expect는 처음 뽑은 결과(2026-10-12)의 기대값이다: 원본 sha256, 레코드 수, 질문 수, id 목록(파일 순서, 줄마다 id 하나)의 sha256.
+version: bench-v0
+seed: 20261012
+strata: [group, language]
+sets:
+  T1:
+    what: in-distribution (training styles, settings and wordings)
+    source: artifacts/simgen/v0b/tests/T1.jsonl
+    unit: record
+    count: 300
+    expect: {source_sha256: 5a0e1f3af02468ae5ace4d308997087f4570336ec6a2a0cb776da479e5590a6c, records: 300, questions: 1670,
+             ids_sha256: bfb8a886e3bd3c6385eb47af0b0fc743b6c80f94d61c45a1f98b172aa2971f1e}
+  T2:
+    what: new style / settings / held-out wordings
+    source: artifacts/simgen/v0b/tests/T2.jsonl
+    unit: record
+    count: 500
+    expect: {source_sha256: 454378466234c2075389552c2627a42c514828dbbcc0cbb76310b08595092d1a, records: 500, questions: 2753,
+             ids_sha256: 998debf0cfd8a0cdbaddba5ef5584ee408c63ddff9adf0a748fe9a4a8bf71837}
+  T3:
+    what: range cells outside the training ranges
+    source: artifacts/simgen/v0b/tests/T3.jsonl
+    unit: record
+    count: 300
+    expect: {source_sha256: a4bb69ab122ebba1d385dd7e4237c0fe4eaba4ec49aeaff14debcb56c445ec73, records: 300, questions: 1643,
+             ids_sha256: 6b7b475042862455f8a8529775c57c915ea583674ac0a6ba26bfa99809f9a1ea}
+  T4:
+    what: unseen phenomenon combination P1+P3
+    source: artifacts/simgen/v0b/tests/T4.jsonl
+    unit: record
+    count: 300
+    expect: {source_sha256: 64820ce2d2bdf13522ad212bf66211bec15f62501240f843e9ac6237a45bca23, records: 300, questions: 1612,
+             ids_sha256: 4401b25a0f22730efe9650026b871fb0f7357068ba5a6cc6248490120e970e0f}
+  T5:
+    what: one-fact pairs (numeric and wording)
+    source: artifacts/simgen/v0b/tests/T5.jsonl
+    unit: pair
+    count: 150
+    expect: {source_sha256: 11c8c759902348e6004c8dd7bd89784c580e997f9179ce2a9ab3172b94b2685d, records: 300, questions: 1670,
+             ids_sha256: 045abff1c431967a07e14173f5e6cc35b631bf0af615d345e97ba8fd31961a67}
+  T6:
+    what: perturbation families (base + every variant)
+    source: artifacts/simgen/v0b/tests/T6.jsonl
+    unit: t6_family
+    count: 30
+    expect: {source_sha256: e117ad2c85dff948cb50f1dbcc036a47f47a835aacd79ace7ba2c30ce2dba8de, records: 390, questions: 2110,
+             ids_sha256: 50e3c21fc8ec50816d014be1f4166d378dca1ac7fd29a7f8f0c30fe52f3a47f9}
+  T7:
+    what: calibration set (ECE)
+    source: artifacts/simgen/v0b/tests/T7.jsonl
+    unit: record
+    count: 300
+    expect: {source_sha256: 37536cd2930a0e8c8b26cb3013cd2ab5e49a4856d7d7f2ff250f8031847da1dd, records: 300, questions: 1670,
+             ids_sha256: 0fdef91df31bdc757a5bbaa4eb1ef93c6547c6d76c2f0aa55b3dfec949f92088}
+  G1:
+    what: general reading — old non-robot test + ood_test (all)
+    source: artifacts/simgen/probes/G1.jsonl
+    unit: all
+    expect: {source_sha256: 8c1e5a6c2d2d05cba4ef591d166de787737a34fb0d0cbea18342c07600bfc3b4, records: 314, questions: 2082,
+             ids_sha256: 24a2bf01023fb2d93445da79a76af11f10e5163a1a5283d4ec2c7bda3560ae04}
+  G2:
+    what: general reading — public BoolQ dev + MultiNLI dev_matched, 500 each (all)
+    source: artifacts/simgen/probes/G2.jsonl
+    unit: all
+    expect: {source_sha256: e97c97dd249dab9f00206a9f6aa9b470fcb9e5221a1958565783037af780d32b, records: 1000, questions: 1000,
+             ids_sha256: e181b277cc91850e756925b04e768a1462fd941f4569c3ce93fb23f3131f2c90}
+
+# score 형식 시운전: 벤치에 들지 않은 T1 레코드 100개 — 단계 둘(원래 기준점 그대로) 대 11단계. 유료 호출이라 승인 뒤에 통제자가 돌린다.
+pilot:
+  from: T1
+  count: 100
+  expect: {records: 100, questions: 562, ids_sha256: d5be2722341101c0b29571d1be179b3bbb90ba94df0beb2599a85e8152835460}
+
+# 요청 변환 (src/robo_jev/bench/openrouter.py): choice는 criteria 맵 그대로, noul은 instructions 그대로(criteria 없음),
+# score는 11단계 0.0 … 1.0(양 끝 단계에 원래 기준점 글) — 값 = 기대 단계 / 10. 상태 글은 문자열 그대로.
+request:
+  score_levels: 11
+  endpoint: https://openrouter.ai/api/alpha/decisions
+
+# OpenRouter 결정 모델 — 기본 선택 여섯 (사용자 결정 2026-10-12: 목록의 19개를 다 돌리지 않는다). 실행 인자 --models로 바꿀 수 있다.
+# :free 복제본은 언제나 뺀다(같은 모델, 엄격한 rate limit).
+models:
+  default:
+    - id: "~typesafe/jev-latest"
+      why: category reference — the robo-jev.dev benchmark site uses it (alias; the resolved version is logged per request)
+    - id: microsoft/microsoft-decision-1
+      why: Qwen3.5-9B post-trained for decisions — the same backbone family as ours
+    - id: togethercomputer/tev1-4b-experimental
+      why: 4B, close to our 2B size; also on the robo-jev.dev site
+    - id: openai/gpt-6-luna-decisions
+      why: frontier-lab reference
+    - id: liquid/d1
+      why: edge-oriented (LiquidAI) — relevant to a fast on-robot L2
+    - id: upstage/solar-decide
+      why: requested by the user (Solar Decide)
+  exclude_suffixes: [":free"]
+
+# 우리 모델 — 이미 있는 예측(같은 레코드, 진단 도구 v0d-diagnose-4, 프롬프트 v0c-p3, 균형 배치)에서 벤치 부분집합만 고른다. 추가 GPU 계산 없음.
+# 칸마다 후보 경로를 앞에서부터 보고 처음 있는 것을 쓴다 ({set} = 세트 이름). 없으면 건너뛴다(v0.1은 오면 다시 돌린다).
+# G1·G2의 기준·v0은 v0.1 pod의 같은 하드웨어 기준(H100)이 있으면 그것을, 없으면 Spark(GB10)의 것을 쓴다.
+ours:
+  - tag: qwen3.5-2b
+    label: Qwen3.5-2B (untrained)
+    role: baseline
+    T: ["artifacts/cloud/runs/v0-base-01-fetched/reports/base-2b-{set}.predictions.jsonl"]
+    G: ["artifacts/cloud/runs/v01-main-01-fetched/reports/base-2b-{set}.predictions.jsonl", "artifacts/reports/v01b/{set}-base-2b.predictions.jsonl"]
+  - tag: robojev-v0
+    label: robojev v0 (2B)
+    role: ours
+    T: ["artifacts/cloud/runs/v0-main-01-fetched/reports/after-2b-{set}.predictions.jsonl"]
+    G: ["artifacts/cloud/runs/v01-main-01-fetched/reports/v0-2b-{set}.predictions.jsonl", "artifacts/reports/v01b/{set}-v0-2b.predictions.jsonl"]
+  - tag: robojev-v0.1-main
+    label: robojev v0.1-main (2B)
+    role: ours
+    T: ["artifacts/cloud/runs/v01-main-01-fetched/reports/after-v01-2b-{set}.predictions.jsonl"]
+    G: ["artifacts/cloud/runs/v01-main-01-fetched/reports/after-v01-2b-{set}.predictions.jsonl"]
+  - tag: robojev-v0.1-mix
+    label: robojev v0.1-mix (2B)
+    role: ours
+    T: ["artifacts/cloud/runs/v01-mix-01-fetched/reports/after-v01mix-2b-{set}.predictions.jsonl"]
+    G: ["artifacts/cloud/runs/v01-mix-01-fetched/reports/after-v01mix-2b-{set}.predictions.jsonl"]
