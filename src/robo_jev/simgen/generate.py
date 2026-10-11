@@ -18,6 +18,13 @@
 **층화와 쌍.** :func:`generate_batch` 는 단위(레코드 하나 또는 쌍 하나)에 분야를 번갈아 배정해 분야별 몫을 같게 하고, 레코드의 약 10 %를
 사실 하나만 바꾼 쌍으로 만든다: ``numeric``(결정 변수 하나만 경계 너머로 — 같은 잡음, 같은 질문 갈래) / ``wording``(숫자는 그대로,
 상황 옷 단어만 바꿈 — 정답이 같다).
+
+**학습 데이터의 두 손잡이(Task v0.1a — 학습 나눔에서만; 시험 세트 생성 경로는 늘 기본값이고, 기본값이 아닌 손잡이를 시험 나눔에 주면
+거절한다).** ``phrasing``(문구 판: ``v0b`` 기본 / ``v01`` — 학습 묶음을 넓힌다, :mod:`~robo_jev.simgen.phrasing`)과 ``fact_shuffle``(레코드마다
+그 확률로 T6 '사실 순서'와 같은 장치를 켠다 — ``RenderPlan.fact_seed``; 동전과 seed는 별도 갈래 ``train-facts``). 둘 다 주 난수 갈래를
+건드리지 않아 같은 seed면 순간·질문·정답이 기본값과 바이트 단위로 같고 요청 글만 다르다(시험). 기본값이 아니면 ``generator.phrasing``·
+``generator.fact_shuffle``(다시 만들기 열쇠)와 ``meta.phrasing``(판과 고른 문구 [열쇠, v0b 번호, v01 번호])·``meta.fact_order``(확률, 섞었나,
+seed, 글이 실제로 바뀌었나)를 적는다 — 기본값이면 적지 않는다(봉인된 시험 세트와 v0b 학습 세트가 바이트 단위로 그대로).
 """
 
 from __future__ import annotations
@@ -44,6 +51,8 @@ from robo_jev.simgen.spec import Batch, stream
 from robo_jev.simgen.world import World
 
 __all__ = [
+    "DEFAULT_FACT_SHUFFLE",
+    "DEFAULT_PHRASING",
     "Moment",
     "PAIR_UNIT_SHARE",
     "assemble",
@@ -68,6 +77,9 @@ RECOMMENDATION_SHARE = 0.5      # planner가 아닌 문체에서 권고를 넣�
 WRONG_RECOMMENDATION_SHARE = 0.31
 HINT_SHARE = 0.3
 _WORLD_ATTEMPTS = 192
+#: 학습 데이터 손잡이의 기본값(Task v0.1a) — 시험 세트는 늘 이 값
+DEFAULT_PHRASING = "v0b"
+DEFAULT_FACT_SHUFFLE = 0.0
 
 
 @dataclass
@@ -311,8 +323,12 @@ def assemble(
     split_spec: dict | None = None,
     t6: dict | None = None,
     threshold_obs: Observation | None = None,
+    phrasing: str = DEFAULT_PHRASING,
+    fact_shuffle: float = DEFAULT_FACT_SHUFFLE,
 ) -> dict:
     """판단 순간 하나 → 레코드(dict).
+
+    ``phrasing``·``fact_shuffle``(Task v0.1a — 학습 나눔만): 문구 판(v0b / v01)과 사실 순서 섞기 확률. 기본값이 아니면 시험 나눔에서는 거절한다.
 
     ``threshold_obs``(숫자 쌍의 변형): 규칙 질문의 문턱을 이 관측(기준)의 값에 놓는다 — 쌍의 두 요청이 옮긴 사실 말고는 같게(수정 1 I4).
 
@@ -322,11 +338,25 @@ def assemble(
     ``meta``(meta.t6에 적을 것)."""
     t6 = t6 or {}
     seed, ctx, anchor, obs = moment.seed, moment.ctx, moment.world, moment.obs
+    fact_shuffle = float(fact_shuffle or 0.0)
+    if (phrasing != "v0b" or fact_shuffle) and (moment.split != "train" or set(t6) - {"recommendation"} or surface):
+        # 시험 세트(T1~T7)와 교란 변형은 늘 v0b 문구·정해진 사실 순서(봉인된 파일을 바이트 단위로 다시 만든다); 학습 쌍의 변형(권고 유지)만 받는다
+        raise ValueError(f"phrasing {phrasing!r} / fact_shuffle {fact_shuffle} are for the training split only (got split {moment.split!r})")
+    if not 0.0 <= fact_shuffle <= 1.0:
+        raise ValueError(f"fact_shuffle must be a probability, got {fact_shuffle}")
     style = t6.get("style", ctx.style)
     k = int(k or cfg.catalog["posterior_k"])
     options = tuple(t6.get("options") or available_options(obs))
-    surface_obj = Surface(lang=ctx.lang, pool=moment.pool, **(surface or {}))
-    qset = write_questions(cfg, obs, options, stream(seed, "questions"), surface_obj, threshold_obs=threshold_obs)
+    surface_obj = Surface(lang=ctx.lang, pool=moment.pool, **(surface or {}), phrasing=phrasing)
+    rng = stream(seed, "questions")
+    fact_seed, fact_order = t6.get("fact_seed"), None
+    if fact_shuffle:
+        # 학습의 사실 순서 섞기(T6 '사실 순서'와 같은 장치) — 동전과 seed는 별도 갈래(주 갈래 questions·render의 소비가 그대로 — 정답이 같다)
+        draw = stream(seed, "train-facts")
+        shuffled = bool(draw.random() < fact_shuffle)
+        fact_seed = int(draw.integers(2**31)) if shuffled else None
+        fact_order = {"p": fact_shuffle, "shuffled": shuffled, "seed": fact_seed}
+    qset = write_questions(cfg, obs, options, rng, surface_obj, threshold_obs=threshold_obs, phrase_seed=seed)
     if t6.get("extra_question"):
         from robo_jev.simgen.questions import candidates, identity
 
@@ -360,8 +390,10 @@ def assemble(
                 recommendation["wrong"] = bool(recommendation["gap"] >= float(cfg.values["wrong_recommendation_min_gap"]))
     rec_key = next((key for key, canon in primary.recipe["options"].items() if canon == recommendation["canonical"]), None)
     hint = _hint(cfg, seed, obs)
-    plan = RenderPlan(style, options, recommendation["canonical"], hint, t6.get("fact_seed"))
+    plan = RenderPlan(style, options, recommendation["canonical"], hint, fact_seed)
     state = render_state(obs, plan, stream(seed, "render"))
+    if fact_order is not None:
+        fact_order["changed"] = fact_order["shuffled"] and state != render_state(obs, replace(plan, fact_seed=None), stream(seed, "render"))
     if t6.get("state_post"):
         state = t6["state_post"](state)
     # 참 세계 = 정답의 사후에서 한 번 더 뽑은 세계(닻 세계가 아니다 — 리뷰 1 I4). 행동 결과가 확률인 장면(P4)은 결과도 뽑는다(갈래
@@ -414,6 +446,10 @@ def assemble(
     }
     if t6.get("meta"):
         meta["t6"] = t6["meta"]
+    if phrasing != "v0b":
+        meta["phrasing"] = {"version": phrasing, "picks": qset.picks}
+    if fact_order is not None:
+        meta["fact_order"] = fact_order
     generator = {
         "version": GENERATOR_VERSION,
         "catalog": cfg.versions["catalog"],
@@ -428,6 +464,10 @@ def assemble(
         "split": split_spec,
         "surface": surface,
     }
+    if phrasing != "v0b":
+        generator["phrasing"] = phrasing
+    if fact_shuffle:
+        generator["fact_shuffle"] = fact_shuffle
     return {
         "schema": SCHEMA,
         "id": f"{id_prefix}-{index:06d}",
@@ -453,11 +493,14 @@ def generate_record(
     k: int | None = None,
     split: dict | None = None,
     pair_skip: int | None = None,
+    phrasing: str = DEFAULT_PHRASING,
+    fact_shuffle: float = DEFAULT_FACT_SHUFFLE,
 ) -> dict:
-    """레코드 하나를 generator 칸의 열쇠(seed, 강제한 칸, 쌍 변형과 받아들인 후보 번호, 나눔)로 다시 만든다(혼자인 순간 — 쌍은 :func:`rebuild_record`)."""
+    """레코드 하나를 generator 칸의 열쇠(seed, 강제한 칸, 쌍 변형과 받아들인 후보 번호, 나눔, 문구 판·사실 순서 섞기)로 다시 만든다(혼자인
+    순간 — 쌍은 :func:`rebuild_record`)."""
     cfg = cfg or default_config()
     moment = build_moment(cfg, seed, domain, forced, variant, split_from(split), pair_skip=pair_skip or 0)
-    return assemble(cfg, moment, index, git=git, k=k, pair=pair, forced=forced, split_spec=split)
+    return assemble(cfg, moment, index, git=git, k=k, pair=pair, forced=forced, split_spec=split, phrasing=phrasing, fact_shuffle=fact_shuffle)
 
 
 def record_moment(cfg: SimgenConfig, record: dict) -> Moment:
@@ -473,7 +516,8 @@ def rebuild_record(cfg: SimgenConfig, record: dict) -> dict:
     g = record["generator"]
     prefix, index = record["id"].rsplit("-", 1)
     forced = {key: value for key, value in g["forced"].items() if key != "domain"}
-    common = {"git": g["git"], "k": record["meta"]["posterior_k"], "id_prefix": prefix, "forced": forced, "split_spec": g["split"], "surface": g.get("surface")}
+    common = {"git": g["git"], "k": record["meta"]["posterior_k"], "id_prefix": prefix, "forced": forced, "split_spec": g["split"], "surface": g.get("surface"),
+              "phrasing": g.get("phrasing", DEFAULT_PHRASING), "fact_shuffle": g.get("fact_shuffle", DEFAULT_FACT_SHUFFLE)}  # fmt: skip
     pair = record["meta"]["pair"]
     extra: dict = {}
     if pair and pair["role"] == "variant" and pair["kind"] == "numeric":
@@ -532,14 +576,16 @@ def plan_units(n: int, base_seed: int, *, groups: tuple[str, ...] | None = None,
 
 
 def generate_unit(cfg: SimgenConfig, unit: dict, *, split=None, forced: dict | None = None, git: str | None = None, k: int | None = None,
-                  id_prefix: str = ID_PREFIX, surface: dict | None = None) -> list[dict]:  # fmt: skip
+                  id_prefix: str = ID_PREFIX, surface: dict | None = None, phrasing: str = DEFAULT_PHRASING,
+                  fact_shuffle: float = DEFAULT_FACT_SHUFFLE) -> list[dict]:  # fmt: skip
     """단위 하나(레코드 하나 또는 쌍 둘)."""
     from robo_jev.simgen.holdout import split_for
 
     split = split or split_for("train")
     forced = {"group": unit["group"], **(forced or {})}
     seed, domain = unit["seed"], unit["domain"]
-    common = {"git": git, "k": k, "id_prefix": id_prefix, "forced": forced, "split_spec": split_spec(split), "surface": surface}
+    common = {"git": git, "k": k, "id_prefix": id_prefix, "forced": forced, "split_spec": split_spec(split), "surface": surface, "phrasing": phrasing,
+              "fact_shuffle": fact_shuffle}  # fmt: skip
     if unit["pair_kind"] is None:
         return [assemble(cfg, build_moment(cfg, seed, domain, forced, None, split), unit["indices"][0], **common)]
     base = build_moment(cfg, seed, domain, forced, None, split)
@@ -588,14 +634,14 @@ def pair_records(cfg: SimgenConfig, base: Moment, domain: str, moment_forced: di
 
 
 def generate_batch(n: int, base_seed: int = 0, *, cfg: SimgenConfig | None = None, git: str | None = None, k: int | None = None, id_prefix: str = ID_PREFIX,
-                   split=None, seed_start: int | None = None):  # fmt: skip
+                   split=None, seed_start: int | None = None, phrasing: str = DEFAULT_PHRASING, fact_shuffle: float = DEFAULT_FACT_SHUFFLE):  # fmt: skip
     """레코드 n개를 차례로 낸다(생성기). 쌍의 두 레코드는 함께 만들고 서로의 id를 `meta.pair.of`로 가리킨다. 기본 나눔은 학습(train)."""
     from robo_jev.simgen.holdout import split_for
 
     cfg = cfg or default_config()
     split = split or split_for("train")
     for unit in plan_units(n, base_seed, groups=split.groups, seed_start=seed_start):
-        yield from generate_unit(cfg, unit, split=split, git=git, k=k, id_prefix=id_prefix)
+        yield from generate_unit(cfg, unit, split=split, git=git, k=k, id_prefix=id_prefix, phrasing=phrasing, fact_shuffle=fact_shuffle)
 
 
 def write_jsonl(path: Path, records) -> dict:

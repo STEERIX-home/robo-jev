@@ -24,6 +24,7 @@ __all__ = [
     "MOTION_ONLY",
     "POOLS",
     "VERB_KEYS",
+    "WIDE_POOL",
     "bank",
     "cap",
     "container_ref",
@@ -33,6 +34,8 @@ __all__ = [
 ]
 
 POOLS = ("train", "heldout")
+#: 학습 문구 판 v01의 학습 묶음(v0b ``train`` + 새 문구 — :mod:`~robo_jev.simgen.phrasing`, Task v0.1a). 빼 둔 묶음은 그대로다.
+WIDE_POOL = "train_v01"
 
 VERB_KEYS = {
     "continue": "keep_going", "slow": "slow_down", "stop_gentle": "ease_to_stop", "stop_moderate": "brake_firmly",
@@ -247,7 +250,9 @@ _DESCRIPTIONS_TURN_FULL = _T(["Take the corner without slowing ({speed}).", "Kee
 
 
 def option_descriptions(canon: str, obs: Observation, pool: str = "train") -> list[str]:
-    """선택지 설명의 바꿔 쓰기(학습 묶음은 셋 이상)."""
+    """선택지 설명의 바꿔 쓰기(학습 묶음은 셋 이상). ``pool = "train_v01"``이면 v01 학습 묶음(v0b 학습 묶음 + 새 문구, 같은 표)."""
+    if pool == WIDE_POOL:
+        return _wide_descriptions(canon, obs)
     if canon.startswith("turn_"):
         ratio = int(canon.split("_")[1]) / 100.0
         speed = speed_text(obs, ratio * obs.robot.speed)
@@ -265,6 +270,19 @@ def option_descriptions(canon: str, obs: Observation, pool: str = "train") -> li
     else:
         bank = _DESCRIPTIONS[canon]
     return [t.format(**numbers) for t in bank[pool]]
+
+
+def _wide_descriptions(canon: str, obs: Observation) -> list[str]:
+    """v01 학습 묶음의 선택지 설명(표 고르기는 :func:`robo_jev.simgen.phrasing.description_table` — 위의 고름과 같다, 시험)."""
+    from robo_jev.simgen.phrasing import description_table, wide
+
+    table, key = description_table(canon, obs.scene, obs.body)
+    templates = wide("en", table, key)
+    if canon.startswith("turn_"):
+        speed = speed_text(obs, int(canon.split("_")[1]) / 100.0 * obs.robot.speed)
+        return [t.format(speed=speed) for t in templates]
+    numbers = _numbers(obs)
+    return [t.format(**numbers) for t in templates]
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -532,7 +550,11 @@ MOTION_ONLY = " (Count only what the motion itself does; leave out any collision
 
 
 def bank(key: str, lang: str = "en", pool: str = "train") -> list[str]:
-    """문구 묶음 하나(언어·묶음별)."""
+    """문구 묶음 하나(언어·묶음별). ``pool = "train_v01"``이면 v01 학습 묶음(v0b ``train`` + 새 문구)."""
+    if pool == WIDE_POOL:
+        from robo_jev.simgen.phrasing import wide
+
+        return wide(lang, "instructions", key)
     if lang == "ko":
         from robo_jev.simgen.phrases_ko import KO
 
