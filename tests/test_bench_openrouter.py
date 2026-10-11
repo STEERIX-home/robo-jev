@@ -388,6 +388,8 @@ def test_the_estimate_counts_the_state_once_or_per_question():
     assert est["questions"] == n and est["low"] < est["high"]
     assert est["high"] - est["low"] == (n - 1) * est["state_tokens"] - 5 * n
     assert est["state_tokens"] == -(-len(payload["state"]) // 4)  # tokenizer가 없으면 글자 / 4
+    one = estimate_request(api_request(_records()[0], "m", only=[next(iter(payload["questions"]))]), overhead={"per_question_low": 10, "per_question_high": 5})
+    assert one["high"] == one["low"]  # 질문 하나면 높은 끝이 낮은 끝보다 작아지지 않는다
 
 
 def test_model_selection_skips_free_copies_and_rejects_unknown_ids():

@@ -368,7 +368,8 @@ def estimate_request(payload: dict[str, Any], *, tokenizer: Any | None = None, o
     """요청 하나의 입력 토큰 견적 — 공급자의 내부 프롬프트는 모르므로 두 끝을 낸다.
 
     * ``low`` — 상태를 한 번 센다: 상태 + Σ 질문(지시·기준의 글) + 질문마다 덧붙는 몫(``overhead["per_question_low"]``).
-    * ``high`` — 질문마다 상태를 다시 센다(질문이 서로의 답을 보지 않고 따로 답한다 — 문서): 질문 수 × 상태 + Σ 질문 + 질문마다 몫(``per_question_high``).
+    * ``high`` — 질문마다 상태를 다시 센다(질문이 서로의 답을 보지 않고 따로 답한다 — 문서): 질문 수 × 상태 + Σ 질문 + 질문마다 몫(``per_question_high``);
+      낮은 끝보다 작으면(질문이 하나일 때) 낮은 끝 — 상한 예약에 쓰는 보수적인 끝이다.
     질문의 글은 API 몸의 그 질문 JSON(``ensure_ascii=False``) 그대로 센다. 덧붙는 몫의 기본값은 문서 예(입력 476토큰)에 맞춘 값이다."""
     count = _token_counter(tokenizer)
     overhead = overhead or {}
@@ -377,7 +378,7 @@ def estimate_request(payload: dict[str, Any], *, tokenizer: Any | None = None, o
     qs = [count(json.dumps(q, ensure_ascii=False)) for q in payload["questions"].values()]
     n = len(qs)
     low = s + sum(qs) + n * float(overhead.get("per_question_low", 0.0))
-    high = n * s + sum(qs) + n * float(overhead.get("per_question_high", 0.0))
+    high = max(low, n * s + sum(qs) + n * float(overhead.get("per_question_high", 0.0)))  # 높은 끝은 언제나 보수적인 쪽 (질문 하나면 두 맞춤이 엇갈린다)
     return {"questions": n, "state_tokens": s, "question_tokens": sum(qs), "low": int(round(low)), "high": int(round(high)), "chars": len(state)}
 
 
