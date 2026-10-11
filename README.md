@@ -4,7 +4,7 @@ robo-jev is a research project by **Steerix Robotics**. It builds the decision l
 
 Models of this kind already exist (TypeSafe's Jev, Microsoft-Decision-1 and others), and several are built by post-training a general LLM backbone (Microsoft-Decision-1, for example, is post-trained Qwen3.5-9B). They read the *meaning* of a situation well. What they lack is *physics*: whether a tall glass tips over if the robot brakes hard now, whether the person reaches the robot's path first, whether the plate actually seated in its nest. robo-jev's bet is that this physics can be taught with simulation-generated data, labelled by what physically happens, and that what is learned transfers to situations the model has never seen.
 
-> **Status (2026-10-11):** new track, first trained version in progress. The data engine and the diagnosis tool are merged; held-out test sets, the trainer and a RunPod runner are in review. See [Status](#status).
+> **Status (2026-10-11):** new track, first trained version in progress. The data engine (with sealed test sets and a 50k training set), the diagnosis tool and the trainer are merged; the RunPod runner is in its first smoke run. See [Status](#status).
 
 ## Where it sits: three layers
 
@@ -97,9 +97,9 @@ Test sets are generated separately and sealed (sha256 manifest). The training ge
 |---|---|---|
 | v0a | Engine stage 1: P1, P5 and their combination; posterior labels; three English text styles | merged |
 | v0c | Diagnosis tool: zero-shot scoring, counterbalanced option orders, paired baselines, regret by criterion | merged |
-| v0b | Engine stage 2: P3, P4, P6, "look again" (value of information), Korean, sealed T1–T7, 50k training set | in review |
-| v0d | Trainer and `--checkpoint` scoring with the same prompts | in review |
-| cloud1 | RunPod runner with hard spend caps | in progress |
+| v0b | Engine stage 2: P3, P4, P6, "look again" (value of information), Korean, sealed T1–T7, 50k training set | merged |
+| v0d | Trainer (LoRA bf16 + fp32 masters, code-mass term) and `--checkpoint` scoring with the same prompts | merged |
+| cloud1 | RunPod runner: hard spend caps, three deletion fences, ledger | first smoke run |
 | **v0** | First trained 2B, evaluated on T1–T7 against the untrained 2B and 4B | **target: 2026-10-12** |
 
 ## Roadmap — coarse to fine
