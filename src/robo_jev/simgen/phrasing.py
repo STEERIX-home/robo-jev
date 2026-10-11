@@ -422,7 +422,7 @@ def bank_digest(lang: str) -> str:
 
 
 def without_text(record: dict) -> dict:
-    """맞대기용 레코드: 요청 글(상태 글·지시문·선택지 설명 — 질문 이름·종류·선택지 열쇠·점수 기준은 남긴다), v01 장부(``meta.phrasing``·
+    """맞대기용 레코드: 요청 글(상태 글·지시문·선택지 설명 — 질문 이름·종류·선택지 열쇠·점수 기준은 그 순서대로 남긴다), v01 장부(``meta.phrasing``·
     ``meta.fact_order``·``generator.phrasing``·``generator.fact_shuffle``)와 생성기 git을 뺀 것. 같은 seed의 v0b·v01 레코드는 이것이 같아야
     한다(정답·참 세계·계산 과정·장부 전부)."""
     import json
@@ -434,6 +434,7 @@ def without_text(record: dict) -> dict:
     for key in ("phrasing", "fact_order"):
         out["meta"].pop(key, None)
     request = out.pop("request")
-    out["questions"] = {name: {"type": q["type"], "criteria": sorted(q["criteria"]) if isinstance(q.get("criteria"), dict) else q.get("criteria")}
-                        for name, q in request["questions"].items()}  # fmt: skip
+    # 순서까지 맞댄다(리뷰 1: 질문 순서·선택지 열쇠 순서가 바뀌어도 알아채게 — 목록으로)
+    out["questions"] = [[name, q["type"], list(q["criteria"]) if isinstance(q.get("criteria"), dict) else q.get("criteria")]
+                        for name, q in request["questions"].items()]  # fmt: skip
     return out
