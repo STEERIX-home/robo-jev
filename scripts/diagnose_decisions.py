@@ -9,6 +9,8 @@
     uv run python scripts/diagnose_decisions.py --rescore <run>.predictions.jsonl [<run>.predictions.seed2.jsonl …] --input … --out <rescored>.json
     # 같은 기록의 두 run 비교 — 두 읽기, 차 a − b, 짝지은 레코드 bootstrap (CPU)
     uv run python scripts/diagnose_decisions.py --compare <a>.predictions.jsonl <b>.predictions.jsonl --labels "2B direct" "2B reasoning" --input … --out <cmp>.json
+    # 학습한 가중치(Task v0d — LoRA adapter 또는 전체 가중치; 재개용 저장 단위·model-only 파일 모두)를 같은 프롬프트·같은 배치·같은 두 읽기로
+    uv run python scripts/diagnose_decisions.py --model Qwen/Qwen3.5-2B --checkpoint <run>/checkpoint.pt --input … --out <after>.json
 
 배치(`--orders`): ``counterbalanced``(기본 — 질문마다 결정적 균형 배치 모두: choice는 순환 이동 n개, noul·score는 정순·역순)와
 ``seeded``(seed 배치 하나; ``--shuffle-seeds``를 여럿 주면 run을 여러 번 돌려 서로 다른 배치로 합친다 — 옛 방식). 요약은 두 읽기 —
@@ -17,6 +19,11 @@
 산출물(`--out X.json`): ``X.json``(설정·검증·실행·요약), ``X.predictions.jsonl``(레코드마다 모델 답 — 질문마다 배치들과 배치 평균;
 정답은 넣지 않는다), ``X.md``(사람이 읽는 표). 형식이 틀린 기록과 겹친 id(:func:`robo_jev.decisions.records.validate_record`)는 세고
 건너뛴다. `--limit`은 쌍을 깨지 않는 무작위 표본(`--seed`)이다.
+
+`--checkpoint`(Task v0d): 기반 모델(`--model`)을 실은 뒤 :func:`robo_jev.decisions.train.apply_checkpoint` 로 학습한 가중치를 얹는다 —
+기반 모델·tokenizer·프롬프트 고정 문구가 학습 때와 다르면 거절한다. 채점은 그 밖에 아무것도 바꾸지 않는다(같은 프롬프트·균형 배치·배치 1·
+두 읽기); 예측의 ``model``은 ``<model>+<방식>:<run id>@<step>``이고 요약의 ``config.checkpoint``에 체크포인트의 정체가 남는다.
+`--checkpoint`가 없으면 결과는 v0c의 실행기와 비트 단위로 같다(검사).
 
 GPU 규칙(GB10 통합 메모리): 첫 CUDA 할당 전에 울타리(`--gpu-memory-fraction`, 기본 0.6), 적재 전에 여유 확인(2B ≥ 20 GiB,
 4B ≥ 30 GiB — 근거는 :data:`robo_jev.decisions.zero_shot.MIN_FREE_BYTES`), 처음과 끝의 메모리 보고. ``--model tiny``는 검사 전용의
@@ -39,7 +46,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from robo_jev.gpu import DEFAULT_FRACTION, limit_gpu_memory, memory_report, require_free  # noqa: E402
 
-SCRIPT_VERSION = "v0c-diagnose-2"
+SCRIPT_VERSION = "v0d-diagnose-3"
 TINY = "tiny"
 #: 모르는 모델 id의 적재 전 여유 (보수적으로 4B의 값).
 FALLBACK_MIN_FREE = 30 * 2**30
@@ -118,6 +125,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--preview", action="store_true", help="보고서 머리에 '봉인된 시험 세트가 아닌 생성 표본의 미리보기'를 단다")
     parser.add_argument("--labels", nargs=2, default=("a", "b"), metavar=("LABEL_A", "LABEL_B"), help="--compare의 열 이름")
     parser.add_argument("--gpu-memory-fraction", type=float, default=DEFAULT_FRACTION)
+    parser.add_argument("--checkpoint", type=Path, default=None,
+                        help="(--model과 함께) 학습한 가중치 — Task v0d의 체크포인트(LoRA adapter 또는 전체 가중치; 재개용·model-only 모두)")
     return parser
 
 
@@ -214,6 +223,14 @@ def _run(args: argparse.Namespace) -> int:
     backbone = _load_backbone(args.model, tokenizer)
     load_seconds = time.perf_counter() - started
     _log(f"loaded {args.model} in {load_seconds:.1f} s · memory {memory_report()}")
+    model_label, checkpoint = args.model, None
+    if args.checkpoint is not None:
+        from robo_jev.decisions.train import apply_checkpoint
+
+        checkpoint = apply_checkpoint(backbone, args.checkpoint, tokenizer_sha256=describe_tokenizer(tokenizer_id)["sha256"])
+        checkpoint["sha256"] = file_sha256(args.checkpoint)
+        model_label = f"{args.model}+{checkpoint['mode']}:{checkpoint['run_id']}@{checkpoint['step']}"
+        _log(f"applied {checkpoint['mode']} checkpoint {args.checkpoint} (run {checkpoint['run_id']}, step {checkpoint['step']}) · memory {memory_report()}")
     seeds = list(args.shuffle_seeds) if args.shuffle_seeds else [args.shuffle_seed]
     if len(seeds) > 1 and args.orders != "seeded":
         raise SystemExit("--shuffle-seeds는 --orders seeded와 함께 쓴다 (균형 배치는 seed 하나로 모든 배치를 만든다)")
@@ -221,7 +238,7 @@ def _run(args: argparse.Namespace) -> int:
     runs = []
     for shuffle_seed in seeds:
         runs.append(diagnose_records(
-            chosen, backbone, tokenizer, model_id=args.model, mode=args.mode, fmt=args.fmt, seed=shuffle_seed, orders=args.orders,
+            chosen, backbone, tokenizer, model_id=model_label, mode=args.mode, fmt=args.fmt, seed=shuffle_seed, orders=args.orders,
             batch=args.batch, gen_batch=args.gen_batch, max_new_tokens=args.max_new_tokens, log=_log,
         ))
     seconds = time.perf_counter() - started
@@ -232,13 +249,13 @@ def _run(args: argparse.Namespace) -> int:
     peak = int(torch.cuda.max_memory_allocated()) if torch.cuda.is_available() else None
     summary = summarize_all(chosen, predictions, n_boot=args.n_boot, seed=args.seed, merge=merge)
     config = {
-        "model": args.model, "mode": args.mode, "format": args.fmt, "orders": args.orders, "prompt_version": PROMPT_VERSION,
+        "model": model_label, "mode": args.mode, "format": args.fmt, "orders": args.orders, "prompt_version": PROMPT_VERSION,
         "prompt_digest": fixed_text_digest(), "seed": args.seed, "shuffle_seed": seeds[0], "shuffle_seeds": seeds, "limit": args.limit,
         "records": len(chosen), "record_ids": [str(r["id"]) for r in chosen],
         "selection": f"pair-preserving random sample, seed {args.seed}, limit {args.limit}" if args.limit else "all valid records",
         "input": str(args.input), "input_sha256": file_sha256(args.input), "batch": args.batch, "gen_batch": args.gen_batch,
         "max_new_tokens": args.max_new_tokens if args.mode == "reasoning" else None, "n_boot": args.n_boot,
-        "tokenizer": describe_tokenizer(tokenizer_id), "backbone_manifest": getattr(backbone, "manifest", None),
+        "tokenizer": describe_tokenizer(tokenizer_id), "backbone_manifest": getattr(backbone, "manifest", None), "checkpoint": checkpoint,
         "script_version": SCRIPT_VERSION, "git": _git_sha(), "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
     }
     listings = [l for run in runs for p in run for q in p["questions"].values() for l in q["listings"]]
@@ -248,7 +265,7 @@ def _run(args: argparse.Namespace) -> int:
         "gpu": {"guard": guard, "memory_at_start": memory_start, "memory_at_end": memory_report(), "peak_allocated_bytes": peak},
     }
     payload = {"config": config, "validation": validation, "run": run, "summary": summary}
-    title = args.title or f"v0c diagnosis — {args.model} {args.mode} ({args.fmt})"
+    title = args.title or f"v0c diagnosis — {model_label} {args.mode} ({args.fmt})"
     _write_outputs(args.out, payload, predictions, title=title, note=PREVIEW_NOTE if args.preview else None)
     _log(f"{len(predictions)} records, {prompts} prompts in {seconds:.1f} s → {args.out} · memory at end {run['gpu']['memory_at_end']}")
     return 0
@@ -256,6 +273,8 @@ def _run(args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
+    if args.checkpoint is not None and args.model is None:
+        raise SystemExit("--checkpoint는 --model(기반 모델)과 함께 쓴다")
     if args.rescore is not None:
         return _rescore(args)
     if args.compare is not None:
