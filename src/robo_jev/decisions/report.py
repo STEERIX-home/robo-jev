@@ -48,6 +48,8 @@ _GROUP_ORDER = (
     ("style", "By style"), ("hint", "By computed hint"), ("recommendation", "By planner recommendation (none / right / wrong)"),
     ("margin_band", "By decision-margin band (|m| tertiles per margin name)"), ("family", "By question family"),
     ("pair", "By pair membership"), ("label_position", "By position of the best option (choice only; 1 = first listed)"),
+    ("key_style", "By option-key style"), ("agent", "By moving agent"), ("distractors", "By number of irrelevant facts"),
+    ("distance_unit", "By distance unit"),
 )
 
 

@@ -54,6 +54,7 @@ __all__ = [
     "group_tables",
     "margin_bands",
     "order_effects",
+    "pair_deltas",
     "pair_summary",
     "permutation_sensitivity",
     "position_bias",
@@ -78,7 +79,7 @@ _TIE = 1e-9
 BLOCKS = ("noul", "score", "choice/action", "choice/state", "choice/rule", "choice/other")
 GROUP_DIMENSIONS = (
     "scene", "phenomena", "domain", "body", "sensor_suite", "style", "language", "hint", "recommendation", "margin_band",
-    "family", "pair", "label_position",
+    "family", "pair", "label_position", "key_style", "agent", "distractors", "distance_unit",
 )
 _BAND_NAMES = ("small", "medium", "large")
 #: bootstrap·run 비교의 머리 지표 — (이름, 행 고르기, 값). 이름은 ``<묶음>.<지표>``.
@@ -178,15 +179,30 @@ def block_of(qtype: str, kind: str | None) -> str:
     return f"choice/{kind}" if kind in ("action", "state", "rule") else "choice/other"
 
 
+def _family_from_basis(basis: Any) -> str | None:
+    """v0a의 ``meta.basis[이름]``(질문이 무엇에서 나왔나) → 계열 이름: ``action:<기준|default>``, ``noul:<사건>``,
+    ``score:<양|사건>``, ``state:<상태>``, ``rule``."""
+    if not isinstance(basis, dict) or not basis.get("kind"):
+        return None
+    kind = str(basis["kind"])
+    if kind == "action":
+        return f"action:{basis.get('criterion') or 'default'}"
+    if kind == "rule":
+        return "rule"
+    tag = basis.get("event") or basis.get("name") or basis.get("state")
+    return f"{kind}:{tag}" if tag else kind
+
+
 def question_family(record: dict[str, Any], name: str) -> str:
-    """질문 계열 (기획서 §7). 엔진이 적어 주면(정답의 ``family``, ``meta.question_families[name]``, ``meta.questions[name].family``)
-    그것을, 아니면 지표 묶음(``noul``·``choice/action`` …)을 쓴다."""
+    """질문 계열 (기획서 §7). 엔진이 적어 주면(정답의 ``family``, ``meta.question_families[name]``, ``meta.questions[name].family``,
+    v0a의 ``meta.basis[name]`` — :func:`_family_from_basis`) 그것을, 아니면 지표 묶음(``noul``·``choice/action`` …)을 쓴다."""
     label = (record.get("labels") or {}).get(name) or {}
     meta = record.get("meta") or {}
     for candidate in (
         label.get("family") if isinstance(label, dict) else None,
         (meta.get("question_families") or {}).get(name) if isinstance(meta.get("question_families"), dict) else None,
         ((meta.get("questions") or {}).get(name) or {}).get("family") if isinstance(meta.get("questions"), dict) else None,
+        _family_from_basis((meta.get("basis") or {}).get(name)) if isinstance(meta.get("basis"), dict) else None,
     ):
         if candidate:
             return str(candidate)
@@ -241,11 +257,12 @@ def margin_bands(records: Iterable[dict[str, Any]]) -> dict[str, str]:
 # --------------------------------------------------------------------------
 
 
-def _recommendation(meta: dict[str, Any]) -> tuple[str, str | None]:
+def _recommendation(meta: dict[str, Any]) -> tuple[str, str | None, str | None]:
+    """(none|right|wrong, 권고 선택지 키, 권고가 겨눈 질문 이름 — v0a는 ``recommendation.question``에 적는다)."""
     rec = meta.get("recommendation")
     if not isinstance(rec, dict) or not rec.get("present") or not rec.get("option"):
-        return "none", None
-    return ("wrong" if rec.get("wrong") else "right"), str(rec["option"])
+        return "none", None, None
+    return ("wrong" if rec.get("wrong") else "right"), str(rec["option"]), (str(rec["question"]) if rec.get("question") else None)
 
 
 def _record_groups(record: dict[str, Any], bands: dict[str, str]) -> dict[str, str]:
@@ -253,6 +270,9 @@ def _record_groups(record: dict[str, Any], bands: dict[str, str]) -> dict[str, s
     phenomena = meta.get("phenomena")
     hint = meta.get("hint")
     _, pair_kind = pair_of(record)
+    agent = meta.get("agent")
+    distractors = meta.get("distractors")
+    units = meta.get("units") if isinstance(meta.get("units"), dict) else {}
     return {
         "scene": str(meta.get("scene") or "unknown"),
         "phenomena": "+".join(str(p) for p in phenomena) if isinstance(phenomena, list) and phenomena else "unknown",
@@ -265,6 +285,12 @@ def _record_groups(record: dict[str, Any], bands: dict[str, str]) -> dict[str, s
         "recommendation": _recommendation(meta)[0],
         "margin_band": bands.get(str(record.get("id")), "unknown"),
         "pair": pair_kind or "none",
+        # v0a가 적는 것: 선택지 키 문체(T6의 '키' 교란), 움직이는 상대의 종류(단어가 판단에 주는 영향), 관계없는 사실의 수(어려움 축, 기획서 §10),
+        # 거리 단위(단위 흔들기)
+        "key_style": str(meta.get("key_style") or "unknown"),
+        "agent": str(agent.get("kind") or "unknown") if isinstance(agent, dict) else ("none" if agent is None else str(agent)),
+        "distractors": str(distractors) if isinstance(distractors, int) and not isinstance(distractors, bool) else "unknown",
+        "distance_unit": str(units.get("distance") or "unknown"),
     }
 
 
@@ -392,10 +418,12 @@ def _recommendation_rows(records: list[dict[str, Any]], rows: list[dict[str, Any
     index = {(r["record_id"], r["question"]): r for r in rows if r.get("m") is not None}
     out = []
     for record in records:
-        status, option = _recommendation(record.get("meta") or {})
+        status, option, target = _recommendation(record.get("meta") or {})
         if option is None:
             continue
         for name, question in record["request"]["questions"].items():
+            if target is not None and target in record["request"]["questions"] and name != target:
+                continue  # 권고가 겨눈 질문이 적혀 있으면 그 질문만 (같은 키를 쓰는 다른 행동 질문은 그 권고의 대상이 아니다)
             row = index.get((str(record.get("id")), name))
             if row is None or row["type"] != "choice" or row["kind"] not in ("action", None):
                 continue
@@ -411,7 +439,8 @@ def _recommendation_rows(records: list[dict[str, Any]], rows: list[dict[str, Any
 
 
 def recommendation_summary(records: list[dict[str, Any]], rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """계획기 권고가 있는 행동 choice(권고 키를 선택지로 가진 것): 권고가 틀렸을 때·맞았을 때 모델이 권고를 고른 비율 등.
+    """계획기 권고가 있는 행동 choice(권고가 겨눈 질문 — ``recommendation.question``이 있으면 그것, 없으면 권고 키를 선택지로 가진
+    행동 choice): 권고가 틀렸을 때·맞았을 때 모델이 권고를 고른 비율 등.
 
     ``follow_rate`` = 모델 argmax == 권고 선택지, ``model_p_recommended``·``label_p_recommended`` = 권고 선택지의 모델·정답 확률,
     ``label_best_rate`` = 권고가 최선 집합에 드는 비율(틀린 권고면 0이어야 한다), ``regret_mean`` = 그 질문들의 모델 후회.
@@ -528,6 +557,34 @@ def _delta(row_a: dict[str, Any], row_b: dict[str, Any]) -> dict[str, Any] | Non
     }
 
 
+def pair_deltas(records: list[dict[str, Any]], rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """쌍마다(한 번씩) 같은 이름·같은 종류의 채점된 질문의 변화 base → variant. base·variant는 ``meta.pair.role``(v0a: base|variant)을
+    따르고, 역할이 없으면 ``pair.of``가 가리키는 쪽을 base로 둔다. 반환: 종류(numeric|wording) → ``{base, variant, question, type, …변화}``."""
+    by_id = {str(r.get("id")): r for r in records}
+    index = {(r["record_id"], r["question"]): r for r in rows if r.get("m") is not None}
+    seen: set[tuple[str, str]] = set()
+    out: dict[str, list[dict[str, Any]]] = {"numeric": [], "wording": []}
+    for record in records:
+        partner, kind = pair_of(record)
+        rid = str(record.get("id"))
+        if partner is None or partner not in by_id or kind not in out:
+            continue
+        key = (min(rid, partner), max(rid, partner))
+        if key in seen:
+            continue
+        seen.add(key)
+        role = ((record.get("meta") or {}).get("pair") or {}).get("role")
+        base, variant = (rid, partner) if role == "base" else (partner, rid)
+        for name in by_id[variant]["request"]["questions"]:
+            a, b = index.get((base, name)), index.get((variant, name))
+            if a is None or b is None:
+                continue
+            delta = _delta(a, b)
+            if delta is not None:
+                out[kind].append({"base": base, "variant": variant, "question": name, "type": a["type"], **delta})
+    return out
+
+
 def pair_summary(records: list[dict[str, Any]], rows: list[dict[str, Any]]) -> dict[str, Any]:
     """사실 하나만 바꾼 쌍 (기획서 §8·§10 T5).
 
@@ -539,31 +596,9 @@ def pair_summary(records: list[dict[str, Any]], rows: list[dict[str, Any]]) -> d
     * ``wording`` — 숫자는 그대로라 정답은 (거의) 움직이지 않는다. 모델의 흔들림 = 평균 |Δp|(choice는 전변동 거리)와 판정이
       뒤집힌 비율(choice argmax, noul·score는 0.5 경계).
     """
-    by_id = {str(r.get("id")): r for r in records}
-    index = {(r["record_id"], r["question"]): r for r in rows if r.get("m") is not None}
-    seen: set[tuple[str, str]] = set()
-    deltas: dict[str, list[tuple[str, dict[str, Any]]]] = {"numeric": [], "wording": []}
-    pair_count: Counter = Counter()
-    for record in records:
-        partner_of, kind = pair_of(record)
-        rid = str(record.get("id"))
-        if partner_of is None or partner_of not in by_id or kind not in deltas:
-            continue
-        key = (min(rid, partner_of), max(rid, partner_of))
-        if key in seen:
-            continue
-        seen.add(key)
-        compared = 0
-        for name in record["request"]["questions"]:
-            a, b = index.get((partner_of, name)), index.get((rid, name))
-            if a is None or b is None:
-                continue
-            delta = _delta(a, b)
-            if delta is not None:
-                deltas[kind].append((a["type"], delta))
-                compared += 1
-        if compared:
-            pair_count[kind] += 1
+    found = pair_deltas(records, rows)
+    deltas = {kind: [(d["type"], d) for d in entries] for kind, entries in found.items()}
+    pair_count = Counter({kind: len({(d["base"], d["variant"]) for d in entries}) for kind, entries in found.items()})
 
     out: dict[str, Any] = {}
     numeric = deltas["numeric"]

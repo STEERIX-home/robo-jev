@@ -393,3 +393,66 @@ def test_a_choice_label_without_kind_but_with_expected_costs_is_read_as_an_actio
     rows = M.question_rows([record], [_oracle(record)])
     blocks = {r["question"]: r["block"] for r in rows}
     assert blocks["action"] == "choice/action" and blocks["person_next"] == "choice/other"
+
+
+# -- v0a 실제 형식의 메타 (basis·recommendation.question·key_style·agent·distractors·pair.role) ------------------------
+
+
+def _v0a_style(record: dict) -> dict:
+    out = copy.deepcopy(record)
+    out["meta"].update({
+        "key_style": "code", "agent": {"kind": "child", "group": "person"}, "distractors": 2, "units": {"distance": "cm", "speed": "m/s"},
+        "basis": {name: ({"kind": "action", "criterion": None} if q["type"] == "choice" and out["labels"][name].get("kind") == "action"
+                         else {"kind": "noul", "source": "event", "event": "contact"} if q["type"] == "noul"
+                         else {"kind": "score", "source": "quantity", "name": "delay"} if q["type"] == "score"
+                         else {"kind": "state", "state": "intent"} if out["labels"][name].get("kind") == "state"
+                         else {"kind": "rule", "classes": {}})
+                  for name, q in out["request"]["questions"].items()},
+    })
+    return out
+
+
+def test_question_family_comes_from_the_engine_basis_when_it_is_there(fixtures):
+    record = _v0a_style(fixtures[3])  # fx-004: action · noul · score · rule
+    record["meta"]["basis"]["decision"]["criterion"] = "time_critical"
+    families = {r["question"]: r["family"] for r in M.question_rows([record], [_oracle(record)])}
+    assert families == {"decision": "action:time_critical", "conflict": "noul:contact", "risk_proceed": "score:delay", "zone": "rule"}
+    plain = _v0a_style(fixtures[0])
+    assert {r["question"]: r["family"] for r in M.question_rows([plain], [_oracle(plain)])}["person_next"] == "state:intent"
+    assert next(r for r in M.question_rows([plain], [_oracle(plain)]) if r["question"] == "action")["family"] == "action:default"
+
+
+def test_new_record_groupings_read_key_style_agent_distractors_and_units(fixtures):
+    record = _v0a_style(fixtures[0])
+    groups = M.question_rows([record], [_oracle(record)])[0]["groups"]
+    assert (groups["key_style"], groups["agent"], groups["distractors"], groups["distance_unit"]) == ("code", "child", "2", "cm")
+    bare = M.question_rows([fixtures[3]], [_oracle(fixtures[3])])[0]["groups"]
+    assert (bare["key_style"], bare["agent"], bare["distractors"], bare["distance_unit"]) == ("unknown", "none", "unknown", "m")
+    summary = M.summarize([record], [_oracle(record)], n_boot=10)
+    assert {"key_style", "agent", "distractors", "distance_unit"} <= set(summary["groups"])
+
+
+def test_a_recommendation_that_names_its_question_is_matched_to_that_question_only(fixtures):
+    record = copy.deepcopy(fixtures[0])
+    # 같은 키를 가진 두 번째 행동 질문 — 권고는 첫 질문만 겨눈다
+    record["request"]["questions"]["backup_action"] = copy.deepcopy(record["request"]["questions"]["action"])
+    record["labels"]["backup_action"] = copy.deepcopy(record["labels"]["action"])
+    pred = _oracle(record)
+    loose = M.summarize([record], [pred], n_boot=10)["recommendation"]["right"]["n"]
+    record["meta"]["recommendation"]["question"] = "action"
+    strict = M.summarize([record], [pred], n_boot=10)["recommendation"]["right"]["n"]
+    assert (loose, strict) == (2, 1)
+
+
+def test_pair_direction_follows_the_engine_roles(fixtures):
+    preds = {r["id"]: _oracle(r) for r in fixtures}
+    records = copy.deepcopy(fixtures)
+    by_id = {r["id"]: r for r in records}
+    # fx-001이 짝 정보를 들고 base, fx-002가 variant (엔진처럼 둘 다 짝을 가리킨다); 파일 순서상 fx-001이 먼저
+    by_id["fx-001"]["meta"]["pair"] = {"of": "fx-002", "kind": "numeric", "role": "base"}
+    by_id["fx-002"]["meta"]["pair"] = {"of": "fx-001", "kind": "numeric", "role": "variant"}
+    preds["fx-001"]["questions"]["contact_if_continue"]["answer"] = {"p_yes": 0.60}
+    preds["fx-002"]["questions"]["contact_if_continue"]["answer"] = {"p_yes": 0.50}
+    numeric = M.summarize(records, list(preds.values()), n_boot=10)["pairs"]["numeric"]
+    assert numeric["pairs"] == 1 and numeric["by_type"]["noul"]["direction_correct"] == 1
+    assert M.pair_deltas(records, M.question_rows(records, list(preds.values())))["numeric"][0]["base"] == "fx-001"
