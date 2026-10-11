@@ -107,11 +107,11 @@ def voi_decision(outcomes: Outcomes, model: dict):
 def world_costs(outcomes: Outcomes, model: dict) -> np.ndarray:
     """세계마다의 비용 (A, K). 'look_again'(다시 보기)이 있으면 그 줄은 보는 시간 + 본 뒤의 최선(voi 모듈)."""
     total = _base_costs(outcomes, model)
-    if outcomes.voi is not None and "look_again" in outcomes.options:
+    if outcomes.voi is not None and outcomes.voi.option in outcomes.options:
         base = [outcomes.index(o) for o in outcomes.voi.base]
         decision = voi_decision(outcomes, model)
         total = total.copy()
-        total[outcomes.index("look_again")] = model["costs"]["delay_per_s"] * outcomes.voi.time + outcomes.voi.after(total[base], decision)
+        total[outcomes.index(outcomes.voi.option)] = model["costs"]["delay_per_s"] * outcomes.voi.time + outcomes.voi.after(total[base], decision)
     return total
 
 
@@ -232,7 +232,7 @@ def voi_label(outcomes: Outcomes, recipe: dict, model: dict, tau: float) -> dict
     본 뒤의 최선) — 두 기대 비용의 소프트맥스(행동 choice와 같은 꼴, argmax = 기대 비용 최소)."""
     ec = expected_costs(outcomes, model)
     now = min(float(ec[outcomes.index(o)]) for o in recipe["base"])
-    look = float(ec[outcomes.index("look_again")])
+    look = float(ec[outcomes.index(recipe["look"])])
     expected = {key: round(now if canon == "decide_now" else look, 4) for key, canon in recipe["options"].items()}
     return {"type": "choice", "kind": "action", "probabilities": softmax_probabilities(expected, tau), "expected_cost": expected}
 
@@ -270,7 +270,7 @@ def realized(true_outcomes: Outcomes, recipe: dict, values_cfg: dict):
         ec = expected_costs(posterior, model)
         now_option = min(recipe["base"], key=lambda o: float(ec[posterior.index(o)]))
         per_world = world_costs(true_outcomes, model)[:, 0]
-        costs = {"decide_now": float(per_world[true_outcomes.index(now_option)]), "look_again": float(per_world[true_outcomes.index("look_again")])}
+        costs = {"decide_now": float(per_world[true_outcomes.index(now_option)]), "look_again": float(per_world[true_outcomes.index(recipe["look"])])}
         realized_costs = {key: round(costs[canon], 4) for key, canon in recipe["options"].items()}
         return {"costs": realized_costs, "best": min(realized_costs, key=realized_costs.get)}
     if kind == "noul":

@@ -14,7 +14,9 @@ from robo_jev.simgen.rollout import available_options
 from robo_jev.simgen.skins import entry_text
 from robo_jev.simgen.spec import Reading, stream
 
-HINT_OPENINGS = ("Estimated stopping distance", "At their current pace", "At its current pace", "Free width", "Sideways acceleration")
+HINT_OPENINGS = ("Estimated stopping distance", "At their current pace", "At its current pace", "Free width", "Sideways acceleration",
+                 "If the load's centre of mass sat at half its height", "On this slope, ", "If the weight of ", "Computed from the readings:",
+                 "At your current speed you reach that spot", "Stopping distance with maximum braking")  # fmt: skip
 
 
 @pytest.fixture(scope="module")

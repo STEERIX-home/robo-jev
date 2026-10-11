@@ -94,6 +94,7 @@ domains:
   warehouse:
     name: warehouse
     floor: {hard: 1.0}
+    emerge_rate: [0.05, 0.25]           # 모퉁이 뒤에서 누가 나올 위험률(초당, 숨은 값 — 이 범위 균등; Task v0b P6)
     side_obstacle_prior: 0.50     # 가려진 옆 공간에 무언가 있을 사전 확률 (랙·팔레트가 빽빽함)
     tilt_sd_deg: 0.5              # 바닥 기울기 σ (도크 경사로 근처)
     bodies: {forklift_amr: 0.35, mobile_base: 0.35, humanoid: 0.15, arm: 0.15}
@@ -176,7 +177,6 @@ domains:
       - {kind: water_bottle, phrases: ["a tall bottle of water for the night crew"]}
       - {kind: paint_tins, phrases: ["a stack of four paint tins"]}
       - {kind: crate_stack, phrases: ["a three-high stack of plastic crates", "a tall stack of cartons on a pallet"]}
-      - {kind: drum, phrases: ["a part-filled 200-litre drum of oil"]}
       - {kind: reagent_bottle, phrases: ["a glass bottle of cleaning concentrate"], tags: [pharma_dc]}
     ramps: ["the ramp down to the loading dock", "the ramp up to the mezzanine goods door", "the sloped floor into the cold store"]
     ramp_ends: ["the dock door at the bottom", "the marked stop line at the bottom", "the fire door at the foot of the ramp"]
@@ -203,6 +203,7 @@ domains:
   factory:
     name: factory line
     floor: {hard: 1.0}
+    emerge_rate: [0.05, 0.25]           # 모퉁이 뒤에서 누가 나올 위험률(초당, 숨은 값 — 이 범위 균등; Task v0b P6)
     side_obstacle_prior: 0.50
     tilt_sd_deg: 0.3
     bodies: {arm: 0.40, mobile_base: 0.25, forklift_amr: 0.20, humanoid: 0.15}
@@ -296,8 +297,6 @@ domains:
       - {kind: box_stack, phrases: ["a stack of three boxes of empty tubs"], tags: [food]}
       - {kind: paint_tins, phrases: ["a stack of primer tins"], tags: [auto, metal]}
       - {kind: crate_stack, phrases: ["a three-high stack of parts crates", "a tall stack of tote boxes on a pallet"]}
-      - {kind: drum, phrases: ["a part-filled drum of cutting oil"], tags: [auto, metal]}
-      - {kind: drum, phrases: ["a part-filled drum of syrup"], tags: [food]}
       - {kind: water_bottle, phrases: ["a tall bottle of deionised water"], tags: [electronics, battery]}
     ramps: ["the ramp up to the mezzanine", "the ramp down to the goods-in bay", "the sloped walkway past the press hall"]
     ramp_ends: ["the barrier at the bottom", "the marked stop line at the bottom", "the roller door at the foot of the ramp"]
@@ -315,6 +314,9 @@ domains:
       - {kind: connector, item: "the harness connector", target: "the module socket", tags: [auto, electronics, battery]}
       - {kind: dowel_pin, item: "the dowel pin", target: "its hole in the base plate", tags: [auto, metal]}
       - {kind: tool_bit, item: "the new screwdriver bit", target: "the chuck", tags: [auto, electronics, battery]}
+      - {kind: tool_bit, item: "the new grinding disc", target: "the grinder's arbor", tags: [metal]}
+      - {kind: cartridge, item: "the label-printer ribbon cartridge", target: "its slot on the packing line", tags: [food]}
+      - {kind: plug, item: "the handheld scanner", target: "its charging cradle"}
       - {kind: shelf_tote, item: "the bin", target: "its slot on the line-side rack"}
       - {kind: rack_pallet, item: "the pallet", target: "the rack beams"}
     corners: ["the corner of the paint booth", "a machine guard at the junction", "a parked forklift at the corner"]
@@ -327,6 +329,7 @@ domains:
   cafe:
     name: café / restaurant
     floor: {hard: 1.0}
+    emerge_rate: [0.10, 0.40]           # 모퉁이 뒤에서 누가 나올 위험률(초당, 숨은 값 — 이 범위 균등; Task v0b P6)
     side_obstacle_prior: 0.45
     tilt_sd_deg: 0.3
     bodies: {mobile_base: 0.50, humanoid: 0.25, arm: 0.25}
@@ -433,6 +436,7 @@ domains:
   hospital:
     name: hospital corridor
     floor: {hard: 1.0}
+    emerge_rate: [0.10, 0.35]           # 모퉁이 뒤에서 누가 나올 위험률(초당, 숨은 값 — 이 범위 균등; Task v0b P6)
     side_obstacle_prior: 0.35
     tilt_sd_deg: 0.2
     bodies: {mobile_base: 0.60, humanoid: 0.40}
@@ -522,6 +526,7 @@ domains:
   lab:
     name: laboratory bench
     floor: {hard: 1.0}
+    emerge_rate: [0.03, 0.15]           # 모퉁이 뒤에서 누가 나올 위험률(초당, 숨은 값 — 이 범위 균등; Task v0b P6)
     side_obstacle_prior: 0.50
     tilt_sd_deg: 0.2
     bodies: {arm: 0.65, mobile_base: 0.35}
@@ -613,6 +618,7 @@ domains:
   sidewalk:
     name: sidewalk / street
     floor: {pavement: 1.0}
+    emerge_rate: [0.10, 0.45]           # 모퉁이 뒤에서 누가 나올 위험률(초당, 숨은 값 — 이 범위 균등; Task v0b P6)
     side_obstacle_prior: 0.30
     tilt_sd_deg: 1.5              # 보도는 배수 경사·턱이 있다
     bodies: {mobile_base: 0.70, humanoid: 0.30}
@@ -703,6 +709,7 @@ domains:
   home:
     name: home (kitchen / living room)
     floor: {hard: 0.5, carpet: 0.5}
+    emerge_rate: [0.03, 0.15]           # 모퉁이 뒤에서 누가 나올 위험률(초당, 숨은 값 — 이 범위 균등; Task v0b P6)
     side_obstacle_prior: 0.45
     tilt_sd_deg: 0.2
     bodies: {mobile_base: 0.40, humanoid: 0.35, arm: 0.25}
@@ -801,6 +808,7 @@ domains:
   retail:
     name: store
     floor: {hard: 1.0}
+    emerge_rate: [0.10, 0.35]           # 모퉁이 뒤에서 누가 나올 위험률(초당, 숨은 값 — 이 범위 균등; Task v0b P6)
     side_obstacle_prior: 0.50
     tilt_sd_deg: 0.2
     bodies: {mobile_base: 0.50, humanoid: 0.30, forklift_amr: 0.20}
@@ -875,6 +883,7 @@ domains:
       - {kind: water_bottle, phrases: ["a tall bottle of water for the staff room"]}
       - {kind: box_stack, phrases: ["a stack of three shoe boxes", "a stack of boxed lamps"]}
       - {kind: plant_pot, phrases: ["a tall potted olive tree"], tags: [garden]}
+      - {kind: potted_tree, phrases: ["a pallet with a tall potted olive tree"], tags: [garden]}
       - {kind: crate_stack, phrases: ["a tall stack of drinks crates on a pallet"]}
     ramps: ["the ramp down to the stock room", "the trolley ramp to the car park", "the ramp up to the mezzanine floor"]
     ramp_ends: ["the stock-room door at the bottom", "the barrier at the bottom"]
@@ -897,6 +906,7 @@ domains:
   greenhouse:
     name: greenhouse / farm
     floor: {hard: 0.5, soil: 0.5}
+    emerge_rate: [0.02, 0.10]           # 모퉁이 뒤에서 누가 나올 위험률(초당, 숨은 값 — 이 범위 균등; Task v0b P6)
     side_obstacle_prior: 0.40
     tilt_sd_deg: 1.0
     bodies: {mobile_base: 0.45, arm: 0.30, humanoid: 0.25}
@@ -971,6 +981,7 @@ domains:
 
     loads:
       - {kind: plant_pot, phrases: ["a tall potted tomato plant", "a potted citrus tree"]}
+      - {kind: potted_tree, phrases: ["a pallet with a tall potted fig tree", "a potted palm on a pallet"]}
       - {kind: water_bottle, phrases: ["a tall bottle of plant feed"]}
       - {kind: box_stack, phrases: ["a stack of three seed-tray boxes"]}
     ramps: ["the ramp up to the packing shed", "the ramp down to the irrigation room"]
@@ -993,6 +1004,7 @@ domains:
   transit:
     name: airport / train station
     floor: {hard: 0.7, carpet: 0.3}
+    emerge_rate: [0.15, 0.50]           # 모퉁이 뒤에서 누가 나올 위험률(초당, 숨은 값 — 이 범위 균등; Task v0b P6)
     side_obstacle_prior: 0.30
     tilt_sd_deg: 0.2
     bodies: {mobile_base: 0.55, humanoid: 0.30, forklift_amr: 0.15}

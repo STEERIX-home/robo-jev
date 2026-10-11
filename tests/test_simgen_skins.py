@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from robo_jev.simgen.catalog import DOMAINS, SCENES, config_errors, default_config
+from robo_jev.simgen.catalog import DOMAINS, SCENE_GROUP, SCENES, TRAIN_GROUPS, config_errors, default_config
 from robo_jev.simgen.generate import build_moment
 from robo_jev.simgen.skins import compatible, entry_ok, entry_text, setting_allows, setting_tags
 
@@ -99,4 +99,4 @@ def test_known_incoherent_combinations_never_appear(moments):
 
 def test_every_domain_and_scene_appears_in_the_skin_sample(moments):
     assert {m.obs.domain for m in moments} == set(DOMAINS)
-    assert {m.obs.scene for m in moments} == set(SCENES)
+    assert {m.obs.scene for m in moments} == {s for s in SCENES if SCENE_GROUP[s] in TRAIN_GROUPS}   # 학습 나눔은 P1+P3을 만들지 않는다

@@ -87,7 +87,10 @@ def test_dataset_stats_report_shares_speed_and_design_checks():
         assert sum(v["share"] for v in stats["shares"][table].values()) == pytest.approx(1.0, abs=1e-3)
     assert 0.3 <= stats["labels"]["key_noul"]["summary"]["mean"] <= 0.7
     for name, margin in stats["margins"].items():
-        assert abs(margin["share_abs_below_1.5_sigma"] - margin["design_share_abs_below_1.5_sigma"]) < 0.08, name
+        # 표본 잡음만큼 허용(v0b는 여유 이름이 12개라 이름마다 레코드가 70~800개): |관측 − 설계| < 4·SE + 0.03
+        design = margin["design_share_abs_below_1.5_sigma"]
+        se = (design * (1.0 - design) / margin["n"]) ** 0.5
+        assert abs(margin["share_abs_below_1.5_sigma"] - design) < 4.0 * se + 0.03, (name, margin["n"])
     assert set(stats["truth_check"]) >= {"noul_by_label_bin", "noul_brier_vs_truth", "action_label_best_is_cheapest_in_hindsight"}
     rec = stats["flags"]["recommendation"]
     assert rec["correct_within_tau"] == 1.0 and rec["wrong_at_least_2tau"] == 1.0 and 0.18 <= rec["wrong_share"] <= 0.32

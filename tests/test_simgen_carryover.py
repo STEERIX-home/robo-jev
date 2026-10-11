@@ -21,6 +21,7 @@ from simgen_helpers import moment, sample_records
 
 from robo_jev.simgen.catalog import DOMAINS, SCENE_MARGINS, default_config
 from robo_jev.simgen.generate import build_moment
+from robo_jev.simgen.holdout import split_for
 from robo_jev.simgen.labels import uses_exact
 from robo_jev.simgen.posterior import exact_labels, sample_posterior
 from robo_jev.simgen.questions import identity, write_questions
@@ -185,7 +186,8 @@ def test_old_step_in_tracks_are_calibrated_in_forward_sbc(cfg):
     v0a 코드(전제 없음)는 정답 0.432 대 실제 0.483(z +4.8, 같은 4,000 세계); 전제 띠로 자르면 z ≈ +0.5."""
     rows = []
     for seed in range(4000):
-        ctx = draw_context(cfg, stream(seed, "context"), DOMAINS[seed % 10], {"scene": "p1_step_in"})
+        # 나이 > 1.0 s는 T3 칸(학습 쪽은 잘라 낸다) — 이 검사는 사후 자체를 재므로 범위를 좁히지 않는 나눔(T3, 칸 없음)으로 뽑는다
+        ctx = draw_context(cfg, stream(seed, "context"), DOMAINS[seed % 10], {"scene": "p1_step_in"}, split_for("T3"))
         world = None
         for attempt in range(64):
             rng = stream(seed, "wide", attempt)

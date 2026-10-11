@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 from simgen_helpers import sample_records
 
-from robo_jev.simgen.catalog import DOMAINS, SCENE_MARGINS, default_config
+from robo_jev.simgen.catalog import DOMAINS, default_config, scene_margins
 from robo_jev.simgen.scenes import Infeasible, build_world, draw_context, draw_margin, draw_margins, margins_of
 from robo_jev.simgen.spec import stream
 
@@ -39,10 +39,18 @@ def test_margin_draws_follow_the_documented_mixture(name, body):
     assert abs(float(np.mean(draws))) < 0.03 * half
 
 
+#: 정확히 맞출 수 없는 여유의 허용(문서화한 예외): P4 안착(seat)은 해상도로 반올림된 보고의 사후 로짓이라 닻이 거절 띠 ±0.35 안에서
+#: 멈추고, P6 오래된 추적(sight)은 다시 보이는 거리를 글에 0.05 m 배수로 적으므로 ±0.025, P3 쌓기(stack)는 계획 위치를 0.005 m 배수로
+#: 적으므로 ±0.0025 안이다(여유가 보이는 값만으로 정해져 숨은 값이 나머지를 받아 줄 수 없다).
+TOLERANCE = {"seat": 0.35 + 1e-9, "sight": 0.025 + 1e-9, "stack": 0.0025 + 1e-9}
+
+
 def test_built_worlds_realise_the_target_margin_exactly():
+    """닻 세계는 목표 여유를 정확히 갖는다(풀이와 따로 잰 여유 = 목표). 예외: 위 TOLERANCE, 그리고 P3에서 그 상황의 물건으로는 닿을 수 없는
+    목표(parts.inexact — 가장 가까운 띠를 쓴다; 비율이 작아야 한다)."""
     cfg = default_config()
-    checked = 0
-    for seed in range(400):
+    checked = skipped = total = 0
+    for seed in range(900):
         ctx = draw_context(cfg, stream(seed, "context"), DOMAINS[seed % 10])
         margins = draw_margins(cfg, ctx, stream(seed, "margin"))
         try:
@@ -50,11 +58,17 @@ def test_built_worlds_realise_the_target_margin_exactly():
         except Infeasible:
             continue
         measured = margins_of(cfg, world)
-        assert set(measured) == set(SCENE_MARGINS[ctx.scene])
+        assert set(measured) == set(scene_margins(ctx.scene, ctx.maneuver))
+        inexact = world.parts.get("inexact", ())
         for name, target in margins.items():
-            assert measured[name] == pytest.approx(target, abs=1e-9), (seed, ctx.scene, name)
+            total += 1
+            if name in inexact:
+                skipped += 1
+                continue
+            assert abs(measured[name] - target) <= TOLERANCE.get(name, 1e-9), (seed, ctx.scene, name, measured[name], target)
         checked += 1
-    assert checked >= 300
+    assert checked >= 600
+    assert skipped / total < 0.12, (skipped, total)
 
 
 def test_margins_concentrate_near_zero_as_designed_in_the_2000_sample():

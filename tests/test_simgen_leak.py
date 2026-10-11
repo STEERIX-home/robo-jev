@@ -18,8 +18,6 @@ from simgen_helpers import moment, sample_records
 from robo_jev.simgen import generate
 from robo_jev.simgen.catalog import default_config
 from robo_jev.simgen.record import dumps
-from robo_jev.simgen.scenes import observe
-from robo_jev.simgen.spec import stream
 
 SIMGEN = Path(generate.__file__).resolve().parent
 OBSERVATION_SIDE = ("narrate.py", "questions.py", "phrases.py", "posterior.py", "rollout.py", "labels.py", "textfmt.py", "observation.py", "spec.py")
@@ -89,7 +87,7 @@ def _hidden_only_world(world):
 
 
 def _observe(cfg, m, world):
-    return observe(cfg, world, m.ctx, stream(m.seed, "observe"), stream(m.seed, "format"), stream(m.seed, "skin", 0))
+    return m.look(cfg, world, 0)
 
 
 LEAK_CASES = [

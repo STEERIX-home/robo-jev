@@ -153,6 +153,9 @@ def _numbers(obs: Observation) -> dict[str, str]:
     if obs.place is not None:
         for name, value in obs.place.action_times.items():
             out[f"t_{name}"] = textfmt.time(value, 0.5 if value >= 5 else 0.1, obs.fmt.time_unit)
+    if obs.stack is not None:
+        for key, value in (("t_recentre", obs.stack.recentre_s), ("t_elsewhere", obs.stack.elsewhere_s), ("t_check", obs.stack.check_s)):
+            out[key] = textfmt.time(value, 0.5 if value >= 5 else 0.1, obs.fmt.time_unit)
     return out
 
 
@@ -336,6 +339,10 @@ EN: dict[str, dict] = {
                         "Could you and {ref} get past each other here with {clear} of combined side clearance, hugging opposite walls?",
                         "With both of you against opposite walls, is there at least {clear} of spare width left over?"],
                        ["Hugging opposite walls, would the two of you have {clear} or more of width to spare?"]),
+    "key.stops_before_corner": _T(["If someone stepped out from behind {corner} right now, could you stop before reaching it, braking as hard as you can (reaction included)?",
+                                   "Braking as hard as you can from the moment someone appears, reaction included, do you come to rest before you reach {corner}?",
+                                   "Is your hardest-braking stopping distance, reaction included, shorter than the distance to {corner}?"],
+                                  ["Could you halt short of {corner} with maximum braking, reaction time included, if someone appeared there now?"]),
     # 쏟아짐·뚜껑 — 출렁임과 충돌을 함께 센다
     "noul.spill_impact": _T(["If you {action}, will anything spill from {cref}, either slopping over the rim or knocked out in a collision?",
                              "Suppose you {action}. Does {cref} spill, counting both slopping over and any bump into {hazard}?",

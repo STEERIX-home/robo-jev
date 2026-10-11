@@ -193,6 +193,7 @@ def _margin_stats(records: list[dict], cfg: SimgenConfig) -> dict:
         truth = [t / cfg.catalog["margins"][name]["sigma"][b] for _, b, t in rows if t is not None]
         out[name] = {
             "unit": cfg.catalog["margins"][name]["unit"],
+            "n": len(values),
             "summary": _summary(values),
             "normalized_by_sigma": _summary(normalized),
             "share_abs_below_1.5_sigma": round(float(np.mean(np.abs(normalized) < 1.5)), 4),

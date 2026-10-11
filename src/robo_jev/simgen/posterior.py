@@ -288,7 +288,14 @@ def _head_on(cfg, obs: Observation, rng, k: int) -> dict[str, np.ndarray]:
 
 
 def sample_posterior(cfg: SimgenConfig, obs: Observation, k: int, rng: np.random.Generator) -> Batch:
-    """관측에서 사후 세계 K개."""
+    """관측에서 사후 세계 K개(P4·P6의 이산 부분은 정확한 무게로 나열 — 그 Batch는 weights를 갖는다)."""
+    from robo_jev.simgen.catalog import scene_kind
+
+    kind = scene_kind(obs.scene)
+    if kind is not None:
+        from robo_jev.simgen import p3, p4, p6
+
+        return {"p3": p3, "p4": p4, "p6": p6}[kind].sample_posterior(cfg, obs, k, rng)
     if obs.scene in ("p1_step_in", "p1p5_step_in_carrying"):
         values = _step_in(cfg, obs, rng, k)
     elif obs.scene == "p1_crossing":
@@ -324,7 +331,17 @@ def exact_labels(cfg: SimgenConfig, obs: Observation) -> dict:
     열쇠 'overrun|stop_moderate'). 계산할 수 없는 것(검열된 보고 등)은 넣지 않는다."""
     out: dict = {}
     a, r = obs.agent, obs.robot
-    family = {"p1_step_in": "step_in", "p1p5_step_in_carrying": "step_in", "p1_crossing": "crossing", "p1_head_on": "head_on"}.get(obs.scene)
+    from robo_jev.simgen.catalog import scene_kind
+
+    kind = scene_kind(obs.scene)
+    if kind is not None:
+        from robo_jev.simgen import p3, p4, p6
+
+        out.update({"p3": p3, "p4": p4, "p6": p6}[kind].exact(cfg, obs))
+        if obs.scene not in ("p1p6_emerging_step_in", "p1p3_step_in_carrying_tall"):
+            return out
+    family = {"p1_step_in": "step_in", "p1p5_step_in_carrying": "step_in", "p1_crossing": "crossing", "p1_head_on": "head_on",
+              "p1p6_emerging_step_in": "step_in", "p1p3_step_in_carrying_tall": "step_in"}.get(obs.scene)  # fmt: skip
     if a is not None and a.cue is not None and family is not None:
         out["intent"] = intent_posterior(cfg, a.kind, family, a.cue, a.age)
     if obs.container is not None:
@@ -333,7 +350,7 @@ def exact_labels(cfg: SimgenConfig, obs: Observation) -> dict:
         bins = np.searchsorted(np.array([hi for _, hi, _ in FILL_BINS[:-1]]), grid, side="right")
         total = float(weight.sum())
         out["fill_bin"] = np.array([float(weight[bins == b].sum()) / total for b in range(len(FILL_BINS))])
-    if obs.scene in ("p1_step_in", "p1p5_step_in_carrying"):
+    if obs.scene in ("p1_step_in", "p1p5_step_in_carrying", "p1p6_emerging_step_in", "p1p3_step_in_carrying_tall"):
         stop = r.speed * r.latency + r.speed**2 / (2.0 * r.decel_moderate)
         p = _upper_tail(a.ahead, stop, 0.005)
         if p is not None:

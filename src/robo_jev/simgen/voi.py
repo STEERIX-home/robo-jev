@@ -29,6 +29,7 @@ class DiscreteSignal:
     base: tuple[str, ...]          # 보고 나서 고를 수 있는 행동(정식 열쇠)
     time: float                    # 보는 데 드는 시간 s
     likelihood: np.ndarray         # (S, K)
+    option: str = "look_again"     # 다시 보기 선택지의 정식 열쇠(쌓기는 check_weight)
 
     def decide(self, costs: np.ndarray, weights: np.ndarray | None):
         """신호마다 최선 행동의 번호(base 안) — costs (B, K)."""
@@ -61,6 +62,7 @@ class GaussianSignal:
     means: np.ndarray              # (K, D)
     sds: np.ndarray                # (K, D)
     nodes: int = 7
+    option: str = "look_again"
 
     def _density(self, points: np.ndarray) -> np.ndarray:
         """points (N, D) → (N, K) 세계마다의 밀도."""

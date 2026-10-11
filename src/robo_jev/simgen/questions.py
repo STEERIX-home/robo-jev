@@ -335,6 +335,11 @@ def _look_phrase(c: _Ctx) -> str:
     return "pause and look again"
 
 
+def look_option(obs: Observation) -> str:
+    """다시 보기 선택지의 정식 열쇠(쌓기는 무게 확인)."""
+    return "check_weight" if obs.stack is not None else "look_again"
+
+
 def look_time(obs: Observation) -> float:
     """다시 보기에 드는 시간(글에 적힌 값)."""
     if obs.place is not None:
@@ -351,8 +356,10 @@ def _voi_question(c: _Ctx, options: tuple[str, ...], style: str) -> Question:
     descriptions = [c.text("voi.decide_now"), c.text("voi.look_first", look=look, t=t)]
     criteria, keymap = _choice(c, ["decide_now", "look_first"], descriptions, style, "v")
     instructions = c.text("voi", look=look)
-    base = sorted(o for o in options if o != "look_again")
-    recipe = {"kind": "voi", "options": {k: ("look_again" if v == "look_first" else "decide_now") for k, v in keymap.items()}, "criterion": None, "base": base}
+    look_opt = look_option(c.obs)
+    base = sorted(o for o in options if o != look_opt)
+    recipe = {"kind": "voi", "options": {k: ("look_again" if v == "look_first" else "decide_now") for k, v in keymap.items()}, "criterion": None,
+              "base": base, "look": look_opt}  # fmt: skip
     return Question(c.name("look_first_or_decide", "check_again_first", "worth_a_second_look"), "choice", instructions, criteria, recipe)
 
 
@@ -409,7 +416,8 @@ def _key_noul(c: _Ctx) -> Question:
     if scene == "p6_stale_track":
         return _noul(c, c.name("still_there", "still_in_the_way", "has_stayed"), "noul.still_there", {"source": "world", "event": "present"})
     if scene == "p6_blind_corner":
-        return _noul(c, c.name("hit_if_keep_speed", "contact_if_keep_speed"), "noul.contact_emerge", {"source": "event", "event": "contact", "option": "continue"}, **c.action("continue"))
+        return _noul(c, c.name("can_stop_before_corner", "stops_in_view", "stop_before_corner"), "key.stops_before_corner",
+                     {"source": "world", "event": "stops_before_corner"})  # fmt: skip
     if scene == "p6_sensor_conflict":
         return _noul(c, c.name("really_there", "obstacle_is_real", "something_there"), "noul.present", {"source": "world", "event": "present"})
     raise ValueError(scene)
@@ -670,9 +678,9 @@ def _state_candidates(c: _Ctx, style: str) -> list:
             canon = {"lidar_right": 1.0 if lidar_says else 0.0, "camera_right": 0.0 if lidar_says else 1.0}
             criteria, keymap = _choice(c, list(canon), [texts["sensor"][k][int(lidar_says)] for k in canon], style, "s")
             options = {key: [canon[val]] for key, val in keymap.items()}
-            return Question(c.name("which_sensor", "believe_which"), "choice", c.text("state.sensor"), criteria, {"kind": "state", "state": "present", "options": options})
+            return Question(c.name("which_sensor", "believe_which"), "choice", c.text("state.sensor"), criteria, {"kind": "state", "state": "sensor_present", "options": options})
 
-        cands.append(_Cand(("state", "present"), sensor_q))
+        cands.append(_Cand(("state", "sensor_present"), sensor_q))
     if obs.stack is not None and obs.stack.offset != 0.0:
 
         def weight_q():
@@ -910,7 +918,7 @@ def write_questions(cfg: SimgenConfig, obs: Observation, options: tuple[str, ...
     states = fresh(_state_candidates(c, style))
     if states and rng.random() < 0.5:
         take(states[int(rng.integers(len(states)))])
-    if obs.scene in VOI_SCENES and "look_again" in options and rng.random() < 0.4:
+    if obs.scene in VOI_SCENES and look_option(obs) in options and rng.random() < 0.4:
         voi = _voi_question(c, options, style)
         if identity(voi.recipe) not in used:
             questions.append(voi)

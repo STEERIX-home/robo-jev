@@ -70,7 +70,14 @@ def available_options(obs: Observation) -> tuple[str, ...]:
     r = obs.robot
     arm = obs.body == "arm"
     base = ("continue", "slow", "stop_gentle", "stop_moderate", "stop_hard")
-    if obs.scene in ("p1_step_in", "p1p5_step_in_carrying"):
+    from robo_jev.simgen.catalog import scene_kind
+
+    kind = scene_kind(obs.scene)
+    if kind is not None and obs.scene not in ("p1p3_step_in_carrying_tall", "p1p6_emerging_step_in"):
+        from robo_jev.simgen import p3, p4, p6
+
+        return {"p3": p3, "p4": p4, "p6": p6}[kind].available(obs)
+    if obs.scene in ("p1_step_in", "p1p5_step_in_carrying", "p1p6_emerging_step_in", "p1p3_step_in_carrying_tall"):
         opts = list(base) + (["retract"] if arm else [])
         if r.can_sidestep and obs.env.sides is not None:
             opts += [f"sidestep_{side}" for side, s in zip(("left", "right"), obs.env.sides, strict=True) if s.status != "blocked"]
@@ -410,16 +417,28 @@ def _turning(cfg: SimgenConfig, obs: Observation, batch: Batch, options) -> Outc
     return out
 
 
-def rollout(cfg: SimgenConfig, obs: Observation, batch: Batch, options=None) -> Outcomes:
-    """선택지 × 세계의 결과. options가 없으면 가능한 선택지 전부."""
+def rollout(cfg: SimgenConfig, obs: Observation, batch: Batch, options=None, rng: np.random.Generator | None = None) -> Outcomes:
+    """선택지 × 세계의 결과. options가 없으면 가능한 선택지 전부. ``rng``는 행동 결과가 확률인 장면(P4)의 참 세계에서 결과를 뽑는다."""
     options = tuple(options or available_options(obs))
     builders = {
         "p1_step_in": _step_in, "p1p5_step_in_carrying": _step_in, "p1_crossing": _crossing, "p1_head_on": _head_on,
         "p5_braking": _braking, "p5_turning": _turning,
     }  # fmt: skip
-    if obs.scene not in builders:
+    from robo_jev.simgen.catalog import scene_kind
+
+    kind = scene_kind(obs.scene)
+    if kind in ("p3", "p6"):
+        from robo_jev.simgen import p3, p6
+
+        out = {"p3": p3, "p6": p6}[kind].rollout(cfg, obs, batch, options)
+    elif kind == "p4":
+        from robo_jev.simgen import p4
+
+        out = p4.rollout(cfg, obs, batch, options, rng)
+    elif obs.scene in builders:
+        out = builders[obs.scene](cfg, obs, batch, options)
+    else:
         raise ValueError(obs.scene)
-    out = builders[obs.scene](cfg, obs, batch, options)
     out.body, out.loaded = obs.robot.body, obs.robot.loaded
     out.weights = batch.weights
     return out

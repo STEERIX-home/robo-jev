@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from robo_jev.simgen import physics as ph
 from robo_jev.simgen.catalog import INTENTS, SCENE_FAMILY, SimgenConfig
-from robo_jev.simgen.labels import cost_model, event_weights, world_costs
+from robo_jev.simgen.labels import cost_model, event_weights, wmean, world_costs
 from robo_jev.simgen.observation import Observation
 from robo_jev.simgen.posterior import intent_posterior
 from robo_jev.simgen.rollout import Outcomes
@@ -51,7 +51,7 @@ def _lead(cfg: SimgenConfig, obs: Observation, out: Outcomes, exact: dict) -> li
     stop_m = ph.stopping_distance(r.speed, r.latency, r.decel_moderate)
     arm = obs.body == "arm"
     firm = "the normal pause" if arm else "firm braking"
-    if obs.scene in ("p1_step_in", "p1p5_step_in_carrying"):
+    if obs.scene in ("p1_step_in", "p1p5_step_in_carrying", "p1p6_emerging_step_in", "p1p3_step_in_carrying_tall"):
         a = obs.agent
         p_short = exact.get("stops_short", float(out.world_events["stops_short"].mean()))
         parts.append(
@@ -106,11 +106,14 @@ def _cost_breakdown(cfg: SimgenConfig, out: Outcomes, recipe: dict, label: dict)
     for key, canon in recipe["options"].items():
         i = out.index(canon)
         terms = []
+        if out.voi is not None and canon == out.voi.option:
+            rows.append((label["expected_cost"][key], f"{key} = look ({out.voi.time:.1f} s) then the best action = {label['expected_cost'][key]:.2f}"))
+            continue
         for event, item in out.cost_items.items():
-            w = float(event_weights(out, model, event)[i].mean())
+            w = float(wmean(event_weights(out, model, event)[i], out))
             if w > 0:
-                terms.append(f"{w:.2f}×{costs[item]:g} {event}")
-        delay = float(out.quantities["delay"][i].mean())
+                terms.append(f"{w:.2f}×{costs[item]:g} {event.split('__')[0]}")
+        delay = float(wmean(out.quantities["delay"][i], out))
         if abs(delay) > 0.005:
             terms.append(f"{delay:.2f} s×{costs['delay_per_s']:g}")
         if out.hard_brake is not None and out.hard_brake[i] and model["hard_brake"] > 0:

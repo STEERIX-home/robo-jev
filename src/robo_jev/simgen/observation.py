@@ -121,6 +121,7 @@ class PlacementObs:
     tolerance: dict                   # 글에 적는 허용 오차
     action_times: dict                # 선택지 → 걸리는 시간 s(글에 적는다)
     stale_reason: str | None = None   # 오래된 카메라의 까닭(P4+P6)
+    gauge_ratio: float = 0.0          # 주 측정의 감각 잡음 / 그 클래스의 잡음 범위 상한(T3 칸 '거친 게이지')
 
     def primary(self) -> tuple[str, Reading]:
         name = "height_mm" if self.family == "place" else "depth_mm"

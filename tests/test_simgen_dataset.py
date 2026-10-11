@@ -16,8 +16,8 @@ import numpy as np
 import pytest
 from simgen_helpers import SAMPLE_N, numeric_view, sample_records, skin_strings
 
-from robo_jev.simgen.catalog import BODIES, DOMAINS, SCENES, default_config
-from robo_jev.simgen.generate import build_moment
+from robo_jev.simgen.catalog import BODIES, DOMAINS, SCENE_GROUP, SCENES, TRAIN_GROUPS, default_config
+from robo_jev.simgen.generate import build_moment, split_from
 
 
 @pytest.fixture(scope="module")
@@ -65,13 +65,17 @@ def test_domain_shares_are_ten_percent_within_two_points(records):
         assert abs(count / len(records) - 0.10) <= 0.02, (domain, count)
 
 
-def test_every_scene_body_and_style_appears_and_the_combination_is_well_represented(records):
+def test_every_train_scene_body_and_style_appears_and_groups_are_even(records):
+    """학습 표본: 빼 둔 조합(P1+P3)의 장면을 뺀 모든 장면·몸·학습 문체 셋이 나오고, 현상·조합 묶음은 고르다(각 1/9 ± 3점 — Task v0b §5)."""
     scenes = Counter(r["meta"]["scene"] for r in records)
-    assert set(scenes) == set(SCENES)
+    assert set(scenes) == {s for s in SCENES if SCENE_GROUP[s] in TRAIN_GROUPS}
     assert set(Counter(r["meta"]["body"] for r in records)) == set(BODIES)
     styles = Counter(r["meta"]["style"] for r in records)
     assert set(styles) == {"facts", "prose", "planner"} and min(styles.values()) > 0.25 * len(records)
-    assert scenes["p1p5_step_in_carrying"] / len(records) >= 0.2
+    groups = Counter(r["meta"]["group"] for r in records)
+    assert set(groups) == set(TRAIN_GROUPS)
+    for group, count in groups.items():
+        assert abs(count / len(records) - 1 / len(TRAIN_GROUPS)) <= 0.03, (group, count)
 
 
 def test_about_ten_percent_of_records_are_in_pairs_that_point_at_each_other(records):
@@ -93,7 +97,7 @@ _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 def _moment_of(record):
     g = record["generator"]
     forced = {k: v for k, v in g["forced"].items() if k != "domain"}
-    return build_moment(default_config(), g["seed"], g["forced"]["domain"], forced or None, g["variant"])
+    return build_moment(default_config(), g["seed"], g["forced"]["domain"], forced or None, g["variant"], split_from(g["split"]))
 
 
 def _numbers_without_skin(record, obs) -> Counter:
@@ -113,7 +117,7 @@ def test_wording_pairs_keep_every_number_and_every_label(records):
         m_base, m_variant = _moment_of(base), _moment_of(variant)
         # 관측에서 상황 옷 문구를 지우면 같다 — 모든 보고 수치·해상도·나이·단서·단위가 그대로다
         assert numeric_view(m_base.obs) == numeric_view(m_variant.obs), variant["id"]
-        assert m_base.obs.skin != m_variant.obs.skin
+        assert skin_strings(m_base.obs) != skin_strings(m_variant.obs)      # 상황 옷 문구(장면마다의 물건·장소·가림 문구 포함)가 다르다
         # 글에서도: 상황 옷 문구를 지운 나머지의 수(값과 순서 무관 목록)가 같고, 비어 있지 않다
         a, b = _numbers_without_skin(base, m_base.obs), _numbers_without_skin(variant, m_variant.obs)
         assert a == b and sum(a.values()) >= 3, (variant["id"], a, b)
