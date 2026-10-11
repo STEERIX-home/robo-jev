@@ -312,3 +312,75 @@ def test_code_mass_is_averaged_by_question_type(fixtures):
     preds = [_prediction(r, {n: q["answer"] for n, q in _oracle(r)["questions"].items()}, mass=0.8) for r in fixtures]
     summary = M.summarize(fixtures, preds, n_boot=10)
     assert summary["overall"]["noul"]["code_mass"] == pytest.approx(0.8) and summary["overall"]["_all"]["code_mass"] == pytest.approx(0.8)
+
+
+# -- 선택지 순서 교란 (T6 꼴의 판정 변경률) ---------------------------------------------------------------------------
+
+
+def test_permutation_sensitivity_measures_how_answers_move_when_only_the_option_order_changes(fixtures):
+    record = fixtures[3]  # fx-004: choice(행동) · noul · score · choice(규칙)
+    a = _oracle(record)
+    b = copy.deepcopy(a)
+    b["questions"]["decision"]["answer"] = {"probabilities": {"proceed": 0.7, "slow_down": 0.1, "stop_moderate": 0.1, "stop_hard": 0.1}}
+    b["questions"]["conflict"]["answer"] = {"p_yes": 0.61}  # 0.41 → 0.61: 0.2 움직이고 0.5 경계를 넘는다
+    c = copy.deepcopy(a)
+    sens = M.permutation_sensitivity([[a], [b], [c]])
+    # 쌍 셋(a-b, a-c, b-c): noul 이동 0.2, 0, 0.2 → 평균 0.4/3, 뒤집힘 2/3
+    assert sens["noul"]["questions"] == 1 and sens["noul"]["pairs"] == 3
+    assert sens["noul"]["shift_mean"] == pytest.approx(0.4 / 3) and sens["noul"]["flip_rate"] == pytest.approx(2 / 3)
+    label = record["labels"]["decision"]["probabilities"]
+    tv = 0.5 * sum(abs(label[k] - v) for k, v in {"proceed": 0.7, "slow_down": 0.1, "stop_moderate": 0.1, "stop_hard": 0.1}.items())
+    assert sens["choice"]["questions"] == 2 and sens["choice"]["shift_mean"] == pytest.approx(2 * tv / 6)
+    assert sens["choice"]["flip_rate"] == pytest.approx(2 / 6)  # 행동 질문의 두 쌍에서 argmax가 proceed로 바뀐다
+    assert sens["score"]["shift_mean"] == 0.0 and sens["_all"]["questions"] == 4
+    assert M.permutation_sensitivity([[a]]) == {"_all": {"questions": 0, "pairs": 0, "shift_mean": None, "flip_rate": None}}
+
+
+def test_side_agreement_counts_the_same_side_of_one_half_and_skips_ambiguous_labels():
+    rows = [{"type": "noul", "kind": None, "block": "noul", "m": M.binary_metrics(p, y)} for p, y in [(0.8, 0.9), (0.3, 0.7), (0.6, 0.55), (0.2, 0.1)]]
+    block = M.aggregate(rows)["noul"]
+    # (0.6, 0.55)은 |y − 0.5| < 0.1이라 빠진다; 나머지 셋 중 둘이 같은 쪽
+    assert block["side_n"] == 3 and block["side_agreement"] == pytest.approx(2 / 3)
+
+
+def _orders_record() -> dict:
+    return {
+        "id": "o", "meta": {}, "request": {"state": "s", "questions": {
+            "y": {"type": "noul", "instructions": "?"}, "s": {"type": "score", "instructions": "?", "criteria": []},
+            "c": {"type": "choice", "instructions": "?", "criteria": {"a": "", "b": "", "c": ""}}}},
+        "labels": {"y": {"type": "noul", "p_yes": 0.5}, "s": {"type": "score", "value": 0.4},
+                   "c": {"type": "choice", "kind": "state", "probabilities": {"a": 0.4, "b": 0.3, "c": 0.3}}},
+    }
+
+
+def _orders_runs():
+    record = _orders_record()
+    bins = ["0.0-0.1", "0.1-0.3", "0.3-0.5", "0.5-0.7", "0.7-0.9", "0.9-1.0"]
+    one = _prediction(record, {"y": {"p_yes": 0.7}, "s": {"value": 0.3}, "c": {"probabilities": {"a": 0.6, "b": 0.3, "c": 0.1}}},
+                      orders={"y": ["yes", "no"], "s": bins, "c": ["a", "b", "c"]})
+    two = _prediction(record, {"y": {"p_yes": 0.3}, "s": {"value": 0.5}, "c": {"probabilities": {"a": 0.2, "b": 0.3, "c": 0.5}}},
+                      orders={"y": ["no", "yes"], "s": bins[::-1], "c": ["c", "b", "a"]})
+    three = _prediction(record, {"y": {"p_yes": 0.9}, "s": {"value": 0.3}, "c": {"probabilities": {"a": 0.6, "b": 0.3, "c": 0.1}}},
+                        orders={"y": ["yes", "no"], "s": bins, "c": ["a", "b", "c"]})
+    return record, [[one], [two], [three]]
+
+
+def test_order_averaging_weighs_each_distinct_order_equally():
+    record, runs = _orders_runs()
+    (avg,) = M.average_over_orders(runs)
+    q = avg["questions"]
+    # noul: Yes 먼저 (0.7, 0.9) → 0.8, Yes 나중 0.3 → (0.8 + 0.3) / 2
+    assert q["y"]["answer"]["p_yes"] == pytest.approx(0.55) and q["y"]["orders_seen"] == 2
+    assert q["s"]["answer"]["value"] == pytest.approx(0.4)
+    assert q["c"]["answer"]["probabilities"] == pytest.approx({"a": 0.4, "b": 0.3, "c": 0.3})
+    assert M.summarize([record], [avg], n_boot=10)["overall"]["noul"]["n"] == 1
+
+
+def test_paired_order_effects_compare_the_same_question_under_different_orders():
+    _, runs = _orders_runs()
+    effects = M.order_effects(runs)
+    assert effects["noul"]["questions"] == 1 and effects["noul"]["mean_shift"] == pytest.approx(0.5) and effects["noul"]["positive_rate"] == 1.0
+    assert effects["score"]["mean_shift"] == pytest.approx(-0.2)
+    # choice: 키별 평균(a .4·b .3·c .3)에서 벗어난 정도를 자리별로 — 순서 (a,b,c)·(c,b,a)·(a,b,c)의 세 run
+    dev = effects["choice"]["3"]["mean_deviation_by_position"]
+    assert dev[0] > 0 > dev[2] and dev[1] == pytest.approx(0.0, abs=1e-12)

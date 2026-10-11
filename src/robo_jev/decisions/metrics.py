@@ -25,6 +25,7 @@ bootstrap 구간(:func:`bootstrap`), 같은 레코드의 두 run 비교(:func:`c
 
 from __future__ import annotations
 
+import itertools
 import math
 import statistics
 from collections import Counter, defaultdict
@@ -43,6 +44,7 @@ __all__ = [
     "HEADLINES",
     "MOVE_MIN",
     "aggregate",
+    "average_over_orders",
     "binary_metrics",
     "block_of",
     "bootstrap",
@@ -51,7 +53,9 @@ __all__ = [
     "ece",
     "group_tables",
     "margin_bands",
+    "order_effects",
     "pair_summary",
+    "permutation_sensitivity",
     "position_bias",
     "question_family",
     "question_rows",
@@ -68,6 +72,8 @@ MOVE_MIN = 0.05
 STILL_MAX = 0.01
 #: noul·score의 "판정 뒤집힘" 문턱 (단어 쌍).
 FLIP_THRESHOLD = 0.5
+#: 같은 쪽 일치(side agreement)에서 빼는 애매한 정답의 폭: |y − 0.5| < 이 값이면 세지 않는다.
+SIDE_MARGIN = 0.1
 _TIE = 1e-9
 BLOCKS = ("noul", "score", "choice/action", "choice/state", "choice/rule", "choice/other")
 GROUP_DIMENSIONS = (
@@ -324,10 +330,13 @@ def _block_summary(block: str, rows: list[dict[str, Any]]) -> dict[str, Any]:
     masses = [float(r["code_mass"]) for r in rows if r.get("code_mass") is not None]
     out: dict[str, Any] = {"n": len(rows), "code_mass": _mean(masses)}
     if block in ("noul", "score"):
+        sided = [m for m in ms if abs(m["y"] - FLIP_THRESHOLD) >= SIDE_MARGIN]
         out.update({
             "log_loss": _mean([m["log_loss"] for m in ms]), "kl": _mean([m["kl"] for m in ms]), "brier": _mean([m["brier"] for m in ms]),
             "mae": _mean([m["abs_error"] for m in ms]), "ece": ece((m["p"], m["y"]) for m in ms),
             "mean_p": _mean([m["p"] for m in ms]), "mean_y": _mean([m["y"] for m in ms]),
+            # 같은 쪽 일치: 정답이 0.5에서 SIDE_MARGIN 이상 떨어진 질문에서 모델 값이 0.5의 같은 쪽인 비율 (읽기 쉬운 '맞혔나')
+            "side_agreement": _mean([1.0 if (m["p"] >= FLIP_THRESHOLD) == (m["y"] >= FLIP_THRESHOLD) else 0.0 for m in sided]), "side_n": len(sided),
         })
         return out
     out.update({
@@ -589,6 +598,137 @@ def pair_summary(records: list[dict[str, Any]], rows: list[dict[str, Any]]) -> d
     return out
 
 
+def _answer_shift(qtype: str, a: dict[str, Any], b: dict[str, Any]) -> tuple[float, bool]:
+    """같은 질문의 두 답 사이 (이동, 판정 뒤집힘): choice는 전변동 거리와 argmax, noul·score는 |Δ|와 0.5 경계."""
+    if qtype == "choice":
+        pa, pb = a["probabilities"], b["probabilities"]
+        keys = list(pa)
+        shift = 0.5 * sum(abs(float(pa[k]) - float(pb.get(k, 0.0))) for k in keys)
+        top_a = max(keys, key=lambda k: (float(pa[k]), -keys.index(k)))
+        top_b = max(keys, key=lambda k: (float(pb.get(k, 0.0)), -keys.index(k)))
+        return shift, top_a != top_b
+    field = "p_yes" if qtype == "noul" else "value"
+    x, y = float(a[field]), float(b[field])
+    return abs(x - y), (x >= FLIP_THRESHOLD) != (y >= FLIP_THRESHOLD)
+
+
+def permutation_sensitivity(runs: list[list[dict[str, Any]]]) -> dict[str, Any]:
+    """선택지 **순서만** 바꿔(shuffle seed) 같은 기록을 여러 번 채점한 예측들 → 질문 종류별 흔들림 (기획서 §10 T6의 판정 변경률 꼴).
+
+    질문마다 run의 모든 쌍에서 :func:`_answer_shift` 를 재고 평균한다: ``shift_mean``(choice는 키로 되돌린 분포의 전변동 거리,
+    noul·score는 |Δ|), ``flip_rate``(판정이 뒤집힌 쌍의 비율). 순서에 무관한 모델이면 둘 다 0이다 — 위치 편향의 다른 얼굴이다.
+    """
+    answers: dict[tuple[str, str], list[tuple[str, dict[str, Any]]]] = defaultdict(list)
+    for run in runs:
+        for prediction in run:
+            for name, question in prediction["questions"].items():
+                answers[(str(prediction["id"]), name)].append((question["type"], question["answer"]))
+    sums: dict[str, list[float]] = defaultdict(lambda: [0, 0, 0.0, 0])  # 질문 수, 쌍 수, 이동 합, 뒤집힘 수
+    for found in answers.values():
+        if len(found) < 2:
+            continue
+        qtype = found[0][0]
+        for bucket in (qtype, "_all"):
+            sums[bucket][0] += 1
+        for (_, a), (_, b) in itertools.combinations(found, 2):
+            shift, flip = _answer_shift(qtype, a, b)
+            for bucket in (qtype, "_all"):
+                sums[bucket][1] += 1
+                sums[bucket][2] += shift
+                sums[bucket][3] += 1 if flip else 0
+    out = {}
+    for bucket, (questions, pairs, shift, flips) in sums.items():
+        out[bucket] = {"questions": int(questions), "pairs": int(pairs), "shift_mean": shift / pairs if pairs else None, "flip_rate": flips / pairs if pairs else None}
+    out.setdefault("_all", {"questions": 0, "pairs": 0, "shift_mean": None, "flip_rate": None})
+    return dict(sorted(out.items()))
+
+
+def _answer_vector(qtype: str, answer: dict[str, Any]) -> dict[str, float]:
+    if qtype == "choice":
+        return {k: float(v) for k, v in answer["probabilities"].items()}
+    return {"p_yes": float(answer["p_yes"])} if qtype == "noul" else {"value": float(answer["value"])}
+
+
+def average_over_orders(runs: list[list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """선택지 순서만 바꿔 여러 번 채점한 예측들 → **순서 평균** 예측 (기록·질문 순서는 첫 run).
+
+    질문마다 관측된 서로 다른 순서(``options``의 나열)별로 답을 먼저 평균하고, 그 순서별 평균을 같은 무게로 다시 평균한다 —
+    noul(Yes 먼저/나중)·score(오름/내림)는 두 순서가 모두 관측되면 1차 위치 편향이 정확히 상쇄된다. choice는 본 순열들 위의
+    평균이다(순열이 몇 개뿐이면 부분적으로만 상쇄된다). 위치 편향을 빼고 "내용을 아는가"를 보는 진단용 읽기다.
+    """
+    if not runs:
+        return []
+    by_key: dict[tuple[str, str], dict[tuple[str, ...], list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+    for run in runs:
+        for prediction in run:
+            for name, question in prediction["questions"].items():
+                by_key[(str(prediction["id"]), name)][tuple(question.get("options") or ())].append(question)
+    out = []
+    for prediction in runs[0]:
+        questions = {}
+        for name, first in prediction["questions"].items():
+            groups = by_key[(str(prediction["id"]), name)]
+            qtype = first["type"]
+            per_order = []
+            masses = []
+            for answers in groups.values():
+                vectors = [_answer_vector(qtype, q["answer"]) for q in answers]
+                per_order.append({k: sum(v[k] for v in vectors) / len(vectors) for k in vectors[0]})
+                masses.extend(float(q["code_mass"]) for q in answers if q.get("code_mass") is not None)
+            mean = {k: sum(v[k] for v in per_order) / len(per_order) for k in per_order[0]}
+            answer = {"probabilities": mean} if qtype == "choice" else ({"p_yes": mean["p_yes"]} if qtype == "noul" else {"value": mean["value"]})
+            questions[name] = {
+                "type": qtype, "options": first.get("options"), "values": first.get("values"), "answer": answer,
+                "code_mass": (sum(masses) / len(masses)) if masses else None, "orders_seen": len(groups),
+            }
+        out.append({**{k: v for k, v in prediction.items() if k != "questions"}, "questions": questions, "order_averaged": len(runs)})
+    return out
+
+
+def order_effects(runs: list[list[dict[str, Any]]]) -> dict[str, Any]:
+    """같은 질문을 다른 순서로 본 run들 사이의 **짝지은** 순서 효과 (질문 안 비교 — 질문 사이 구성 차가 섞이지 않는다).
+
+    * noul — 두 순서가 모두 관측된 질문마다 평균 p_yes(Yes 먼저) − 평균 p_yes(Yes 나중); ``mean_shift``와 양수인 비율.
+    * score — 같은 식으로 평균 값(오름) − 평균 값(내림).
+    * choice — 순서가 둘 이상 관측된 질문에서, 선택지마다 (그 run의 확률 − 그 선택지의 run 평균)을 그 선택지가 놓인 자리로
+      모아 평균한다(선택지 수마다). 양수인 자리는 그 자리에 놓이는 것만으로 확률이 오른다는 뜻이다.
+    """
+    by_key: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
+    for run in runs:
+        for prediction in run:
+            for name, question in prediction["questions"].items():
+                by_key[(str(prediction["id"]), name)].append(question)
+    shifts: dict[str, list[float]] = {"noul": [], "score": []}
+    deviations: dict[int, list[list[float]]] = {}
+    choice_questions: Counter = Counter()
+    for found in by_key.values():
+        qtype = found[0]["type"]
+        if len({tuple(q.get("options") or ()) for q in found}) < 2:
+            continue
+        if qtype in ("noul", "score"):
+            first_side = [q for q in found if (q["options"][0] == "yes" if qtype == "noul" else _ascending(q))]
+            other_side = [q for q in found if q not in first_side]
+            if first_side and other_side:
+                field = "p_yes" if qtype == "noul" else "value"
+                shifts[qtype].append(_mean([float(q["answer"][field]) for q in first_side]) - _mean([float(q["answer"][field]) for q in other_side]))
+            continue
+        options = found[0]["options"]
+        n = len(options)
+        means = {k: _mean([float(q["answer"]["probabilities"][k]) for q in found]) for k in options}
+        slots = deviations.setdefault(n, [[] for _ in range(n)])
+        choice_questions[n] += 1
+        for q in found:
+            for position, key in enumerate(q["options"]):
+                slots[position].append(float(q["answer"]["probabilities"][key]) - means[key])
+    out: dict[str, Any] = {}
+    for qtype, values in shifts.items():
+        out[qtype] = {"questions": len(values), "mean_shift": _mean(values), "positive_rate": _mean([1.0 if v > 0 else 0.0 for v in values])}
+    out["choice"] = {
+        str(n): {"questions": choice_questions[n], "mean_deviation_by_position": [_mean(slot) for slot in slots]} for n, slots in sorted(deviations.items())
+    }
+    return out
+
+
 # --------------------------------------------------------------------------
 # 기준선, bootstrap, 비교
 # --------------------------------------------------------------------------
@@ -725,6 +865,7 @@ DEFINITIONS = {
     "code_mass": "probability mass the full-vocabulary softmax puts on the answer codes at the answer position (format adherence)",
     "follow_rate": "action choices offering the planner's recommended option: share where the model argmax is that option",
     "margin_band": "tertiles of |margin| per margin name over the scored set; records with several margins take the tightest band",
+    "side_agreement": "noul/score: share of questions whose label is at least 0.1 away from 0.5 where the model value is on the same side of 0.5",
     "direction_correct_rate": "numeric pairs: among questions whose label moved (|dy| or total variation >= 0.05), share where the model moved the same way (sign / inner product > 0)",
 }
 

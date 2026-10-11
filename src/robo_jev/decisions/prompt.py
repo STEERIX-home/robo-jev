@@ -45,6 +45,7 @@ from robo_jev.model.zero_shot import verify_codes
 
 __all__ = [
     "ANSWER_CUE",
+    "DEFAULT_FORMAT",
     "FORMATS",
     "MODES",
     "NOUL_LINES",
@@ -65,6 +66,8 @@ __all__ = [
 PROMPT_VERSION = "v0c-p1"
 FORMATS = ("plain", "chat")
 MODES = ("direct", "reasoning")
+#: 진단의 기본 형식 — plain과 chat을 2B에서 실측해 고른다(보고서 `.superpowers/sdd/task-v0c-report.md`의 "Prompt format").
+DEFAULT_FORMAT = "chat"
 
 #: 프롬프트 머리의 고정 지시 — 무엇을 하는 모델인지(L2 판단, docs/12 §1).
 SYSTEM_TEXT = (
