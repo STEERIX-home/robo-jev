@@ -4,7 +4,7 @@ robo-jev is a research project by **Steerix Robotics**. It builds the decision l
 
 Models of this kind already exist (TypeSafe's Jev, Microsoft-Decision-1 and others), and several are built by post-training a general LLM backbone (Microsoft-Decision-1, for example, is post-trained Qwen3.5-9B). They read the *meaning* of a situation well. What they lack is *physics*: whether a tall glass tips over if the robot brakes hard now, whether the person reaches the robot's path first, whether the plate actually seated in its nest. robo-jev's bet is that this physics can be taught with simulation-generated data, labelled by what physically happens, and that what is learned transfers to situations the model has never seen.
 
-> **Status (2026-10-11):** new track, first trained version in progress. The data engine (with sealed test sets and a 50k training set), the diagnosis tool and the trainer are merged; the RunPod runner is in its first smoke run. See [Status](#status).
+> **Status (2026-10-12):** the first trained version (v0, a 2B LoRA) beats the untrained model on every sealed test set, including unseen styles and wordings (T2) and an unseen combination of phenomena (T4) — the central hypothesis is supported under the rule fixed before the result was seen. v0.1 (wording and fact-order robustness, a general-ability check) is in progress. See [First result](#first-result-v0) and [Status](#status).
 
 ## Where it sits: three layers
 
@@ -83,13 +83,39 @@ Test sets are generated separately and sealed (sha256 manifest). The training ge
 
 **Central hypothesis:** what is learned from phenomena transfers to unseen situations. It is supported if the trained model beats the untrained one on **T2 and T4** (paired intervals excluding zero). If it improves only on T1, it has learned the generator's style, and the data is fixed before anything is scaled.
 
+## First result (v0)
+
+The 2B backbone (Qwen3.5-2B) was trained once (LoRA, 50,000 generated requests, one epoch, 62 minutes on one H100) and scored on the sealed sets with the same prompts as the untrained model. The table shows untrained → trained, single option order (the deployed condition), with the paired 95 % interval of the difference:
+
+| Set | yes/no Brier | score Brier | action regret (no stated criterion) | action accuracy |
+|---|---|---|---|---|
+| T1 same distribution | 0.180 → 0.034 [−0.152, −0.141] | 0.190 → 0.012 | 9.9 → 0.8 | 0.37 → 0.71 |
+| **T2 unseen style, settings, wording** | 0.167 → 0.059 [−0.115, −0.102] | 0.183 → 0.018 [−0.169, −0.160] | 12.4 → 1.6 [−11.8, −9.9] | 0.34 → 0.67 |
+| T3 unseen variable ranges | 0.169 → 0.053 | 0.181 → 0.017 | 8.2 → 1.2 | 0.39 → 0.66 |
+| **T4 unseen combination** | 0.197 → 0.025 [−0.178, −0.166] | 0.204 → 0.021 [−0.190, −0.176] | 22.8 → 1.4 [−23.1, −19.9] | 0.29 → 0.75 |
+| T7 calibration (ECE, yes/no / score) | 0.134 / 0.193 → 0.014 / 0.004 | | | |
+
+- **It stops deferring.** The untrained model follows the planner's recommendation about two times in three whether it is right or wrong. The trained model follows wrong recommendations 5–12 % of the time and right ones about as often as its own accuracy.
+- **It stops depending on option order.** Answer flips when only the option listing changes fell from 0.53 to 0.08. Confident flips (both answers decisive) fell from 0.12 to 0.
+- **Changing one fact moves it the right way.** In minimal pairs it follows the moved label 90 % of the time, versus 55 % before training.
+- **Size alone does not do it.** The untrained 4B is no better than the untrained 2B (T2 yes/no Brier 0.207 vs 0.167).
+
+**Weaknesses v0 exposed:**
+- **Wording.** A counterfactual question ("if you recentre it first, does it come off the stack?") is answered perfectly in the training wordings but worse than untrained in T2's held-out wording. Training saw only three wordings per question.
+- **Fact order.** Shuffling the order of facts moves the trained model's answers more than the untrained model's (mean shift 0.071 vs 0.034).
+- **Unmeasured so far.**
+  - General ability outside physics.
+  - Any test outside this generator family. All seven sets come from the same engine with held-out cells, so outside tests are still to come.
+
+v0.1 changes only the data — more training wordings, shuffled fact order — so the difference can be attributed, and it adds a general-ability check. Its pass rule was written down before any v0.1 data existed.
+
 ## Training
 
 - **Same reading for diagnosis and training.** One prompt per question (Qwen chat template, one-letter answer codes, ending in `Answer:`); training prompts are byte-identical to diagnosis prompts. Option order, Yes/No order and score direction are re-shuffled for every training example, so position bias cannot be learned.
 - **Loss:** soft-label KL between the label distribution and the model's probabilities over that question's answer codes, at the answer position only; a small auxiliary term keeps probability mass on the shown codes.
 - **Modes:** LoRA (bf16 adapter compute with fp32 master weights) or full fine-tuning with fp32 master weights.
 - **Smoke test (in-distribution only, not the hypothesis test):** after a short LoRA run on 1,600 generated records, on 400 held-back records of the same distribution the 2B went from worse than "always 0.5" on yes/no to clearly better (−0.087 [−0.113, −0.061] vs the 0.5 baseline), action accuracy 0.31 → 0.54, state accuracy 0.46 → 0.85, the "Yes first" shift +0.25 → −0.01, and listing flips 56 % → 13 %.
-- **Compute:** development on a DGX Spark (GB10); training runs move to RunPod H100 through a budget-capped launcher (being built) that deletes its pod when done and terminates the pod itself if the launcher dies.
+- **Compute:** development on a DGX Spark (GB10); training and evaluation run on RunPod H100 through a budget-capped launcher that deletes its pod when done and lets the pod delete itself if the launcher dies (LoRA bf16 on one H100: 11,215 tokens/s, about 6× the GB10; one epoch of 50k requests in 62 minutes).
 
 ## Status
 
@@ -99,8 +125,9 @@ Test sets are generated separately and sealed (sha256 manifest). The training ge
 | v0c | Diagnosis tool: zero-shot scoring, counterbalanced option orders, paired baselines, regret by criterion | merged |
 | v0b | Engine stage 2: P3, P4, P6, "look again" (value of information), Korean, sealed T1–T7, 50k training set | merged |
 | v0d | Trainer (LoRA bf16 + fp32 masters, code-mass term) and `--checkpoint` scoring with the same prompts | merged |
-| cloud1 | RunPod runner: hard spend caps, three deletion fences, ledger | first smoke run |
-| **v0** | First trained 2B, evaluated on T1–T7 against the untrained 2B and 4B | **target: 2026-10-12** |
+| cloud1 | RunPod runner: hard spend caps, three deletion fences, ledger | merged; self-delete proven on H100 |
+| **v0** | First trained 2B, evaluated on T1–T7 against the untrained 2B and 4B | **done 2026-10-12 — hypothesis supported** ([First result](#first-result-v0)) |
+| v0.1 | More training wordings, shuffled fact order, general-ability check (G1) | in progress |
 
 ## Roadmap — coarse to fine
 
