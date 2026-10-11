@@ -24,6 +24,8 @@ from robo_jev.simgen.holdout import TRAIN_STYLES, cells_hit, load_holdout, range
 ARTIFACTS = Path(__file__).resolve().parents[1] / "artifacts" / "simgen" / "v0b"
 TRAIN = ARTIFACTS / "train-50k.jsonl"
 TESTS = ARTIFACTS / "tests"
+#: Task v0.1a — 학습 문구 판 v01 + 사실 순서 섞기로 만든 학습 세트(같은 seed·같은 설정; 시험 세트는 v0b 그대로)
+TRAIN_V01 = ARTIFACTS.parent / "v01" / "train-50k.jsonl"
 
 
 @pytest.fixture(scope="module")
@@ -147,11 +149,13 @@ def _scan(path: Path):
             yield json.loads(line)
 
 
-@pytest.mark.skipif(not TRAIN.exists(), reason="training set not generated yet (scripts/simgen_v0b.py train)")
-def test_the_whole_training_set_hits_no_held_out_cell_and_shares_no_request_with_any_test_set(holdout):
+@pytest.mark.parametrize("train", [TRAIN, TRAIN_V01], ids=["v0b", "v01"])
+def test_the_whole_training_set_hits_no_held_out_cell_and_shares_no_request_with_any_test_set(holdout, train):
+    if not train.exists():
+        pytest.skip(f"training set not generated yet: {train} (scripts/simgen_v0b.py train)")
     train_hashes = set()
     n = 0
-    for r in _scan(TRAIN):
+    for r in _scan(train):
         meta = r["meta"]
         assert meta["holdout"] == [] and _held_cells(holdout, meta) == [], r["id"]
         assert meta["group"] != "P1+P3" and SCENE_GROUP[meta["scene"]] != "P1+P3"

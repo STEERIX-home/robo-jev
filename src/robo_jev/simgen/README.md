@@ -233,6 +233,7 @@ seed 범위는 나눔마다 겹치지 않는다(학습 1,000,000~, T1 2,000,000~
 | `voi` | '다시 볼까' 신호 모형(이산 닫힌 꼴, 연속 준난수 적분) |
 | `holdout` · `testsets` · `perturb` | 빼 둔 칸과 나눔, 시험 세트 T1~T7과 manifest, T6 교란 |
 | `korean` · `narrate_ko` · `phrases_ko` · `phrases_ko_data` · `state_text` · `rule_text` | 조사·한국어 서술기·한국어 문구, 상태·규칙 글(두 언어) |
+| `phrasing` · `phrases_v01` · `phrases_ko_v01` | 문구 판(v0b·v01)의 표·고르기 흐름·빼 둔 문구 근접 규칙·쓰임 통계, v01의 새 학습 문구(영어·한국어) — §7 |
 
 ```bash
 uv run python scripts/simgen_generate.py --n 2000 --seed 0 --out artifacts/simgen/v0a/sample-2000.jsonl --stats artifacts/simgen/v0a/stats.json [--values configs/simgen/values-v0.1.yaml]
@@ -243,4 +244,37 @@ uv run python scripts/simgen_mutants.py --work artifacts/scratch/v0a/mutants --o
 uv run python scripts/simgen_v0b.py train --out artifacts/simgen/v0b/train-50k.jsonl --workers 12 [--values configs/simgen/values-v0.1.yaml]
 uv run python scripts/simgen_v0b.py tests --out-dir artifacts/simgen/v0b/tests --workers 7
 uv run python scripts/simgen_v0b.py examples --out artifacts/simgen/v0b/examples-30
+# Task v0.1a — 학습 세트 v01(같은 seed·설정, 학습 문구 판 v01 + 사실 순서 섞기 0.5) + v0b와 레코드마다 맞대기
+uv run python scripts/simgen_v0b.py train --out artifacts/simgen/v01/train-50k.jsonl --phrasing v01 --workers 12
+uv run python scripts/simgen_v0b.py compare --v0b artifacts/simgen/v0b/train-50k.jsonl --v01 artifacts/simgen/v01/train-50k.jsonl \
+    --v0b-stats artifacts/simgen/v0b/train-50k.stats.json --v01-stats artifacts/simgen/v01/train-50k.stats.json --out artifacts/simgen/v01/train-50k.compare.json
 ```
+
+## 7. Task v0.1a — 학습 문구 판 v01과 사실 순서 섞기
+
+v0 학습 모델은 학습 문구(열쇠마다 3개)로 물으면 가정 질문을 읽지만 T2의 빼 둔 바꿔 쓰기에서 무너지고(가정 행동 대신 '계획대로'로 답함),
+사실 순서를 바꾸면 기반보다 더 흔들렸다. v0.1은 **데이터만** 고친다(모델·학습 설정은 v0 그대로 — v0 → v0.1의 차이를 이 두 변화에 돌린다).
+
+* **문구 판(`phrasing`).** `v0b`(기본) = 기존 `train`·`heldout` 목록 그대로(바이트 단위 — 시험이 해시로 고정). `v01` = 학습 묶음
+  `train_v01` = v0b `train` + 새 문구(`phrases_v01`: 영어 질문 열쇠 92개마다 새 문구 5~7개 — 가정 질문(`{action}`을 쓰는 39개) 7개, 선택지
+  설명 41개마다 5개 — 743개; `phrases_ko_v01`: 한국어 같은 표의 열쇠마다 3개 — 399개). 빼 둔 묶음(T2 전용)은 두 판이 같다. 새 문구는 뜻이 같다(가정 행동·시간 창·
+  세는 것·점수 기준 방향·답 형식)·빼 둔 문구와 같지 않고 낱말(어절) 유사도 < 0.8·글자 유사도 < 0.75·빼 둔 문구에만 있는 3-gram 금지·자리
+  표시는 그 열쇠의 v0b 학습 문구의 것만, 그 열쇠의 v0b 학습 문구 모두에 있는 것은 반드시(가정 질문은 행동 자리)·**언어 전체에서** 빼 둔 문구에만
+  있는 내용어(불용어가 아닌 낱말·어절)와 내용어를 담은 3-gram 금지 — 다른 열쇠의 빼 둔 말도 학습에 들어가지 않게(리뷰 1 M1~M3;
+  `phrasing.violations`, 시험 `test_simgen_phrasing.py`).
+* **고르기는 주 흐름을 건드리지 않는다.** v0b 묶음 크기로 뽑던 수를 그대로 뽑고(질문 이름·조리법·선택지·순서·정답이 v0b와 같다), 실제 문구는
+  레코드 seed + 열쇠 이름의 별도 흐름(`stream(seed, "phrasing-v01", 열쇠)`)에서 넓은 묶음 전체 가운데 고른다. 고른 것은
+  `meta.phrasing.picks`([열쇠, v0b 번호, v01 번호]) — 같은 seed의 v0b 레코드가 쓴 문구도 여기서 안다.
+* **사실 순서 섞기(`fact_shuffle`, v01 기본 0.5).** 레코드마다 그 확률로 T6 '사실 순서'와 같은 장치(`RenderPlan.fact_seed` → `narrate.ordered`)를
+  켠다; 동전과 seed는 별도 갈래 `train-facts`. 섞는 단위는 T6과 같다: 사실 조각(한 조각 안의 순서 — 두 시각의 위치 보고 등 — 는 그대로),
+  첫 줄(상황·몸·과제)과 끝(방해 문구·힌트·권고·가능한 동작)은 제자리, 문단·칸(ROBOT / PERCEIVED)은 그대로. `meta.fact_order` =
+  `{p, shuffled, seed, changed}`(changed = 글이 실제로 바뀌었나 — 조각이 하나뿐이거나 섞어도 같은 순서면 False).
+* **학습 나눔에서만.** 기본값이 아닌 손잡이를 시험 나눔(T1~T7)이나 교란 변형에 주면 `assemble`이 거절한다 — 시험 세트 생성 경로는 늘 v0b이고,
+  봉인된 T1~T7과 v0b 학습 세트는 지금 코드로 바이트 단위로 다시 만들어진다(시험이 앞부분의 해시를 고정). 기본값이면 레코드에
+  `generator.phrasing`·`generator.fact_shuffle`·`meta.phrasing`·`meta.fact_order`를 적지 않는다(없음 = v0b).
+* **생성기 버전.** `generator.version`은 `v0b` 그대로다(기본 경로의 출력이 같다). v01 레코드는 `generator.phrasing = "v01"`·
+  `generator.fact_shuffle`로 구별되고 그 칸으로 다시 만들어진다(`rebuild_record`).
+* **알려진 v0b 결함(고치지 않음 — v0b 글을 바꾸면 봉인된 시험 세트를 다시 만들 수 없다).** P6 오래된 추적의 `{spot}`은 전치사구('in the
+  corridor outside room 214')인데 v0b의 상태 글('was standing at {spot}')·규칙 글('the distance to {spot}')·학습 문구 둘('still at {spot}',
+  'toward {spot}')이 앞에 전치사를 붙인다. v01의 새 문구는 `{spot}`을 전치사구로 쓴다.
+

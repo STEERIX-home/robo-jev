@@ -76,7 +76,18 @@ def option_noun(canon: str, obs: Observation) -> str:
 
 
 def option_descriptions(canon: str, obs: Observation, pool: str = "train") -> list[str]:
-    """선택지 설명의 바꿔 쓰기(학습 묶음은 셋 이상) — 영어 phrases.option_descriptions와 같은 고름."""
+    """선택지 설명의 바꿔 쓰기(학습 묶음은 셋 이상) — 영어 phrases.option_descriptions와 같은 고름. ``pool = "train_v01"``이면 v01 학습
+    묶음(v0b 학습 묶음 + 새 문구, 같은 표)."""
+    if pool == "train_v01":
+        from robo_jev.simgen.phrasing import description_table, wide
+
+        table, key = description_table(canon, obs.scene, obs.body)
+        templates = wide("ko", table, key)
+        if canon.startswith("turn_"):
+            speed = speed_text(obs, int(canon.split("_")[1]) / 100.0 * obs.robot.speed)
+            return [kfmt(t, speed=speed) for t in templates]
+        numbers = _numbers(obs)
+        return [kfmt(t, **numbers) for t in templates]
     if canon.startswith("turn_"):
         ratio = int(canon.split("_")[1]) / 100.0
         speed = speed_text(obs, ratio * obs.robot.speed)

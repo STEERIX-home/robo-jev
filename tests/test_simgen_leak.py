@@ -23,6 +23,7 @@ SIMGEN = Path(generate.__file__).resolve().parent
 OBSERVATION_SIDE = (
     "narrate.py", "narrate_ko.py", "questions.py", "phrases.py", "phrases_ko.py", "phrases_ko_data.py", "state_text.py", "rule_text.py", "korean.py",
     "posterior.py", "rollout.py", "labels.py", "textfmt.py", "observation.py", "spec.py", "p3.py", "p4.py", "p6.py", "voi.py", "holdout.py", "perturb.py",
+    "phrasing.py", "phrases_v01.py", "phrases_ko_v01.py",
 )  # fmt: skip
 
 #: 세계에만 있는 값의 이름(굴리기 batch 열쇠 가운데 관측에 없는 것)과 지시서가 든 이름.
@@ -135,8 +136,9 @@ LEAK_CASES = [
 ]
 
 
+@pytest.mark.parametrize("knobs", [{}, {"phrasing": "v01", "fact_shuffle": 0.5}], ids=["v0b", "v01"])     # 학습 문구 판 v01·사실 순서 섞기도(Task v0.1a)
 @pytest.mark.parametrize(("seed", "domain", "forced"), LEAK_CASES)
-def test_two_worlds_that_differ_only_in_hidden_values_give_the_same_observation_and_record(seed, domain, forced):
+def test_two_worlds_that_differ_only_in_hidden_values_give_the_same_observation_and_record(seed, domain, forced, knobs):
     cfg = default_config()
     base = moment(seed, domain, **forced)
     other_world = _hidden_only_world(base.world)
@@ -144,8 +146,8 @@ def test_two_worlds_that_differ_only_in_hidden_values_give_the_same_observation_
     obs_a, obs_b = _observe(cfg, base, base.world), _observe(cfg, base, other_world)
     assert obs_a == base.obs and obs_b == obs_a  # observe()를 거친 두 관측이 같다
     other = replace(base, world=other_world, obs=obs_b)
-    a = generate.assemble(cfg, base, 0)
-    b = generate.assemble(cfg, other, 0)
+    a = generate.assemble(cfg, base, 0, **knobs)
+    b = generate.assemble(cfg, other, 0, **knobs)
     # 모델 입력·정답·참 결과(사후에서 뽑음)·계산 과정·장부가 모두 같다 — 닻 세계의 설계 여유(meta.margins, margin_norm)만 숨은 값
     # (교차의 비우는 시각은 상대 반지름에 걸린다)에 따라 다를 수 있다.
     for record in (a, b):

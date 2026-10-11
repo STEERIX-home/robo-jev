@@ -109,6 +109,12 @@ MUTANTS = {
     "Midentical": ("src/robo_jev/simgen/testsets.py",
                    '    record["meta"]["t6"]["identical_to_base"] = json.dumps(record["request"], ensure_ascii=False) == json.dumps(base["request"], ensure_ascii=False)',
                    '    record["meta"]["t6"]["identical_to_base"] = False', "M4: identical T6 variants not flagged"),
+    # Task v0.1a — 학습 문구 판 v01·사실 순서 섞기(지시서 §1-4의 변이체 셋)
+    "Mv01heldout": ("src/robo_jev/simgen/phrases_v01.py", '        "Suppose you {action}. Will {sref} topple off {spot}?",\n',
+                    '        "If you {action}, does {sref} come off the stack?",\n', "v01: a new wording replaced by the held-out (T2) wording of its key"),
+    "Mv01factmain": ("src/robo_jev/simgen/generate.py", '        draw = stream(seed, "train-facts")\n', "        draw = rng\n",
+                     "v01: the fact-order coin and seed drawn from the main question stream"),
+    "Mv01default": ("src/robo_jev/simgen/generate.py", 'DEFAULT_PHRASING = "v0b"\n', 'DEFAULT_PHRASING = "v01"\n', "v01: the default phrasing switched to v01"),
 }  # fmt: skip
 
 
@@ -141,8 +147,8 @@ def _mutate(dest: Path, path: str, old: str, new: str) -> None:  # noqa: D401
     target.write_text(text.replace(old, new), encoding="utf-8")
 
 
-def _run(dest: Path, basetemp: Path) -> tuple[int, list[str], str]:
-    tests = sorted(str(p.relative_to(dest)) for p in (dest / "tests").glob("test_simgen_*.py"))
+def _run(dest: Path, basetemp: Path, only_tests: list[str] | None = None) -> tuple[int, list[str], str]:
+    tests = sorted(str(p.relative_to(dest)) for p in (dest / "tests").glob("test_simgen_*.py") if only_tests is None or p.name in only_tests)
     env = {**os.environ, "PYTHONPATH": str(dest / "src"), "CUDA_VISIBLE_DEVICES": ""}
     cmd = [sys.executable, "-m", "pytest", "-q", "-rf", "-p", "no:cacheprovider", "-p", "no:randomly", f"--basetemp={basetemp}", *tests]
     done = subprocess.run(cmd, cwd=dest, env=env, capture_output=True, text=True, timeout=3600)
@@ -157,6 +163,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--only", nargs="*", default=None, help="이 변이체만(기본: 전부)")
     parser.add_argument("--jobs", type=int, default=1, help="동시에 돌릴 사본 수")
+    parser.add_argument("--tests", nargs="*", default=None, help="이 시험 파일만(이름, 예: test_simgen_phrasing.py; 기본: simgen 시험 전부)")
     args = parser.parse_args(argv)
     results = {}
     names = [n for n in MUTANTS if args.only is None or n in args.only]
@@ -167,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         if name != "control":
             for path, old, new in _edits(name)[1]:
                 _mutate(dest, path, old, new)
-        code, failed, summary = _run(dest, args.work.resolve() / f"pytest-{name}")
+        code, failed, summary = _run(dest, args.work.resolve() / f"pytest-{name}", args.tests)
         # 사본이 정말 쓰였는지: 사본의 패키지 경로를 확인한다
         where = subprocess.run([sys.executable, "-c", "import robo_jev.simgen as s; print(s.__file__)"], cwd=dest,
                                env={**os.environ, "PYTHONPATH": str(dest / "src")}, capture_output=True, text=True).stdout.strip()  # fmt: skip

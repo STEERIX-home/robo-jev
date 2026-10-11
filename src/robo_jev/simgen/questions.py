@@ -14,6 +14,11 @@
 **언어·묶음·흔들기.** ``Surface``의 ``lang``(en/ko)과 ``pool``(train/heldout — 빼 둔 바꿔 쓰기 묶음은 시험 세트 T2 전용)으로 문구 묶음을
 고른다. ``shift``(지시문)·``desc_shift``(선택지 설명)는 고른 문구 번호를 그만큼 옮긴다 — 난수 소비가 같아 질문의 뜻(이름·조리법·선택지·순서)은
 그대로이고 문구만 바뀐다(교란 시험 T6의 지시·설명 바꿔 쓰기). ``key_style``을 주면 선택지 열쇠 문체를 바꾼다(T6 키 바꾸기).
+
+**문구 판**(``phrasing`` — Task v0.1a, :mod:`~robo_jev.simgen.phrasing`). ``v0b``(기본)는 위 그대로다. ``v01``이면 학습 묶음(``pool = train``)의
+고르기만 넓은 묶음(``train_v01`` = v0b 학습 묶음 + 새 문구)에서 한다: 주 흐름에서 v0b 묶음 크기로 뽑던 수는 그대로 뽑고(소비가 같다 — 질문
+이름·조리법·선택지·순서가 v0b와 같다), 실제 문구는 레코드 seed와 열쇠 이름의 별도 흐름(:func:`~robo_jev.simgen.phrasing.pick_stream`)에서
+고른다. 고른 것은 ``QuestionSet.picks``([열쇠, v0b 번호, v01 번호])에 남는다.
 """
 
 from __future__ import annotations
@@ -49,6 +54,7 @@ class Surface:
     desc_shift: int = 0     # 선택지 설명 묶음에서
     key_style: str | None = None
     mirror: bool = False    # 좌우 거울상 변형(T6): 왼쪽·오른쪽 후보를 거꾸로 돌아 기준 레코드와 같은 자리에 거울상 질문이 오게
+    phrasing: str = "v0b"   # 문구 판(v0b / v01 — v01은 학습 묶음만 넓힌다, Task v0.1a)
 
 
 @dataclass
@@ -72,6 +78,7 @@ class QuestionSet:
     key_style: str
     primary_action: str              # 계획기 권고가 겨누는 행동 질문의 이름
     key_question: str                # 핵심 noul의 이름
+    picks: list | None = None        # 문구 판 v01: 고른 문구 [열쇠, v0b 번호, v01 번호] (v0b면 None)
 
 
 def identity(recipe: dict) -> tuple:
@@ -153,10 +160,19 @@ def _entered(agent, arm: bool) -> str:
 class _Ctx:
     """질문 문구에 채울 말과 난수."""
 
-    def __init__(self, cfg: SimgenConfig, obs: Observation, rng: np.random.Generator, surface: Surface):
+    def __init__(self, cfg: SimgenConfig, obs: Observation, rng: np.random.Generator, surface: Surface, phrase_seed: int | None = None):
         self.cfg, self.obs, self.rng, self.surface = cfg, obs, rng, surface
         self.lang, self.pool = surface.lang, surface.pool
         self.names: set[str] = set()
+        # 문구 판 v01: 학습 묶음만 넓힌다(빼 둔 묶음·교란 옮김은 v0b 그대로) — 고르기는 별도 흐름(레코드 seed + 열쇠 이름)
+        if surface.phrasing not in ("v0b", "v01"):
+            raise ValueError(f"unknown phrasing {surface.phrasing!r}")
+        self.wide = surface.phrasing == "v01" and surface.pool == "train"
+        if self.wide and (phrase_seed is None or surface.shift or surface.desc_shift):
+            raise ValueError("phrasing v01 needs the record seed and takes no paraphrase shift")
+        self.phrase_seed = phrase_seed
+        self.picks: list = []
+        self._streams: dict[str, np.random.Generator] = {}
         if self.lang == "ko":
             from robo_jev.simgen.phrases_ko import ko_values
 
@@ -164,10 +180,24 @@ class _Ctx:
         else:
             self.values = _en_values(obs)
 
+    def _wide_pick(self, name: str, index: int, size: int) -> int:
+        """v01: 넓은 묶음(크기 ``size``)에서 별도 흐름으로 고른 번호 — 주 흐름의 번호 ``index``(v0b 고르기)는 기록만 한다."""
+        rng = self._streams.get(name)
+        if rng is None:
+            from robo_jev.simgen.phrasing import pick_stream
+
+            rng = self._streams[name] = pick_stream(self.phrase_seed, name)
+        pick = int(rng.integers(size))
+        self.picks.append([name, index, pick])
+        return pick
+
     def text(self, key: str, **extra) -> str:
-        """묶음 ``key``에서 문구 하나를 골라 채운다(``shift``만큼 옮긴 번호)."""
+        """묶음 ``key``에서 문구 하나를 골라 채운다(``shift``만큼 옮긴 번호). v01이면 넓은 묶음에서 별도 흐름으로(주 흐름 소비는 같다)."""
         templates = bank(key, self.lang, self.pool)
         index = (int(self.rng.integers(len(templates))) + self.surface.shift) % len(templates)
+        if self.wide:
+            wide = bank(key, self.lang, "train_v01")
+            return self.fill(wide[self._wide_pick(key, index, len(wide))], **extra)
         return self.fill(templates[index], **extra)
 
     def fill(self, template: str, **extra) -> str:
@@ -188,12 +218,18 @@ class _Ctx:
 
     def describe(self, canon: str) -> str:
         if self.lang == "ko":
-            from robo_jev.simgen.phrases_ko import option_descriptions as ko_descriptions
-
-            variants = ko_descriptions(canon, self.obs, self.pool)
+            from robo_jev.simgen.phrases_ko import option_descriptions as describe
         else:
-            variants = option_descriptions(canon, self.obs, self.pool)
+            describe = option_descriptions
+        variants = describe(canon, self.obs, self.pool)
         index = (int(self.rng.integers(len(variants))) + self.surface.desc_shift) % len(variants)
+        if self.wide:
+            from robo_jev.simgen.phrasing import description_table
+
+            wide = describe(canon, self.obs, "train_v01")
+            table, key = description_table(canon, self.obs.scene, self.obs.body)
+            name = f"{table}.{key}" if key == canon else f"{table}.{canon}"
+            return wide[self._wide_pick(name, index, len(wide))]
         return variants[index]
 
     def anchors(self, key: str, **extra) -> list[str]:
@@ -957,10 +993,11 @@ def candidates(cfg: SimgenConfig, obs: Observation, options: tuple[str, ...], rn
 
 
 def write_questions(cfg: SimgenConfig, obs: Observation, options: tuple[str, ...], rng: np.random.Generator, surface: Surface | None = None,
-                    threshold_obs: Observation | None = None) -> QuestionSet:  # fmt: skip
-    """요청 하나의 질문들(3~8개). ``threshold_obs``: 규칙 질문의 문턱을 놓을 관측(숫자 쌍의 변형은 기준의 관측 — 답은 이 관측의 값으로)."""
+                    threshold_obs: Observation | None = None, phrase_seed: int | None = None) -> QuestionSet:  # fmt: skip
+    """요청 하나의 질문들(3~8개). ``threshold_obs``: 규칙 질문의 문턱을 놓을 관측(숫자 쌍의 변형은 기준의 관측 — 답은 이 관측의 값으로).
+    ``phrase_seed``: 문구 판 v01의 별도 고르기 흐름을 여는 레코드 seed(v0b면 쓰지 않는다)."""
     surface = surface or Surface()
-    c = _Ctx(cfg, obs, rng, surface)
+    c = _Ctx(cfg, obs, rng, surface, phrase_seed)
     c.tobs = threshold_obs or obs
     style = KEY_STYLES[int(rng.integers(len(KEY_STYLES)))]
     style = surface.key_style or style
@@ -1014,4 +1051,4 @@ def write_questions(cfg: SimgenConfig, obs: Observation, options: tuple[str, ...
         order.remove(0)
         order.insert(0, 0)
     questions = [questions[int(i)] for i in order]
-    return QuestionSet(questions, style, primary.name, key.name)
+    return QuestionSet(questions, style, primary.name, key.name, c.picks if c.wide else None)
