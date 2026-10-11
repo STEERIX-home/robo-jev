@@ -127,13 +127,18 @@ def _norm_pdf(x, mean, sd):
 def test_p4_posterior_is_the_hand_computed_bayes_rule(cfg, seed, domain, scene):
     obs = moment(seed, domain, scene=scene).obs
     place = obs.place
-    model = p4.state_model(cfg, place.family, place.cls, tuple(d for d in p4.DIMS[place.family] if d in place.readings))
+    # 사전·상태 모형을 코드가 아니라 속성 목록에서 바로 읽는다(셋째 상태는 ± 둘로 반씩, 부호 있는 측정은 −쪽 평균의 부호를 뒤집는다)
+    cls = cfg.catalog["p4"][place.family]["classes"][place.cls]
+    names = p4.STATES[place.family]
+    prior = [cls["prior"][names[0]], cls["prior"][names[1]], cls["prior"][names[2]] / 2, cls["prior"][names[2]] / 2]
     post = np.zeros(4)
     for s in range(4):
-        like = model.prior[s]
+        like = prior[s] / sum(prior)
         for name, r in place.readings.items():
-            j = model.dims.index(name)
-            like *= _norm_pdf(r.value, model.mean[s, j], math.sqrt(model.sd[s, j] ** 2 + r.sigma_eff**2))
+            mu, sd = cls[name][names[min(s, 2)]]
+            if s == 3 and name == p4.SIGNED[place.family]:
+                mu = -mu
+            like *= _norm_pdf(r.value, mu, math.sqrt(sd**2 + r.sigma_eff**2))
         post[s] = like
     post /= post.sum()
     exact = p4.exact(cfg, obs)
@@ -261,3 +266,35 @@ def test_look_again_label_is_look_time_plus_the_best_after_looking(cfg, seed, do
     assert look_cost - delay_cost <= base_best + 1e-6
     per_world = world_costs(out, model)
     assert float(wmean(per_world[out.index(look)], out)) == pytest.approx(look_cost, abs=1e-6)
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# 단조성(새 현상)
+# ----------------------------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(("seed", "domain", "scene"), [(81, "hospital", "p6_stale_track"), (82, "warehouse", "p6_sensor_conflict"), (86, "lab", "p6_stale_track")])
+def test_slowing_down_never_raises_the_contact_probability(cfg, seed, domain, scene):
+    """앞에 서 있을지 모르는 것(오래된 추적·센서 불일치)에는: 단단히 서기 ≤ 절반으로 줄이기 ≤ 그대로 가기(닿을 확률). 모퉁이는 일부러 뺀다 —
+    교차하는 줄 위에서 멈추면 가로지르는 사람이 멈춘 로봇에 닿을 수 있어(빨리 지나가는 편이 덜 닿는 순간이 있다) 단조가 아니다."""
+    obs = moment(seed, domain, scene=scene).obs
+    out = rollout(cfg, obs, sample_posterior(cfg, obs, 2000, stream(seed, "p")), available_options(obs))
+    p = {o: float(wmean(out.events["contact"][out.index(o)], out)) for o in ("continue", "slow", "stop_moderate")}
+    assert p["stop_moderate"] <= p["slow"] + 1e-12 <= p["continue"] + 2e-12, p
+
+
+@pytest.mark.parametrize(("seed", "domain", "scene"), [(84, "lab", "p4_place_check"), (85, "factory", "p4_insert")])
+def test_a_primary_reading_further_from_nominal_lowers_the_seated_probability(cfg, seed, domain, scene):
+    """주 측정(높이·깊이)을 기준(0)에서 멀리 옮길수록 '제대로 앉음'의 사후 확률이 줄어든다(다른 보고는 그대로)."""
+    from dataclasses import replace
+
+    obs = moment(seed, domain, scene=scene).obs
+    name, reading = obs.place.primary()
+    tol = obs.place.tolerance[name]
+    values = [0.0, 0.5 * tol, tol, 2 * tol, 4 * tol]
+    probs = []
+    for v in values:
+        readings = {**obs.place.readings, name: replace(reading, value=v)}
+        probs.append(p4.exact(cfg, replace(obs, place=replace(obs.place, readings=readings)))["ok_now"])
+    assert all(a >= b - 1e-12 for a, b in zip(probs, probs[1:], strict=False)), probs
+    assert probs[0] > probs[-1] + 0.2

@@ -267,7 +267,13 @@ def _truth_block(record: dict) -> list[str]:
         if is_ball and key in ("stay_s", "cross_speed", "back_speed", "yield_standoff", "hurry_factor", "aside_speed", "keep_standoff", "reacts", "react_standoff"):
             continue
         label = "centre-to-centre distance along the aisle now (m)" if key == "dist" and record["meta"]["scene"] == "p1_head_on" else _HIDDEN_KEYS[key]
-        lines.append(f"- {label}: {round(v[key], 3)}")
+        value = round(v[key], 3)
+        if key in ("state", "state_then") and record["meta"].get("place"):
+            from robo_jev.simgen.p4 import STATES
+
+            sub = int(v[key])
+            value = f"{STATES[record['meta']['place']['family']][(0, 1, 2, 2)[sub]]}" + ("" if sub < 2 else (" (+)" if sub == 2 else " (−)"))
+        lines.append(f"- {label}: {value}")
     views = record["meta"].get("sides")
     for i, side in enumerate(("left", "right")):
         if views and views[i] in ("occluded", "blocked"):
