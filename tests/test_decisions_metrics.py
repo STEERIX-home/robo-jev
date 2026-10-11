@@ -384,3 +384,12 @@ def test_paired_order_effects_compare_the_same_question_under_different_orders()
     # choice: 키별 평균(a .4·b .3·c .3)에서 벗어난 정도를 자리별로 — 순서 (a,b,c)·(c,b,a)·(a,b,c)의 세 run
     dev = effects["choice"]["3"]["mean_deviation_by_position"]
     assert dev[0] > 0 > dev[2] and dev[1] == pytest.approx(0.0, abs=1e-12)
+
+
+def test_a_choice_label_without_kind_but_with_expected_costs_is_read_as_an_action_choice(fixtures):
+    record = copy.deepcopy(fixtures[0])
+    del record["labels"]["action"]["kind"]
+    del record["labels"]["person_next"]["kind"]
+    rows = M.question_rows([record], [_oracle(record)])
+    blocks = {r["question"]: r["block"] for r in rows}
+    assert blocks["action"] == "choice/action" and blocks["person_next"] == "choice/other"

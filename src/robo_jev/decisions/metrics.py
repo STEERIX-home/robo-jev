@@ -290,6 +290,8 @@ def question_rows(records: list[dict[str, Any]], predictions: list[dict[str, Any
             qtype = str(question.get("type"))
             label = labels.get(name)
             kind = label.get("kind") if isinstance(label, dict) else None
+            if kind is None and isinstance(label, dict) and qtype == "choice" and isinstance(label.get("expected_cost"), dict):
+                kind = "action"  # 기대 비용이 붙은 choice는 정의상 행동 choice다 (기획서 §5)
             row: dict[str, Any] = {
                 "record_id": rid, "question": name, "type": qtype, "kind": kind, "block": block_of(qtype, kind),
                 "family": question_family(record, name), "groups": dict(groups), "label": label, "answer": None, "options": None,

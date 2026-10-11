@@ -1,18 +1,23 @@
 """학습 없는 Qwen이 판단 요청에 내는 코드 확률 읽기 (Task v0c §2.2; 기획서 docs/12 §1 기준선, §11).
 
-**바로 답 (direct)** — :func:`robo_jev.decisions.prompt.build_prompts` 의 프롬프트(``Answer:``로 끝남)를 오른쪽 padding 배치로
-한 번 forward하고, 마지막 유효 위치의 hidden(최종 RMSNorm 뒤)을 **LM head의 코드 행에만** fp32로 투영해 코드 위에서 softmax한다
+**바로 답 (direct)** — :func:`robo_jev.decisions.prompt.build_prompts` 의 프롬프트(``Answer:``로 끝남)를 한 번 forward하고,
+마지막 유효 위치의 hidden(최종 RMSNorm 뒤)을 **LM head의 코드 행에만** fp32로 투영해 코드 위에서 softmax한다
 (:func:`robo_jev.model.zero_shot.score_prompts` 와 같은 수학 — 검사가 같은 확률을 확인한다). 우리가 쓸 형태(System 1, 한 번의
-forward)와 같은 조건이다. 길이로 정렬해 묶어 padding을 줄인다(결과는 원래 순서로 돌려준다).
+forward)와 같은 조건이다. **기본 배치는 1**(padding 없음): 실제 2B(bf16)에서 배치 구성(오른쪽 padding 길이·묶인 프롬프트)이 코드
+확률을 최대 0.015–0.020 움직이고 fixture 33문항 중 3–4개의 argmax를 뒤집었다(같은 배치는 비트 단위로 재현) — 한 프롬프트의 값이
+같이 묶인 다른 프롬프트에 기대지 않게 하려고 하나씩 읽는다(배포 조건 — 요청 하나 — 과도 같다). `batch`를 키우면 길이로 정렬해
+오른쪽 padding으로 묶는다(빠르지만 위의 잡음이 있다; 결과는 원래 순서로 돌려준다).
 
-**코드 질량** — 같은 자리에서 전체 어휘 softmax가 코드들에 준 몫(``code_mass``; LM head를 32,768행씩 fp32로 나눠 logsumexp).
-확률은 코드 행만으로 정하고, 질량은 형식 준수(모델이 정말 글자로 답하려 하는가)를 보는 진단이다.
+**코드 질량** — 같은 자리에서 전체 어휘 softmax가 코드들에 준 몫(``code_mass``; 호출마다 LM head의 fp32 사본을 한 번 만들어
+logsumexp — 2B 2.0 GB, 4B 2.5 GB). 확률은 코드 행만으로 정하고, 질량은 형식 준수(모델이 정말 글자로 답하려 하는가)를 보는 진단이다.
 
 **생각하고 답 (reasoning)** — 같은 프롬프트에 "짧게 생각하고 답하라"를 붙인 판(``mode="reasoning"``)에서 greedy로 최대
 `max_new_tokens`(기본 256) 생성한다(왼쪽 padding 배치, HF ``generate``; Qwen3.5의 DeltaNet 층은 padding 자리의 입력을 0으로
 지워 상태에 섞이지 않는다 — 소형 검사가 배치 생성 == 하나씩 생성을 확인한다). 생성은 끝 토큰(``<|im_end|>``·``<|endoftext|>``,
 chat은 ``</think>``도)에서 멈추고, 모델이 스스로 ``Answer:``를 쓰면 그 앞에서 자른다(:func:`finish_reasoning`). 그 뒤에
 :func:`robo_jev.decisions.prompt.reasoning_close` 를 붙여 **바로 답과 같은 방식으로** 코드 확률을 읽는다. 비싸므로 일부 표본에만 쓴다.
+생성은 배치로 한다(하나씩이면 너무 느리다) — 실제 2B(bf16)에서 생성 배치 1과 8의 greedy 경로가 fixture 15문항 중 11개는 64토큰까지
+같았고 4개는 31·53번째 토큰에서 갈렸다(bf16 잡음). 같은 입력·같은 설정이면 비트 단위로 재현된다; 생각 글은 "그 설정에서의 한 경로"다.
 
 GPU 규칙(GB10 통합 메모리): 진입점(``scripts/diagnose_decisions.py``)이 첫 CUDA 할당 전에 ``limit_gpu_memory(0.6)``을 걸고 적재 전에
 :data:`MIN_FREE_BYTES` 만큼의 여유를 ``require_free``로 확인한다.
@@ -40,16 +45,15 @@ __all__ = [
     "special_id",
 ]
 
-DEFAULT_BATCH = 8
+DEFAULT_BATCH = 1
 DEFAULT_GEN_BATCH = 16
 REASONING_MAX_NEW_TOKENS = 256
 #: 적재 전에 있어야 하는 장치(통합) 메모리 여유. 근거: bf16 가중치 2B ≈ 4.3 GiB(text 1.9 B + 시각 0.3 B 매개변수)·4B ≈ 8.7 GiB,
-#: CUDA context ≈ 1 GiB, 채점 배치(8 × ≤ 1.5 K 토큰)의 activation과 전체 어휘 logsumexp 조각(fp32 32,768 × d)이 1 GiB 미만,
+#: CUDA context ≈ 1 GiB, 코드 질량용 LM head fp32 사본(2B 2.0 GB·4B 2.5 GB), 채점 배치(≤ 8 × 1.5 K 토큰)의 activation 1 GiB 미만,
 #: reasoning 배치 생성(16열 × ≤ 1.8 K 토큰)의 KV(2B: full-attention 6층 × 2 head × 256 × bf16 ≈ 12 KB/토큰)와 DeltaNet 상태
 #: (18층 × 16 head × 128² × fp32 ≈ 19 MB/열)가 1 GiB 남짓. 적재 때 dtype 변환의 일시적 사본과 expandable segment의 조각까지 덮도록
 #: 필요량의 약 3배를 요구한다 — 다른 프로세스(데스크톱 포함)가 통합 메모리를 쓰는 상자라 여유를 넉넉히 둔다.
 MIN_FREE_BYTES = {"Qwen/Qwen3.5-2B": 20 * 2**30, "Qwen/Qwen3.5-4B": 30 * 2**30}
-_HEAD_CHUNK = 32_768
 _SELF_ANSWER = re.compile(r"(?i)(?:final\s+)?answer\s*:")
 
 
@@ -61,15 +65,6 @@ def special_id(tokenizer: Any, token: str) -> int:
     return int(found)
 
 
-def _full_logsumexp(last: torch.Tensor, head: torch.Tensor) -> torch.Tensor:
-    """``last`` [B, d] fp32 × LM head 전체 [V, d] → 행마다 logsumexp (fp32, 행 조각씩)."""
-    parts = []
-    for start in range(0, head.shape[0], _HEAD_CHUNK):
-        chunk = head[start : start + _HEAD_CHUNK].float()
-        parts.append(torch.logsumexp(last @ chunk.T, dim=1))
-    return torch.logsumexp(torch.stack(parts, dim=1), dim=1)
-
-
 def score_code_prompts(backbone: Any, prompts: list[dict[str, Any]], *, batch: int = DEFAULT_BATCH, code_mass: bool = True) -> list[dict[str, Any]]:
     """프롬프트(``tokens``·``code_ids``) → ``{"code_probs", "code_logits", "code_mass"}`` (입력 순서). 모듈 설명의 방식."""
     head = backbone.model.lm_head.weight
@@ -77,6 +72,7 @@ def score_code_prompts(backbone: Any, prompts: list[dict[str, Any]], *, batch: i
     order = sorted(range(len(prompts)), key=lambda i: (len(prompts[i]["tokens"]), i))
     out: list[dict[str, Any] | None] = [None] * len(prompts)
     with torch.no_grad():
+        head32 = head.float() if code_mass and prompts else None  # 전체 어휘 logsumexp용 — 호출마다 한 번
         for start in range(0, len(order), max(1, int(batch))):
             index = order[start : start + max(1, int(batch))]
             group = [prompts[i] for i in index]
@@ -87,7 +83,7 @@ def score_code_prompts(backbone: Any, prompts: list[dict[str, Any]], *, batch: i
             positions = torch.arange(length)[None].expand(len(group), length)
             hidden = backbone(ids.to(device), positions.to(device))["hidden"]
             last = torch.stack([hidden[row, len(p["tokens"]) - 1] for row, p in enumerate(group)]).float()
-            lse = _full_logsumexp(last, head) if code_mass else None
+            lse = torch.logsumexp(last @ head32.T, dim=1) if head32 is not None else None
             for row, p in enumerate(group):
                 rows = head[torch.tensor(p["code_ids"], device=device)].float()
                 logits = rows @ last[row]

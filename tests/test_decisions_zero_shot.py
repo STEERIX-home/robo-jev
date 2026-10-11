@@ -186,6 +186,16 @@ def test_left_padded_batch_generation_matches_one_at_a_time_on_the_tiny_qwen(fix
     assert all(len(g["generated"]) <= 6 for g in batched)
 
 
+def test_the_default_reading_is_one_prompt_at_a_time_so_it_does_not_depend_on_the_other_prompts(fixtures):
+    """기본 배치는 1이다 — padding이 없어 한 프롬프트의 확률이 같이 묶인 다른 프롬프트에 기대지 않는다(실제 2B bf16에서 배치 구성이
+    코드 확률을 0.02까지 움직이고 argmax를 33개 중 3~4개 뒤집었다; 보고서)."""
+    assert Z.DEFAULT_BATCH == 1
+    prompts = [p for r in fixtures[:2] for p in P.record_prompts(r, tokenizer(), seed=1)]
+    alone = [Z.score_code_prompts(tiny(), [p])[0]["code_probs"] for p in prompts]
+    together = [s["code_probs"] for s in Z.score_code_prompts(tiny(), prompts)]
+    assert alone == together
+
+
 def test_required_free_memory_is_declared_for_both_candidate_models():
     assert Z.MIN_FREE_BYTES["Qwen/Qwen3.5-2B"] == 20 * 2**30 and Z.MIN_FREE_BYTES["Qwen/Qwen3.5-4B"] == 30 * 2**30
 
@@ -205,8 +215,8 @@ def real_2b() -> QwenBackbone:
 @needs_real_2b
 @pytest.mark.parametrize("fmt", P.FORMATS)
 def test_real_2b_direct_scoring_of_the_fixture_requests_sums_to_one_and_is_deterministic(fixtures, fmt):
-    first = Z.diagnose_records(fixtures, real_2b(), tokenizer(), model_id=REAL_2B, mode="direct", fmt=fmt, seed=1, batch=8)
-    second = Z.diagnose_records(fixtures, real_2b(), tokenizer(), model_id=REAL_2B, mode="direct", fmt=fmt, seed=1, batch=8)
+    first = Z.diagnose_records(fixtures, real_2b(), tokenizer(), model_id=REAL_2B, mode="direct", fmt=fmt, seed=1)
+    second = Z.diagnose_records(fixtures, real_2b(), tokenizer(), model_id=REAL_2B, mode="direct", fmt=fmt, seed=1)
     assert [p["id"] for p in first] == [r["id"] for r in fixtures]
     for a, b in zip(first, second):
         assert set(a["questions"]) == set(b["questions"])
