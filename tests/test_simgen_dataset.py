@@ -95,9 +95,9 @@ _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 
 
 def _moment_of(record):
-    g = record["generator"]
-    forced = {k: v for k, v in g["forced"].items() if k != "domain"}
-    return build_moment(default_config(), g["seed"], g["forced"]["domain"], forced or None, g["variant"], split_from(g["split"]))
+    from robo_jev.simgen.generate import record_moment
+
+    return record_moment(default_config(), record)       # 숫자 쌍의 변형은 받아들인 후보 번호까지(수정 1 N2)
 
 
 def _numbers_without_skin(record, obs) -> Counter:
@@ -207,6 +207,49 @@ def test_numeric_pairs_change_only_the_flipped_fact_and_cross_the_key(forced_pai
             changed += sum(a != b for a, b in zip(_SKELETON.findall(tb[part]), _SKELETON.findall(tv[part]), strict=True))
         assert changed <= 8 and tb["state"] != tv["state"], (variant["id"], changed)     # 말로 보고한 채움은 수가 아니라 구간 말이 바뀐다
     assert numeric >= 30, numeric
+
+
+@pytest.fixture(scope="module")
+def skipped_pairs():
+    """받아들인 후보가 첫째가 아닌(generator.pair_skip > 0) 숫자 쌍 단위 셋 — 드물다(약 2 %)라서 찾는다(학습 세트와 같은 경로 generate_unit)."""
+    from robo_jev.simgen.generate import generate_unit
+
+    cfg = default_config()
+    out = []
+    for i in range(600):
+        unit = {"seed": 6_100_000 + i, "domain": DOMAINS[i % len(DOMAINS)], "group": TRAIN_GROUPS[i % len(TRAIN_GROUPS)], "indices": [2 * i, 2 * i + 1],
+                "pair_kind": "numeric"}  # fmt: skip
+        if i < 48:
+            continue     # forced_pairs와 같은 단위는 건너뛴다
+        records = generate_unit(cfg, unit)
+        if (records[1]["generator"]["pair_skip"] or 0) > 0:
+            out.append(records)
+            if len(out) == 3:
+                break
+    return out
+
+
+def test_every_record_and_pair_rebuilds_from_its_own_fields(records, forced_pairs, skipped_pairs):
+    """수정 1 N2: 숫자 쌍의 변형은 받아들인 후보 번호(generator.pair_skip)를 적는다 — 그래서 학습 세트의 모든 레코드(쌍의 기준·변형, 단어
+    쌍, 혼자인 순간)가 그 자신의 칸만으로 글자 그대로 다시 만들어진다(``rebuild_record``). 후보 0이 아닌 변형이 실제로 있고, 그 번호를 빼면
+    다른 관측이 나온다(번호가 필요하다)."""
+    from robo_jev.simgen.generate import build_moment, rebuild_record, record_moment, split_from
+
+    cfg = default_config()
+    pairs = [r for unit in forced_pairs + skipped_pairs for r in unit]
+    checked = Counter()
+    for r in pairs + [r for r in records[:240]]:
+        g, pair = r["generator"], r["meta"]["pair"]
+        numeric_variant = bool(pair) and pair["role"] == "variant" and pair["kind"] == "numeric"
+        assert (g["pair_skip"] is not None) == numeric_variant, (r["id"], g["pair_skip"], pair)
+        assert rebuild_record(cfg, r) == r, r["id"]
+        checked["numeric variant" if numeric_variant else ("pair" if pair else "single")] += 1
+        if numeric_variant and g["pair_skip"] > 0:
+            checked["skip > 0"] += 1
+            forced = {k: v for k, v in g["forced"].items() if k != "domain"}
+            first = build_moment(cfg, g["seed"], g["forced"]["domain"], forced, "numeric", split_from(g["split"]))
+            assert first.obs != record_moment(cfg, r).obs, r["id"]
+    assert checked["numeric variant"] >= 30 and checked["skip > 0"] >= 3 and checked["single"] >= 100, checked
 
 
 def test_planner_style_always_carries_a_recommendation_and_others_about_half(records):

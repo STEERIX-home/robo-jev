@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import math
+from collections import Counter
 
 import numpy as np
 import pytest
@@ -301,6 +302,40 @@ def test_stopping_before_the_corner_never_meets_someone_who_steps_out(cfg):
     out2 = rollout(cfg, obs2, Batch({k: np.array([v], dtype=float) for k, v in row2.items()}), ("stop_before", "stop_hard"))
     assert stop_before_decel(obs2.robot, 0.25) == pytest.approx(obs2.robot.decel_hard)   # 최대로도 모자라면 최대로(모퉁이 안에 선다)
     assert out2.events["contact"][out2.index("stop_hard")].all()
+
+
+def test_stop_before_the_corner_is_offered_only_when_the_robot_can_do_it(cfg):
+    """수정 1 N1 (재검토: 모퉁이 레코드의 58 %에서 '모퉁이 앞에서 멈추기'에 필요한 감속이 최대 감속을 넘었는데도 그 선택지를 내놓아, 최대
+    제동으로 잘린 결과에 '모퉁이 앞에서 선다'는 글이 붙었다): 로봇이 아는 값 — 보고된 모퉁이까지 거리 d, 지금 속도 v, 반응 시간 t_r,
+    최대 감속 a_max — 으로 v²/(2·(d − v·t_r − 0.05)) ≤ a_max일 때만(손 계산, 모듈 함수를 쓰지 않는다) 내놓고, 최대 제동은 언제나 내놓는다
+    (영어·한국어 같은 선택지). 내놓을 때 그 굴리기(정답의 물리)는 앞면을 보고된 모퉁이 5 cm 앞에 세운다 — 글이 약속하는 결과."""
+    from robo_jev.simgen.generate import assemble, build_moment
+    from robo_jev.simgen.p6 import _profile
+
+    seen = Counter()
+    for i in range(160):
+        lang = "ko" if i % 4 == 0 else "en"
+        m = build_moment(cfg, 4_200 + i, ("warehouse", "hospital", "retail", "sidewalk", "factory")[i % 5], {"scene": "p6_blind_corner", "lang": lang})
+        obs = m.obs
+        r, d = obs.robot, obs.corner.ahead.value
+        room = d - r.speed * r.latency - 0.05
+        feasible = room > 0 and r.speed**2 / (2.0 * room) <= r.decel_hard
+        options = available_options(obs)
+        assert "stop_hard" in options
+        assert ("stop_before" in options) == feasible, (i, d, r.speed, r.latency, r.decel_hard)
+        seen[(feasible, lang)] += 1
+        if feasible:
+            t = np.arange(0.0, 30.0, 0.01)
+            assert float(_profile("stop_before", r, t, obs)[-1]) <= d - 0.05 + 1e-6
+        if i % 4 == 0:   # 레코드의 어느 질문도 내놓지 않은 선택지를 말하지 않는다(내놓은 선택지는 질문이 고르는 만큼만 나온다)
+            record = assemble(cfg, m, i)
+            mentioned = {b.get("option") for b in record["meta"]["basis"].values()} | {v for opts in record["meta"]["options"].values()
+                                                                                       for v in opts.values() if isinstance(v, str)}  # fmt: skip
+            if not feasible:
+                assert "stop_before" not in mentioned, (i, sorted(x for x in mentioned if x))
+            seen[("mentioned", "stop_before" in mentioned)] += 1
+    assert all(seen[(f, lang)] > 0 for f in (True, False) for lang in ("en", "ko")), seen
+    assert seen[("mentioned", True)] > 0, seen
 
 
 def test_someone_stepping_out_walks_around_a_robot_standing_in_the_walkway_unless_distracted_and_close(cfg):

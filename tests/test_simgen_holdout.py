@@ -134,12 +134,10 @@ def test_a_training_sample_hits_no_held_out_cell(holdout):
         assert "robot_speed" in meta["holdout_vars"]          # 로봇 속도는 모든 장면에서 적힌다(장면 목록과 무관하게 검사하려고)
     # 관측에서 다시 잰 칸도 0건(meta.holdout_vars가 관측의 값과 같다)
     cfg = default_config()
-    from robo_jev.simgen.generate import split_from
+    from robo_jev.simgen.generate import record_moment
 
     for r in records[:300]:
-        g = r["generator"]
-        forced = {k: v for k, v in g["forced"].items() if k != "domain"}
-        m = build_moment(cfg, g["seed"], g["forced"]["domain"], forced, g["variant"], split_from(g["split"]))
+        m = record_moment(cfg, r)            # 숫자 쌍의 변형은 받아들인 후보 번호까지(수정 1 N2)
         assert cells_hit(holdout, m.obs) == []
 
 

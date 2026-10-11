@@ -37,9 +37,9 @@ def cfg():
 
 
 def _moment_of(cfg, record):
-    g = record["generator"]
-    forced = {k: v for k, v in g["forced"].items() if k != "domain"}
-    return build_moment(cfg, g["seed"], g["forced"]["domain"], forced or None, g["variant"])
+    from robo_jev.simgen.generate import record_moment
+
+    return record_moment(cfg, record)        # 숫자 쌍의 변형은 받아들인 후보 번호까지(수정 1 N2)
 
 
 # ----------------------------------------------------------------------------------------------------------------

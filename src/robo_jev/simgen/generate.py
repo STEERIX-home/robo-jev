@@ -51,8 +51,11 @@ __all__ = [
     "generate_batch",
     "generate_record",
     "git_short_sha",
+    "pair_records",
     "plan_units",
+    "rebuild_record",
     "recommend",
+    "record_moment",
     "truth_world",
 ]
 
@@ -83,6 +86,7 @@ class Moment:
     pool: str = "train"                  # 질문 문구 묶음(train / heldout — T2 전용)
     holdout: tuple = ()                  # 이 관측이 들어간 빼 둔 칸(T3 칸 이름, 빼 둔 문체·상황·묶음)
     noise: int = 0                       # 관측 잡음 흐름 번호(받아들인 시도 — 보고가 빼 둔 칸에 닿으면 다른 잡음으로도 다시 뽑는다)
+    pair_skip: int | None = None         # 숫자 쌍의 변형: 받아들인 후보의 번호(generator.pair_skip — 레코드에서 다시 만들 수 있게, 수정 1 N2)
 
     def look(self, cfg: SimgenConfig, world: World, skin: int = 0) -> Observation:
         """이 순간의 잡음·서식·옷 흐름으로 세계 하나를 다시 관측한다(누출 시험·T6 변형이 같은 잡음을 쓰게)."""
@@ -184,7 +188,8 @@ def build_moment(cfg: SimgenConfig, seed: int, domain: str, forced: dict | None 
 
     if SCENE_GROUP[ctx.scene] in holdout.groups:
         held += ("group:" + SCENE_GROUP[ctx.scene],)
-    return Moment(seed, ctx, world, obs, attempt + 1, attempt // 8, variant, flipped, split.name, pool, held, noise)
+    return Moment(seed, ctx, world, obs, attempt + 1, attempt // 8, variant, flipped, split.name, pool, held, noise,
+                  int(pair_skip) if variant == "numeric" else None)
 
 
 def recommend(cfg: SimgenConfig, seed: int, style: str, out: Outcomes) -> dict:
@@ -418,6 +423,7 @@ def assemble(
         "git": git,
         "variant": moment.variant,
         "forced": {"domain": ctx.domain, **(forced or {})},
+        "pair_skip": moment.pair_skip,
         "attempts": moment.attempts,
         "split": split_spec,
         "surface": surface,
@@ -446,11 +452,39 @@ def generate_record(
     git: str | None = None,
     k: int | None = None,
     split: dict | None = None,
+    pair_skip: int | None = None,
 ) -> dict:
-    """레코드 하나를 generator 칸의 열쇠(seed, 강제한 칸, 쌍 변형, 나눔)로 다시 만든다."""
+    """레코드 하나를 generator 칸의 열쇠(seed, 강제한 칸, 쌍 변형과 받아들인 후보 번호, 나눔)로 다시 만든다(혼자인 순간 — 쌍은 :func:`rebuild_record`)."""
     cfg = cfg or default_config()
-    moment = build_moment(cfg, seed, domain, forced, variant, split_from(split))
+    moment = build_moment(cfg, seed, domain, forced, variant, split_from(split), pair_skip=pair_skip or 0)
     return assemble(cfg, moment, index, git=git, k=k, pair=pair, forced=forced, split_spec=split)
+
+
+def record_moment(cfg: SimgenConfig, record: dict) -> Moment:
+    """레코드의 generator 칸에서 그 판단 순간을 다시 만든다 — 숫자 쌍의 변형은 받아들인 후보 번호(``pair_skip``)까지(수정 1 N2)."""
+    g = record["generator"]
+    forced = {key: value for key, value in g["forced"].items() if key != "domain"}
+    return build_moment(cfg, g["seed"], g["forced"]["domain"], forced or None, g["variant"], split_from(g["split"]), pair_skip=g.get("pair_skip") or 0)
+
+
+def rebuild_record(cfg: SimgenConfig, record: dict) -> dict:
+    """학습 세트·T1~T5·T7의 레코드를 그 자신의 칸(generator·meta.pair·id)만으로 다시 만든다. 숫자 쌍의 변형은 같은 seed의 기준 순간에서
+    기준의 계획기 권고와 규칙 문턱을 다시 얻는다(:func:`pair_records`와 같은 길). T6 변형은 testsets가 다시 만든다."""
+    g = record["generator"]
+    prefix, index = record["id"].rsplit("-", 1)
+    forced = {key: value for key, value in g["forced"].items() if key != "domain"}
+    common = {"git": g["git"], "k": record["meta"]["posterior_k"], "id_prefix": prefix, "forced": forced, "split_spec": g["split"], "surface": g.get("surface")}
+    pair = record["meta"]["pair"]
+    extra: dict = {}
+    if pair and pair["role"] == "variant" and pair["kind"] == "numeric":
+        base = build_moment(cfg, g["seed"], g["forced"]["domain"], forced or None, None, split_from(g["split"]))
+        rec = assemble(cfg, base, 0, **common)["meta"]["recommendation"]
+        extra = {"t6": {"recommendation": {"present": rec["present"], "canonical": rec["canonical"], "wrong": rec["wrong"], "kept": True}},
+                 "threshold_obs": base.obs}  # fmt: skip
+    out = assemble(cfg, record_moment(cfg, record), int(index), **common, **extra)
+    if pair is not None:
+        out["meta"]["pair"] = dict(pair)
+    return out
 
 
 def split_from(spec: dict | None):

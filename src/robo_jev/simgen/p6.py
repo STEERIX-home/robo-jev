@@ -31,7 +31,10 @@ from robo_jev.simgen.rollout import Outcomes, _delay, _longitudinal, time_grid
 from robo_jev.simgen.spec import Batch, RobotSpec
 from robo_jev.simgen.voi import DiscreteSignal
 
-__all__ = ["available", "conflict_posterior", "emerge_probability", "exact", "rollout", "sample_posterior", "stay_probability"]
+__all__ = [
+    "available", "conflict_posterior", "emerge_probability", "exact", "rollout", "sample_posterior", "stay_probability", "stop_before_feasible",
+    "stop_before_need",
+]  # fmt: skip
 
 OPTIONS = {
     "p6_stale_track": ("continue", "slow", "stop_moderate", "look_again"),
@@ -43,6 +46,10 @@ _BEFORE_BUFFER = 0.05      # stop_before: 모퉁이 선에서 이만큼 앞에 �
 
 
 def available(obs: Observation) -> tuple[str, ...]:
+    """그 순간 가능한 선택지. 모퉁이의 '모퉁이 앞에서 멈추기'는 로봇이 아는 값으로 할 수 있을 때만 내놓는다(수정 1 N1 — 할 수 없으면
+    최대 제동과 같은 결과인데 글은 '모퉁이 앞에서 선다'고 약속했다); 최대 제동은 언제나."""
+    if obs.scene == "p6_blind_corner" and not stop_before_feasible(obs):
+        return tuple(o for o in OPTIONS[obs.scene] if o != "stop_before")
     return OPTIONS[obs.scene]
 
 
@@ -181,11 +188,28 @@ def _emerging(cfg, obs: Observation, k: int, rng: np.random.Generator) -> Batch:
 # ----------------------------------------------------------------------------------------------------------------
 
 
+def stop_before_need(r: RobotSpec, ahead_reported: float) -> float | None:
+    """보고된 모퉁이까지 거리에서 반응 거리와 여유(5 cm)를 뺀 만큼 안에 서는 데 필요한 감속 — 그 거리가 없으면 None."""
+    room = ahead_reported - r.speed * r.latency - _BEFORE_BUFFER
+    if room <= 0.0:
+        return None
+    return r.speed**2 / (2.0 * room)
+
+
+def stop_before_feasible(obs: Observation) -> bool:
+    """'모퉁이 앞에서 멈추기'를 할 수 있나 — 로봇이 아는 값(보고된 모퉁이까지 거리, 지금 속도, 반응 시간, 최대 감속)으로 필요한 감속이
+    최대 감속 이하(수정 1 N1)."""
+    need = stop_before_need(obs.robot, obs.corner.ahead.value)
+    return need is not None and need <= obs.robot.decel_hard + 1e-12
+
+
 def stop_before_decel(r: RobotSpec, ahead_reported: float) -> float:
     """모퉁이 앞에서 멈추기의 감속: 보고된 모퉁이까지 거리(반응 거리와 여유를 뺀 만큼) 안에 서는 일정 감속 — 부드러운 감속보다 약하면
-    부드럽게(더 일찍 선다), 최대 감속으로도 모자라면 최대로(모퉁이를 지나 선다)."""
-    room = ahead_reported - r.speed * r.latency - _BEFORE_BUFFER
-    need = r.speed**2 / (2.0 * max(room, 1e-3))
+    부드럽게(더 일찍 선다). 이 선택지는 필요한 감속이 최대 감속 이하일 때만 나온다(:func:`stop_before_feasible`); 넘으면(직접 굴릴 때만)
+    최대로 자른다."""
+    need = stop_before_need(r, ahead_reported)
+    if need is None:
+        return float(r.decel_hard)
     return float(min(max(need, r.decel_gentle), r.decel_hard))
 
 
