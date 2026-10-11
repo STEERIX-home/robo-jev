@@ -162,7 +162,7 @@ def test_sensor_conflict_sentences_name_the_reporting_sensor_and_hedge_object_cu
 
     from robo_jev.simgen.generate import build_moment
     from robo_jev.simgen.holdout import split_for
-    from robo_jev.simgen.narrate import HEDGED_CUES, RenderPlan, render_state
+    from robo_jev.simgen.narrate import RenderPlan, render_state
     from robo_jev.simgen.rollout import available_options
     from robo_jev.simgen.spec import stream
 
@@ -185,6 +185,6 @@ def test_sensor_conflict_sentences_name_the_reporting_sensor_and_hedge_object_cu
                         says_camera = re.search(r"카메라(?:는[^,]*물체가 있다고 보고|: 약 [^;]*물체)", text) is not None
                         hedged = "있을 수 있" in text
                     assert (says_lidar, says_camera) == (lidar, not lidar), (lang, style, lidar, text)
-                    assert hedged == (cue in HEDGED_CUES), (lang, style, cue, text)
+                    assert hedged == (cue in ("glass", "black")), (lang, style, cue, text)     # 물체 자체일 수 있는 단서(명세 — 모듈 상수를 읽지 않는다)
                     seen[lang] += 1
     assert seen["en"] == seen["ko"] == 40
