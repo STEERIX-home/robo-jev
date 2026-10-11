@@ -21,6 +21,7 @@ __all__ = [
     "ANCHORS",
     "HINTS_KO",
     "KO",
+    "MOTION_ONLY",
     "RULE_TEXT",
     "STATE_TEXT",
     "delay_reference",
@@ -34,6 +35,8 @@ __all__ = [
 
 KO = data.KO
 ANCHORS = data.ANCHORS_KO
+#: 충돌이 있을 수 있는 순간에 움직임만 세는 물건 질문에 덧붙이는 정의(영어 phrases.MOTION_ONLY와 같은 뜻 — 수정 1 I2)
+MOTION_ONLY = " (충돌은 빼고, 움직임 자체만으로 생기는 일만 셉니다.)"
 STATE_TEXT = data.STATE_TEXT_KO
 RULE_TEXT = data.RULE_TEXT_KO
 HINTS_KO = data.HINTS_KO

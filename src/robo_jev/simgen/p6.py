@@ -35,9 +35,11 @@ __all__ = ["available", "conflict_posterior", "emerge_probability", "exact", "ro
 
 OPTIONS = {
     "p6_stale_track": ("continue", "slow", "stop_moderate", "look_again"),
-    "p6_blind_corner": ("continue", "slow", "creep", "stop_moderate", "look_again"),
+    # 모퉁이(수정 1 I3): 모퉁이 앞에서 멈추기(stop_before — 보이는 거리 안에 서도록 지금 필요한 만큼 감속), 감속 단계(단단히·최대로), 서행
+    "p6_blind_corner": ("continue", "slow", "creep", "stop_before", "stop_moderate", "stop_hard", "look_again"),
     "p6_sensor_conflict": ("continue", "slow", "stop_moderate", "detour", "look_again"),
 }
+_BEFORE_BUFFER = 0.05      # stop_before: 모퉁이 선에서 이만큼 앞에 서도록(로봇 앞면 기준, m)
 
 
 def available(obs: Observation) -> tuple[str, ...]:
@@ -129,11 +131,12 @@ def sample_posterior(cfg, obs: Observation, k: int, rng: np.random.Generator) ->
         hi_d = np.array([s.get("decel", [1.0, 2.0])[1] for s in spec])[which]
         react = np.array([cfg.catalog["crossing_reaction"]["base"][s["group"]] for s in spec])[which]
         u = lo_u + (hi_u - lo_u) * rng.random(m)
+        distract = np.array([cfg.catalog["static_avoidance"]["distracted_prior"][s["group"]] for s in spec])[which]
         values = {
             "lam": lam, "t_e": t_e, "u": u, "ra": lo_r + (hi_r - lo_r) * rng.random(m), "agent_decel": lo_d + (hi_d - lo_d) * rng.random(m),
             "reacts": (rng.random(m) < react).astype(float), "react_standoff": _uniform(rng, cfg.catalog["crossing_reaction"]["standoff"], m),
             "ahead": np.maximum(_normal(rng, c.ahead, m, 0.0), 0.0), "lateral": np.maximum(_normal(rng, c.lateral, m, 0.0), 0.0),
-            "kind": which.astype(float),
+            "kind": which.astype(float), "distracted": (rng.random(m) < distract).astype(float), "static_u": rng.random(m),
         }  # fmt: skip
         batch = _split(values, p_emerge, "emerges")
     elif obs.scene == "p6_sensor_conflict":
@@ -147,6 +150,17 @@ def sample_posterior(cfg, obs: Observation, k: int, rng: np.random.Generator) ->
     return _pick_world(batch, rng) if k == 1 else batch
 
 
+def _follower_reaction(cfg, kind: str, rng, k: int) -> dict:
+    """따라 나오는 상대의 반응 매개변수의 사전 — p6_world.follower_reaction과 같은 뽑기(세계 모듈을 import하지 않으려고 여기에 둔다)."""
+    agent = cfg.agent(kind)
+    group = agent["group"]
+    lo_d, hi_d = agent.get("decel", [1.0, 2.0])
+    lo_s, hi_s = cfg.catalog["crossing_reaction"]["standoff"]
+    return {"reacts2": (rng.random(k) < cfg.catalog["crossing_reaction"]["base"][group]).astype(float), "decel2": lo_d + (hi_d - lo_d) * rng.random(k),
+            "standoff2": lo_s + (hi_s - lo_s) * rng.random(k),
+            "distracted2": (rng.random(k) < cfg.catalog["static_avoidance"]["distracted_prior"][group]).astype(float), "static_u2": rng.random(k)}  # fmt: skip
+
+
 def _emerging(cfg, obs: Observation, k: int, rng: np.random.Generator) -> Batch:
     from robo_jev.simgen.posterior import _step_in
 
@@ -155,6 +169,7 @@ def _emerging(cfg, obs: Observation, k: int, rng: np.random.Generator) -> Batch:
     spec = cfg.agent(obs.agent.kind)
     values.update({
         "t2": _uniform(rng, cfg.catalog["p6"]["follow_delay"], m), "u2": _uniform(rng, spec["speed"], m), "ra2": _uniform(rng, spec["radius"], m),
+        **_follower_reaction(cfg, obs.agent.kind, rng, m),
     })  # fmt: skip
     p_follow = cfg.catalog["p6"]["follow"].get(obs.agent.kind, 0.0)
     batch = _split(values, np.full(m, p_follow), "follow")
@@ -166,9 +181,19 @@ def _emerging(cfg, obs: Observation, k: int, rng: np.random.Generator) -> Batch:
 # ----------------------------------------------------------------------------------------------------------------
 
 
-def _profile(option: str, r: RobotSpec, t: np.ndarray) -> np.ndarray:
+def stop_before_decel(r: RobotSpec, ahead_reported: float) -> float:
+    """모퉁이 앞에서 멈추기의 감속: 보고된 모퉁이까지 거리(반응 거리와 여유를 뺀 만큼) 안에 서는 일정 감속 — 부드러운 감속보다 약하면
+    부드럽게(더 일찍 선다), 최대 감속으로도 모자라면 최대로(모퉁이를 지나 선다)."""
+    room = ahead_reported - r.speed * r.latency - _BEFORE_BUFFER
+    need = r.speed**2 / (2.0 * max(room, 1e-3))
+    return float(min(max(need, r.decel_gentle), r.decel_hard))
+
+
+def _profile(option: str, r: RobotSpec, t: np.ndarray, obs: Observation | None = None) -> np.ndarray:
     if option == "creep":
         return ph.ramp_position(t, r.speed, r.latency, r.decel_moderate, r.creep_ratio * r.speed)
+    if option == "stop_before":
+        return ph.ramp_position(t, r.speed, r.latency, stop_before_decel(r, obs.corner.ahead.value), 0.0)
     return _longitudinal(option, r, t)
 
 
@@ -244,24 +269,33 @@ def _stale(cfg, obs: Observation, batch: Batch, options) -> Outcomes:
 
 
 def _corner(cfg, obs: Observation, batch: Batch, options) -> Outcomes:
-    """모퉁이: 출현한 세계에서 로봇은 출현 시각 + 반응 뒤 최대로 서고, 상대는 진로 쪽으로 걷다가(반응하면) 로봇 앞에서 선다."""
+    """모퉁이: 출현한 세계에서 로봇은 출현 시각 + 반응 뒤 최대로 서고, 상대는 진로 쪽으로 걷다가 로봇이 자기 줄을 막으면 선다 —
+    움직이는 로봇이면 reacts(갈래의 늦은 반응 확률), 멈춘(아주 느린) 로봇이면 거의 언제나(처음 마주칠 때 주의·거리로 실패를 정함,
+    수정 1 I3 — 눈에 보이는 멈춘 로봇에 걸어 들어오는 경우를 사람 25 %로 세던 것을 고친다)."""
+    from robo_jev.simgen.rollout import robot_static, static_encounter
+
     r, t = obs.robot, time_grid(cfg)
     dt = float(t[1] - t[0])
     b = batch.values
     k = batch.size
     c = obs.corner
     emerges = b["emerges"] > 0.5
-    line = b["ahead"] + r.radius                              # 로봇 중심 → 상대가 지나는 줄
+    kinds = list(cfg.domain(obs.domain)["agents"]["crossing"])
+    never = np.isin(b["kind"].astype(int), [i for i, n in enumerate(kinds) if cfg.agent(n)["group"] == "ball"])
+    distracted = b["distracted"] > 0.5
+    # 모퉁이까지 거리(ahead)는 로봇 앞면 → 사람이 나와 걷는 길의 가까운 가장자리(사람 몸이 시작하는 곳)다 — 그래서 사람 중심의 줄은
+    # 로봇 중심에서 ahead + 로봇 반지름 + 사람 반지름(수정 1 I3: 앞면이 모퉁이 앞에 서면 닿지 않는다 — 여유·'모퉁이 앞에서 멈추기'와 같은 뜻)
+    line = b["ahead"] + r.radius + b["ra"]
     r_sum = r.radius + b["ra"]
     start = r.radius + b["lateral"] + b["ra"]                # 출현 때 상대 중심의 진로 중심선에서의 거리
     sign = 1.0 if c.side == "left" else -1.0
     out = Outcomes(tuple(options))
-    contact, impact, delay = [], [], []
+    contact, impact, delay, robot_v = [], [], [], []
     for option in options:
         if option == "look_again":
-            contact.append(np.zeros(k, dtype=bool)), impact.append(np.zeros(k)), delay.append(np.zeros(k))
+            contact.append(np.zeros(k, dtype=bool)), impact.append(np.zeros(k)), delay.append(np.zeros(k)), robot_v.append(np.full(k, np.nan))
             continue
-        x_opt = _profile(option, r, t)
+        x_opt = _profile(option, r, t, obs)
         v_opt = np.concatenate([[r.speed], np.diff(x_opt) / dt])
         # 로봇: 출현 + 반응 뒤 최대 제동 — 세계마다 (K, T)
         t_b = np.where(emerges, b["t_e"] + r.latency, np.inf)
@@ -281,25 +315,37 @@ def _corner(cfg, obs: Observation, batch: Batch, options) -> Outcomes:
         v = b["u"].copy()
         s_pos = start + b["u"] * b["t_e"]                   # t = 0의 진로 쪽 거리
         braking = np.zeros(k, dtype=bool)
+        decided = np.zeros(k, dtype=bool)
+        fail = np.zeros(k, dtype=bool)
+        static = robot_static(cfg, x_r, dt)                 # (K, T − 1)
         dist[:, 0] = s_pos
         for j in range(1, len(t)):
             visible = t[j - 1] >= b["t_e"]
             on_line = np.abs(x_r[:, j - 1] - line) < r_sum + 0.1
             remaining_d = dist[:, j - 1] - r_sum
-            trigger = visible & (b["reacts"] > 0.5) & on_line & (remaining_d <= b["react_standoff"] + v**2 / (2.0 * b["agent_decel"]))
+            approaching = remaining_d > -b["ra"]
+            in_range = remaining_d <= b["react_standoff"] + v**2 / (2.0 * b["agent_decel"])
+            still = static[:, j - 1]
+            decided, fail = static_encounter(cfg, visible & still & on_line & approaching, remaining_d, v, b["agent_decel"], distracted, b["static_u"],
+                                             decided, fail, never)  # fmt: skip
+            moving_trigger = ~still & (b["reacts"] > 0.5)
+            static_trigger = still & decided & ~fail
+            trigger = visible & on_line & approaching & in_range & (moving_trigger | static_trigger)
             braking = braking | trigger
             v_next = np.where(braking, np.maximum(v - b["agent_decel"] * dt, 0.0), b["u"])
             dist[:, j] = dist[:, j - 1] - 0.5 * (v + v_next) * dt
             v = v_next
         y_a = sign * dist
-        hit, v_imp, _ = ph.first_contact(x_r, 0.0, line[:, None], y_a, r_sum, dt)
+        hit, v_imp, _, step = ph.first_contact(x_r, 0.0, line[:, None], y_a, r_sum, dt, with_step=True)
         hit &= emerges
         contact.append(hit), impact.append(np.where(hit, v_imp, 0.0))
+        v_r = np.diff(x_r, axis=1) / dt
+        robot_v.append(np.where(hit, np.take_along_axis(v_r, np.maximum(step, 0)[:, None], axis=1)[:, 0], np.nan))
         delay.append(_delay(x_r[:, -1], r, float(t[-1])))
     out.events = {"contact": np.array(contact)}
     out.impact = {"contact": np.array(impact)}
     out.quantities = {"delay": np.array(delay)}
-    kinds = list(cfg.domain(obs.domain)["agents"]["crossing"])
+    out.aux = {"contact_robot_speed": np.array(robot_v)}
     items = [cfg.agent(n)["contact"] for n in kinds]
     # 닿음 비용은 나올 수 있는 상대 종류마다 다르다 — 세계마다의 종류로 센다(가장 흔한 비용 항목으로 묶지 않는다)
     out.cost_items = {}
@@ -312,7 +358,7 @@ def _corner(cfg, obs: Observation, batch: Batch, options) -> Outcomes:
     # 결정 여유의 사건: 지금 누가 나오면 모퉁이에 닿기 전에 설 수 있나(반응 + 최대 제동 < 모퉁이까지 거리 — 나옴과 무관한 세계 사건)
     d_hard = ph.stopping_distance(r.speed, r.latency, r.decel_hard)
     out.world_events = {"emerge_3s": (emerges & (b["t_e"] <= horizon)).astype(float), "stops_before_corner": (b["ahead"] > d_hard).astype(float)}
-    out.hard_brake = np.zeros(len(options), dtype=bool)
+    out.hard_brake = np.array([o == "stop_hard" for o in options])
     if "look_again" in options:
         look = cfg.catalog["p6"]["corner"]["look"]
         coming = emerges & (b["t_e"] <= look["window_s"])
@@ -359,33 +405,57 @@ def _conflict(cfg, obs: Observation, batch: Batch, options) -> Outcomes:
 
 
 def _emerging_rollout(cfg, obs: Observation, batch: Batch, options) -> Outcomes:
-    """P1+P6: 첫 상대는 P1 끼어듦 그대로, 둘째(따라옴)는 첫 상대가 나온 자리(첫 보고 위치)에서 t2에 나와 같은 쪽으로 u2로 가로지른다."""
-    from robo_jev.simgen.rollout import _step_in
+    """P1+P6: 첫 상대는 P1 끼어듦 그대로, 둘째(따라옴)는 첫 상대가 나온 자리(첫 보고 위치)에서 t2에 나와 같은 쪽으로 u2로 가로지른다.
+    둘째도 가로지름과 같은 규칙으로 로봇을 피한다(수정 1 I3): 로봇 몸이 자기 줄을 덮고 있으면 움직이는 로봇에는 reacts2로, 멈춘(아주
+    느린) 로봇에는 거의 언제나(처음 마주칠 때 주의·거리로 실패를 정함) decel2로 standoff2 앞에서 선다."""
+    from robo_jev.simgen.rollout import _longitudinal as longitudinal
+    from robo_jev.simgen.rollout import _step_in, robot_static, static_encounter
 
     out = _step_in(cfg, obs, batch, options)
     r, t = obs.robot, time_grid(cfg)
     dt = float(t[1] - t[0])
     b = batch.values
     a = obs.agent
+    k = batch.size
     follow = b["follow"] > 0.5
+    never = np.full(k, a.group == "ball")
+    distracted = b["distracted2"] > 0.5
     # 첫 상대가 나온 자리: 가장 오래된 위치 보고(나이 동안 옆으로 움직였다)
     y_occ = b["lat0"] - b["dir"] * b["u0"] * a.track_ages[0]
-    tt = t[None, :]
-    y2 = y_occ[:, None] + b["dir"][:, None] * b["u2"][:, None] * np.clip(tt - b["t2"][:, None], 0.0, None)
-    active = tt >= b["t2"][:, None]
-    y2 = np.where(active, y2, y_occ[:, None] - b["dir"][:, None] * 5.0)   # 나오기 전에는 가림 뒤(멀리)
-    x2 = b["gap"][:, None] + 0.0 * tt
     r_sum2 = r.radius + b["ra2"]
     contact2, speed2 = [], []
-    for i, option in enumerate(options):
-        from robo_jev.simgen.rollout import _longitudinal as longitudinal
-
-        x_r = longitudinal(option, r, t)[None, :]
+    for option in options:
+        x_r = longitudinal(option, r, t)
         y_r = np.zeros_like(x_r)
         if option.startswith("sidestep"):
             sgn = 1.0 if option.endswith("left") else -1.0
-            y_r = ph.smoothstep(t, r.latency, r.sidestep_duration, sgn * r.sidestep_offset)[None, :]
-        hit, v_imp, _ = ph.first_contact(x_r, y_r, x2, y2, r_sum2, dt)
+            y_r = ph.smoothstep(t, r.latency, r.sidestep_duration, sgn * r.sidestep_offset)
+        static = robot_static(cfg, x_r, dt)
+        # 둘째의 옆 위치 y2 (K, T): 나오기 전에는 가림 뒤(멀리), 나온 뒤 dir 쪽으로 걷고 로봇이 줄을 막으면 선다
+        y2 = np.empty((k, len(t)))
+        y2[:, 0] = y_occ - b["dir"] * 5.0
+        walked = np.zeros(k)
+        v = b["u2"].copy()
+        braking = np.zeros(k, dtype=bool)
+        decided = np.zeros(k, dtype=bool)
+        fail = np.zeros(k, dtype=bool)
+        for i in range(1, len(t)):
+            active = t[i - 1] >= b["t2"]
+            on_line = np.abs(x_r[i - 1] - b["gap"]) < r_sum2 + 0.1
+            remaining = b["dir"] * (y_r[i - 1] - (y_occ + b["dir"] * walked)) - r_sum2
+            approaching = remaining > -b["ra2"]
+            in_range = remaining <= b["standoff2"] + v**2 / (2.0 * b["decel2"])
+            decided, fail = static_encounter(cfg, active & static[i - 1] & on_line & approaching, remaining, v, b["decel2"], distracted, b["static_u2"],
+                                             decided, fail, never)  # fmt: skip
+            trigger = active & on_line & approaching & in_range & np.where(static[i - 1], decided & ~fail, b["reacts2"] > 0.5)
+            braking = braking | trigger
+            v_next = np.where(braking, np.maximum(v - b["decel2"] * dt, 0.0), b["u2"])
+            step = np.where(active, 0.5 * (v + v_next) * dt, 0.0)
+            walked = walked + step
+            v = np.where(active, v_next, v)
+            y2[:, i] = np.where(t[i] >= b["t2"], y_occ + b["dir"] * walked, y_occ - b["dir"] * 5.0)
+        x2 = b["gap"][:, None] + 0.0 * t[None, :]
+        hit, v_imp, _ = ph.first_contact(x_r[None, :], y_r[None, :], x2, y2, r_sum2, dt)
         contact2.append(hit & follow), speed2.append(np.where(hit & follow, v_imp, 0.0))
     first = out.events["contact"]
     second = np.array(contact2)

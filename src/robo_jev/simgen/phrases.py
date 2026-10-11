@@ -21,6 +21,7 @@ from robo_jev.simgen.observation import Observation
 
 __all__ = [
     "ARM_VERB_KEYS",
+    "MOTION_ONLY",
     "POOLS",
     "VERB_KEYS",
     "bank",
@@ -42,6 +43,7 @@ VERB_KEYS = {
     "ramp_normal": "take_ramp_normally", "ramp_slow": "take_ramp_slowly", "detour": "take_detour",
     "place_now": "set_down_now", "recentre": "recentre_first", "place_elsewhere": "put_it_elsewhere", "check_weight": "check_weight_first",
     "press_down": "press_down", "push_harder": "push_harder", "reseat": "redo_it", "call_human": "call_someone", "look_again": "look_again",
+    "stop_before": "stop_before_corner",
 }  # fmt: skip
 ARM_VERB_KEYS = {"stop_gentle": "pause_smoothly", "stop_moderate": "pause", "stop_hard": "protective_stop", "continue": "keep_moving"}
 
@@ -99,6 +101,7 @@ _SHORT = {
     "reseat": "take it out and do it again",
     "call_human": "call a person to check it",
     "look_again": "look again before deciding",
+    "stop_before": "stop before you reach the corner",
 }
 _SHORT_ARM = {
     "continue": "keep the tool moving at its current speed",
@@ -209,6 +212,8 @@ _DESCRIPTIONS = {
                      ["Get someone to inspect it (roughly {t_call_human})."]),
     "look_again": _T(["Take another measurement first (about {t_look_again}), then decide.", "Measure it again before deciding (about {t_look_again}).", "Re-check it with your sensors (about {t_look_again}), then choose."],
                      ["Repeat the measurement first (roughly {t_look_again})."]),
+    "stop_before": _T(["Brake now just enough to stop before the corner.", "Slow down so that you come to rest short of the corner.",
+                       "Stop in front of the corner, braking only as hard as needed."], ["Ease to a halt before the corner line."]),
 }
 _DESCRIPTIONS_ARM = {
     "continue": _T(["Keep the tool moving at its current speed ({v}).", "Carry on along the planned path without slowing.", "Do not change the motion; continue at {v}."],
@@ -383,6 +388,10 @@ EN: dict[str, dict] = {
     # P3
     "noul.fall": _T(["If you {action}, will {lref} topple over or slide off?", "Suppose you {action}. Does {lref} tip over or fall off?",
                      "Would {lref} fall over or off if you {action}?"], ["If you {action}, does {lref} end up toppled or dropped?"]),
+    "noul.fall_impact": _T(["If you {action}, will {lref} topple over or come off, counting being knocked off in a collision with {hazard}?",
+                            "Suppose you {action}. Does {lref} end up toppled or off the deck, either from the motion or knocked off by a bump into {hazard}?",
+                            "Would {lref} topple or fall off if you {action}, whether from the motion itself or from a collision?"],
+                           ["If you {action}, is {lref} knocked over or off, by the motion or by hitting {hazard}?"]),
     "noul.tip": _T(["If you {action}, will {lref} tip over?", "Suppose you {action}. Does {lref} topple?", "Would {lref} tip over if you {action}?"],
                    ["If you {action}, does {lref} go over?"]),
     "noul.slide": _T(["If you {action}, will {lref} slide on {deck}?", "Suppose you {action}. Does {lref} start to slip on {deck}?", "Would {lref} skid on {deck} if you {action}?"],
@@ -443,6 +452,10 @@ EN: dict[str, dict] = {
                          "What is the chance of running into {obstacle} if you {action}?"], ["If you {action}, how probable is it that you strike {obstacle}?"]),
     "score.fall": _T(["How likely is {lref} to topple over or slide off if you {action}?", "Rate the chance that {lref} tips or falls off if you {action}.",
                       "What is the risk that {lref} ends up toppled or dropped if you {action}?"], ["If you {action}, how probable is it that {lref} goes over or off?"]),
+    "score.fall_impact": _T(["How likely is {lref} to topple over or come off if you {action}, counting a collision that knocks it off?",
+                             "Rate the chance that {lref} ends up toppled or off the deck if you {action}, from the motion or from any bump into {hazard}.",
+                             "What is the risk that {lref} goes over or off if you {action}, whether by the motion or in a collision?"],
+                            ["If you {action}, how probable is it that {lref} is knocked over or off, a collision included?"]),
     "score.slide": _T(["If you {action}, how far does {lref} slide toward the edge?", "Rate how much of the distance to the edge {lref} slides if you {action}.",
                        "If you {action}, how close to the edge does {lref} slide?"], ["If you {action}, how far toward the edge does {lref} shift?"]),
     "score.topple_stack": _T(["How likely is {sref} to topple off {spot} if you {action}?", "Rate the chance that {sref} falls off the stack if you {action}.",
@@ -505,11 +518,17 @@ ANCHORS = {
     "delay_long": ["0 = no time lost", "1 = {long} or more"],
     "overrun": ["0 = you certainly stop short", "1 = you certainly hit it"],
     "fall": ["0 = it certainly stays upright and on board", "1 = it certainly topples or falls off"],
+    "fall_impact": ["0 = it certainly stays upright and on board", "1 = it certainly topples or comes off (being knocked off in a collision counts)"],
     "slide": ["0 = it does not move", "1 = it slides all the way to the edge (or off)"],
     "topple": ["0 = it certainly stays on the stack", "1 = it certainly topples off"],
     "unseated": ["0 = it certainly ends up in place and intact", "1 = it certainly ends up out of place or damaged"],
     "damage": ["0 = nothing can break", "1 = something certainly breaks"],
 }
+
+
+#: 충돌이 있을 수 있는 순간에 움직임만 세는 물건 질문(넘어짐·미끄러짐·fall_motion·미끄러진 거리)에 덧붙이는 정의(수정 1 I2 — 기준 문구처럼
+#: 정답의 뜻을 정하므로 바꿔 쓰지 않는다)
+MOTION_ONLY = " (Count only what the motion itself does; leave out any collision.)"
 
 
 def bank(key: str, lang: str = "en", pool: str = "train") -> list[str]:

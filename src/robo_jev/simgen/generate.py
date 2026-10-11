@@ -280,16 +280,10 @@ def _scene_meta(obs: Observation) -> dict:
 
 
 def _holdout_vars(obs: Observation) -> dict[str, float]:
-    """이 관측의 T3 칸 변수 값(글에 보인 값) — 학습 세트 전부를 훑는 겹침 검사가 레코드만으로 칸을 다시 잴 수 있게."""
-    from robo_jev.simgen.holdout import load_holdout, observed_value
+    """이 관측의 칸 변수 값 전부(글에 보인 값, 장면 목록과 무관하게) — 학습 세트 전부를 훑는 겹침 검사가 레코드만으로 칸을 다시 잴 수 있게."""
+    from robo_jev.simgen.holdout import observed_values
 
-    out = {}
-    for cell in load_holdout().ranges:
-        if obs.scene in cell.scenes and cell.var not in out:
-            value = observed_value(obs, cell.var)
-            if value is not None:
-                out[cell.var] = round(float(value), 6)
-    return out
+    return observed_values(obs)
 
 
 def assemble(

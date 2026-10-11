@@ -44,6 +44,7 @@ __all__ = [
     "config_errors",
     "default_config",
     "load_config",
+    "distraction_probability",
     "reaction_probability",
 ]
 
@@ -213,6 +214,15 @@ def reaction_probability(config: SimgenConfig, kind: str, cue: str | None) -> fl
     base = spec["base"][config.agent(kind)["group"]]
     factor = spec["cue_factor"].get(cue, 1.0) if cue else 1.0
     return float(min(spec["max"], base * factor))
+
+
+def distraction_probability(config: SimgenConfig, kind: str, cue: str | None) -> float:
+    """주의가 딴 데 있을 확률: 단서가 정해 주면 그 값(static_avoidance.distracted_cue), 아니면 갈래의 사전값. 공은 0(피하지 않으므로 무의미)."""
+    spec = config.catalog["static_avoidance"]
+    group = config.agent(kind)["group"]
+    if cue is not None and cue in spec["distracted_cue"]:
+        return float(spec["distracted_cue"][cue])
+    return float(spec["distracted_prior"][group])
 
 
 def _read_yaml(path: Path) -> dict:

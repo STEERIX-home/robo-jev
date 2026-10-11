@@ -37,7 +37,7 @@ from robo_jev.simgen.skins import compatible, setting_tags
 from robo_jev.simgen.spec import round_to
 from robo_jev.simgen.world import World
 
-__all__ = ["build", "flip", "margins_of", "observe_parts", "prior_redraw", "truth_parts"]
+__all__ = ["build", "flip", "follower_reaction", "margins_of", "observe_parts", "prior_redraw", "truth_parts"]
 
 
 def truth_parts(cfg: SimgenConfig, obs) -> tuple[dict, dict, dict]:
@@ -118,6 +118,7 @@ def _build_corner(cfg: SimgenConfig, ctx: Context, margins: dict, rng) -> World:
         "agent_decel": _u(rng, agent.get("decel", [1.0, 2.0])), "reacts": float(rng.random() < cfg.catalog["crossing_reaction"]["base"][agent["group"]]),
         "react_standoff": _u(rng, cfg.catalog["crossing_reaction"]["standoff"]), "ahead": ahead, "lateral": w,
         "kind": float(list(cfg.domain(ctx.domain)["agents"]["crossing"]).index(ctx.agent_kind)),   # 사후와 같은 번호(분야의 가로지름 섞기)
+        "distracted": float(rng.random() < cfg.catalog["static_avoidance"]["distracted_prior"][agent["group"]]), "static_u": float(rng.random()),
     }  # fmt: skip
     parts = {"side": side, "look_s": round_to(_u(rng, spec["look"]["time"]), 0.1)}
     return World(ctx.scene, ctx.domain, ctx.variant, robot, ctx.agent_kind, None, values, {}, parts=parts)
@@ -180,9 +181,24 @@ def _build_emerging(cfg: SimgenConfig, ctx: Context, margins: dict, rng) -> Worl
     values.update({
         "gap": gap, "side_left": sides[0], "side_right": sides[1], "follow": float(rng.random() < follow_p),
         "t2": _u(rng, cfg.catalog["p6"]["follow_delay"]), "u2": _u(rng, agent["speed"]), "ra2": _u(rng, agent["radius"]),
+        **follower_reaction(cfg, ctx.agent_kind, rng, 1, scalar=True),
     })  # fmt: skip
     at_obs.update(sides=views)
     return World(ctx.scene, ctx.domain, ctx.variant, _make_robot(p, v0), ctx.agent_kind, None, values, at_obs, parts={})
+
+
+def follower_reaction(cfg: SimgenConfig, kind: str, rng, k: int, scalar: bool = False) -> dict:
+    """따라 나오는 둘째 상대의 반응(수정 1 I3 — 가로지름과 같은 규칙): 움직이는 로봇에 늦게라도 서나(갈래의 늦은 반응 확률), 감속·여유,
+    주의가 흐트러졌나(갈래 사전), 멈춘 로봇 앞 실패를 정하는 균등 난수. 사후(p6._emerging)와 닻이 같은 사전을 쓴다."""
+    agent = cfg.agent(kind)
+    group = agent["group"]
+    react = cfg.catalog["crossing_reaction"]["base"][group]
+    distracted = cfg.catalog["static_avoidance"]["distracted_prior"][group]
+    lo_d, hi_d = agent.get("decel", [1.0, 2.0])
+    lo_s, hi_s = cfg.catalog["crossing_reaction"]["standoff"]
+    out = {"reacts2": (rng.random(k) < react).astype(float), "decel2": lo_d + (hi_d - lo_d) * rng.random(k), "standoff2": lo_s + (hi_s - lo_s) * rng.random(k),
+           "distracted2": (rng.random(k) < distracted).astype(float), "static_u2": rng.random(k)}  # fmt: skip
+    return {key: float(v[0]) for key, v in out.items()} if scalar else out
 
 
 def build(cfg: SimgenConfig, ctx: Context, margins: dict, rng) -> World:

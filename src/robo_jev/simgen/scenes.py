@@ -29,7 +29,7 @@ from dataclasses import dataclass, replace
 import numpy as np
 
 from robo_jev.simgen import physics as ph
-from robo_jev.simgen.catalog import GROUPS, INTENTS, SCENE_BODIES, SimgenConfig, reaction_probability, scene_kind, scene_margins
+from robo_jev.simgen.catalog import GROUPS, INTENTS, SCENE_BODIES, SimgenConfig, distraction_probability, reaction_probability, scene_kind, scene_margins
 from robo_jev.simgen.observation import (
     AgentObs,
     ContainerObs,
@@ -241,6 +241,8 @@ def _robot_params(cfg: SimgenConfig, body: str, rng: np.random.Generator, loaded
         p["retract_speed"] = round_to(_u(rng, spec["retract"]["speed"]), 0.05)
     lo, hi = spec["decel"]["moderate"]
     p["_moderate_range"] = (lo * factor, hi * factor)
+    lo, hi = spec["decel"]["hard"]
+    p["_hard_range"] = (lo * factor, hi * factor)
     return p
 
 
@@ -480,6 +482,8 @@ def _build_crossing(cfg, ctx, margins, rng) -> World:
         # 로봇이 자기 줄을 막고 있으면 늦게라도 서나(단서에 묶인 확률; 리뷰 1 질문 4) — 숨은 값
         "reacts": float(react_draw < reaction_probability(cfg, ctx.agent_kind, cue)),
         "react_standoff": _u(rng, cfg.catalog["crossing_reaction"]["standoff"]) * scale,
+        "distracted": float(rng.random() < distraction_probability(cfg, ctx.agent_kind, cue)),
+        "static_u": float(rng.random()),
     }  # fmt: skip
     world = World(ctx.scene, ctx.domain, ctx.variant, _make_robot(p, v0, cruise), ctx.agent_kind, None, values, {"intent_obs": i_obs, "cue": cue, "age": age})
     return _with_margins(cfg, world)

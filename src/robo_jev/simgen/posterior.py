@@ -26,7 +26,7 @@ from statistics import NormalDist
 
 import numpy as np
 
-from robo_jev.simgen.catalog import INTENTS, SimgenConfig, reaction_probability
+from robo_jev.simgen.catalog import INTENTS, SimgenConfig, distraction_probability, reaction_probability
 from robo_jev.simgen.observation import Observation
 from robo_jev.simgen.spec import FILL_BINS, Batch, Reading, fill_bin_index
 
@@ -266,6 +266,9 @@ def _crossing(cfg, obs: Observation, rng, k: int) -> dict[str, np.ndarray]:
         "roll_decel": _roll_decel(cfg, obs, rng, k) if spec["group"] == "ball" else np.zeros(k),
         "reacts": (rng.random(k) < react).astype(float),
         "react_standoff": _uniform(rng, cfg.catalog["crossing_reaction"]["standoff"], k) * scale,
+        # 멈춘(아주 느린) 로봇을 피하는가(수정 1 I3): 주의가 흐트러졌나(단서 또는 갈래 사전), 실패를 정하는 균등 난수
+        "distracted": (rng.random(k) < distraction_probability(cfg, agent.kind, agent.cue)).astype(float),
+        "static_u": rng.random(k),
     }  # fmt: skip
 
 

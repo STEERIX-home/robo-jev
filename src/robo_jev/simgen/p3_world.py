@@ -6,7 +6,8 @@
 
 **결정 여유**(catalog margins) — **관측으로 정해지는 명목값**이다(숨은 값은 그 둘레의 불확실성): tip = (B/2)/(com_mid·H) − r_ref
 (바닥 폭 B와 높이 H는 잰 값의 참값, com_mid = 그 물건 종류의 무게중심 높이 비율 범위의 가운데, 치우침 0; r_ref = 기준 움직임의 쏠림 비 —
-단단한 제동/g, 지금 속도의 v²/(R·g), 보통 출발/g, 보통 경사로 (sin φ + a/g)/cos φ), stop(감속 갈래) = 장애물 면 − 단단한 제동의 멈춤
+최대 제동/g(감속 갈래·P1+P3), 지금 속도의 v²/(R·g), 빠른 출발/g, 보통 경사로 (sin φ + a/g)/cos φ — 핵심 질문이 묻는 움직임과 같다;
+수정 1 I2), stop(감속 갈래) = 장애물 면 − 단단한 제동의 멈춤
 거리, stack = L_low/2 − |d|, spill·step_in은 P5·P1과 같다. 그래서 여유 0 근처의 순간은 정답(사후 확률)도 반반 근처다 — 숨은 무게중심 높이
 비율·앞뒤 치우침·마찰은 닻에서도 속성 목록의 사전에서 뽑는다(받침 표면도 그 몸의 표면 가운데 하나; 미끄러짐은 설계 여유가 아니라 그
 표면의 마찰 사전과 r이 정한다 — 표면이 이산이라 r의 해상도로는 맞출 수 없다). 여유는 로봇 쪽 결정 변수(감속·회전 속도·출발 가속·경사 —
@@ -56,6 +57,8 @@ def truth_parts(cfg: SimgenConfig, obs) -> tuple[dict, dict, dict]:
     geometry: dict = {}
     if obs.load is not None:
         parts["load"] = {"kind": obs.load.kind}
+    if obs.env.start_accels:
+        parts["start_accels"] = dict(obs.env.start_accels)
     if obs.env.turn_radius is not None:
         geometry = {"radius": obs.env.turn_radius, "angle_deg": obs.env.turn_angle_deg, "approach": obs.env.turn_approach.value}
     if obs.scene == "p3_ramp":
@@ -88,16 +91,23 @@ def b_eff(base, off, direction: str):
     return base / 2.0
 
 
-def reference_ratio(robot, scene: str, maneuver: str | None, geometry: dict) -> float:
-    """결정 여유의 기준 움직임의 쏠림 비 r_ref."""
+def reference_ratio(robot, scene: str, maneuver: str | None, geometry: dict, parts: dict | None = None) -> float:
+    """결정 여유의 기준 움직임의 쏠림 비 r_ref — 핵심 질문이 묻는 움직임(:func:`robo_jev.simgen.p3.reference_option`)과 같다.
+
+    감속 갈래·끼어듦(P1+P3)은 **최대 제동**, 출발은 **빠른 출발**이다(수정 1 I2): 단단한 제동(0.10~0.20 g)·보통 출발(≤ 0.2 g)의 쏠림 비로는
+    학습의 높이/바닥 폭 칸(≤ 5) 안의 어떤 물건도 경계에 오지 않아, 닻이 닿을 수 있는 목표만 받아들인 결과 여유 분포가 양수로 쏠렸다(라운드 0
+    학습 세트의 감속 tip 여유 중앙값 +1.5~2.2σ, 핵심 정답이 넘어섬에 좌우됨). 최대 제동(0.15~0.36 g)·빠른 출발은 경계에 닿는다 — 그래서
+    핵심 질문 '최대로 제동하면(빠르게 출발하면) 움직임만으로 넘어지거나 미끄러져 떨어지나'의 여유 0 근처가 정답 반반 근처다.
+    회전은 지금 속도, 경사로는 보통(내려가며 단단한 멈춤 / 올라가며 보통 출발)."""
     if maneuver == "turn":
         return robot.speed**2 / geometry["radius"] / G
     if maneuver == "start":
-        return robot.accel / G
+        return float(parts["start_accels"]["start_quick"]) / G
     if scene == "p3_ramp":
         a = robot.decel_moderate if maneuver == "down" else robot.accel
         return float(ph.incline_ratio(a, math.radians(geometry["angle_deg"])))
-    return robot.decel_moderate / G
+    return robot.decel_hard / G
+
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -275,10 +285,11 @@ def _build_carrying(cfg: SimgenConfig, ctx: Context, margins: dict, rng) -> Worl
     values: dict = {}
     entry_c = None
     if ctx.maneuver == "brake":
-        lo, hi = p["_moderate_range"]
-        decels = _grid(max(lo, p["decel_gentle"] + 0.1), min(hi, p["decel_hard"] - 0.1), 0.1)
+        # 넘어짐 여유의 기준은 최대 제동(reference_ratio) — 그 감속을 글에 보이는 0.1 m/s² 배수에서 물건과 함께 고른다(단단한 제동보다 크게)
+        lo, hi = p["_hard_range"]
+        decels = _grid(max(lo, p["decel_moderate"] + 0.2), hi, 0.1)
         entry, deck, hidden, i_r, inexact = _solve_load(cfg, ctx, decels / G, margins["tip"], rng)
-        p["decel_moderate"] = float(decels[i_r])
+        p["decel_hard"] = float(decels[i_r])
         if ctx.scene == "p3p5_carrying_mixed":
             entry_c, fill = _spill_fill(cfg, ctx, margins["spill"], p["decel_moderate"], rng)
             hidden_c, at_c = _container_hidden(cfg, ctx, entry_c, rng)
@@ -314,7 +325,9 @@ def _build_carrying(cfg: SimgenConfig, ctx: Context, margins: dict, rng) -> Worl
     else:  # start
         cruise = round_to(rng.uniform(*speed_range(cfg, ctx)), body["speed_resolution"])
         accels = _grid(*cfg.catalog["p3"]["start_accel"][ctx.body], 0.05)
-        entry, deck, hidden, i_r, inexact = _solve_load(cfg, ctx, accels / G, margins["tip"], rng)
+        # 넘어짐 여유의 기준은 빠른 출발(reference_ratio) — 보통 출발 가속마다 그 빠른 출발 가속의 쏠림 비에서 고른다
+        quick = np.array([_start_accels(cfg, {**p, "accel": float(a)})["start_quick"] for a in accels])
+        entry, deck, hidden, i_r, inexact = _solve_load(cfg, ctx, quick / G, margins["tip"], rng)
         p["accel"] = float(accels[i_r])
         values.update(hidden)
         robot = _make_robot(p, 0.0, cruise)
@@ -361,15 +374,15 @@ def _build_ramp(cfg: SimgenConfig, ctx: Context, margins: dict, rng) -> World:
 
 
 def _build_step_in_tall(cfg: SimgenConfig, ctx: Context, margins: dict, rng) -> World:
-    """P1+P3(T4 전용): 끼어듦 + 키 큰 물건. step_in 여유는 P1처럼, tip 여유는 단단한 제동의 쏠림 비에서."""
+    """P1+P3(T4 전용): 끼어듦 + 키 큰 물건. step_in 여유는 P1처럼(단단한 제동), tip 여유는 최대 제동의 쏠림 비에서(수정 1 I2)."""
     p = _robot_params(cfg, ctx.body, rng, loaded=True)
     agent = cfg.agent(ctx.agent_kind)
     ra = _u(rng, agent["radius"])
     r_sum = p["radius"] + ra
-    lo, hi = p["_moderate_range"]
-    decels = _grid(max(lo, p["decel_gentle"] + 0.1), min(hi, p["decel_hard"] - 0.1), 0.1)
+    lo, hi = p["_hard_range"]
+    decels = _grid(max(lo, p["decel_moderate"] + 0.2), hi, 0.1)
     entry, deck, hidden, i_r, inexact = _solve_load(cfg, ctx, decels / G, margins["tip"], rng)
-    p["decel_moderate"] = float(decels[i_r])
+    p["decel_hard"] = float(decels[i_r])
     v0, gap = _solve_speed_for_gap(cfg, ctx, p, r_sum, margins["step_in"], p["decel_moderate"], rng)
     values, at_obs = _step_in_agent(cfg, ctx, ra, r_sum, rng)
     views, sides = _sides(cfg, ctx, p["can_sidestep"], rng)
@@ -469,9 +482,9 @@ def margins_of(cfg: SimgenConfig, world: World) -> dict[str, float]:
     for name in scene_margins(world.scene, maneuver if world.scene != "p1p3_step_in_carrying_tall" else None):
         if name == "tip":
             spec = cfg.catalog["loads"][world.parts["load"]["kind"]]
-            out[name] = float(nominal_ratio(spec, v["base"], v["height"])) - reference_ratio(r, world.scene, maneuver, world.geometry)
+            out[name] = float(nominal_ratio(spec, v["base"], v["height"])) - reference_ratio(r, world.scene, maneuver, world.geometry, world.parts)
         elif name == "slide":
-            out[name] = mu_mid(cfg, world.parts["deck"]["kind"]) - reference_ratio(r, world.scene, maneuver, world.geometry)
+            out[name] = mu_mid(cfg, world.parts["deck"]["kind"]) - reference_ratio(r, world.scene, maneuver, world.geometry, world.parts)
         elif name == "stop":
             out[name] = v["obstacle"] - r.radius - ph.stopping_distance(r.speed, r.latency, r.decel_moderate)
         elif name == "spill":
@@ -501,7 +514,7 @@ def flip(cfg: SimgenConfig, world: World, name: str, rng):
     for target in targets:
         changes: dict[str, float] = {}
         if name == "tip":
-            ratio = reference_ratio(r, world.scene, maneuver, world.geometry)
+            ratio = reference_ratio(r, world.scene, maneuver, world.geometry, world.parts)
             if ratio + target <= 0.02:
                 continue
             spec = cfg.catalog["loads"][world.parts["load"]["kind"]]

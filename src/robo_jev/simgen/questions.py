@@ -29,7 +29,8 @@ from robo_jev.simgen.observation import Observation
 from robo_jev.simgen.phrases import ANCHORS, ARM_VERB_KEYS, VERB_KEYS, bank, cap, container_ref, option_descriptions, option_short
 from robo_jev.simgen.spec import Reading
 
-__all__ = ["KEY_STYLES", "LONG_OPTIONS", "Question", "QuestionSet", "Surface", "VOI_SCENES", "candidates", "identity", "impact_possible", "write_questions"]
+__all__ = ["KEY_STYLES", "LONG_OPTIONS", "Question", "QuestionSet", "Surface", "VOI_SCENES", "candidates", "identity", "impact_possible",
+           "impact_possible_load", "write_questions"]
 
 KEY_STYLES = ("word", "code", "verb")
 #: 다시 보기(정보의 가치) 선택지가 있는 장면
@@ -115,7 +116,7 @@ _OPT_NAME = {
     "start_gentle": "gentle_start", "start_normal": "normal_start", "start_quick": "quick_start", "secure_first": "secure_first",
     "ramp_normal": "ramp_normal", "ramp_slow": "ramp_slow", "detour": "detour", "place_now": "place_now", "recentre": "recentre",
     "place_elsewhere": "elsewhere", "check_weight": "check_weight", "press_down": "press", "push_harder": "push", "reseat": "redo",
-    "call_human": "call", "look_again": "look_again",
+    "call_human": "call", "look_again": "look_again", "stop_before": "stop_before",
 }  # fmt: skip
 
 _STEP_IN_SCENES = ("p1_step_in", "p1p5_step_in_carrying", "p1p6_emerging_step_in", "p1p3_step_in_carrying_tall")
@@ -128,6 +129,17 @@ def impact_possible(obs: Observation) -> bool:
     if obs.scene in ("p1p5_step_in_carrying", "p5_braking"):
         return True
     return obs.scene == "p3p5_carrying_mixed" and obs.env.maneuver == "brake"
+
+
+def impact_possible_load(obs: Observation) -> bool:
+    """실은 키 큰 물건이 충돌(멈출 목표를 넘어섬·끼어든 상대·옆 장애물)로 떨어질 수 있는 순간인가(수정 1 I2). 그러면 충돌까지 세는
+    떨어짐(fall)을 묻는 글은 충돌을 밝히고(``*_impact`` 묶음), 움직임만 세는 질문(넘어짐·미끄러짐·fall_motion·미끄러진 거리)은 '충돌은
+    빼고 움직임 자체만'을 덧붙인다. 충돌이 없는 순간(회전·출발·경사로)은 둘이 같아 떨어짐(fall) 하나만 묻는다."""
+    if obs.load is None:
+        return False
+    if obs.scene == "p1p3_step_in_carrying_tall":
+        return True
+    return obs.scene in ("p3_carrying_tall", "p3p5_carrying_mixed") and obs.env.maneuver == "brake"
 
 
 def _entered(agent, arm: bool) -> str:
@@ -370,8 +382,38 @@ def _voi_question(c: _Ctx, options: tuple[str, ...], style: str) -> Question:
 # ----------------------------------------------------------------------------------------------------------------
 
 
-def _noul(c: _Ctx, name: str, key: str, recipe: dict, **extra) -> Question:
-    return Question(name, "noul", c.text(key, **extra), None, {"kind": "noul", **recipe})
+def _noul(c: _Ctx, name: str, key: str, recipe: dict, suffix: str = "", **extra) -> Question:
+    return Question(name, "noul", c.text(key, **extra) + suffix, None, {"kind": "noul", **recipe})
+
+
+def _motion_only(c: _Ctx) -> str:
+    """움직임만 세는 물건 질문의 덧붙임(충돌이 있을 수 있는 순간 — 글이 정답과 같은 것을 묻게, 수정 1 I2)."""
+    if c.lang == "ko":
+        from robo_jev.simgen.phrases_ko import MOTION_ONLY
+
+        return MOTION_ONLY
+    from robo_jev.simgen.phrases import MOTION_ONLY
+
+    return MOTION_ONLY
+
+
+_LOAD_NOULS = {   # 사건 → (묶음 열쇠, 이름 둘, 움직임만인가)
+    "fall": ("noul.fall", ("falls_if", "topples"), True),
+    "fall_motion": ("noul.fall", ("falls_if", "topples"), True),
+    "fall_impact": ("noul.fall_impact", ("knocked_off_if", "comes_off"), False),
+    "tip": ("noul.tip", ("tips_if", "tips_over"), True),
+    "slide": ("noul.slide", ("slides_if", "slips"), True),
+}
+
+
+def _load_noul(c: _Ctx, event: str, option: str) -> Question:
+    """물건 질문 하나(사건 fall·fall_motion·tip·slide, 또는 충돌까지 세는 fall — 이름 'fall_impact'로 부른다)."""
+    impact = impact_possible_load(c.obs)
+    key, names, motion = _LOAD_NOULS[event]
+    recorded = "fall" if event == "fall_impact" else event
+    suffix = _motion_only(c) if (impact and motion) else ""
+    return _noul(c, c.name(f"{names[0]}_{_OPT_NAME[option]}", f"{names[1]}_{_OPT_NAME[option]}"), key,
+                 {"source": "event", "event": recorded, "option": option}, suffix=suffix, **c.action(option))  # fmt: skip
 
 
 def _spill_noul(c: _Ctx, option: str) -> Question:
@@ -384,10 +426,10 @@ def _spill_noul(c: _Ctx, option: str) -> Question:
 
 
 def p3_reference_option(obs: Observation) -> str:
-    """P3의 핵심 noul이 묻는 기준 움직임(결정 여유의 기준 가속과 같은 것)."""
-    if obs.scene == "p3_ramp":
-        return "ramp_normal"
-    return {"brake": "stop_moderate", "turn": "turn_100", "start": "start_normal"}[obs.env.maneuver]
+    """P3의 핵심 noul이 묻는 기준 움직임(결정 여유의 기준 가속과 같은 것 — 감속은 최대 제동, 출발은 빠른 출발; 수정 1 I2)."""
+    from robo_jev.simgen.p3 import reference_option
+
+    return reference_option(obs.scene, obs.env.maneuver)
 
 
 def _key_noul(c: _Ctx) -> Question:
@@ -407,8 +449,9 @@ def _key_noul(c: _Ctx) -> Question:
     if scene == "p5_turning":
         return _spill_noul(c, "turn_100")
     if scene in ("p3_carrying_tall", "p3p5_carrying_mixed", "p3_ramp"):
+        # 핵심 질문 = P3 현상 자체(기준 움직임에서 넘어지거나 미끄러져 떨어지나) — 감속 장면에서도 넘어섬·충돌이 정답을 정하지 않게(수정 1 I2)
         option = p3_reference_option(obs)
-        return _noul(c, c.name(f"falls_if_{_OPT_NAME[option]}", f"topples_{_OPT_NAME[option]}"), "noul.fall", {"source": "event", "event": "fall", "option": option}, **c.action(option))
+        return _load_noul(c, "fall_motion" if impact_possible_load(obs) else "fall", option)
     if scene == "p3_place_stack":
         return _noul(c, c.name("topples_if_placed", "falls_off_stack"), "noul.topple_stack", {"source": "event", "event": "topple", "option": "place_now"}, **c.action("place_now"))
     if scene in ("p4_place_check", "p4p6_stale_check"):
@@ -484,12 +527,14 @@ def _extra_nouls(c: _Ctx, options: tuple[str, ...]) -> list:
                 cands.append(_Cand(_ev("event", "overrun", option), lambda o=option: _noul(
                     c, c.name(f"hit_if_{_OPT_NAME[o]}", f"overrun_{_OPT_NAME[o]}"), "noul.overrun", {"source": "event", "event": "overrun", "option": o}, **c.action(o))))
     if obs.load is not None:
+        impact = impact_possible_load(obs)
+        events = ("fall_motion", "fall_impact", "tip", "slide") if impact else ("fall", "tip", "slide")
         for option in options:
             if option in ("secure_first", "detour"):
                 continue
-            for event, key, names in (("fall", "noul.fall", ("falls_if", "topples")), ("tip", "noul.tip", ("tips_if", "tips_over")), ("slide", "noul.slide", ("slides_if", "slips"))):
-                cands.append(_Cand(_ev("event", event, option), lambda o=option, e=event, k=key, n=names: _noul(
-                    c, c.name(f"{n[0]}_{_OPT_NAME[o]}", f"{n[1]}_{_OPT_NAME[o]}"), k, {"source": "event", "event": e, "option": o}, **c.action(o))))
+            for event in events:
+                recorded = "fall" if event == "fall_impact" else event
+                cands.append(_Cand(_ev("event", recorded, option), lambda o=option, e=event: _load_noul(c, e, o)))
     if obs.stack is not None and "recentre" in options:
         cands.append(_Cand(_ev("event", "topple", "recentre"), lambda: _noul(
             c, c.name("topples_if_recentred", "falls_off_if_recentred"), "noul.topple_stack", {"source": "event", "event": "topple", "option": "recentre"}, **c.action("recentre"))))
@@ -541,8 +586,8 @@ def _delay_reference(c: _Ctx) -> str:
     return "keeping your current speed"
 
 
-def _score(c: _Ctx, names: tuple[str, ...], key: str, anchors: list[str], recipe: dict, **extra) -> Question:
-    return Question(c.name(*names), "score", c.text(key, **extra), anchors, {"kind": "score", **recipe})
+def _score(c: _Ctx, names: tuple[str, ...], key: str, anchors: list[str], recipe: dict, suffix: str = "", **extra) -> Question:
+    return Question(c.name(*names), "score", c.text(key, **extra) + suffix, anchors, {"kind": "score", **recipe})
 
 
 _NO_DELAY = ("continue", "go_now", "turn_100", "place_now", "ramp_normal", "start_quick", "look_again")
@@ -590,10 +635,23 @@ def _score_candidates(c: _Ctx, options: tuple[str, ...]) -> list:
             cands.append(_Cand(_ev("event", "overrun", option), lambda o=option, a=act, s=short: _score(
                 c, (f"overrun_risk_{s}", f"hit_risk_{s}"), "score.overrun", c.anchors("overrun"), {"source": "event", "name": "overrun", "option": o}, **a)))
         if obs.load is not None and option not in ("secure_first", "detour"):
-            cands.append(_Cand(_ev("event", "fall", option), lambda o=option, a=act, s=short: _score(
-                c, (f"fall_risk_{s}", f"topple_risk_{s}"), "score.fall", c.anchors("fall"), {"source": "event", "name": "fall", "option": o}, **a)))
-            cands.append(_Cand(("quantity", "slide_frac", option, None), lambda o=option, a=act, s=short: _score(
-                c, (f"slide_{s}", f"slip_toward_edge_{s}"), "score.slide", c.anchors("slide"), {"source": "quantity", "name": "slide_frac", "option": o}, **a)))
+            if impact_possible_load(obs):
+                # 충돌이 있을 수 있는 순간: 움직임만 세는 떨어짐·미끄러짐(덧붙임)과 충돌까지 세는 떨어짐(글이 충돌을 밝힘)을 따로 묻는다
+                motion = _motion_only(c)
+                cands.append(_Cand(_ev("event", "fall_motion", option), lambda o=option, a=act, s=short, m=motion: _score(
+                    c, (f"fall_risk_{s}", f"topple_risk_{s}"), "score.fall", c.anchors("fall"), {"source": "event", "name": "fall_motion", "option": o},
+                    suffix=m, **a)))  # fmt: skip
+                cands.append(_Cand(_ev("event", "fall", option), lambda o=option, a=act, s=short: _score(
+                    c, (f"knocked_off_risk_{s}", f"comes_off_risk_{s}"), "score.fall_impact", c.anchors("fall_impact"),
+                    {"source": "event", "name": "fall", "option": o}, **a)))  # fmt: skip
+                cands.append(_Cand(("quantity", "slide_frac", option, None), lambda o=option, a=act, s=short, m=motion: _score(
+                    c, (f"slide_{s}", f"slip_toward_edge_{s}"), "score.slide", c.anchors("slide"), {"source": "quantity", "name": "slide_frac", "option": o},
+                    suffix=m, **a)))  # fmt: skip
+            else:
+                cands.append(_Cand(_ev("event", "fall", option), lambda o=option, a=act, s=short: _score(
+                    c, (f"fall_risk_{s}", f"topple_risk_{s}"), "score.fall", c.anchors("fall"), {"source": "event", "name": "fall", "option": o}, **a)))
+                cands.append(_Cand(("quantity", "slide_frac", option, None), lambda o=option, a=act, s=short: _score(
+                    c, (f"slide_{s}", f"slip_toward_edge_{s}"), "score.slide", c.anchors("slide"), {"source": "quantity", "name": "slide_frac", "option": o}, **a)))
         if obs.stack is not None and option in ("place_now", "recentre"):
             cands.append(_Cand(_ev("event", "topple", option), lambda o=option, a=act, s=short: _score(
                 c, (f"topple_risk_{s}", f"falls_off_risk_{s}"), "score.topple_stack", c.anchors("topple"), {"source": "event", "name": "topple", "option": o}, **a)))

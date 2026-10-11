@@ -15,6 +15,7 @@ v0c 미리보기(v0a.1 표본)에서 학습 없는 Qwen이 정답과 반대로 �
 from __future__ import annotations
 
 import re
+from collections import Counter
 from dataclasses import replace
 
 import numpy as np
@@ -118,3 +119,90 @@ def test_gentle_braking_spill_labels_are_impact_spills_and_say_so():
         assert _COLLISION.search(q["instructions"]), q["instructions"]
     means = {o: np.mean([v for opt, v in rows if opt == o]) for o in ("stop_gentle", "stop_moderate", "stop_hard") if any(opt == o for opt, _ in rows)}
     assert len(rows) > 30 and len(means) >= 2
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# 실은 물건의 넘어짐·떨어짐 (수정 1 I2 — 리뷰의 v0b-000106: '넘어지거나 떨어지나'의 정답이 넘어선 충돌을 셌는데 글은 말하지 않았다)
+# ----------------------------------------------------------------------------------------------------------------
+
+_COLLISION_KO = re.compile(r"충돌|부딪")
+_LOAD_WHAT = ("fall", "fall_motion", "tip", "slide", "slide_frac")
+_LOAD_CASES = (("p3_carrying_tall", "brake"), ("p3p5_carrying_mixed", "brake"), ("p3_carrying_tall", "turn"), ("p3_carrying_tall", "start"),
+               ("p3_ramp", None), ("p3p5_carrying_mixed", "turn"))  # fmt: skip
+
+
+@pytest.fixture(scope="module")
+def load_records(cfg):
+    """P3 갈래마다 영어·한국어를 고르게(강제 틀 48개 — 표본에는 감속 장면이 적어서)."""
+    from robo_jev.simgen.catalog import DOMAINS
+    from robo_jev.simgen.generate import generate_record
+
+    out = []
+    for i in range(48):
+        scene, maneuver = _LOAD_CASES[i % len(_LOAD_CASES)]
+        forced = {"scene": scene, "lang": "en" if (i // len(_LOAD_CASES)) % 2 == 0 else "ko"}
+        if maneuver:
+            forced["maneuver"] = maneuver
+        out.append(generate_record(8_800_000 + i, i, DOMAINS[i % len(DOMAINS)], cfg=cfg, forced=forced))
+    return out
+
+
+def _criteria_text(q: dict) -> str:
+    criteria = q.get("criteria")
+    if isinstance(criteria, dict):
+        return " ".join(criteria.values())
+    return " ".join(criteria or [])
+
+
+def test_load_questions_say_whether_a_collision_counts(load_records):
+    """충돌로 떨어질 수 있는 순간(P3·P3+P5 감속): 충돌까지 세는 떨어짐(fall)의 글은 충돌을 밝히고, 움직임만 세는 질문(fall_motion·tip·slide·
+    미끄러진 거리)의 글은 '충돌은 빼고 움직임만'을 붙인다; 충돌이 없는 순간(회전·출발·경사로)의 글은 충돌을 말하지 않는다 — 영어와 한국어."""
+    from robo_jev.simgen import phrases, phrases_ko
+
+    seen = Counter()
+    for record in load_records:
+        meta = record["meta"]
+        ko = meta["language"] == "ko"
+        impact = meta["scene"] in ("p3_carrying_tall", "p3p5_carrying_mixed") and meta.get("maneuver") == "brake"
+        motion_only = (phrases_ko.MOTION_ONLY if ko else phrases.MOTION_ONLY).strip()
+        collision = _COLLISION_KO if ko else _COLLISION
+        for name, q in record["request"]["questions"].items():
+            basis = meta["basis"][name]
+            what = basis.get("event") or basis.get("name")
+            if basis["kind"] not in ("noul", "score") or what not in _LOAD_WHAT:
+                continue
+            text = q["instructions"] + " " + _criteria_text(q)
+            if impact and what == "fall":
+                assert motion_only not in text and collision.search(text), (record["id"], name, text)
+                seen["counts the collision"] += 1
+            elif impact:
+                assert motion_only in q["instructions"], (record["id"], name, text)
+                seen["motion only"] += 1
+            else:
+                assert motion_only not in text and not collision.search(text), (record["id"], name, text)
+                seen["no collision possible"] += 1
+            seen["ko" if ko else "en"] += 1
+    assert seen["counts the collision"] >= 5 and seen["motion only"] >= 15 and seen["no collision possible"] >= 15, seen
+    assert seen["ko"] >= 10 and seen["en"] >= 10, seen
+
+
+def test_motion_only_load_labels_hold_together_within_a_request(load_records):
+    """한 요청 안에서(같은 선택지): P(넘어짐) ≤ P(움직임으로 떨어짐) ≤ P(넘어짐) + P(미끄러짐) — 움직임만 세는 정답에 충돌이 들어가면 마지막
+    부등식이 깨진다(리뷰의 v0b-000106: 넘어짐 0·미끄러짐 0인데 '넘어지거나 떨어지나' 1.0); 그리고 P(움직임으로 떨어짐) ≤ P(충돌까지 센 떨어짐)."""
+    checked = 0
+    for record in load_records:
+        meta = record["meta"]
+        by_option: dict[str, dict[str, float]] = {}
+        for name, basis in meta["basis"].items():
+            if basis["kind"] == "noul" and basis.get("event") in ("tip", "slide", "fall_motion", "fall"):
+                by_option.setdefault(basis["option"], {})[basis["event"]] = record["labels"][name]["p_yes"]
+        for option, p in by_option.items():
+            if "fall_motion" in p:
+                assert p["fall_motion"] >= p.get("tip", 0.0) - 1e-6, (record["id"], option, p)
+                if "tip" in p and "slide" in p:
+                    assert p["fall_motion"] <= p["tip"] + p["slide"] + 1e-6, (record["id"], option, p)
+                    checked += 1
+                if "fall" in p:
+                    assert p["fall_motion"] <= p["fall"] + 1e-6, (record["id"], option, p)
+                    checked += 1
+    assert checked >= 1

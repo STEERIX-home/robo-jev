@@ -25,9 +25,17 @@ from robo_jev.simgen.rollout import STOP_LEVELS, TURN_RATIOS, Outcomes, _add_con
 from robo_jev.simgen.spec import Batch
 from robo_jev.simgen.voi import DiscreteSignal
 
-__all__ = ["available", "exact", "load_events", "rollout", "sample_posterior"]
+__all__ = ["available", "exact", "load_events", "reference_option", "rollout", "sample_posterior"]
 
 G = ph.G
+
+
+def reference_option(scene: str, maneuver: str | None) -> str:
+    """P3의 핵심 noul이 묻는 선택지 — 결정 여유의 기준 움직임(p3_world.reference_ratio)과 같은 것: 감속 갈래는 최대 제동, 출발은 빠른
+    출발(보통 제동·보통 출발로는 학습 범위의 물건이 경계에 오지 않는다 — 수정 1 I2), 회전은 지금 속도, 경사로는 보통."""
+    if scene == "p3_ramp":
+        return "ramp_normal"
+    return {"brake": "stop_hard", "turn": "turn_100", "start": "start_quick"}[maneuver]
 
 
 def available(obs: Observation) -> tuple[str, ...]:
@@ -96,16 +104,19 @@ def sample_posterior(cfg, obs: Observation, k: int, rng: np.random.Generator) ->
 # ----------------------------------------------------------------------------------------------------------------
 
 
-def load_events(batch: Batch, long_acc, dv, direction: str, lat_acc=None, lat_time=None, impact=None, incline: float = 0.0, slow_static=None):
-    """선택지마다 (넘어짐, 미끄러짐, 떨어짐, 미끄러진 거리 비율) 각각 (A, K).
+def load_events(batch: Batch, long_acc, dv, direction: str, lat_acc=None, lat_time=None, impact=None, incline: float = 0.0) -> dict:
+    """선택지마다의 물건 사건 (A, K): ``tip``(넘어짐)·``slide``(미끄러짐)·``fall_motion``(움직임 자체로 넘어지거나 미끄러져 떨어짐)·
+    ``fall``(fall_motion 또는 충돌로 떨어짐 — 비용은 이것), 양 ``slide_frac``(미끄러진 거리 / 가장자리까지 거리).
 
+    넘어짐·미끄러짐·미끄러진 거리는 **움직임 자체**(받침의 가감속·회전)의 결과다 — 충돌은 넣지 않는다(수정 1 I2: 글이 충돌을 말하지 않는
+    질문의 정답에 충돌이 들어가지 않게; 충돌을 세는 질문은 fall을 묻고 글이 충돌을 밝힌다).
     long_acc (A,): 앞뒤 가속의 크기(감속은 앞으로, 출발·오르막은 뒤로 쏠림 — ``direction``), dv (A,): 그 가속으로 바뀌는 속도,
     lat_acc·lat_time (A,): 회전의 옆 가속과 그 지속 시간, impact (A, K): 충돌(그러면 떨어진다), incline: 경사로 기울기(라디안)."""
     b = batch.values
     h = b["com"] * b["height"]
     b_long = b["base"] / 2.0 * (1.0 - b["off"]) if direction == "front" else b["base"] / 2.0 * (1.0 + b["off"])
     edge_long = b["edge_f"] if direction == "front" else b["edge_b"]
-    tip, slide, fall, frac = [], [], [], []
+    tip, slide, fall, motion, frac = [], [], [], [], []
     for i in range(len(long_acc)):
         ratio = float(ph.incline_ratio(long_acc[i], incline)) if (long_acc[i] > 0 or incline > 0) else 0.0
         t_l, s_l = ph.tip_slide(ratio, b["mu"], b_long, h)
@@ -120,18 +131,18 @@ def load_events(batch: Batch, long_acc, dv, direction: str, lat_acc=None, lat_ti
         hit = np.asarray(impact[i], dtype=bool) if impact is not None else np.zeros(batch.size, dtype=bool)
         tip.append(t_l | t_s)
         slide.append(s_l | s_s)
+        motion.append(t_l | t_s | off_l | off_s)
         fall.append(t_l | t_s | off_l | off_s | hit)
         with np.errstate(divide="ignore", invalid="ignore"):
             f_l = np.where(s_l, np.minimum(1.0, d_l / np.maximum(edge_long, 1e-6)), 0.0)
             f_s = np.where(s_s, np.minimum(1.0, d_s / np.maximum(b["edge_s"], 1e-6)), 0.0)
         frac.append(np.maximum(f_l, f_s))
-    return np.array(tip), np.array(slide), np.array(fall), np.array(frac)
+    return {"tip": np.array(tip), "slide": np.array(slide), "fall_motion": np.array(motion), "fall": np.array(fall), "slide_frac": np.array(frac)}
 
 
-def _add_load(cfg, obs: Observation, out: Outcomes, events) -> None:
-    tip, slide, fall, frac = events
-    out.events.update(tip=tip, slide=slide, fall=fall)
-    out.quantities["slide_frac"] = frac
+def _add_load(cfg, obs: Observation, out: Outcomes, events: dict) -> None:
+    out.events.update(tip=events["tip"], slide=events["slide"], fall=events["fall"], fall_motion=events["fall_motion"])
+    out.quantities["slide_frac"] = events["slide_frac"]
     out.cost_items["fall"] = cfg.catalog["loads"][obs.load.kind]["fall"]
 
 
@@ -247,12 +258,12 @@ def _ramp(cfg, obs: Observation, batch: Batch, options) -> Outcomes:
     out.quantities = {"delay": np.array(delay)}
     events = load_events(batch, np.array(long_acc), np.array(dv), "front" if down else "back", incline=phi)
     # 고정 먼저·돌아가기는 물건이 넘어지지 않는다
-    tip, slide, fall, frac = events
     for i, option in enumerate(options):
         if option in ("secure_first", "detour"):
-            tip[i] = slide[i] = fall[i] = False
-            frac[i] = 0.0
-    _add_load(cfg, obs, out, (tip, slide, fall, frac))
+            for name in ("tip", "slide", "fall", "fall_motion"):
+                events[name][i] = False
+            events["slide_frac"][i] = 0.0
+    _add_load(cfg, obs, out, events)
     return out
 
 

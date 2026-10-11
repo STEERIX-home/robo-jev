@@ -154,8 +154,8 @@ def min_distance(xr, yr, xa, ya):
     return np.min(_segment_distances(dx, dy), axis=-1)
 
 
-def first_contact(xr, yr, xa, ya, radius_sum, dt: float):
-    """(닿았나, 처음 닿는 구간의 상대 속도 — 안 닿았으면 0, 최소 거리). 상대 속도는 그 구간의 평균이다."""
+def first_contact(xr, yr, xa, ya, radius_sum, dt: float, with_step: bool = False):
+    """(닿았나, 처음 닿는 구간의 상대 속도 — 안 닿았으면 0, 최소 거리[, 처음 닿는 구간 번호 — 안 닿았으면 −1]). 상대 속도는 그 구간의 평균이다."""
     dx = np.asarray(xa, dtype=float) - np.asarray(xr, dtype=float)
     dy = np.asarray(ya, dtype=float) - np.asarray(yr, dtype=float)
     dx, dy = np.broadcast_arrays(dx, dy)
@@ -165,6 +165,8 @@ def first_contact(xr, yr, xa, ya, radius_sum, dt: float):
     first = np.argmax(touching, axis=-1)
     rel = np.hypot(np.diff(dx, axis=-1), np.diff(dy, axis=-1)) / dt
     speed = np.take_along_axis(rel, first[..., None], axis=-1)[..., 0]
+    if with_step:
+        return hit, np.where(hit, speed, 0.0), seg.min(axis=-1), np.where(hit, first, -1)
     return hit, np.where(hit, speed, 0.0), seg.min(axis=-1)
 
 

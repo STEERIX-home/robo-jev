@@ -22,7 +22,7 @@ from robo_jev.simgen.catalog import default_config
 from robo_jev.simgen.labels import wmean
 from robo_jev.simgen.posterior import exact_labels, sample_posterior
 from robo_jev.simgen.rollout import available_options, rollout
-from robo_jev.simgen.spec import stream
+from robo_jev.simgen.spec import Batch, stream
 from robo_jev.simgen.voi import DiscreteSignal, GaussianSignal
 
 G = ph.G
@@ -92,6 +92,45 @@ def test_a_stronger_motion_tips_every_load_that_a_weaker_one_tips(cfg, seed, dom
         assert np.all(~weaker | stronger)
     if "secure_first" in out.options:
         assert not out.events["fall"][out.index("secure_first")].any()
+
+
+def test_motion_only_load_events_never_count_the_collision(cfg):
+    """수정 1 I2: 넘어짐·미끄러짐·움직임으로 떨어짐(fall_motion)은 받침의 움직임만의 결과다 — 장애물을 아주 가까이 옮겨 모든 멈춤이 넘어서
+    부딪히게 해도 그대로이고, 충돌까지 세는 떨어짐(fall)만 늘어난다(fall = fall_motion ∪ 넘어섬)."""
+    obs, out = _p3_out(cfg, 35, "cafe", scene="p3_carrying_tall", maneuver="brake", body="mobile_base")
+    batch = sample_posterior(cfg, obs, 512, stream(35, "posterior"))
+    near = Batch({**batch.values, "obstacle": np.full(batch.size, obs.robot.radius + 0.02)})
+    out_near = rollout(cfg, obs, near, available_options(obs))
+    for option in ("stop_gentle", "stop_moderate", "stop_hard"):
+        i = out.index(option)
+        assert out_near.events["overrun"][i].all()
+        for name in ("tip", "slide", "fall_motion"):
+            assert np.array_equal(out_near.events[name][i], out.events[name][i]), (option, name)
+        assert np.array_equal(out_near.quantities["slide_frac"][i], out.quantities["slide_frac"][i])
+        assert out_near.events["fall"][i].all()
+        assert np.array_equal(out.events["fall"][i], out.events["fall_motion"][i] | out.events["overrun"][i])
+
+
+def test_the_braking_key_asks_about_the_load_under_the_hardest_stop_not_the_overrun(cfg):
+    """수정 1 I2: P3·P3+P5 감속의 핵심 질문 = 최대로 제동하면 움직임만으로 넘어지거나 미끄러져 떨어지나(결정 여유의 기준 움직임과 같다) —
+    그 정답은 멈출 목표까지의 거리(넘어섬 여유)와 무관하다."""
+    from robo_jev.simgen.generate import assemble, build_moment
+    from robo_jev.simgen.p3_world import reference_ratio
+
+    for seed, scene in ((41, "p3_carrying_tall"), (42, "p3p5_carrying_mixed")):
+        m = build_moment(cfg, seed, "cafe", {"scene": scene, "maneuver": "brake", "body": "mobile_base"})
+        record = assemble(cfg, m, 0)
+        basis = record["meta"]["basis"][record["meta"]["key_question"]]
+        assert (basis["event"], basis["option"]) == ("fall_motion", "stop_hard")
+        world = m.world
+        assert reference_ratio(world.robot, scene, "brake", world.geometry, world.parts) == pytest.approx(world.robot.decel_hard / 9.81, rel=1e-3)
+        obs = m.obs
+        batch = sample_posterior(cfg, obs, 256, stream(seed, "posterior"))
+        options = available_options(obs)
+        far = rollout(cfg, obs, Batch({**batch.values, "obstacle": batch["obstacle"] + 5.0}), options)
+        near = rollout(cfg, obs, Batch({**batch.values, "obstacle": np.full(batch.size, obs.robot.radius + 0.02)}), options)
+        i = far.index("stop_hard")
+        assert np.array_equal(far.events["fall_motion"][i], near.events["fall_motion"][i])
 
 
 def test_fall_contains_tip_and_slides_off_the_edge(cfg):
@@ -202,6 +241,56 @@ def test_p6_closed_forms_match_the_weighted_posterior(cfg, seed, domain, scene, 
     out = rollout(cfg, obs, sample_posterior(cfg, obs, 20_000, stream(seed, "big")), available_options(obs))
     assert event in exact
     assert float(wmean(out.world_events[event], out)) == pytest.approx(exact[event], abs=0.012)
+
+
+def _corner_case(cfg, ahead: float):
+    """사각 모퉁이 손 계산: 로봇 1.0 m/s(반응 0.2 s, 최대 3.0 m/s²), 반지름 0.3; 사람(반지름 0.3, 1.4 m/s)이 가림 끝에서 1.0 m 떨어져 걷다가
+    t_e에 보인다 — 반응하지 않고(reacts 0), 주의가 흐트러졌고, 멈춘 로봇 앞 실패의 균등 난수 static_u."""
+    from dataclasses import replace
+
+    from robo_jev.simgen.spec import Reading
+
+    obs = moment(62, "sidewalk", scene="p6_blind_corner").obs
+    robot = replace(obs.robot, speed=1.0, cruise=1.0, latency=0.2, decel_gentle=1.0, decel_moderate=1.75, decel_hard=3.0, radius=0.3)
+    obs = replace(obs, robot=robot, corner=replace(obs.corner, ahead=Reading(ahead, 0.0, 0.01), lateral=Reading(1.0, 0.0, 0.01)))
+    names = list(cfg.domain(obs.domain)["agents"]["crossing"])
+    person = next(i for i, n in enumerate(names) if cfg.agent(n)["group"] == "person")
+    row = {"lam": 0.2, "t_e": 1.0, "u": 1.4, "ra": 0.3, "agent_decel": 2.0, "reacts": 0.0, "react_standoff": 0.4, "ahead": ahead, "lateral": 1.0,
+           "kind": float(person), "distracted": 1.0, "static_u": 0.0, "emerges": 1.0}  # fmt: skip
+    return obs, row
+
+
+def test_stopping_before_the_corner_never_meets_someone_who_steps_out(cfg):
+    """수정 1 I3: '모퉁이 앞에서 멈추기'는 보고된 모퉁이까지 거리(반응 거리·여유 5 cm를 뺀 만큼) 안에 선다 — 앞면이 사람이 나오는 길에
+    들어가지 않으므로, 나온 사람이 반응하지 않고 주의가 흐트러져 멈춘 로봇에도 걸어 들어오는 세계(static_u = 0)에서도 닿지 않는다.
+    대조: 같은 세계에서 모퉁이 안에 서는 최대 제동(멈춤 거리 0.37 m > 모퉁이까지 0.25 m)은 닿는다."""
+    from dataclasses import replace as replace_robot
+
+    from robo_jev.simgen.p6 import stop_before_decel
+
+    obs, row = _corner_case(cfg, 2.0)
+    rows = [row, {**row, "t_e": 0.2}, {**row, "t_e": 2.5}, {**row, "distracted": 0.0, "static_u": 0.9}]
+    out = rollout(cfg, obs, Batch({k: np.array([r[k] for r in rows], dtype=float) for k in row}), ("stop_before", "continue"))
+    assert not out.events["contact"][out.index("stop_before")].any()
+    # 필요한 감속 1.0²/(2·(2.0 − 0.2 − 0.05)) = 0.29 m/s² < 부드러운 감속 → 부드럽게(더 일찍 선다); 1.2 m에서는 1/(2·0.95) = 0.53 → 그대로
+    assert stop_before_decel(obs.robot, 2.0) == pytest.approx(obs.robot.decel_gentle)
+    assert stop_before_decel(replace_robot(obs.robot, decel_gentle=0.3), 1.2) == pytest.approx(1.0 / (2.0 * 0.95))
+    obs2, row2 = _corner_case(cfg, 0.25)
+    out2 = rollout(cfg, obs2, Batch({k: np.array([v], dtype=float) for k, v in row2.items()}), ("stop_before", "stop_hard"))
+    assert stop_before_decel(obs2.robot, 0.25) == pytest.approx(obs2.robot.decel_hard)   # 최대로도 모자라면 최대로(모퉁이 안에 선다)
+    assert out2.events["contact"][out2.index("stop_hard")].all()
+
+
+def test_someone_stepping_out_walks_around_a_robot_standing_in_the_walkway_unless_distracted_and_close(cfg):
+    """수정 1 I3: 로봇이 최대로 서서(0.37 m) 모퉁이 0.25 m 안쪽의 길에 서 있을 때, 1 s 뒤 나온 사람은 남은 거리 1.6 − 0.6 = 1.0 m에서 그
+    로봇을 처음 본다 — 반응 + 멈춤 거리 1.4 × 0.5 + 1.4²/4 = 1.19 m보다 짧아 '가깝다': 주의면 0.05, 흐트러지면 0.50의 확률로만 부딪힌다
+    (25 %의 '반응하지 않음'은 움직이는 로봇에만)."""
+    obs, row = _corner_case(cfg, 0.25)
+    rows = [{**row, "distracted": 0.0, "static_u": 0.5}, {**row, "distracted": 1.0, "static_u": 0.3}, {**row, "distracted": 1.0, "static_u": 0.7},
+            {**row, "distracted": 0.0, "static_u": 0.03}]  # fmt: skip
+    out = rollout(cfg, obs, Batch({k: np.array([r[k] for r in rows], dtype=float) for k in row}), ("stop_hard",))
+    assert out.events["contact"][0].tolist() == [False, True, False, True]
+    assert np.all(out.aux["contact_robot_speed"][0][[1, 3]] < 0.05)
 
 
 def test_a_stale_spot_cannot_be_hit_once_its_occupant_has_left_or_was_never_there(cfg):

@@ -28,9 +28,11 @@ paraphrase_pool: heldout
 # T4 — 처음 보는 조합: P1+P3(사람이 끼어들 때 키 큰 잔·짐을 실은 로봇). 학습은 P1·P3 단독과 P1+P5·P3+P5를 보지만 이 조합은 보지 않는다.
 groups: [P1+P3]
 
-# T3 — 처음 보는 변수 범위(외삽). 칸마다 관측에서 읽는 변수(var), 그 칸을 갖는 장면, 그리고 잘라 낸 쪽: `above`(값 > cut이 시험 전용) 또는
-# `below`(값 < cut이 시험 전용). cut이 몸별이면 몸마다. 학습은 이 잘라 낸 쪽을 만들 수 없다(생성기가 범위를 좁혀 뽑고, 보고값이 넘으면 다시
-# 뽑는다); T3는 칸 하나를 골라 그 쪽에서 뽑는다.
+# T3 — 처음 보는 변수 범위(외삽). 칸마다 관측에서 읽는 변수(var), 잘라 낸 쪽: `above`(값 > cut이 시험 전용) 또는 `below`(값 < cut이
+# 시험 전용), cut이 몸별이면 몸마다. **학습은 그 변수가 관측되는 모든 장면에서 잘라 낸 쪽을 만들 수 없다**(생성기가 범위를 좁혀 뽑고,
+# 보고값이 넘으면 다시 뽑는다 — 수정 1 I1: 로봇 속도는 로봇 자체의 변수라 P3+P5·P3·P6 장면으로 새고 있었다). `scenes`는 T3가 그 칸의
+# 레코드를 뽑는 장면일 뿐이다. 같은 변수를 쓰는 칸(p1_fast_robot·p5_fast_robot)은 한 물리량이라 같은 쪽·같은 cut이어야 하고 장면 목록이
+# 겹치면 안 된다 — 어기면 holdout.load_holdout이 이 파일을 거절한다.
 ranges:
   - {name: p1_fast_robot, phenomenon: P1, var: robot_speed, side: above, cut: {mobile_base: 1.25, humanoid: 1.0, forklift_amr: 2.1, arm: 0.8},
      scenes: [p1_step_in, p1_crossing, p1_head_on, p1p5_step_in_carrying, p1p6_emerging_step_in]}

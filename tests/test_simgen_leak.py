@@ -30,7 +30,8 @@ HIDDEN_NAMES = (
     "intent", "slosh", "true_", "stay_s", "cross_speed", "cross_accel", "back_speed", "back_decel", "stop_decel", "roll_decel",
     "yield_standoff", "agent_decel", "hurry_factor", "hurry_accel", "aside_speed", "keep_standoff", "side_left", "side_right",
     "intent_obs", "lid_prior", "k_ref", "posterior", "com_ratio", "t_leave", "react_standoff", "state_then", "x_height", "x_tilt", "x_depth",
-    "x_force", "x_lateral", "leave_rate", "emerge_rate", "c_max", "sigma_check", "hazard_per_s", "follow_delay",
+    "x_force", "x_lateral", "leave_rate", "emerge_rate", "c_max", "sigma_check", "hazard_per_s", "follow_delay", "static_u", "reacts2", "standoff2",
+    "distracted2", "fail_close", "distracted_prior",
 )  # fmt: skip
 
 
@@ -79,9 +80,14 @@ def _hidden_only_world(world):
                         ("t_e", lambda x: x + 0.5), ("late", lambda x: x + 0.05), ("t2", lambda x: x + 0.2), ("u2", lambda x: x * 1.1)):  # fmt: skip
         if key in v:
             v[key] = change(v[key])
-    for key in ("present", "emerges", "follow", "changed"):
+    for key in ("present", "emerges", "follow", "changed", "distracted", "distracted2", "reacts2"):
         if key in v:
             v[key] = 1.0 - v[key]
+    # 멈춘 로봇 앞 회피 실패를 정하는 균등 난수·둘째 상대의 감속·여유(수정 1 I3)도 숨은 값이다
+    for key, change in (("static_u", lambda x: (x + 0.37) % 1.0), ("static_u2", lambda x: (x + 0.37) % 1.0), ("decel2", lambda x: x * 1.2),
+                        ("standoff2", lambda x: x + 0.1)):  # fmt: skip
+        if key in v:
+            v[key] = change(v[key])
     if world.scene == "p3_place_stack":
         v["c"] = v["c"] * 0.5 if world.parts.get("cue") else -v["c"]
     if world.scene.startswith("p4"):
