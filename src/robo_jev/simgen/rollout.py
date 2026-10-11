@@ -9,7 +9,7 @@
 ``turn_100`` … ``turn_30``(회전 속도 = 지금 속도의 비율).
 
 결과: 사건(닿음 contact, 옆 장애물 닿음 side_contact, 쏟아짐 spill, 장애물 넘어섬 overrun, 마주 섬 blocked, 액면이 림·뚜껑에 닿음
-rim_reached)은 (A, K) bool, 양(진행 손실 delay 초, 가까움 closeness, 빈 높이 사용 headroom)은 (A, K) float, 닿음·넘어섬의 충격 속도
+rim_reached — 출렁임이나 충돌로)은 (A, K) bool, 양(진행 손실 delay 초, 가까움 closeness, 빈 높이 사용 headroom — 충돌이면 1)은 (A, K) float, 닿음·넘어섬의 충격 속도
 (impact, (A, K) m/s — 충돌 속도에 따른 닿음 비용 기제용), 급제동을 쓰나(hard_brake, (A,)), 선택지와 무관한 세계 사건(world_events)과
 상태(states)는 (K,).
 
@@ -52,6 +52,9 @@ class Outcomes:
     hard_brake: np.ndarray | None = None                        # (A,) 급제동을 쓰는 선택지
     body: str = ""                                              # 비용표의 몸별 값(급제동 비용·v_ref)을 고르려고
     loaded: bool = False
+    weights: np.ndarray | None = None                           # (K,) 세계의 사후 무게(없으면 같은 무게) — Batch.weights
+    voi: object | None = None                                   # 'look_again'의 신호 모형(voi.DiscreteSignal / GaussianSignal)
+    policy: object | None = None                                # 참 세계: 결정 규칙을 정할 사후의 Outcomes(정답 쪽)
 
     def index(self, option: str) -> int:
         return self.options.index(option)
@@ -143,17 +146,21 @@ def _closeness(min_dist: np.ndarray, r_sum: np.ndarray, arm: bool) -> np.ndarray
 
 
 def _container_outcomes(obs: Observation, batch: Batch, options, impact: np.ndarray | None, accels=None):
-    """(spill, headroom, rim_reached) 각각 (A, K) — 정적 근사 + 충격(닿음·넘어섬). rim_reached는 뚜껑과 무관하게 액면이 림에 닿나."""
+    """(spill, headroom, rim_reached) 각각 (A, K) — 정적 근사 + 충격(닿음·옆 장애물·넘어섬).
+
+    세 사건은 같은 뜻의 원인을 센다(v0c 진단의 반대 상관 점검, Task v0b): 충돌이 있으면 액면은 림(뚜껑)까지 친다 — rim_reached는 참,
+    headroom(빈 높이 사용)은 1이고, 뚜껑이 없으면 쏟아진다. 옛 정의는 headroom·rim_reached에서 충돌을 빼서 "멈추지 않고 가면 쏟아짐
+    1.0 / 빈 높이 사용 0.03"처럼 한 요청 안에서 기준 문구('1 = 림에 닿거나 쏟아짐')와 어긋났다."""
     c, r = obs.container, obs.robot
     spill, headroom, rim = [], [], []
     for i, option in enumerate(options):
         a = max_accel(option, r) if accels is None else accels[i]
         rise = ph.liquid_rise(c.diameter, a, batch["k"], batch["tilt"])
         reached = np.asarray(batch["fill"]) * c.height + rise > c.height
-        hit = impact[i] & (batch["lid"] < 0.5) if impact is not None else False
-        spill.append((reached & (batch["lid"] < 0.5)) | hit)
-        rim.append(reached)
-        headroom.append(ph.headroom_used(batch["fill"], c.height, rise))
+        hit = np.asarray(impact[i], dtype=bool) if impact is not None else np.zeros(batch.size, dtype=bool)
+        spill.append((reached | hit) & (batch["lid"] < 0.5))
+        rim.append(reached | hit)
+        headroom.append(np.where(hit, 1.0, ph.headroom_used(batch["fill"], c.height, rise)))
     return np.array(spill), np.array(headroom), np.array(rim)
 
 
@@ -414,4 +421,5 @@ def rollout(cfg: SimgenConfig, obs: Observation, batch: Batch, options=None) -> 
         raise ValueError(obs.scene)
     out = builders[obs.scene](cfg, obs, batch, options)
     out.body, out.loaded = obs.robot.body, obs.robot.loaded
+    out.weights = batch.weights
     return out

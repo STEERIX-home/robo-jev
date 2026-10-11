@@ -34,9 +34,11 @@ def test_option_descriptions_have_at_least_three_paraphrases(seed, domain, force
         assert phrases.option_short(option, obs)
 
 
-def test_instruction_banks_have_three_or_more_variants_per_family():
-    for family, bank in {**phrases.ACTION_INSTRUCTIONS, **phrases.CRITERION_INSTRUCTIONS}.items():
-        assert len(set(bank)) >= 3, family
+def test_instruction_banks_have_three_or_more_variants_per_family_and_a_heldout_pool():
+    """학습 묶음은 셋 이상, 빼 둔 묶음(T2 전용)은 하나 이상이고 학습 묶음과 겹치지 않는다."""
+    for key, entry in phrases.EN.items():
+        assert len(set(entry["train"])) >= 3 or key.startswith("voi."), key
+        assert entry["heldout"] and not set(entry["heldout"]) & set(entry["train"]), key
 
 
 @pytest.mark.parametrize(("seed", "domain", "forced"), MOMENTS)

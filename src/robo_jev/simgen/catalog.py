@@ -42,7 +42,7 @@ __all__ = [
 REPO = Path(__file__).resolve().parents[3]
 CONFIG_DIR = REPO / "configs" / "simgen"
 CATALOG_PATH = CONFIG_DIR / "catalog-v0.2.yaml"
-SKINS_PATH = CONFIG_DIR / "skins-v0.1.yaml"
+SKINS_PATH = CONFIG_DIR / "skins-v0.2.yaml"
 VALUES_PATH = CONFIG_DIR / "values-v0.yaml"
 VALUES_V01_PATH = CONFIG_DIR / "values-v0.1.yaml"
 

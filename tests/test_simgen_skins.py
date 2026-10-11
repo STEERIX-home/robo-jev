@@ -80,7 +80,7 @@ def test_known_incoherent_combinations_never_appear(moments):
             assert not [w for w in FOOD_FORBIDDEN if w in text], (m.seed, text)
         if obs.body == "arm":
             seen_arm += 1
-            assert "battery" not in text, (m.seed, text)
+            assert "battery is at" not in text, (m.seed, text)  # 고정 팔에 배터리 잔량 문구가 없다(전지 공장이라는 상황 글은 된다)
             if obs.container is not None and obs.domain in ("warehouse", "factory", "greenhouse"):
                 assert not any(w in obs.container.phrase for w in ("coffee", "tea", "cocoa")), (m.seed, obs.container.phrase)
             if "fruit-picking" in obs.skin.body_name or "transplanting" in obs.skin.body_name:

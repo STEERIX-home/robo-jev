@@ -24,6 +24,9 @@ from robo_jev.simgen.rollout import Outcomes
 
 __all__ = [
     "uses_exact",
+    "voi_decision",
+    "voi_label",
+    "wmean",
     "action_label",
     "cost_model",
     "costs_for",
@@ -76,8 +79,15 @@ def event_weights(outcomes: Outcomes, model: dict, event: str) -> np.ndarray:
     return weight
 
 
-def world_costs(outcomes: Outcomes, model: dict) -> np.ndarray:
-    """세계마다의 비용 (A, K)."""
+def wmean(values: np.ndarray, outcomes: Outcomes) -> np.ndarray:
+    """마지막 축(세계)의 사후 평균 — 무게가 있으면 무게 평균, 없으면 산술 평균(v0a와 같은 수)."""
+    values = np.asarray(values, dtype=float)
+    if outcomes.weights is None:
+        return values.mean(axis=-1)
+    return np.sum(values * outcomes.weights, axis=-1) / float(np.sum(outcomes.weights))
+
+
+def _base_costs(outcomes: Outcomes, model: dict) -> np.ndarray:
     costs = model["costs"]
     total = costs["delay_per_s"] * outcomes.quantities["delay"]
     for event, item in outcomes.cost_items.items():
@@ -87,9 +97,27 @@ def world_costs(outcomes: Outcomes, model: dict) -> np.ndarray:
     return total
 
 
+def voi_decision(outcomes: Outcomes, model: dict):
+    """'다시 보기' 뒤의 결정 규칙 — 정답의 사후(참 세계면 ``policy``가 가리키는 사후)에서 정한다."""
+    source = outcomes.policy if outcomes.policy is not None else outcomes
+    base = [source.index(o) for o in source.voi.base]
+    return source.voi.decide(_base_costs(source, model)[base], source.weights)
+
+
+def world_costs(outcomes: Outcomes, model: dict) -> np.ndarray:
+    """세계마다의 비용 (A, K). 'look_again'(다시 보기)이 있으면 그 줄은 보는 시간 + 본 뒤의 최선(voi 모듈)."""
+    total = _base_costs(outcomes, model)
+    if outcomes.voi is not None and "look_again" in outcomes.options:
+        base = [outcomes.index(o) for o in outcomes.voi.base]
+        decision = voi_decision(outcomes, model)
+        total = total.copy()
+        total[outcomes.index("look_again")] = model["costs"]["delay_per_s"] * outcomes.voi.time + outcomes.voi.after(total[base], decision)
+    return total
+
+
 def expected_costs(outcomes: Outcomes, model: dict) -> np.ndarray:
-    """선택지마다의 기대 비용 (A,)."""
-    return world_costs(outcomes, model).mean(axis=1)
+    """선택지마다의 기대 비용 (A,) — 사후 평균."""
+    return wmean(world_costs(outcomes, model), outcomes)
 
 
 def _rounded_distribution(probs: dict[str, float]) -> dict[str, float]:
@@ -120,11 +148,13 @@ def action_label(outcomes: Outcomes, keymap: dict[str, str], model: dict, tau: f
 
 
 def _event(outcomes: Outcomes, recipe: dict) -> np.ndarray:
+    """사건(세계마다 0/1, 또는 그 세계에서 일어날 확률 — P4의 행동 결과)."""
     if recipe["source"] == "world":
         values = outcomes.world_events[recipe["event"]]
     else:
         values = outcomes.events[recipe["event"]][outcomes.index(recipe["option"])]
-    return ~values if recipe.get("negate") else values
+    values = np.asarray(values, dtype=float)
+    return 1.0 - values if recipe.get("negate") else values
 
 
 def _exact_key(recipe: dict) -> str:
@@ -136,7 +166,7 @@ def noul_label(outcomes: Outcomes, recipe: dict, exact: dict | None = None) -> d
     if exact and _exact_key(recipe) in exact:
         p = float(exact[_exact_key(recipe)])
         return {"type": "noul", "p_yes": round(1.0 - p if recipe.get("negate") else p, 6)}
-    return {"type": "noul", "p_yes": round(float(np.mean(_event(outcomes, recipe))), 6)}
+    return {"type": "noul", "p_yes": round(float(np.clip(wmean(_event(outcomes, recipe), outcomes), 0.0, 1.0)), 6)}
 
 
 def _quantity(outcomes: Outcomes, recipe: dict) -> np.ndarray:
@@ -147,11 +177,13 @@ def _quantity(outcomes: Outcomes, recipe: dict) -> np.ndarray:
         values = outcomes.quantities[recipe["name"]][i]
     if recipe.get("transform") == "per_3s":
         values = np.clip(values / 3.0, 0.0, 1.0)
+    elif recipe.get("transform") == "per_30s":
+        values = np.clip(values / 30.0, 0.0, 1.0)
     return values
 
 
 def score_label(outcomes: Outcomes, recipe: dict) -> dict:
-    return {"type": "score", "value": round(float(np.clip(np.mean(_quantity(outcomes, recipe)), 0.0, 1.0)), 6)}
+    return {"type": "score", "value": round(float(np.clip(wmean(_quantity(outcomes, recipe), outcomes), 0.0, 1.0)), 6)}
 
 
 def _state_values(outcomes: Outcomes, recipe: dict) -> np.ndarray:
@@ -187,7 +219,7 @@ def state_label(outcomes: Outcomes, recipe: dict, exact: dict | None = None) -> 
         probs = {key: float(sum(dist[int(v)] for v in accepted)) for key, accepted in recipe["options"].items()}
     else:
         values = _state_values(outcomes, recipe)
-        probs = {key: float(np.mean(np.isin(values, accepted))) for key, accepted in recipe["options"].items()}
+        probs = {key: float(wmean(np.isin(values, accepted).astype(float), outcomes)) for key, accepted in recipe["options"].items()}
     return {"type": "choice", "kind": "state", "probabilities": _rounded_distribution(probs)}
 
 
@@ -195,11 +227,23 @@ def rule_label(recipe: dict) -> dict:
     return {"type": "choice", "kind": "rule", "probabilities": {k: (1.0 if k == recipe["answer"] else 0.0) for k in recipe["options"]}}
 
 
+def voi_label(outcomes: Outcomes, recipe: dict, model: dict, tau: float) -> dict:
+    """'다시 볼까' 정답: 지금 정하기 = 지금 가능한 행동(base)의 최소 기대 비용, 먼저 다시 보기 = 'look_again'의 기대 비용(보는 시간 +
+    본 뒤의 최선) — 두 기대 비용의 소프트맥스(행동 choice와 같은 꼴, argmax = 기대 비용 최소)."""
+    ec = expected_costs(outcomes, model)
+    now = min(float(ec[outcomes.index(o)]) for o in recipe["base"])
+    look = float(ec[outcomes.index("look_again")])
+    expected = {key: round(now if canon == "decide_now" else look, 4) for key, canon in recipe["options"].items()}
+    return {"type": "choice", "kind": "action", "probabilities": softmax_probabilities(expected, tau), "expected_cost": expected}
+
+
 def label_for(outcomes: Outcomes, recipe: dict, values_cfg: dict, exact: dict | None = None) -> dict:
     """질문 하나의 정답(조리법 = 질문 생성기의 내부 기록). ``exact`` = 닫힌 꼴 정답(posterior.exact_labels) — 있으면 그 값을 쓴다."""
     kind = recipe["kind"]
     if kind == "action":
         return action_label(outcomes, recipe["options"], _model_for(outcomes, values_cfg, recipe.get("criterion")), values_cfg["tau"])
+    if kind == "voi":
+        return voi_label(outcomes, recipe, _model_for(outcomes, values_cfg, None), values_cfg["tau"])
     if kind == "noul":
         return noul_label(outcomes, recipe, exact)
     if kind == "score":
@@ -219,8 +263,18 @@ def realized(true_outcomes: Outcomes, recipe: dict, values_cfg: dict):
         realized_costs = {key: round(float(per_world[true_outcomes.index(canon)]), 4) for key, canon in recipe["options"].items()}
         best = min(realized_costs, key=realized_costs.get)
         return {"costs": realized_costs, "best": best}
+    if kind == "voi":
+        # 지금 정하기 = 정답의 사후에서 기대 비용이 가장 낮은 지금 행동을 참 세계에서; 먼저 다시 보기 = 사후의 결정 규칙을 참 세계의 신호에
+        model = _model_for(true_outcomes, values_cfg, None)
+        posterior = true_outcomes.policy
+        ec = expected_costs(posterior, model)
+        now_option = min(recipe["base"], key=lambda o: float(ec[posterior.index(o)]))
+        per_world = world_costs(true_outcomes, model)[:, 0]
+        costs = {"decide_now": float(per_world[true_outcomes.index(now_option)]), "look_again": float(per_world[true_outcomes.index("look_again")])}
+        realized_costs = {key: round(costs[canon], 4) for key, canon in recipe["options"].items()}
+        return {"costs": realized_costs, "best": min(realized_costs, key=realized_costs.get)}
     if kind == "noul":
-        return bool(_event(true_outcomes, recipe)[0])
+        return bool(_event(true_outcomes, recipe)[0] >= 0.5)
     if kind == "score":
         return round(float(_quantity(true_outcomes, recipe)[0]), 6)
     if kind == "state":

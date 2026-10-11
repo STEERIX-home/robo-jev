@@ -1,4 +1,8 @@
-# 상황 옷 카드 v0.1 — 분야 10개의 의미 층 (docs/12 §2 ①·§8, Task v0a 지시서 §3.10, 리뷰 1 m1 반영).
+# 상황 옷 카드 v0.2 — 분야 10개의 의미 층 (docs/12 §2 ①·§8, Task v0a 지시서 §3.10, 리뷰 1 m1, Task v0b).
+# v0.2(Task v0b): 새 장면(P3 받침 위 키 큰 물건·경사로·쌓기, P4 놓기·끼우기 확인, P6 오래된 추적·모퉁이·센서 불일치, 조합)의 항목 —
+# loads·ramps·ramp_ends·detours·stack_items·stack_spots·p4_items·corners·conflicts — 와 분야마다 다섯째 상황 하나. **다섯째 상황(과 그
+# 상황의 새 태그만 가진 항목)은 시험 세트 T2 전용이다** — 학습 생성기가 쓰지 못하게 configs/simgen/holdout-v0b.yaml이 막는다.
+# 한국어 문구는 skins-ko-v0.2.yaml(영어 문구 → 한국어).
 #
 # 이 카드가 "LLM이 입히는 의미"다: 누가·어디서·무슨 일을 하나, 어떤 사람·차량·물체가 나오나, 무엇을 들고 있나, 상관없는 사실은
 # 무엇인가. 물리 값은 여기 없다 — 단어는 catalog의 종류(agent kind, container kind)를 통해서만 판단에 영향을 준다(docs/12 §4).
@@ -16,7 +20,7 @@
 #
 # 자리 표시: {container} = 용기 문구, {Ref}/{ref} = 상대를 가리키는 말(대문자로 시작/소문자). 용기 문구에는 목적지를 넣지 않는다
 # ('…for the shift lead' — 과제 문구의 목적지와 부딪힌다). 막힘·가림 문구는 단수다(… is right beside you). 문구를 바꾸면 `version`을 올린다.
-version: skins-v0.1
+version: skins-v0.2
 
 # 몸의 일반 이름과 기본 carry(분야 카드에 없을 때)
 body_names:
@@ -62,6 +66,29 @@ cue_phrases:
     hesitating: ["{Ref} paused for a moment mid-reach.", "{Ref} hesitated briefly."]
     quick_motion: ["{Ref} is moving quickly.", "{Ref} darted forward."]
 
+# Task v0b — 몸별 받침 표면(P3: 키 큰 물건이 서 있는 면; kind = catalog decks — 그 표면의 마찰 범위가 사전이다)
+decks:
+  mobile_base:
+    - {kind: rubber_mat, text: "a rubber anti-slip mat"}
+    - {kind: antislip_tray, text: "a textured anti-slip tray liner"}
+    - {kind: plastic_tray, text: "a smooth plastic tray"}
+    - {kind: steel_tray, text: "bare stainless steel"}
+    - {kind: wood_deck, text: "a wooden carrying board"}
+  humanoid:
+    - {kind: rubber_mat, text: "a rubber-lined tray"}
+    - {kind: antislip_tray, text: "a tray with a grippy liner"}
+    - {kind: plastic_tray, text: "a smooth plastic tray"}
+    - {kind: steel_tray, text: "a polished metal tray"}
+  forklift_amr:
+    - {kind: wood_deck, text: "a wooden pallet"}
+    - {kind: steel_forks, text: "the bare steel forks"}
+    - {kind: rubber_mat, text: "a pallet topped with a rubber anti-slip sheet"}
+# Task v0b — P4+P6: 카메라 측정이 오래된 까닭(몸별)
+stale_camera:
+  arm: ["your own forearm has been blocking the wrist camera since the release", "the cell camera dropped frames while the arm moved away"]
+  humanoid: ["your hand has been in front of the head camera since you let go", "the head camera is still re-focusing after the turn"]
+  forklift_amr: ["the mast has been blocking the fork camera since you lowered the load", "the fork camera is still adjusting to the darker rack bay"]
+
 domains:
   # ------------------------------------------------------------------------------------------------------------
   warehouse:
@@ -75,6 +102,7 @@ domains:
       - {text: "A busy morning in the fulfilment centre; trucks are being loaded.", tags: []}
       - {text: "Inventory week in a cold-storage warehouse.", tags: [cold]}
       - {text: "Peak season at a parcel sorting warehouse.", tags: [parcel]}
+      - {text: "A pharmaceutical distribution centre; a cold-chain shipment is being picked.", tags: [pharma_dc, cold]}
     body_names:
       mobile_base: [{text: "a tote-carrying mobile robot", carry: "on your top deck"}, {text: "a small autonomous delivery cart", carry: "on your cargo deck"}]
       humanoid: ["a humanoid picking robot", "a bipedal warehouse robot"]
@@ -134,6 +162,7 @@ domains:
     occluders: ["a pallet stack", "a rack upright", "a parked pallet jack"]
     blockers: ["a full pallet", "the rack itself", "a row of stacked totes"]
     distractors:
+      - {text: "The cold-chain logger on the pallet is blinking green.", tags: [pharma_dc]}
       - "The overhead lights in this zone are on a motion timer."
       - "A truck is reversing at dock 3, its alarm beeping."
       - "A radio in the break room is playing pop music."
@@ -142,6 +171,34 @@ domains:
       - {text: "The temperature in here is 2 °C.", tags: [cold]}
       - {text: "A parcel jam is being cleared on the sorter.", tags: [parcel]}
 
+    loads:
+      - {kind: box_stack, phrases: ["a stack of three shoe boxes", "a two-high stack of parcels"]}
+      - {kind: water_bottle, phrases: ["a tall bottle of water for the night crew"]}
+      - {kind: paint_tins, phrases: ["a stack of four paint tins"]}
+      - {kind: crate_stack, phrases: ["a three-high stack of plastic crates", "a tall stack of cartons on a pallet"]}
+      - {kind: drum, phrases: ["a part-filled 200-litre drum of oil"]}
+      - {kind: reagent_bottle, phrases: ["a glass bottle of cleaning concentrate"], tags: [pharma_dc]}
+    ramps: ["the ramp down to the loading dock", "the ramp up to the mezzanine goods door", "the sloped floor into the cold store"]
+    ramp_ends: ["the dock door at the bottom", "the marked stop line at the bottom", "the fire door at the foot of the ramp"]
+    detours: ["the goods lift", "the long way round through aisle 3"]
+    stack_items:
+      - {kind: carton, phrases: ["a carton of tinned food", "a carton of bottled sauces"]}
+      - {kind: tote, phrases: ["a full tote of small parts"]}
+      - {kind: parcel, phrases: ["a parcel marked FRAGILE"]}
+      - {kind: pallet_load, phrases: ["a pallet of boxed floor tiles", "a pallet of bagged rice"]}
+    stack_spots: ["the top of the outbound pallet", "the stack on the staging lane", "the top of the cartons on shelf B4"]
+    p4_items:
+      - {kind: shelf_tote, item: "the tote", target: "its slot on the flow rack"}
+      - {kind: rack_pallet, item: "the pallet", target: "the rack beams in bay 12"}
+      - {kind: dolly_load, item: "the stack of crates", target: "the trolley dolly"}
+      - {kind: cartridge, item: "the new label roll", target: "the printer spindle"}
+      - {kind: plug, item: "the scanner", target: "its charging cradle"}
+    corners: ["the end of the rack row", "a stack of pallets at the corner", "the corner of the charging bay"]
+    conflicts:
+      - {cue: dust, phrases: ["dust from a torn bag of cement"]}
+      - {cue: black, phrases: ["a black rubber mat leaning against the rack"]}
+      - {cue: glare, phrases: ["low sun through the open dock door"]}
+      - {cue: glass, phrases: ["the glass wall of the shipping office"]}
   # ------------------------------------------------------------------------------------------------------------
   factory:
     name: factory line
@@ -154,6 +211,7 @@ domains:
       - {text: "An electronics assembly hall; the line is running at full rate.", tags: [electronics]}
       - {text: "A metal-fabrication shop floor during a changeover.", tags: [metal]}
       - {text: "Morning shift at a food-packaging plant.", tags: [food]}
+      - {text: "A battery-module assembly plant on the night shift.", tags: [battery, electronics]}
     body_names:
       mobile_base: [{text: "a parts-delivery AMR", tags: [auto, electronics, metal]}, {text: "an ingredient-delivery AMR", tags: [food]}, {text: "a tugger robot", carry: "on the cart you are towing"}]
       humanoid: ["a humanoid line-assistant robot", {text: "a humanoid robot doing kitting runs", tags: [auto, electronics, metal]}]
@@ -223,6 +281,7 @@ domains:
     occluders: ["a machine guard", "a stack of crates", "a building column"]
     blockers: ["the conveyor frame", "a machine guard", "a parked cart"]
     distractors:
+      - {text: "A cell-formation cabinet is humming behind you.", tags: [battery]}
       - "The line is running at 42 units per hour."
       - "The andon light at station 5 is green."
       - "Shift change is in 20 minutes."
@@ -232,6 +291,38 @@ domains:
       - {text: "The washdown crew is hosing down line 1.", tags: [food]}
       - {text: "Your battery is at 72 %.", bodies: [mobile_base, humanoid, forklift_amr]}
 
+    loads:
+      - {kind: box_stack, phrases: ["a stack of three parts boxes"], tags: [auto, electronics, metal, battery]}
+      - {kind: box_stack, phrases: ["a stack of three boxes of empty tubs"], tags: [food]}
+      - {kind: paint_tins, phrases: ["a stack of primer tins"], tags: [auto, metal]}
+      - {kind: crate_stack, phrases: ["a three-high stack of parts crates", "a tall stack of tote boxes on a pallet"]}
+      - {kind: drum, phrases: ["a part-filled drum of cutting oil"], tags: [auto, metal]}
+      - {kind: drum, phrases: ["a part-filled drum of syrup"], tags: [food]}
+      - {kind: water_bottle, phrases: ["a tall bottle of deionised water"], tags: [electronics, battery]}
+    ramps: ["the ramp up to the mezzanine", "the ramp down to the goods-in bay", "the sloped walkway past the press hall"]
+    ramp_ends: ["the barrier at the bottom", "the marked stop line at the bottom", "the roller door at the foot of the ramp"]
+    detours: ["the freight lift", "the long way round past line 4"]
+    stack_items:
+      - {kind: crate, phrases: ["a crate of fasteners", "a crate of machined brackets"], tags: [auto, metal, electronics, battery]}
+      - {kind: crate, phrases: ["a crate of sealed tubs"], tags: [food]}
+      - {kind: tote, phrases: ["a tote of spare caps", "a tote of cable looms"]}
+      - {kind: pallet_load, phrases: ["a pallet of steel castings", "a pallet of finished housings"]}
+    stack_spots: ["the stack on the line-side rack", "the top of the outgoing crate stack", "the pallet at the end of line 2"]
+    p4_items:
+      - {kind: fixture_part, item: "the housing", target: "the test fixture", tags: [auto, electronics, battery]}
+      - {kind: fixture_part, item: "the bracket", target: "the weld jig", tags: [metal]}
+      - {kind: fixture_part, item: "the lid", target: "the sealing fixture", tags: [food]}
+      - {kind: connector, item: "the harness connector", target: "the module socket", tags: [auto, electronics, battery]}
+      - {kind: dowel_pin, item: "the dowel pin", target: "its hole in the base plate", tags: [auto, metal]}
+      - {kind: tool_bit, item: "the new screwdriver bit", target: "the chuck", tags: [auto, electronics, battery]}
+      - {kind: shelf_tote, item: "the bin", target: "its slot on the line-side rack"}
+      - {kind: rack_pallet, item: "the pallet", target: "the rack beams"}
+    corners: ["the corner of the paint booth", "a machine guard at the junction", "a parked forklift at the corner"]
+    conflicts:
+      - {cue: dust, phrases: ["grinding dust in the air"], tags: [auto, metal]}
+      - {cue: steam, phrases: ["steam from the washdown"], tags: [food]}
+      - {cue: glass, phrases: ["the glass wall of the quality booth"]}
+      - {cue: black, phrases: ["a black anti-static mat hanging from a stand"]}
   # ------------------------------------------------------------------------------------------------------------
   cafe:
     name: café / restaurant
@@ -244,6 +335,7 @@ domains:
       - {text: "A quiet weekday morning in a neighbourhood coffee shop.", tags: []}
       - {text: "Dinner service at a crowded bistro.", tags: []}
       - {text: "Weekend brunch at a family restaurant.", tags: []}
+      - {text: "A late-night ramen bar with a long counter.", tags: [ramen]}
     body_names:
       mobile_base: [{text: "a wheeled serving robot", carry: "on your tray"}, {text: "a tray-carrying delivery robot", carry: "on your tray"}]
       humanoid: ["a humanoid waiter robot", "a humanoid server"]
@@ -302,8 +394,41 @@ domains:
     bench_obstacles: ["the edge of the pickup shelf", "a saucer left on the counter", "the drip tray of the machine"]
     occluders: ["a pillar", "a tall potted plant", "the coat rack"]
     blockers: ["a table", "the pastry case", "a row of chairs"]
-    distractors: ["Soft jazz is playing over the speakers.", "The espresso machine is steaming milk.", "Table 4 has asked for the bill.", "It is raining outside.", "The daily special is pumpkin soup.", "The card reader at the till is beeping."]
+    distractors:
+      - "Soft jazz is playing over the speakers."
+      - "The espresso machine is steaming milk."
+      - "Table 4 has asked for the bill."
+      - "It is raining outside."
+      - "The daily special is pumpkin soup."
+      - "The card reader at the till is beeping."
+      - {text: "Broth is simmering in the big pots behind the counter.", tags: [ramen]}
 
+    loads:
+      - {kind: tall_glass, phrases: ["a tall glass of iced latte", "a tall glass of cola"]}
+      - {kind: glass_bottle, phrases: ["a bottle of red wine", "a glass bottle of sparkling water"]}
+      - {kind: flower_vase, phrases: ["a vase of fresh tulips for the window table"]}
+      - {kind: water_bottle, phrases: ["a tall carafe-style plastic bottle of water"]}
+    ramps: ["the ramp up to the terrace", "the step-free ramp by the entrance", "the ramp down to the cellar bar"]
+    ramp_ends: ["the terrace door at the bottom", "the bar at the foot of the ramp"]
+    detours: ["the service lift", "the long way round through the kitchen"]
+    stack_items:
+      - {kind: crate, phrases: ["a crate of soft-drink bottles"]}
+      - {kind: tote, phrases: ["a tote of clean cups", "a tote of folded napkins"]}
+      - {kind: carton, phrases: ["a carton of oat milk"]}
+    stack_spots: ["the top of the crate stack in the back room", "the stack by the dishwasher"]
+    p4_items:
+      - {kind: cup_saucer, item: "the cup", target: "its saucer on the pickup shelf"}
+      - {kind: cup_saucer, item: "the jug", target: "the warming plate"}
+      - {kind: dish_rack, item: "the tray of cups", target: "the dishwasher rack"}
+      - {kind: portafilter, item: "the portafilter", target: "the group head"}
+      - {kind: cartridge, item: "the water filter", target: "its housing under the counter"}
+      - {kind: meal_tray, item: "the tray", target: "the trolley rails"}
+    corners: ["the corner of the coffee bar", "the kitchen swing door", "a tall menu board"]
+    conflicts:
+      - {cue: glass, phrases: ["the glass door to the terrace"]}
+      - {cue: steam, phrases: ["steam from the dishwasher"]}
+      - {cue: glare, phrases: ["sunlight through the front window"]}
+      - {cue: black, phrases: ["a black chalkboard sign"]}
   # ------------------------------------------------------------------------------------------------------------
   hospital:
     name: hospital corridor
@@ -316,6 +441,7 @@ domains:
       - {text: "Visiting hours on a busy medical floor.", tags: []}
       - {text: "Night shift in an emergency-department corridor.", tags: []}
       - {text: "Afternoon on a geriatric ward.", tags: []}
+      - {text: "A children's ward in the late afternoon.", tags: [paediatric]}
     body_names:
       mobile_base: [{text: "a hospital delivery robot", carry: "in your open top tray"}, {text: "an autonomous medication cart", carry: "on your top shelf"}]
       humanoid: ["a humanoid care-assistant robot", "a humanoid porter robot"]
@@ -360,8 +486,38 @@ domains:
     obstacles: ["a closed fire door", "an empty wheelchair parked in the corridor", "a linen cart left in the middle of the corridor", "a wet-floor sign"]
     occluders: ["a privacy curtain", "a parked bed", "a supply cabinet"]
     blockers: ["a parked bed", "a row of chairs", "a vital-signs monitor on a stand"]
-    distractors: ["A call bell is ringing in room 209.", "The corridor lights are dimmed for the night.", "A PA announcement is asking for a porter to ward 6.", "The hand-sanitiser dispenser next to you is empty.", "Your next delivery is due in 12 minutes.", "There is a faint smell of disinfectant."]
+    distractors:
+      - "A call bell is ringing in room 209."
+      - "The corridor lights are dimmed for the night."
+      - "A PA announcement is asking for a porter to ward 6."
+      - "The hand-sanitiser dispenser next to you is empty."
+      - "Your next delivery is due in 12 minutes."
+      - "There is a faint smell of disinfectant."
+      - {text: "A clown doctor is visiting the playroom.", tags: [paediatric]}
 
+    loads:
+      - {kind: water_bottle, phrases: ["a tall bottle of drinking water", "a jug of water in a tall plastic bottle"]}
+      - {kind: flower_vase, phrases: ["a vase of flowers for a patient"]}
+      - {kind: box_stack, phrases: ["a stack of three boxes of gloves"]}
+      - {kind: reagent_bottle, phrases: ["a glass bottle of disinfectant"]}
+    ramps: ["the ramp down to the radiology wing", "the ramp up to the old building", "the sloped corridor to the day clinic"]
+    ramp_ends: ["the fire door at the bottom", "the double doors at the foot of the ramp"]
+    detours: ["the bed lift", "the long way round past the main entrance"]
+    stack_items:
+      - {kind: carton, phrases: ["a carton of saline bags", "a carton of syringes"]}
+      - {kind: tote, phrases: ["a tote of linen packs"]}
+    stack_spots: ["the stack in the supply room", "the top of the boxes on the storage shelf"]
+    p4_items:
+      - {kind: meal_tray, item: "the meal tray", target: "the rails of the food trolley"}
+      - {kind: sample_tube, item: "the blood tube", target: "the sample rack"}
+      - {kind: capsule, item: "the sample capsule", target: "the pneumatic-tube station"}
+      - {kind: shelf_box, item: "the box of dressings", target: "its shelf slot"}
+      - {kind: plug, item: "the infusion pump", target: "its docking station"}
+    corners: ["the corner by the nurses' station", "a parked bed at the junction", "the corner of the lift lobby"]
+    conflicts:
+      - {cue: glass, phrases: ["a glass partition by the waiting area"]}
+      - {cue: glare, phrases: ["sun through the corridor windows"]}
+      - {cue: black, phrases: ["a black equipment case"]}
   # ------------------------------------------------------------------------------------------------------------
   lab:
     name: laboratory bench
@@ -374,6 +530,7 @@ domains:
       - {text: "A clinical lab processing the morning's samples.", tags: [clinical]}
       - {text: "A biology research lab late in the evening.", tags: [bio]}
       - {text: "A quality-control lab at a pharmaceutical plant.", tags: [pharma]}
+      - {text: "A university physics lab during a student project week.", tags: [physics]}
     body_names:
       mobile_base: [{text: "a lab-supply mobile robot", carry: "on your carrying deck"}, {text: "a sample-transport robot", carry: "in your open sample tray"}]
       arm: ["a liquid-handling robot arm on the lab bench", "a collaborative arm in the sample-prep cell"]
@@ -421,8 +578,37 @@ domains:
     bench_obstacles: ["the edge of the sample rack", "a pipette left on the deck", "the rim of the stir plate"]
     occluders: ["a fume-hood sash", "a shelf of reagent bottles", "the centrifuge"]
     blockers: ["the island bench", "a fridge", "a waste bin"]
-    distractors: ["The fume hood reads normal airflow.", "A centrifuge is spinning down nearby.", "The lab radio is playing quietly.", "The next sample batch is due at 14:30.", "A timer on bench 2 is counting down.", "The room is kept at 21 °C."]
+    distractors:
+      - "The fume hood reads normal airflow."
+      - "A centrifuge is spinning down nearby."
+      - "The lab radio is playing quietly."
+      - "The next sample batch is due at 14:30."
+      - "A timer on bench 2 is counting down."
+      - "The room is kept at 21 °C."
+      - {text: "A laser on the optical table is switched off for alignment.", tags: [physics]}
 
+    loads:
+      - {kind: reagent_bottle, phrases: ["a glass bottle of acetone", "a tall bottle of buffer stock"]}
+      - {kind: glass_bottle, phrases: ["a glass bottle of distilled water"]}
+      - {kind: box_stack, phrases: ["a stack of three boxes of pipette tips"]}
+    ramps: ["the ramp down to the service corridor", "the ramp up to the clean-room airlock"]
+    ramp_ends: ["the airlock door at the bottom", "the marked stop line at the bottom"]
+    detours: ["the service lift", "the long way round through the stores"]
+    stack_items:
+      - {kind: carton, phrases: ["a carton of glass vials", "a box of culture flasks"]}
+      - {kind: tote, phrases: ["a tote of reagent kits"]}
+      - {kind: parcel, phrases: ["a parcel of glassware"]}
+    stack_spots: ["the stack on the storage trolley", "the top of the boxes in the cold room"]
+    p4_items:
+      - {kind: well_plate, item: "the 96-well plate", target: "the reader's plate nest"}
+      - {kind: sample_tube, item: "the sample tube", target: "its slot in the rack"}
+      - {kind: vial_rotor, item: "the vial", target: "its pocket in the centrifuge rotor"}
+      - {kind: cartridge, item: "the tip box", target: "the pipetting deck position"}
+    corners: ["the end of bench row B", "the fume-hood corner", "the cold-room door"]
+    conflicts:
+      - {cue: glass, phrases: ["the glass door of the cold room"]}
+      - {cue: steam, phrases: ["steam from the autoclave"]}
+      - {cue: black, phrases: ["a black bench mat propped against the wall"]}
   # ------------------------------------------------------------------------------------------------------------
   sidewalk:
     name: sidewalk / street
@@ -435,6 +621,7 @@ domains:
       - {text: "A quiet residential street on a Sunday morning.", tags: []}
       - {text: "Outside a train station at rush hour.", tags: []}
       - {text: "A shopping street in light rain.", tags: []}
+      - {text: "A seaside promenade on a windy afternoon.", tags: [promenade]}
     body_names:
       mobile_base: [{text: "a six-wheeled sidewalk delivery robot", carry: "in your open cargo bin"}, {text: "a food-delivery robot", carry: "in your cargo compartment"}]
       humanoid: ["a humanoid courier robot", "a humanoid robot carrying a delivery box"]
@@ -484,8 +671,34 @@ domains:
     obstacles: ["a closed gate", "an e-scooter lying across the path", "a café sign board", "a raised bollard"]
     occluders: ["a parked van", "a bus shelter", "a hedge"]
     blockers: ["the kerb", "a row of parked bicycles", "a shop wall"]
-    distractors: ["A bus is pulling away from the stop.", "Church bells are ringing.", "It started to drizzle a minute ago.", "A shop is playing loud music.", "Your delivery is two minutes ahead of schedule.", "A pigeon flew off the pavement."]
+    distractors:
+      - "A bus is pulling away from the stop."
+      - "Church bells are ringing."
+      - "It started to drizzle a minute ago."
+      - "A shop is playing loud music."
+      - "Your delivery is two minutes ahead of schedule."
+      - "A pigeon flew off the pavement."
+      - {text: "Gulls are circling over the sea wall.", tags: [promenade]}
 
+    loads:
+      - {kind: water_bottle, phrases: ["a tall bottle of water", "a large bottle of soda"]}
+      - {kind: flower_vase, phrases: ["a bouquet in a tall glass vase"]}
+      - {kind: box_stack, phrases: ["a stack of two pizza boxes and a cake box"]}
+    ramps: ["the kerb ramp at the crossing", "the ramp down to the underpass", "the ramp up to the shop entrance"]
+    ramp_ends: ["the kerb at the bottom", "the underpass gate at the bottom"]
+    detours: ["the lift to the underpass", "the long way round via the zebra crossing"]
+    stack_items:
+      - {kind: parcel, phrases: ["a parcel", "a box of groceries"]}
+    stack_spots: ["the parcel already on the doorstep", "the stack of parcels by the door"]
+    p4_items:
+      - {kind: locker_parcel, item: "the parcel", target: "the locker compartment"}
+      - {kind: plug, item: "your charging connector", target: "the street charging post"}
+    corners: ["a parked delivery van", "the corner of the bakery", "a hedge at the driveway"]
+    conflicts:
+      - {cue: glass, phrases: ["a shop's glass door"]}
+      - {cue: glare, phrases: ["low sun straight ahead"]}
+      - {cue: dust, phrases: ["dust from roadworks"]}
+      - {cue: black, phrases: ["a black bin bag"]}
   # ------------------------------------------------------------------------------------------------------------
   home:
     name: home (kitchen / living room)
@@ -498,6 +711,7 @@ domains:
       - {text: "A living room on a rainy Saturday afternoon.", tags: []}
       - {text: "An open-plan apartment in the evening.", tags: []}
       - {text: "A small flat where an older person lives alone.", tags: []}
+      - {text: "A shared student flat on a Sunday evening.", tags: [flat]}
     body_names:
       mobile_base: [{text: "a home-assistant robot on wheels", carry: "on your tray"}, {text: "a small household robot", carry: "on your carrying tray"}]
       humanoid: ["a humanoid home robot", "a household humanoid"]
@@ -551,8 +765,38 @@ domains:
     bench_obstacles: ["the edge of the cutting board", "a jar on the counter", "the rim of the sink"]
     occluders: ["the back of the sofa", "the kitchen island", "an open cupboard door"]
     blockers: ["the wall", "the dining table", "a bookshelf"]
-    distractors: ["The washing machine is on its spin cycle.", "A cartoon is playing on the TV.", "The doorbell rang a minute ago.", "The oven timer shows 8 minutes left.", "It is 7:45 in the morning.", "A cat is asleep on the windowsill."]
+    distractors:
+      - "The washing machine is on its spin cycle."
+      - "A cartoon is playing on the TV."
+      - "The doorbell rang a minute ago."
+      - "The oven timer shows 8 minutes left."
+      - "It is 7:45 in the morning."
+      - "A cat is asleep on the windowsill."
+      - {text: "Someone is cooking instant noodles in the shared kitchen.", tags: [flat]}
 
+    loads:
+      - {kind: flower_vase, phrases: ["a vase of roses", "a tall vase of sunflowers"]}
+      - {kind: glass_bottle, phrases: ["a bottle of olive oil", "a bottle of wine"]}
+      - {kind: tall_glass, phrases: ["a tall glass of milk", "a tall glass of juice"]}
+      - {kind: plant_pot, phrases: ["a potted fern"]}
+    ramps: ["the ramp at the patio door", "the ramp down to the garage", "the threshold ramp into the garden room"]
+    ramp_ends: ["the garage door at the bottom", "the patio at the bottom"]
+    detours: ["the long way round through the hallway"]
+    stack_items:
+      - {kind: carton, phrases: ["a box of books", "a box of kitchen things"]}
+      - {kind: parcel, phrases: ["a parcel of glasses"]}
+    stack_spots: ["the stack of moving boxes in the hall", "the top of the boxes in the storage room"]
+    p4_items:
+      - {kind: dish_rack, item: "the plate", target: "its slot in the dish rack"}
+      - {kind: cup_saucer, item: "the mug", target: "the coaster on the side table"}
+      - {kind: plug, item: "the kettle", target: "its power base"}
+      - {kind: cartridge, item: "the water-filter cartridge", target: "the jug lid"}
+    corners: ["the kitchen doorway", "the end of the sofa", "the hallway corner"]
+    conflicts:
+      - {cue: glass, phrases: ["the glass patio door"]}
+      - {cue: glare, phrases: ["sun through the balcony door"]}
+      - {cue: steam, phrases: ["steam from the kettle"]}
+      - {cue: black, phrases: ["a black leather bag on the floor"]}
   # ------------------------------------------------------------------------------------------------------------
   retail:
     name: store
@@ -565,6 +809,7 @@ domains:
       - {text: "A hardware store an hour before closing.", tags: [hardware]}
       - {text: "A department store during a sale.", tags: [department], bodies: [mobile_base, humanoid]}
       - {text: "A pharmacy with a short queue at the counter.", tags: [pharmacy], bodies: [mobile_base, humanoid]}
+      - {text: "A garden centre on a spring weekend.", tags: [garden, hardware], bodies: [mobile_base, humanoid, forklift_amr]}
     body_names:
       mobile_base: [{text: "an inventory-scanning robot", carry: "on your top deck"}, {text: "a shelf-restocking robot", carry: "on your loading deck"}]
       humanoid: ["a humanoid store-assistant robot", "a humanoid robot stocking shelves"]
@@ -615,6 +860,7 @@ domains:
     occluders: ["a gondola end", "a stack of boxes", "a promotional banner"]
     blockers: ["a freezer cabinet", "a shelf", "a display table"]
     distractors:
+      - {text: "A sprinkler is watering the outdoor plant tables.", tags: [garden]}
       - "A price check was just announced over the PA."
       - "Background music is playing."
       - "The automatic doors keep opening and closing."
@@ -624,6 +870,29 @@ domains:
       - {text: "The paint-mixing machine is shaking a can.", tags: [hardware]}
       - {text: "A customer is asking how long prescriptions take.", tags: [pharmacy]}
 
+    loads:
+      - {kind: paint_tins, phrases: ["a stack of paint tins"], tags: [hardware]}
+      - {kind: water_bottle, phrases: ["a tall bottle of water for the staff room"]}
+      - {kind: box_stack, phrases: ["a stack of three shoe boxes", "a stack of boxed lamps"]}
+      - {kind: plant_pot, phrases: ["a tall potted olive tree"], tags: [garden]}
+      - {kind: crate_stack, phrases: ["a tall stack of drinks crates on a pallet"]}
+    ramps: ["the ramp down to the stock room", "the trolley ramp to the car park", "the ramp up to the mezzanine floor"]
+    ramp_ends: ["the stock-room door at the bottom", "the barrier at the bottom"]
+    detours: ["the goods lift", "the long way round through the stock room"]
+    stack_items:
+      - {kind: carton, phrases: ["a carton of tinned tomatoes", "a box of light bulbs"]}
+      - {kind: tote, phrases: ["a tote of returns"]}
+      - {kind: pallet_load, phrases: ["a pallet of bottled water", "a pallet of compost bags"]}
+    stack_spots: ["the top of the display stack", "the stack in the stock room"]
+    p4_items:
+      - {kind: shelf_box, item: "the box", target: "its place on the top shelf"}
+      - {kind: rack_pallet, item: "the pallet", target: "the rack beams in the stock room"}
+      - {kind: cartridge, item: "the price-label strip", target: "the shelf-edge rail"}
+    corners: ["the end of aisle 7", "a promotional stand at the corner", "the stock-room door"]
+    conflicts:
+      - {cue: glass, phrases: ["the glass doors of a fridge"]}
+      - {cue: glare, phrases: ["light reflecting off the shop window"]}
+      - {cue: black, phrases: ["a black display stand"]}
   # ------------------------------------------------------------------------------------------------------------
   greenhouse:
     name: greenhouse / farm
@@ -636,6 +905,7 @@ domains:
       - {text: "A strawberry polytunnel during harvest.", tags: [strawberry]}
       - {text: "A hydroponic lettuce greenhouse.", tags: [lettuce]}
       - {text: "A nursery greenhouse full of potted seedlings.", tags: [nursery]}
+      - {text: "A vertical-farm room with stacked grow racks.", tags: [vertical, lettuce]}
     body_names:
       mobile_base: [{text: "a greenhouse transport robot", carry: "on your carrying deck"}, {text: "an autonomous harvest cart", carry: "in your crate bay"}]
       humanoid: ["a humanoid farmhand robot", "a humanoid greenhouse worker"]
@@ -689,8 +959,36 @@ domains:
     bench_obstacles: ["the rim of the dosing tray", "a pot on the bench", "the edge of the tray rack"]
     occluders: ["a stack of crates", "a water tank", {text: "a row of tall tomato plants", tags: [tomato]}, {text: "a stack of seedling trays", tags: [nursery]}]
     blockers: ["a heating pipe", {text: "the growing gutter", tags: [tomato, strawberry, lettuce]}, {text: "a seedling bench", tags: [nursery]}, "a stack of crates"]
-    distractors: ["The misting system just switched on.", "The temperature inside is 26 °C.", "The roof vents are opening.", "A radio is playing in the packing shed.", {text: "Bumblebees are working the flowers.", tags: [tomato, strawberry]}, {text: "Row 3 was harvested yesterday.", tags: [tomato, strawberry, lettuce]}, {text: "The seedlings were potted on yesterday.", tags: [nursery]}]
+    distractors:
+      - "The misting system just switched on."
+      - "The temperature inside is 26 °C."
+      - "The roof vents are opening."
+      - "A radio is playing in the packing shed."
+      - {tags: [tomato, strawberry], text: Bumblebees are working the flowers.}
+      - {tags: [tomato, strawberry, lettuce], text: Row 3 was harvested yesterday.}
+      - {tags: [nursery], text: The seedlings were potted on yesterday.}
+      - {text: "The LED grow lights are in their pink night cycle.", tags: [vertical]}
 
+    loads:
+      - {kind: plant_pot, phrases: ["a tall potted tomato plant", "a potted citrus tree"]}
+      - {kind: water_bottle, phrases: ["a tall bottle of plant feed"]}
+      - {kind: box_stack, phrases: ["a stack of three seed-tray boxes"]}
+    ramps: ["the ramp up to the packing shed", "the ramp down to the irrigation room"]
+    ramp_ends: ["the shed door at the bottom", "the marked stop line at the bottom"]
+    detours: ["the long way round past the water tanks"]
+    stack_items:
+      - {kind: crate, phrases: ["a crate of tomatoes", "a crate of lettuce heads"]}
+      - {kind: tote, phrases: ["a tote of seedling plugs"]}
+    stack_spots: ["the stack of crates by the packing line", "the top of the full crates on the trolley"]
+    p4_items:
+      - {kind: pot_tray, item: "the pot", target: "its hole in the growing tray"}
+      - {kind: seedling_plug, item: "the seedling plug", target: "its cell in the tray"}
+      - {kind: hose_fitting, item: "the hose", target: "the quick-connect fitting"}
+    corners: ["the end of row 12", "a stack of crates at the junction", "the water tanks"]
+    conflicts:
+      - {cue: glass, phrases: ["a glass partition"]}
+      - {cue: steam, phrases: ["mist from the misting system"]}
+      - {cue: glare, phrases: ["low sun through the glass roof"]}
   # ------------------------------------------------------------------------------------------------------------
   transit:
     name: airport / train station
@@ -703,6 +1001,7 @@ domains:
       - {text: "A main-line railway-station concourse at rush hour.", tags: [rail]}
       - {text: "A quiet airport gate area late at night.", tags: [airport], bodies: [mobile_base, humanoid]}
       - {text: "The platform level of a metro station.", tags: [rail], bodies: [mobile_base, humanoid]}
+      - {text: "The waiting hall of a ferry terminal.", tags: [ferry], bodies: [mobile_base, humanoid, forklift_amr]}
     body_names:
       mobile_base: [{text: "a guide robot", carry: "on your tray"}, {text: "a luggage-carrying robot", carry: "on your luggage deck"}]
       humanoid: ["a humanoid information robot", "a humanoid porter robot"]
@@ -757,6 +1056,7 @@ domains:
     occluders: ["a pillar", "an advertising display", "a row of luggage lockers"]
     blockers: ["a row of seats", "a ticket machine", "a glass wall"]
     distractors:
+      - {text: "The 16:40 ferry has just started boarding.", tags: [ferry]}
       - "A baby is crying nearby."
       - "The air conditioning is humming loudly."
       - "Your battery is at 48 %."
@@ -764,3 +1064,24 @@ domains:
       - "An announcement asks passengers to keep their luggage with them."
       - {text: "Boarding for flight LH 718 has just been announced.", tags: [airport]}
       - {text: "The departure board shows a 20-minute delay for the 14:05 train.", tags: [rail]}
+    loads:
+      - {kind: water_bottle, phrases: ["a tall bottle of water for a passenger"]}
+      - {kind: flower_vase, phrases: ["a bouquet in a tall vase for the lounge"], tags: [airport]}
+      - {kind: box_stack, phrases: ["a stack of three duty-free boxes"], tags: [airport]}
+      - {kind: crate_stack, phrases: ["a tall stack of parcels on a cart"]}
+    ramps: ["the ramp down to platform 2", "the boarding ramp", "the ramp up to the mezzanine"]
+    ramp_ends: ["the barrier at the bottom", "the platform edge markings at the foot of the ramp"]
+    detours: ["the lift", "the long way round past the ticket office"]
+    stack_items:
+      - {kind: parcel, phrases: ["a suitcase", "a boxed parcel"]}
+      - {kind: pallet_load, phrases: ["a pallet of mailbags"]}
+    stack_spots: ["the top of the luggage stack on the cart", "the stack of boxes in the left-luggage room"]
+    p4_items:
+      - {kind: luggage_rack, item: "the suitcase", target: "the overhead luggage rack"}
+      - {kind: dolly_load, item: "the cargo box", target: "the baggage dolly"}
+      - {kind: plug, item: "the luggage trolley", target: "the trolley rail"}
+    corners: ["a pillar at the junction", "the corner of the ticket office", "a row of luggage lockers"]
+    conflicts:
+      - {cue: glass, phrases: ["a glass barrier"]}
+      - {cue: glare, phrases: ["sun through the concourse windows"]}
+      - {cue: black, phrases: ["a black suitcase"]}

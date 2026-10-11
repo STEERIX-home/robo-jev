@@ -34,9 +34,9 @@ def within(inner, outer) -> bool:
 
 
 def test_config_versions_are_the_current_files(config):
-    """Task v0b: 속성 목록 v0.2(끼어듦 전제 띠, P3·P4·P6), 상황 옷 v0.1, 가치표는 사용자가 고르기 전까지 values-v0."""
+    """Task v0b: 속성 목록 v0.2(끼어듦 전제 띠, P3·P4·P6), 상황 옷 v0.2(새 장면 항목, 분야마다 빼 둔 상황 하나), 가치표는 사용자가 고르기 전까지 values-v0."""
     assert config.catalog["version"] == "catalog-v0.2"
-    assert config.skins["version"] == "skins-v0.1"
+    assert config.skins["version"] == "skins-v0.2"
     assert config.values["version"] == "values-v0"
     assert cat.load_config(values_path=cat.VALUES_V01_PATH).values["version"] == "values-v0.1"
 
