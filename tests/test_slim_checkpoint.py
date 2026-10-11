@@ -141,6 +141,8 @@ R14_SEVEN = (
 #: 상시 규칙(2026-10-09, HANDOFF §5) — Task R14 자신의 세 체크포인트(모든 R14 평가 run이 끝난 뒤 승인 묶음에 더했다).
 R14_OWN = ("artifacts/runs/r14-t1-fp32-2b-s18/checkpoint.pt", "artifacts/runs/r14-t1-fp32-2b-s17/checkpoint.pt",
            "artifacts/runs/r14-t1-fp32-2b-s19/checkpoint.pt")
+#: 상시 규칙 — Task v0d 자신의 시운전 체크포인트(2B LoRA; 학습 전·후 진단 run이 끝난 뒤 더했다).
+V0D_OWN = ("artifacts/runs/v0d/v0d-smoke-lora-2b/checkpoint.pt",)
 
 
 def test_only_the_user_approved_checkpoints_can_be_slimmed_each_under_its_dated_approval(tmp_path):
@@ -148,8 +150,8 @@ def test_only_the_user_approved_checkpoints_can_be_slimmed_each_under_its_dated_
     셋(평가 run이 모두 끝난 뒤에 더했다 — 완주한 run만 대체한다); 승인마다 날짜·근거가 붙은 묶음이다. 목록 밖의 경로는 아무것도 읽기 전에 거절한다."""
     module = script()
     assert [(approval["date"], approval["standing_rule"], approval["paths"]) for approval in module.APPROVALS] == [
-        ("2026-09-29", False, R8_NINE), ("2026-10-09", False, R14_SEVEN), ("2026-10-09", True, R14_OWN)]
-    assert module.APPROVED == R8_NINE + R14_SEVEN + R14_OWN and len(set(module.APPROVED)) == 19
+        ("2026-09-29", False, R8_NINE), ("2026-10-09", False, R14_SEVEN), ("2026-10-09", True, R14_OWN), ("2026-10-09", True, V0D_OWN)]
+    assert module.APPROVED == R8_NINE + R14_SEVEN + R14_OWN + V0D_OWN and len(set(module.APPROVED)) == 20
     assert module.approval_of("artifacts/runs/r14-t1-fp32-2b-s19/checkpoint.pt")["standing_rule"] is True  # 상시 규칙 — 완주한 run만 대체한다
     assert all(path.startswith("artifacts/runs/") and path.endswith(".pt") for path in module.APPROVED)
     assert module.approval_of("artifacts/runs/r12-t1-fp32-2b-s19/checkpoint.pt") == {
@@ -191,10 +193,10 @@ def test_a_standing_rule_checkpoint_is_slimmed_only_when_its_run_completed_and_e
     assert sha256(half) == half_before and load_checkpoint(half)["format"] == CHECKPOINT_FORMAT
     assert all(row["approval"] == {"date": "2026-10-09", "basis": "standing rule (test)", "standing_rule": True} for row in report["files"])
     assert report["failed"] == ["artifacts/runs/half/checkpoint.pt"] and report["replaced"] == 1
-    assert report["approvals"] == [{**approvals[0], "paths": list(approvals[0]["paths"])}] and report["script"] == "slim-checkpoint-1.1"
+    assert report["approvals"] == [{**approvals[0], "paths": list(approvals[0]["paths"])}] and report["script"] == "slim-checkpoint-1.2"
     assert "git" in report and "git_dirty_files" in report  # 저장소 밖(tmp)이라 None이다 — 저장소 안에서는 커밋과 변경 파일 목록
     assert set(report["tool_files_sha256"]) == {"scripts/slim_checkpoint.py", "src/robo_jev/checkpoint.py", "src/robo_jev/train.py",
-                                                "src/robo_jev/harness/model_policy.py"}  # 실행한 코드의 sha256 (tmp에는 없어 None)
+                                                "src/robo_jev/harness/model_policy.py", "src/robo_jev/decisions/train.py"}  # 실행한 코드의 sha256 (tmp에는 없어 None)
 
 
 def test_the_loaded_state_check_compares_what_the_evaluation_loader_put_into_the_model_bit_for_bit():
@@ -224,3 +226,42 @@ def test_the_dirty_file_list_names_each_changed_tracked_file_by_its_full_path(tm
         (tmp_path / name).write_text("x = 2\n", encoding="utf-8")
     (tmp_path / "untracked.txt").write_text("u", encoding="utf-8")
     assert module.dirty_files() == ["scripts/tool.py", "src/model.py"]
+
+
+def test_a_finished_decisions_run_is_slimmed_through_the_diagnosis_loader_and_an_unfinished_one_is_left_alone(tmp_path, monkeypatch):
+    """Task v0d: 판단 학습 체크포인트(kind ``decisions-train-v0``)의 평가 경로 검사는 진단 도구의 적재 함수(`apply_checkpoint`)다 — 같은 seed로
+    다시 만든 소형 기반 모델에 그 파일을 얹고 실린 adapter가 파일과 비트 단위로 같아야 대체한다. 끝나지 않은 run은 상시 규칙대로 그대로 둔다.
+    슬림 파일은 진단 도구가 그대로 싣는다."""
+    from robo_jev.decisions import train as T
+    from robo_jev.decisions.records import read_records
+    from robo_jev.model.backbone_qwen import QwenBackbone, torch_reference_kernels
+    from robo_jev.model.tokenizer import available_tokenizer, load_tokenizer
+
+    module = script()
+    records = read_records(REPO / "tests" / "fixtures" / "decisions" / "requests.jsonl")
+    tokenizer = load_tokenizer(available_tokenizer()[0])
+    base = {"model_id": "tiny", "device": "cpu", "dtype": "float32", "out_dir": str(tmp_path / "artifacts" / "runs" / "v0d"), "batch_examples": 4,
+            "lora": {"r": 4, "alpha": 8, "dropout": 0.0, "targets": ["q_proj", "v_proj"]}, "dev_fraction": 0.0, "dev_every": 0, "lr": 1e-2,
+            "min_free_disk_gb": 0}  # fmt: skip
+    with torch_reference_kernels():
+        T.DecisionTrainer({**base, "run_name": "done"}, records=records, tokenizer=tokenizer, log=None).run()
+        T.DecisionTrainer({**base, "run_name": "half", "epochs": 2, "stop_after_steps": 1}, records=records, tokenizer=tokenizer, log=None).run()
+    done, half = tmp_path / "artifacts/runs/v0d/done/checkpoint.pt", tmp_path / "artifacts/runs/v0d/half/checkpoint.pt"
+    half_before = sha256(half)
+    approvals = ({"date": "2026-10-09", "basis": "standing rule (test)", "standing_rule": True,
+                  "paths": ("artifacts/runs/v0d/done/checkpoint.pt", "artifacts/runs/v0d/half/checkpoint.pt")},)  # fmt: skip
+    monkeypatch.setattr(module, "REPO", tmp_path)
+    monkeypatch.setattr(module, "APPROVALS", approvals)
+    monkeypatch.setattr(module, "APPROVED", approvals[0]["paths"])
+    assert module.main(["run", "--out", str(tmp_path / "report.json")]) == 1
+    report = json.loads((tmp_path / "report.json").read_text(encoding="utf-8"))
+    rows = {row["path"]: row for row in report["files"]}
+    row = rows["artifacts/runs/v0d/done/checkpoint.pt"]
+    assert row["replaced"] is True and row["checks"]["model_bits"]["equal"] and row["checks"]["other_keys"]["equal"]
+    evaluation = row["checks"]["evaluation"]
+    assert evaluation["params_equal"] is True and evaluation["mode"] == "lora" and evaluation["function"].startswith("robo_jev.decisions.train.apply_checkpoint")
+    assert load_model_checkpoint(done)["format"] == MODEL_ONLY_FORMAT
+    assert rows["artifacts/runs/v0d/half/checkpoint.pt"]["replaced"] is False and sha256(half) == half_before
+    fresh = QwenBackbone.tiny(seed=4, vocab_size=tokenizer.get_vocab_size())
+    assert T.apply_checkpoint(fresh, done, tokenizer_sha256=None)["mode"] == "lora"
+
