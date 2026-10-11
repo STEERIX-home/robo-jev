@@ -55,6 +55,7 @@ __all__ = [
     "DecisionsClient",
     "DecisionsError",
     "FORMAT",
+    "Job",
     "KEY_NAME",
     "Ledger",
     "MODELS_URL",
@@ -607,10 +608,10 @@ class DecisionsClient:
             if status == 200:
                 try:
                     parsed = json.loads(data.decode("utf-8"))
-                except (ValueError, UnicodeDecodeError) as error:
-                    raise DecisionsError(redact(f"200 with an unreadable body: {error}", self._key), status=200) from None
+                except (ValueError, UnicodeDecodeError) as error:  # 처리(청구)됐을 수 있다 — 예약액을 불확실한 지출로 남긴다
+                    raise DecisionsError(redact(f"200 with an unreadable body: {error}", self._key), status=200, uncertain=True) from None
                 if not isinstance(parsed, dict):
-                    raise DecisionsError("200 with a non-object body", status=200)
+                    raise DecisionsError("200 with a non-object body", status=200, uncertain=True)
                 return parsed, {"attempts": attempt, "statuses": statuses, "uncertain_attempts": uncertain,
                                 "seconds": round(time.perf_counter() - started, 3)}
             if status in UNCERTAIN_STATUSES:

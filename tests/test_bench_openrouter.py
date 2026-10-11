@@ -223,6 +223,18 @@ def test_choice_probabilities_that_do_not_sum_to_one_are_renormalized():
     assert not problems and sum(answer["probabilities"].values()) == pytest.approx(1.0) and answer["raw_sum"] == pytest.approx(0.99)
 
 
+def test_an_unreadable_200_counts_as_possibly_billed(tmp_path):
+    ledger = Ledger(None, max_total_usd=1.0, max_model_usd=1.0)
+    with FakeServer() as server:
+        def transport(method, url, headers, body, timeout):  # 200이지만 JSON이 아닌 몸
+            return 200, {}, b"<html>oops</html>"
+
+        client = DecisionsClient(Secret(KEY), url=server.url, transport=transport, sleep=lambda s: None)
+        out = run_requests("m", _jobs(_records()[:1], estimate=1e-3), client=client, cache=ResponseCache(tmp_path / "c"), ledger=ledger,
+                           price={}, concurrency=1)
+    assert out["errors"] and ledger.snapshot()["models"]["m"]["uncertain_usd"] == pytest.approx(2e-3)
+
+
 def test_a_200_without_answers_is_not_cached(tmp_path):
     cache = ResponseCache(tmp_path / "cache")
     with FakeServer([(200, {"error": {"code": 502, "message": "Provider returned error"}}, {}, 0)]) as server:
