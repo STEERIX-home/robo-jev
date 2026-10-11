@@ -6,6 +6,7 @@
 # 카트를 미는 사람의 ref는 사람이다(단서 "…에 정신이 팔려 있다"는 사람의 것; 카트에 닿으면 사람 닿음으로 센다).
 #
 # 자리 표시: {container} = 용기 문구, {Ref}/{ref} = 상대를 가리키는 말(대문자로 시작/소문자). 문구를 바꾸면 `version`을 올린다.
+# 용기 문구에는 목적지를 넣지 않는다('…for the shift lead') — 과제 문구의 목적지와 부딪힌다. 막힘·가림 문구는 단수(… is right beside you).
 version: skins-v0
 
 # 몸의 일반 이름(분야 카드에 없을 때)
@@ -110,9 +111,9 @@ domains:
       - {kind: open_tote, content: other, phrases: ["a tote of rinse water"]}
       - {kind: open_tote, content: chemical, phrases: ["a tote of battery-wash solution"]}
       - {kind: shallow_tray, content: other, phrases: ["a drip tray full of condensate"]}
-      - {kind: mug, content: hot, phrases: ["a mug of coffee for the shift lead"]}
-      - {kind: takeaway_cup, content: hot, phrases: ["a paper cup of hot tea from the break room"]}
-      - {kind: beaker_250, content: chemical, phrases: ["a 250 ml sample from a leaking drum"]}
+      - {kind: mug, content: hot, phrases: ["a mug of black coffee"]}
+      - {kind: takeaway_cup, content: hot, phrases: ["a paper cup of hot tea"]}
+      - {kind: beaker_250, content: chemical, phrases: ["a 250 ml beaker of fluid from a leaking drum"]}
     obstacles: ["a pallet left sticking out into the aisle", "the closed roll-up door to the dock", "a stack of empty totes", "a yellow safety barrier"]
     bench_obstacles: ["the side wall of the shipping box", "the edge of the conveyor", "a roll of tape left on the bench"]
     occluders: ["a pallet stack", "a rack upright", "a parked pallet jack"]
@@ -176,7 +177,7 @@ domains:
       - {kind: shallow_tray, content: other, phrases: ["a drip tray of water from the leak test"]}
       - {kind: beaker_250, content: chemical, phrases: ["a 250 ml beaker of epoxy hardener", "a beaker of solder flux"]}
       - {kind: beaker_600, content: chemical, phrases: ["a 600 ml beaker of cleaning solvent"]}
-      - {kind: mug, content: hot, phrases: ["a mug of coffee for the shift supervisor"]}
+      - {kind: mug, content: hot, phrases: ["a mug of coffee"]}
     obstacles: ["a parts cart parked across the lane", "the closed fire door", "a pallet of castings", "the end-of-lane bumper"]
     bench_obstacles: ["the edge of the test rig", "a part sitting on the fixture", "the guard around the dispensing nozzle"]
     occluders: ["a machine guard", "a stack of crates", "a building column"]
@@ -244,7 +245,7 @@ domains:
       - {kind: tall_glass, content: other, phrases: ["a tall glass of iced tea", "a glass of sparkling water"]}
       - {kind: soup_bowl, content: hot, phrases: ["a bowl of tomato soup", "a bowl of hot ramen broth"]}
       - {kind: takeaway_cup, content: hot, phrases: ["a paper cup of chai latte", "a takeaway flat white"]}
-      - {kind: pitcher, content: other, phrases: ["a jug of water for the table", "a pitcher of lemonade"]}
+      - {kind: pitcher, content: other, phrases: ["a jug of iced water", "a pitcher of lemonade"]}
     obstacles: ["a chair someone pushed out into the aisle", "the closed swing door to the kitchen", "a high chair parked at the end of a table", "a wet-floor sign"]
     bench_obstacles: ["the edge of the pickup shelf", "a saucer left on the counter", "the drip tray of the machine"]
     occluders: ["a pillar", "a tall potted plant", "the coat rack"]
@@ -271,7 +272,7 @@ domains:
       mobile_base: ["delivering medication to the nurses' station", "returning empty specimen boxes to the lab", "bringing clean linen to room 8"]
       humanoid: ["taking supplies to the treatment room", "walking a set of patient files to the ward clerk"]
     carry_tasks:
-      mobile_base: ["carrying {container} to room 112", "taking {container} to the sluice room"]
+      mobile_base: ["carrying {container} to room 112", "taking {container} down the corridor to ward 3"]
       humanoid: ["carrying {container} to a patient in bed 4", "bringing {container} to the nurses' station"]
     agents:
       step_in: {adult: 0.45, elder_walker: 0.25, cart: 0.20, other_robot: 0.10}
@@ -294,12 +295,12 @@ domains:
         - {np: "another delivery robot", ref: "the other robot"}
         - {np: "a UV-disinfection robot", ref: "the disinfection robot"}
     containers:
-      - {kind: tall_glass, content: other, phrases: ["a glass of water for a patient", "a cup of diluted juice"]}
+      - {kind: tall_glass, content: other, phrases: ["a glass of water", "a cup of diluted juice"]}
       - {kind: soup_bowl, content: hot, phrases: ["a bowl of hot broth on a meal tray", "a bowl of porridge"]}
       - {kind: specimen_cup, content: chemical, phrases: ["a urine specimen cup", "a specimen cup of wound-irrigation fluid"]}
       - {kind: basin, content: other, phrases: ["a wash basin of warm water", "a basin of saline"]}
-      - {kind: pitcher, content: other, phrases: ["a jug of water for the ward"]}
-      - {kind: mug, content: hot, phrases: ["a mug of tea for the night nurse"]}
+      - {kind: pitcher, content: other, phrases: ["a jug of drinking water"]}
+      - {kind: mug, content: hot, phrases: ["a mug of tea"]}
     obstacles: ["a closed fire door", "an empty wheelchair parked in the corridor", "a linen cart left in the middle of the corridor", "a wet-floor sign"]
     occluders: ["a privacy curtain", "a parked bed", "a supply cabinet"]
     blockers: ["a parked bed", "a row of chairs", "a vital-signs monitor on a stand"]
@@ -414,7 +415,7 @@ domains:
       - {kind: tall_glass, content: other, phrases: ["a smoothie in a clear cup", "an iced latte in a clear cup"]}
     obstacles: ["a closed gate", "an e-scooter lying across the path", "a café sign board", "a raised bollard"]
     occluders: ["a parked van", "a bus shelter", "a hedge"]
-    blockers: ["the kerb and the road", "a row of parked bicycles", "a shop wall"]
+    blockers: ["the kerb", "a row of parked bicycles", "a shop wall"]
     distractors: ["A bus is pulling away from the stop.", "Church bells are ringing.", "It started to drizzle a minute ago.", "A shop is playing loud music.", "Your delivery is two minutes ahead of schedule.", "A pigeon flew off the pavement."]
 
   # ------------------------------------------------------------------------------------------------------------
@@ -503,7 +504,7 @@ domains:
       forklift_amr: ["moving a pallet of bottled drinks to aisle 2", "returning an empty pallet to the stock room"]
     carry_tasks:
       mobile_base: ["carrying {container} to the staff room", "bringing {container} to the customer-service desk"]
-      humanoid: ["carrying {container} to a customer at the deli counter", "bringing {container} to the cashier"]
+      humanoid: ["carrying {container} to the staff room", "bringing {container} to the back of the store"]
       forklift_amr: ["moving {container} on a pallet to the cleaning area", "taking {container} to the loading bay"]
     agents:
       step_in: {adult: 0.45, child: 0.20, cart: 0.25, elder_walker: 0.10}
@@ -526,14 +527,14 @@ domains:
         - {np: "a floor-scrubbing robot", ref: "the scrubber"}
         - {np: "another inventory robot", ref: "the other robot"}
     containers:
-      - {kind: takeaway_cup, content: hot, phrases: ["a sample cup of coffee from the demo stand", "a cup of hot soup from the deli counter"]}
-      - {kind: bucket, content: other, phrases: ["a mop bucket", "a bucket of water for the flower display"]}
+      - {kind: takeaway_cup, content: hot, phrases: ["a sample cup of coffee", "a paper cup of hot soup"]}
+      - {kind: bucket, content: other, phrases: ["a mop bucket", "a bucket of water"]}
       - {kind: bucket, content: chemical, phrases: ["a bucket of floor-cleaning concentrate"]}
-      - {kind: shallow_tray, content: other, phrases: ["a drip tray from the freezer cabinet"]}
+      - {kind: shallow_tray, content: other, phrases: ["a drip tray of meltwater"]}
       - {kind: deli_tub, content: hot, phrases: ["a tub of hot mac and cheese"]}
     obstacles: ["a pallet of stock left in the aisle", "a promotional stand", "the closed stock-room door", "a wet-floor sign"]
     occluders: ["a gondola end", "a stack of boxes", "a promotional banner"]
-    blockers: ["the freezer cabinets", "a shelf", "a display table"]
+    blockers: ["a freezer cabinet", "a shelf", "a display table"]
     distractors: ["A price check was just announced over the PA.", "Background music is playing.", "Aisle 3 has a two-for-one offer on pasta.", "The automatic doors keep opening and closing.", "There is a queue at checkout 4.", "Your battery is at 55 %."]
 
   # ------------------------------------------------------------------------------------------------------------
@@ -587,7 +588,7 @@ domains:
       - {kind: shallow_tray, content: other, phrases: ["a seedling tray standing in water"]}
       - {kind: beaker_600, content: chemical, phrases: ["a beaker of mixed fertiliser solution"]}
       - {kind: beaker_250, content: chemical, phrases: ["a 250 ml beaker of pH-adjusting acid"]}
-      - {kind: mug, content: hot, phrases: ["a mug of tea for the grower"]}
+      - {kind: mug, content: hot, phrases: ["a mug of tea"]}
     obstacles: ["a stack of empty crates", "a hose reel", "a closed sliding door", "a parked trolley"]
     bench_obstacles: ["the rim of the crate", "a pot on the bench", "the edge of the tray rack"]
     occluders: ["a row of tall tomato plants", "a stack of crates", "a water tank"]
@@ -644,13 +645,13 @@ domains:
         - {np: "another guide robot", ref: "the other robot"}
         - {np: "a floor-cleaning robot", ref: "the cleaning robot"}
     containers:
-      - {kind: takeaway_cup, content: hot, phrases: ["a coffee for a passenger", "a paper cup of hot tea"]}
-      - {kind: tall_glass, content: other, phrases: ["a glass of orange juice from the lounge bar", "a glass of sparkling water"]}
-      - {kind: mug, content: hot, phrases: ["a mug of hot chocolate from the lounge"]}
-      - {kind: soup_bowl, content: hot, phrases: ["a bowl of noodle soup from the food court"]}
+      - {kind: takeaway_cup, content: hot, phrases: ["a paper cup of black coffee", "a paper cup of hot tea"]}
+      - {kind: tall_glass, content: other, phrases: ["a glass of orange juice", "a glass of sparkling water"]}
+      - {kind: mug, content: hot, phrases: ["a mug of hot chocolate"]}
+      - {kind: soup_bowl, content: hot, phrases: ["a bowl of noodle soup"]}
       - {kind: open_tote, content: chemical, phrases: ["a tote of de-icing fluid"]}
       - {kind: bucket, content: other, phrases: ["a bucket of mop water"]}
     obstacles: ["a queue-barrier tape", "a closed glass door", "an unattended suitcase", "a cleaning sign"]
     occluders: ["a pillar", "an advertising display", "a row of luggage lockers"]
-    blockers: ["a row of seats", "the ticket machines", "a glass wall"]
+    blockers: ["a row of seats", "a ticket machine", "a glass wall"]
     distractors: ["Boarding for flight LH 718 has just been announced.", "The departure board shows a 20-minute delay for the 14:05 train.", "A baby is crying nearby.", "The air conditioning is humming loudly.", "Your battery is at 48 %.", "A group of tourists is taking photos."]

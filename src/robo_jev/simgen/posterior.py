@@ -3,7 +3,8 @@
 **관측만 받는다** — 세계 모듈을 import하지 않는다(누출 금지; 시험이 이 모듈의 import를 검사한다).
 
 * 관측된 수치는 관측값 주변 정규분포(감각 잡음 σ와 보고 반올림을 합친 ``Reading.sigma_eff``; 국소적으로 평평한 사전).
-  값의 범위가 물리적으로 막힌 것(속도 ≥ 0, 채움 ∈ (0, 1])은 잘린 정규분포(역누적분포)로 뽑는다.
+  값의 범위가 물리적으로 막힌 속도(≥ 0)는 잘린 정규분포(역누적분포)로 뽑는다. 채움은 보고가 거친 구간(말 구간 또는 5 % 반올림)이고
+  날 추정값이 [0, 1]로 잘려 보고되므로, 평평한 사전 × 정확한 구간 가능도로 뽑는다(:func:`_fill_posterior`).
 * 관측 안 된 값(상대의 반지름, 의도별 움직임 매개변수, 출렁임 계수, 바닥 기울기, 공의 구름 저항, 가려진 쪽의 장애물, 보이지 않는 뚜껑)은
   속성 목록·분야 카드의 사전 분포에서 뽑는다.
 * 이산 의도는 단서 가능도로 베이즈 갱신한다: P(지금 의도 | 단서, 나이) = (1 − q)·P(의도 | 단서) + q·사전, q = 1 − e^{−λ·나이}
@@ -21,7 +22,7 @@ import numpy as np
 
 from robo_jev.simgen.catalog import INTENTS, SimgenConfig
 from robo_jev.simgen.observation import Observation
-from robo_jev.simgen.spec import Batch, Reading
+from robo_jev.simgen.spec import FILL_BINS, Batch, Reading, fill_bin_index
 
 __all__ = ["intent_posterior", "sample_posterior"]
 
@@ -99,9 +100,45 @@ def _intents(cfg, obs: Observation, family: str, rng, k: int) -> np.ndarray:
     return _categorical(rng, intent_posterior(cfg, agent.kind, family, agent.cue, agent.age), k)
 
 
+_FILL_GRID = np.linspace(0.02, 1.0, 981)
+
+
+def _std_cdf(x: np.ndarray) -> np.ndarray:
+    """표준정규 누적분포(벡터) — erf의 Abramowitz–Stegun 7.1.26 근사(오차 < 1.5e-7)."""
+    z = np.abs(x) / math.sqrt(2.0)
+    t = 1.0 / (1.0 + 0.3275911 * z)
+    poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))))
+    erf = 1.0 - poly * np.exp(-z * z)
+    return 0.5 * (1.0 + np.sign(x) * erf)
+
+
+def _fill_interval(c) -> tuple[float, float]:
+    """보고된 채움이 뜻하는 날 추정값의 구간. 날 추정값은 [0, 1]로 잘려 보고되므로 맨 위·맨 아래 구간은 끝이 열려 있다(검열)."""
+    if c.fill_mode == "phrase":
+        lo, hi, _ = FILL_BINS[fill_bin_index(c.fill.value)]
+    else:
+        lo, hi = c.fill.value - c.fill.resolution / 2.0, c.fill.value + c.fill.resolution / 2.0
+    return (-math.inf if lo <= 0.0 else lo), (math.inf if hi >= 1.0 else hi)
+
+
+def _fill_posterior(rng: np.random.Generator, c, k: int) -> np.ndarray:
+    """채움의 사후 표본: 평평한 사전 × 정확한 구간 가능도 P(f + σz ∈ [lo, hi)) — 격자 위 역누적분포.
+
+    보고를 구간 가운데의 정규 관측으로 보면(σ_eff) 잘린 맨 위('full to the brim', 100 %)에서 사후가 아래로 끌린다 — 가득 찬 용기의 쏟아짐
+    확률이 체계적으로 낮게 나온다(스모크 실측: 열린 용기 정답 평균 0.39 대 실제 0.52). 같은 난수 u면 보고가 클수록 표본이 크다(단조 결합)."""
+    lo, hi = _fill_interval(c)
+    sigma = c.fill.sigma
+    upper = np.ones_like(_FILL_GRID) if math.isinf(hi) else _std_cdf((hi - _FILL_GRID) / sigma)
+    lower = np.zeros_like(_FILL_GRID) if math.isinf(lo) else _std_cdf((lo - _FILL_GRID) / sigma)
+    weight = np.clip(upper - lower, 0.0, None)
+    cdf = np.cumsum(weight)
+    cdf = cdf / cdf[-1]
+    return np.interp(rng.random(k), cdf, _FILL_GRID)
+
+
 def _container(cfg: SimgenConfig, obs: Observation, rng, k: int) -> dict[str, np.ndarray]:
     c = obs.container
-    fill = _truncated_normal(rng, c.fill.value, c.fill.sigma_eff, k, lo=0.02, hi=1.0)
+    fill = _fill_posterior(rng, c, k)
     slosh = _uniform(rng, cfg.catalog["slosh_k"], k)
     tilt = np.radians(rng.normal(0.0, cfg.domain(obs.domain)["tilt_sd_deg"], k))
     lid_draw = rng.random(k)

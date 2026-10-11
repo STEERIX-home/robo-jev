@@ -78,7 +78,15 @@ class _Ctx:
 
     def fmt(self, text: str, **extra) -> str:
         ref_bare = self.ref[4:] if self.ref.startswith("the ") else self.ref
-        values = {"ref": self.ref, "Ref": cap(self.ref), "cref": self.cref, "obstacle": self.obstacle, "ref_bare": ref_bare, **extra}
+        agent = self.obs.agent
+        arm = self.obs.body == "arm"
+        values = {
+            "ref": self.ref, "Ref": cap(self.ref), "cref": self.cref, "obstacle": self.obstacle, "ref_bare": ref_bare,
+            "lane": "the tool's path" if arm else "your lane",
+            "poss": "their" if agent is not None and agent.group == "person" else "its",
+            "entered": "has rolled into" if agent is not None and agent.group == "ball" else ("has just reached into" if arm else "has just stepped into"),
+            **extra,
+        }  # fmt: skip
         return text.format(**values)
 
     def pick(self, items):
@@ -184,13 +192,13 @@ def _key_noul(c: _Ctx) -> Question:
     if obs.scene == "p1_crossing":
         if obs.variant == "stopped":
             templates = [
-                "If you start now and {ref} keeps its current pace, will you be across {ref}'s line at least 0.3 s before {ref} reaches your path?",
+                "If you start now and {ref} keeps {poss} current pace, will you be across {ref}'s line at least 0.3 s before {ref} reaches your path?",
                 "Going right away, do you clear the crossing with at least 0.3 s to spare, assuming {ref} does not change pace?",
                 "If you move off now, would you be past the crossing line at least 0.3 s ahead of {ref} (both at constant pace)?",
             ]
         else:
             templates = [
-                "If you keep your speed and {ref} keeps its current pace, will you be clear of {ref}'s line at least 0.3 s before {ref} reaches your path?",
+                "If you keep your speed and {ref} keeps {poss} current pace, will you be clear of {ref}'s line at least 0.3 s before {ref} reaches your path?",
                 "Keeping your speed, do you get across {ref}'s line with at least 0.3 s to spare, assuming {ref} does not change pace?",
                 "At constant speeds on both sides, would you clear the crossing at least 0.3 s ahead of {ref}?",
             ]
@@ -245,7 +253,7 @@ def _extra_nouls(c: _Ctx, options: tuple[str, ...]) -> list:
             ], {"source": "world", "event": "ball_stops_in_lane"}))  # fmt: skip
         else:
             cands.append(lambda: _noul(c, c.name("still_in_lane_2s", "in_path_in_2s"), [
-                "Will {ref} still be in your lane 2 seconds from now?", "Two seconds from now, is {ref} still inside your path?",
+                "Will {ref} still be in {lane} 2 seconds from now?", "Two seconds from now, is {ref} still inside {lane}?",
                 "Is {ref} going to be in your way 2 s from now?",
             ], {"source": "world", "event": "in_lane_2s"}))  # fmt: skip
         if obs.env.sides is not None:
@@ -378,7 +386,7 @@ def _state_candidates(c: _Ctx, style: str) -> list:
             criteria, keymap = _choice(c, [_STATE_KEYS[i] for i in intents], [cap(t) for t in texts], style, "s")
             options = {key: [float(intents.index(_inverse_state(val)))] for key, val in keymap.items()}
             instructions = c.fmt(c.pick(["What will {ref} most likely do in the next few seconds?", "Which best describes what {ref} is about to do?",
-                                         "Predict {ref}'s next move."]))  # fmt: skip
+                                         "Predict what {ref} will do next."]))  # fmt: skip
             return Question(c.name("their_next_move", "likely_move", "what_they_do"), "choice", instructions, criteria,
                             {"kind": "state", "state": "intent", "options": options})  # fmt: skip
 

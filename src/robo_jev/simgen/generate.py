@@ -44,7 +44,8 @@ __all__ = ["Moment", "PAIR_UNIT_SHARE", "assemble", "build_moment", "generate_ba
 PAIR_UNIT_SHARE = 0.0526
 NUMERIC_PAIR_SHARE = 0.6
 RECOMMENDATION_SHARE = 0.5      # planner가 아닌 문체에서 권고를 넣는 비율(planner는 늘)
-WRONG_RECOMMENDATION_SHARE = 0.25
+#: 틀린 권고가 가능할 때(최선보다 2τ 이상 나쁜 선택지가 있을 때 — 표본에서 약 88 %) 틀리게 둘 비율. 전체로 약 25 %가 된다(지시서 §3.8).
+WRONG_RECOMMENDATION_SHARE = 0.28
 HINT_SHARE = 0.3
 _WORLD_ATTEMPTS = 64
 

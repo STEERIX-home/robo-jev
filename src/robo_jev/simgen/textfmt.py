@@ -22,7 +22,10 @@ def number(value: float, decimals: int) -> str:
 
 
 def _in_unit(value: float, resolution: float, unit: str) -> tuple[str, float]:
+    """해상도 격자로 반올림한 값을 그 단위로 쓴다(보고 값은 이미 격자 위라 그대로; 힌트처럼 계산한 값은 여기서 격자에 맞춘다)."""
     scale = _SCALE[unit]
+    if resolution > 0:
+        value = round(value / resolution) * resolution
     decimals = decimals_for(resolution * scale) if resolution > 0 else 2
     if unit == "km/h":
         decimals = 1

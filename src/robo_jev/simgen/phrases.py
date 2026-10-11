@@ -142,13 +142,13 @@ def option_descriptions(canon: str, obs: Observation) -> list[str]:
 
 ACTION_INSTRUCTIONS = {
     "generic": ["What should you do now?", "Choose your next action.", "Which action do you take in this moment?", "Pick the best thing to do right now."],
-    "p1_step_in": ["{Ref} has just stepped into your lane. What do you do?", "Something is in your way. Choose how to respond.", "How do you respond to {ref} in your path?"],
+    "p1_step_in": ["{Ref} {entered} {lane}. What do you do?", "Something is in your way. Choose how to respond.", "How do you respond to {ref} in your path?"],
     "p1_crossing": ["{Ref} is heading for your path. What do you do?", "Choose how to handle the crossing.", "How do you respond to {ref} approaching from the side?"],
     "p1_crossing_stopped": ["Do you go now or wait?", "You are waiting at the edge of the crossing. What do you do?", "Choose when to cross."],
     "p1_head_on": ["You and {ref} are about to meet in this aisle. What do you do?", "How do you handle the oncoming {ref_bare}?", "Choose how to pass (or not pass) {ref}."],
     "p5_braking": ["You have to stop before {obstacle}. How do you brake?", "Choose how hard to brake.", "Pick a braking strength for this stop."],
     "p5_turning": ["How fast do you take the corner?", "Choose a speed for the upcoming turn.", "Pick your speed through the bend."],
-    "p1p5_step_in_carrying": ["{Ref} has just stepped into your lane while you are carrying {cref}. What do you do?", "Choose how to respond, keeping both {ref} and {cref} in mind.", "How do you react, given the person ahead and the open container you carry?"],
+    "p1p5_step_in_carrying": ["{Ref} {entered} {lane} while you are carrying {cref}. What do you do?", "Choose how to respond, keeping both {ref} and {cref} in mind.", "How do you react, given what is ahead of you and the open container you carry?"],
 }
 
 CRITERION_INSTRUCTIONS = {

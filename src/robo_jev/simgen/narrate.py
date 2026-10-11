@@ -166,6 +166,9 @@ def _motion_fact(obs: Observation, u: np.ndarray) -> _Fact:
     if obs.scene == "p5_turning":
         sentence = [f"You are travelling straight at {v}.", f"You are moving at {v} toward {place}."][int(u[0] * 2)]
         return _Fact(f"Current speed: {v}.", sentence, "ROBOT", f"speed: {v}")
+    if obs.scene == "p1_crossing":
+        sentence = [f"You are moving at {v}, approaching {place}.", f"You are travelling at {v} and coming up to {place}."][int(u[0] * 2)]
+        return _Fact(f"Moving at {v}, approaching {place}.", sentence, "ROBOT", f"speed: {v} (approaching {place})")
     sentence = [f"You are moving {place} at {v}.", f"You are travelling at {v} {place}."][int(u[0] * 2)]
     return _Fact(f"Moving {place} at {v}.", sentence, "ROBOT", f"speed: {v} ({place})")
 

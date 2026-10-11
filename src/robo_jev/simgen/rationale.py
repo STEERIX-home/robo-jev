@@ -26,8 +26,8 @@ _KIND_NAMES = {
 }  # fmt: skip
 
 
-def _m(x: float) -> str:
-    return f"{x:.2f} m"
+def _m(x: float, arm: bool = False) -> str:
+    return f"{x:.3f} m" if arm else f"{x:.2f} m"
 
 
 def _p(x: float) -> str:
@@ -38,12 +38,14 @@ def _lead(cfg: SimgenConfig, obs: Observation, out: Outcomes) -> list[str]:
     r = obs.robot
     parts: list[str] = []
     stop_m = ph.stopping_distance(r.speed, r.latency, r.decel_moderate)
+    arm = obs.body == "arm"
+    firm = "the normal pause" if arm else "firm braking"
     if obs.scene in ("p1_step_in", "p1p5_step_in_carrying"):
         a = obs.agent
         parts.append(
-            f"The reported gap is {_m(a.ahead.value)} (σ_eff {a.ahead.sigma_eff:.3f} m); firm braking from {r.speed:.2f} m/s needs "
-            f"{r.speed * r.latency:.2f} m of reaction plus {r.speed**2 / (2 * r.decel_moderate):.2f} m of braking = {_m(stop_m)}, so "
-            f"P(stop short with firm braking) = {_p(out.world_events['stops_short'].mean())} over the posterior worlds."
+            f"The reported gap is {_m(a.ahead.value, arm)} (σ_eff {a.ahead.sigma_eff:.3f} m); {firm} from {r.speed:.2f} m/s needs "
+            f"{_m(r.speed * r.latency, arm)} of reaction plus {_m(r.speed**2 / (2 * r.decel_moderate), arm)} of braking = {_m(stop_m, arm)}, so "
+            f"P(stop short with {firm}) = {_p(out.world_events['stops_short'].mean())} over the posterior worlds."
         )
     elif obs.scene == "p1_crossing":
         parts.append(
@@ -57,8 +59,8 @@ def _lead(cfg: SimgenConfig, obs: Observation, out: Outcomes) -> list[str]:
             f"P(room to pass) = {_p(out.world_events['passable'].mean())}."
         )
     elif obs.scene == "p5_braking":
-        stops = ", ".join(f"{lvl} {_m(ph.stopping_distance(r.speed, r.latency, r.decel(lvl)))}" for lvl in ("gentle", "moderate", "hard"))
-        parts.append(f"Stopping distances from {r.speed:.2f} m/s are {stops} against a reported gap of {_m(obs.env.obstacle_distance.value)}.")
+        stops = ", ".join(f"{lvl} {_m(ph.stopping_distance(r.speed, r.latency, r.decel(lvl)), arm)}" for lvl in ("gentle", "moderate", "hard"))
+        parts.append(f"Stopping distances from {r.speed:.2f} m/s are {stops} against a reported gap of {_m(obs.env.obstacle_distance.value, arm)}.")
     elif obs.scene == "p5_turning":
         parts.append(f"At the current {r.speed:.2f} m/s the turn of radius {obs.env.turn_radius:.2f} m means {r.speed**2 / obs.env.turn_radius:.2f} m/s² sideways.")
     family = SCENE_FAMILY[obs.scene]
