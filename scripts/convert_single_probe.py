@@ -336,7 +336,7 @@ def build_parser() -> argparse.ArgumentParser:
     mix = sub.add_parser("mix", help="학습 파일 + G1-train-mix를 이어 붙인 학습 입력과 manifest (CPU)")
     mix.add_argument("--base", type=Path, required=True, help="학습 파일 (예: artifacts/simgen/v01/train-50k.jsonl)")
     mix.add_argument("--probe", type=Path, required=True, help="G1-train-mix.jsonl")
-    mix.add_argument("--sealed", type=Path, default=None, help="봉인 G1.jsonl — 주면 섞기용과 origin group·원본 레코드가 겹치지 않는지 본다")
+    mix.add_argument("--sealed", type=Path, required=True, help="봉인 G1.jsonl — 섞기용과 origin group·원본 레코드가 겹치지 않는지 본다 (반드시 준다: 빠뜨리면 계보 검사가 조용히 빠졌다 — 리뷰 1 M4)")
     mix.add_argument("--train-config", type=Path, default=None, help="학습 설정 YAML — 주면 그 dev 나눔·q로 epoch당 예 수와 섞인 몫을 정확히 센다")
     mix.add_argument("--out", type=Path, required=True)
     mix.set_defaults(func=cmd_mix)
