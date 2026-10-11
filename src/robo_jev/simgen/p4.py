@@ -11,7 +11,7 @@
 — 무게는 사전(그때) × p(카메라 | 그때) × 전이 × p(힘 | 지금), 전이: 그대로 (1 − q̄)·[같음], 바뀜 q̄·사전(지금), q̄ = 1 − E_λ[e^{−λa}].
 
 **행동의 결과**(catalog p4.actions — 하위 상태마다 확률): 그대로 둠(continue), 눌러 넣기·더 세게 밀기(fix·damage), 다시 하기(success),
-사람 부르기(언제나 바로잡힘 + 사람 비용), 다시 재기(look_again — :class:`~robo_jev.simgen.voi.GaussianSignal`: 같은 x를 새 잡음으로; 바뀐
+사람 부르기(언제나 바로잡힘 + 사람 비용), 다시 재기(look_again — :class:`~robo_jev.simgen.voi.GaussianSignal`(준난수 적분): 같은 x를 새 잡음으로; 바뀐
 세계는 지금 상태에서 새 x). 사건은 세계마다의 확률이다(ok_after, damage, unseated, human_call) — 정답은 그 무게 평균(정확).
 
 세계 모듈을 import하지 않는다.
@@ -266,7 +266,7 @@ def _signal(cfg, obs: Observation, batch: Batch, base: tuple[str, ...]) -> Gauss
             post_var = 1.0 / (1.0 / sd**2 + 1.0 / se**2)
             post_mean = post_var * (mu / sd**2 + m / se**2)
             means[i, j], sds[i, j] = post_mean, math.sqrt(post_var + se**2)
-    return GaussianSignal(base, float(place.action_times["look_again"]), means, sds, nodes=7 if len(names) <= 2 else 5)
+    return GaussianSignal(base, float(place.action_times["look_again"]), means, sds)
 
 
 def exact(cfg, obs: Observation) -> dict:

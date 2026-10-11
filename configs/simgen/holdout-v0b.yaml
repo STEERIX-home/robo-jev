@@ -35,7 +35,8 @@ ranges:
   - {name: p1_fast_robot, phenomenon: P1, var: robot_speed, side: above, cut: {mobile_base: 1.25, humanoid: 1.0, forklift_amr: 2.1, arm: 0.8},
      scenes: [p1_step_in, p1_crossing, p1_head_on, p1p5_step_in_carrying, p1p6_emerging_step_in]}
   - {name: p1_old_track, phenomenon: P1, var: track_age, side: above, cut: 1.0, scenes: [p1_step_in, p1_crossing, p1_head_on, p1p5_step_in_carrying]}
-  - {name: p3_tall_narrow_load, phenomenon: P3, var: load_aspect, side: above, cut: 4.0, scenes: [p3_carrying_tall, p3_ramp, p3p5_carrying_mixed]}
+  # 높이/바닥 폭 > 5: 단단한 제동에도 넘어질 만큼 가늘고 키 큰 물건이 학습에도 있게(≤ 5) 자르고, 그보다 가는 것을 시험 전용으로
+  - {name: p3_tall_narrow_load, phenomenon: P3, var: load_aspect, side: above, cut: 5.0, scenes: [p3_carrying_tall, p3_ramp, p3p5_carrying_mixed]}
   - {name: p3_steep_ramp, phenomenon: P3, var: ramp_angle, side: above, cut: 7.0, scenes: [p3_ramp]}
   - {name: p4_coarse_gauge, phenomenon: P4, var: gauge_ratio, side: above, cut: 0.8, scenes: [p4_place_check, p4_insert, p4p6_stale_check]}
   - {name: p4_old_image, phenomenon: P4, var: image_age, side: above, cut: 3.0, scenes: [p4p6_stale_check]}

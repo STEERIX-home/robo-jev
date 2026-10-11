@@ -74,6 +74,8 @@ def test_spill_implies_rim_reached_and_full_headroom_in_every_world(cfg):
 def _records_with(kind_filter):
     for record in sample_records():
         meta = record["meta"]
+        if meta["language"] != "en":      # 한국어 문구의 뜻은 test_simgen_korean
+            continue
         for name, q in record["request"]["questions"].items():
             basis = meta["basis"][name]
             if kind_filter(basis):

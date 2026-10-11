@@ -20,13 +20,17 @@ from robo_jev.simgen.catalog import default_config
 from robo_jev.simgen.record import dumps
 
 SIMGEN = Path(generate.__file__).resolve().parent
-OBSERVATION_SIDE = ("narrate.py", "questions.py", "phrases.py", "posterior.py", "rollout.py", "labels.py", "textfmt.py", "observation.py", "spec.py")
+OBSERVATION_SIDE = (
+    "narrate.py", "narrate_ko.py", "questions.py", "phrases.py", "phrases_ko.py", "phrases_ko_data.py", "state_text.py", "rule_text.py", "korean.py",
+    "posterior.py", "rollout.py", "labels.py", "textfmt.py", "observation.py", "spec.py", "p3.py", "p4.py", "p6.py", "voi.py", "holdout.py", "perturb.py",
+)  # fmt: skip
 
 #: 세계에만 있는 값의 이름(굴리기 batch 열쇠 가운데 관측에 없는 것)과 지시서가 든 이름.
 HIDDEN_NAMES = (
     "intent", "slosh", "true_", "stay_s", "cross_speed", "cross_accel", "back_speed", "back_decel", "stop_decel", "roll_decel",
     "yield_standoff", "agent_decel", "hurry_factor", "hurry_accel", "aside_speed", "keep_standoff", "side_left", "side_right",
-    "intent_obs", "lid_prior", "k_ref", "posterior",
+    "intent_obs", "lid_prior", "k_ref", "posterior", "com_ratio", "t_leave", "react_standoff", "state_then", "x_height", "x_tilt", "x_depth",
+    "x_force", "x_lateral", "leave_rate", "emerge_rate", "c_max", "sigma_check", "hazard_per_s", "follow_delay",
 )  # fmt: skip
 
 
@@ -69,6 +73,21 @@ def _hidden_only_world(world):
         v.update(k=1.6 if v["k"] < 1.3 else 1.0, tilt=-v["tilt"] + 0.01)
         if world.at_observation.get("lid_view") == "unknown":
             v["lid"] = 1.0 - v["lid"]
+    # 새 현상의 숨은 값(Task v0b): 무게중심 높이 비율·치우침·마찰(P3), 쌓을 물건의 무게 치우침(P3 쌓기 — 단서는 관측이라 그대로),
+    # 상태·바뀜(P4 — 보고 m_는 관측), 떠남·출현·따라옴·늦은 감지·있음(P6 — 두 센서의 보고는 관측)
+    for key, change in (("com", lambda x: x * 0.9), ("off", lambda x: -x), ("mu", lambda x: x + 0.07), ("lam", lambda x: x * 1.3), ("t_leave", lambda x: x + 0.7),
+                        ("t_e", lambda x: x + 0.5), ("late", lambda x: x + 0.05), ("t2", lambda x: x + 0.2), ("u2", lambda x: x * 1.1)):  # fmt: skip
+        if key in v:
+            v[key] = change(v[key])
+    for key in ("present", "emerges", "follow", "changed"):
+        if key in v:
+            v[key] = 1.0 - v[key]
+    if world.scene == "p3_place_stack":
+        v["c"] = v["c"] * 0.5 if world.parts.get("cue") else -v["c"]
+    if world.scene.startswith("p4"):
+        v["state"] = float((int(v["state"]) + 1) % 4)
+        for key in [k for k in v if k.startswith("x_")]:
+            v[key] += 0.3
     views = world.at_observation.get("sides", ("", ""))
     for i, key in enumerate(("side_left", "side_right")):
         if key in v and views[i] == "occluded":
@@ -99,6 +118,14 @@ LEAK_CASES = [
     (16, "sidewalk", {"scene": "p1_step_in", "body": "mobile_base"}),
     (17, "transit", {"scene": "p1_crossing", "body": "mobile_base", "variant": "stopped"}),
     (18, "home", {"scene": "p1_step_in", "body": "humanoid", "agent_kind": "ball"}),
+    (21, "cafe", {"scene": "p3_carrying_tall"}), (22, "warehouse", {"scene": "p3_place_stack", "body": "forklift_amr"}),
+    (23, "lab", {"scene": "p4_place_check", "body": "arm"}), (24, "factory", {"scene": "p4p6_stale_check"}),
+    (25, "hospital", {"scene": "p6_stale_track"}), (26, "sidewalk", {"scene": "p6_blind_corner"}), (27, "warehouse", {"scene": "p6_sensor_conflict"}),
+    (28, "retail", {"scene": "p1p6_emerging_step_in"}), (29, "cafe", {"scene": "p3p5_carrying_mixed"}), (30, "factory", {"scene": "p3_ramp"}),
+    # 한국어 서술의 누출 검사(Task v0b §8)
+    (31, "cafe", {"scene": "p1p5_step_in_carrying", "body": "mobile_base", "lang": "ko"}), (32, "home", {"scene": "p5_turning", "lang": "ko"}),
+    (33, "lab", {"scene": "p4_insert", "body": "arm", "lang": "ko"}), (34, "hospital", {"scene": "p6_stale_track", "lang": "ko"}),
+    (35, "warehouse", {"scene": "p3_place_stack", "body": "humanoid", "lang": "ko"}), (36, "transit", {"scene": "p6_sensor_conflict", "lang": "ko"}),
 ]
 
 

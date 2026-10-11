@@ -23,6 +23,7 @@ v0 근사(보고서에 적음): 관측 나이 동안 상대는 관측 시점의 
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -795,7 +796,9 @@ def _skin_v0b(cfg, ctx: Context, world: World, rng: np.random.Generator, usable,
         out["load_ref"] = _object_ref(out["load_phrase"])
         out["deck_phrase"] = world.parts["deck"]["text"]
     if ctx.scene == "p3_ramp":
-        out["ramp"] = entry_text(_pick_from(usable(card["ramps"]), u[0]))
+        # 경사로 문구의 방향('… down to …' / '… up to …')이 움직임 갈래와 맞는 것만(방향 없는 문구는 둘 다)
+        ramps = [e for e in usable(card["ramps"]) if not re.search(r"\b" + ("up" if ctx.maneuver == "down" else "down") + r"\b", entry_text(e))]
+        out["ramp"] = entry_text(_pick_from(ramps, u[0]))
         out["ramp_end"] = entry_text(_pick_from(usable(card["ramp_ends"]), u[1]))
         out["detour"] = entry_text(_pick_from(usable(card["detours"]), u[2]))
     if ctx.scene == "p3_place_stack":

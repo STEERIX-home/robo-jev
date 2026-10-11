@@ -4,11 +4,14 @@
 ``p3_place_stack``(쌓기 — 무게중심이 받침면 안에 있나), 조합 ``p3p5_carrying_mixed``(키 큰 물건과 열린 용기를 함께 실음 — 감속·회전),
 ``p1p3_step_in_carrying_tall``(사람이 끼어들 때 키 큰 물건을 실음 — 시험 세트 T4 전용).
 
-**결정 여유**(catalog margins): tip = b_eff/h − r_ref(기준 움직임의 쏠림 비 — 단단한 제동, 지금 속도의 회전, 보통 출발, 보통 경사로),
-slide = μ − r_ref, stop(감속 갈래) = 장애물 면 − 단단한 제동의 멈춤 거리, stack = L_low/2 − |d|(명목 — 무게가 가운데이고 놓기 오차가 없을 때
-받침 가장자리까지; 숨은 무게 치우침 c와 놓기 오차 ε가 그 둘레의 불확실성), spill·step_in은 P5·P1과 같다.
-숨은 값(무게중심 높이 비율 com, 앞뒤 치우침 off, 마찰 μ, 쌓을 물건의 무게 치우침 c)을 여유에 맞춰 풀되 속성 목록의 범위 안에서만(안 되면
-:class:`~robo_jev.simgen.scenes.Infeasible` — 다른 갈래로 다시 뽑는다). 닻 세계는 관측만 만든다(참 세계는 정답의 사후에서 — 생성기).
+**결정 여유**(catalog margins) — **관측으로 정해지는 명목값**이다(숨은 값은 그 둘레의 불확실성): tip = (B/2)/(com_mid·H) − r_ref
+(바닥 폭 B와 높이 H는 잰 값의 참값, com_mid = 그 물건 종류의 무게중심 높이 비율 범위의 가운데, 치우침 0; r_ref = 기준 움직임의 쏠림 비 —
+단단한 제동/g, 지금 속도의 v²/(R·g), 보통 출발/g, 보통 경사로 (sin φ + a/g)/cos φ), stop(감속 갈래) = 장애물 면 − 단단한 제동의 멈춤
+거리, stack = L_low/2 − |d|, spill·step_in은 P5·P1과 같다. 그래서 여유 0 근처의 순간은 정답(사후 확률)도 반반 근처다 — 숨은 무게중심 높이
+비율·앞뒤 치우침·마찰은 닻에서도 속성 목록의 사전에서 뽑는다(받침 표면도 그 몸의 표면 가운데 하나; 미끄러짐은 설계 여유가 아니라 그
+표면의 마찰 사전과 r이 정한다 — 표면이 이산이라 r의 해상도로는 맞출 수 없다). 여유는 로봇 쪽 결정 변수(감속·회전 속도·출발 가속·경사 —
+글에 보이는 해상도의 값)와 물건의 B·H로 정확히 맞추고, 그 상황의 물건으로 닿을 수 없는 목표만 가장 가까운 값(``parts.inexact``)을 쓴다.
+닻 세계는 관측만 만든다(참 세계는 정답의 사후에서 — 생성기).
 
 이 모듈은 세계 쪽이다(scenes와 같은 층).
 """
@@ -85,14 +88,6 @@ def b_eff(base, off, direction: str):
     return base / 2.0
 
 
-def _direction(scene: str, maneuver: str | None) -> str:
-    if maneuver in ("start", "up"):
-        return "back"
-    if maneuver == "turn":
-        return "side"
-    return "front"
-
-
 def reference_ratio(robot, scene: str, maneuver: str | None, geometry: dict) -> float:
     """결정 여유의 기준 움직임의 쏠림 비 r_ref."""
     if maneuver == "turn":
@@ -113,41 +108,61 @@ def reference_ratio(robot, scene: str, maneuver: str | None, geometry: dict) -> 
 _ASPECT_PAD = 0.15     # 높이/바닥 폭 칸 경계에서 띄우는 여유(보고 잡음 σ 0.01/0.005가 경계를 넘지 않게)
 
 
-def _geometry_samples(cfg: SimgenConfig, ctx: Context, kind: str, rng, n: int = 256) -> dict[str, np.ndarray]:
-    """그 물건 종류의 기하 n개(속성 목록 범위에서 균등) — 높이/바닥 폭은 빼 둔 칸 범위 안(학습 ≤ 4.0, T3 > 4.0; 여유 0.15)."""
-    spec = cfg.catalog["loads"][kind]
-    edges = cfg.catalog["p3"]["edge"][ctx.body]
+def com_mid(spec: dict) -> float:
+    """무게중심 높이 비율 범위의 가운데(명목 여유의 기준)."""
+    return 0.5 * (spec["com_ratio"][0] + spec["com_ratio"][1])
+
+
+def mu_mid(cfg: SimgenConfig, deck_kind: str) -> float:
+    lo, hi = cfg.catalog["decks"][deck_kind]["mu"]
+    return 0.5 * (lo + hi)
+
+
+def nominal_ratio(spec: dict, base, height):
+    """명목 쏠림 비 (B/2)/(com_mid·H) — 치우침 0, 무게중심 높이 비율은 범위 가운데."""
+    return np.asarray(base, dtype=float) / 2.0 / (com_mid(spec) * np.asarray(height, dtype=float))
+
+
+def _height_bounds(cfg: SimgenConfig, ctx: Context, spec: dict, base: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """높이 H의 범위(속성 목록 ∩ 높이/바닥 폭 칸 — 학습 ≤ 4.0, T3 > 4.0; 보고 잡음 여유 0.15)."""
     a_lo, a_hi = ctx.range("load_aspect", (0.0, 1e9))
-    base = rng.uniform(*spec["base"], n)
-    h_lo = np.maximum(spec["height"][0], (a_lo + _ASPECT_PAD) * base if a_lo > 0 else np.zeros(n))
+    h_lo = np.maximum(spec["height"][0], (a_lo + _ASPECT_PAD) * base if a_lo > 0 else np.zeros(len(base)))
     h_hi = np.minimum(spec["height"][1], (a_hi - _ASPECT_PAD) * base)
+    return h_lo, h_hi
+
+
+def _geometry_for(cfg: SimgenConfig, ctx: Context, kind: str, q: float, rng, n: int = 256) -> dict | None:
+    """명목 쏠림 비가 정확히 q인 (B, H) 하나와 가장자리 거리 — 바닥 폭을 범위에서 뽑고 H = B/(2·com_mid·q)가 범위 안이면."""
+    spec = cfg.catalog["loads"][kind]
+    if q <= 0.0:
+        return None
+    base = rng.uniform(*spec["base"], n)
+    height = base / (2.0 * com_mid(spec) * q)
+    h_lo, h_hi = _height_bounds(cfg, ctx, spec, base)
+    ok = np.flatnonzero((height >= h_lo) & (height <= h_hi))
+    if len(ok) == 0:
+        return None
+    i = int(ok[int(rng.integers(len(ok)))])
+    edges = cfg.catalog["p3"]["edge"][ctx.body]
+    return {"base": float(base[i]), "height": float(height[i]), "edge_f": _u(rng, edges), "edge_b": _u(rng, edges), "edge_s": _u(rng, edges)}
+
+
+def _ratio_range(cfg: SimgenConfig, ctx: Context, kind: str, rng, n: int = 512) -> tuple[float, float] | None:
+    """그 물건 종류의 명목 쏠림 비가 닿는 범위(높이/바닥 폭 칸 안) — 표본으로."""
+    spec = cfg.catalog["loads"][kind]
+    base = rng.uniform(*spec["base"], n)
+    h_lo, h_hi = _height_bounds(cfg, ctx, spec, base)
     ok = h_hi >= h_lo
-    out = {
-        "base": base, "height": h_lo + rng.random(n) * (h_hi - h_lo), "h_lo": h_lo, "h_hi": h_hi,
-        "off": rng.uniform(-spec["offset"], spec["offset"], n), "com": rng.uniform(*spec["com_ratio"], n),
-        "edge_f": rng.uniform(*edges, n), "edge_b": rng.uniform(*edges, n), "edge_s": rng.uniform(*edges, n),
-    }  # fmt: skip
-    return {k: v[ok] for k, v in out.items()}
+    if not ok.any():
+        return None
+    lo = nominal_ratio(spec, base[ok], h_hi[ok])
+    hi = nominal_ratio(spec, base[ok], h_lo[ok])
+    return float(lo.min()), float(hi.max())
 
 
-def _fit_ratio(spec: dict, geo: dict[str, np.ndarray], b: np.ndarray, q: float, rng) -> dict | None:
-    """b_eff/(com·H) = q를 정확히 맞추는 기하 하나: 표본마다 com을 고쳐(범위 안이면) 또는 H를 고쳐(높이 범위 안이면) 맞춘다."""
-    if q <= 0.0 or len(b) == 0:
-        return None
-    com_need = b / (q * geo["height"])
-    h_need = b / (q * geo["com"])
-    fit_c = (com_need >= spec["com_ratio"][0]) & (com_need <= spec["com_ratio"][1])
-    fit_h = (h_need >= geo["h_lo"]) & (h_need <= geo["h_hi"])
-    choices = [(int(i), "com") for i in np.flatnonzero(fit_c)] + [(int(i), "height") for i in np.flatnonzero(fit_h)]
-    if not choices:
-        return None
-    i, which = choices[int(rng.integers(len(choices)))]
-    out = {k: float(v[i]) for k, v in geo.items() if k not in ("h_lo", "h_hi")}
-    if which == "com":
-        out["com"] = float(com_need[i])
-    else:
-        out["height"] = float(h_need[i])
-    return out
+def _hidden_load(cfg: SimgenConfig, spec: dict, deck_kind: str, rng) -> dict:
+    """숨은 값(무게중심 높이 비율·앞뒤 치우침·마찰) — 정답과 같은 사전(물건 종류·받침 표면의 범위 균등)."""
+    return {"com": _u(rng, spec["com_ratio"]), "off": float(rng.uniform(-spec["offset"], spec["offset"])), "mu": _u(rng, cfg.catalog["decks"][deck_kind]["mu"])}
 
 
 def _nearest_band(lo: float, hi: float, target: float, width: float, rng) -> float:
@@ -164,81 +179,54 @@ def _grid(lo: float, hi: float, step: float) -> np.ndarray:
     return np.round(np.arange(k0, k1 + 1) * step, 6)
 
 
-def _solve_load(cfg: SimgenConfig, ctx: Context, r_values, m_tip: float, m_slide: float | None, rng, entries=None,
-                strict: bool = False) -> tuple[dict, dict, dict, int, tuple[str, ...]]:  # fmt: skip
-    """(물건 항목, 받침 표면 항목, 숨은 값, 고른 r의 번호, 정확히 맞추지 못한 여유) — tip 여유 b_eff/(com·H) − r = m_tip을 물건 기하와 r로,
-    slide 여유 μ − r = m_slide를 마찰로(그 μ를 범위에 담는 표면을 고른다) 맞춘다.
+def _solve_load(cfg: SimgenConfig, ctx: Context, r_values, m_tip: float, rng, entries=None, strict: bool = False
+                ) -> tuple[dict, dict, dict, int, tuple[str, ...]]:  # fmt: skip
+    """(물건 항목, 받침 표면 항목, 기하 + 숨은 값, 고른 r의 번호, 정확히 맞추지 못한 여유).
 
-    r(기준 움직임의 쏠림 비)은 로봇 쪽 결정 변수가 정한다(단단한 제동의 감속/g, 회전 속도의 v²/(R·g), 출발 가속/g, 경사로의 쏠림 비).
-    ``r_values``는 그 변수가 글에 보이는 값(해상도의 배수)일 때의 r들이다 — 그중 하나를 고르고 기하를 그 r에 정확히 맞춘다(그래서 닻의
-    여유가 목표와 정확히 같다). 물건 종류마다 b_eff/h가 닿는 구간이 정해져 있어(예: 사람형 로봇의 제동에서 물병은 늘 넘어지지 않는 쪽
-    멀리) 뽑은 여유에 닿는 조합이 그 상황에 없으면 가장 가까이 닿는 물건의 구간 끝에서 안쪽으로 σ 폭 안의 값을 쓰고 그 여유를 '정확하지
-    않음'으로 돌려준다 — 그런 순간은 본래 여유가 큰 순간이고, 레코드의 meta.margins는 실제 세계에서 다시 잰 여유다(정답은 관측의 사후라
-    닻의 여유 분포와 무관하다). ``strict``면 그 대신 Infeasible(호출한 쪽이 다른 기하로 다시). slide가 None이면 μ는 고른 표면의 사전에서."""
+    r(기준 쏠림 비)은 로봇 쪽 결정 변수가 정한다 — ``r_values``는 그 변수가 글에 보이는 값일 때의 r들이다. tip 여유 (B/2)/(com_mid·H) − r를
+    물건의 B·H로 정확히 맞춘다; 받침 표면은 그 몸의 표면 가운데 하나, 숨은 값은 사전에서 뽑는다. 그 상황의 물건으로는 닿을 수 없는 목표면
+    가장 가까운 (물건, r)의 구간 끝에서 안쪽으로 σ 폭 안의 값을 쓰고 'tip'을 '정확하지 않음'으로 돌려준다(``strict``면 그 대신 Infeasible)."""
     entries = entries if entries is not None else load_entries(cfg, ctx)
     if not entries:
         raise Infeasible("no load for this context")
     r_values = np.asarray(r_values, dtype=float)
     if len(r_values) == 0:
         raise Infeasible("no reference ratio to choose from")
-    direction = _direction(ctx.scene, ctx.maneuver)
-    order_r = rng.permutation(len(r_values))[:8]
-    pool = []
-    fit, i_r, inexact = None, None, []
+    decks = cfg.skins["decks"][ctx.body]
+    deck = decks[int(rng.integers(len(decks)))]
+    order_r = [int(i) for i in rng.permutation(len(r_values))][:12]
+    ranges = {}
     for idx in rng.permutation(len(entries)):
         entry = entries[int(idx)]
         spec = cfg.catalog["loads"][entry["kind"]]
-        geo = _geometry_samples(cfg, ctx, entry["kind"], rng)
-        if len(geo["base"]) == 0:
+        for i_r in order_r:
+            geo = _geometry_for(cfg, ctx, entry["kind"], float(r_values[i_r]) + m_tip, rng)
+            if geo is not None:
+                return entry, deck, {**geo, **_hidden_load(cfg, spec, deck["kind"], rng)}, i_r, ()
+        ranges[int(idx)] = _ratio_range(cfg, ctx, entry["kind"], rng)
+    if strict:
+        raise Infeasible("no load reaches the tip margin with these reference ratios")
+    # 가장 가까이 닿는 (물건, r): 그 물건의 명목 비 구간 끝에서 안쪽으로
+    sigma = cfg.catalog["margins"]["tip"]["sigma"][ctx.body]
+    best, gap = None, math.inf
+    for idx, rr in ranges.items():
+        if rr is None:
             continue
-        b = b_eff(geo["base"], geo["off"], direction)
-        for j in order_r:
-            fit = _fit_ratio(spec, geo, b, float(r_values[j]) + m_tip, rng)
-            if fit is not None:
-                i_r = int(j)
-                break
-        if fit is not None:
-            break
-        ratios = b / (geo["com"] * geo["height"])
-        pool.append((entry, spec, geo, b, float(ratios.min()), float(ratios.max())))
-    if fit is None:
-        if not pool:
-            raise Infeasible("no load geometry fits the aspect range")
-        if strict:
-            raise Infeasible("no load reaches the tip margin with these reference ratios")
-        # 닿을 수 있는 r 구간 [q_min − m, q_max − m]에 가장 가까운 (물건, r) → 쏠림 비는 그 물건 구간의 안쪽 띠(σ 폭)
-        sigma = cfg.catalog["margins"]["tip"]["sigma"][ctx.body]
-
-        def gap(t, r):
-            return max(t[4] - m_tip - r, r - (t[5] - m_tip), 0.0)
-
-        best = min(((t, j) for t in pool for j in range(len(r_values))), key=lambda tj: gap(tj[0], float(r_values[tj[1]])))
-        (entry, spec, geo, b, q_min, q_max), i_r = best
-        q = _nearest_band(q_min, q_max, float(r_values[i_r]) + m_tip, sigma, rng)
-        fit = _fit_ratio(spec, geo, b, q, rng)
-        if fit is None:
-            ratios = b / (geo["com"] * geo["height"])
-            i = int(np.argmin(np.abs(ratios - q)))
-            fit = {k: float(v[i]) for k, v in geo.items() if k not in ("h_lo", "h_hi")}
-        inexact.append("tip")
-    r = float(r_values[i_r])
-    decks = cfg.skins["decks"][ctx.body]
-    order = [decks[int(i)] for i in rng.permutation(len(decks))]
-    if m_slide is None:
-        deck = order[0]
-        mu = _u(rng, cfg.catalog["decks"][deck["kind"]]["mu"])
-    else:
-        mu = r + m_slide
-        fits = [d for d in order if cfg.catalog["decks"][d["kind"]]["mu"][0] <= mu <= cfg.catalog["decks"][d["kind"]]["mu"][1]]
-        if fits:
-            deck = fits[0]
-        else:
-            # 그 마찰을 담는 표면이 이 몸에 없으면 가장 가까운 표면의 범위 끝에서 안쪽으로(σ 폭)
-            sigma = cfg.catalog["margins"]["slide"]["sigma"][ctx.body]
-            deck = min(order, key=lambda d: max(cfg.catalog["decks"][d["kind"]]["mu"][0] - mu, mu - cfg.catalog["decks"][d["kind"]]["mu"][1]))
-            mu = _nearest_band(*cfg.catalog["decks"][deck["kind"]]["mu"], mu, sigma, rng)
-            inexact.append("slide")
-    return entry, deck, {**fit, "mu": float(mu)}, i_r, tuple(inexact)
+        for i_r in order_r:
+            target = float(r_values[i_r]) + m_tip
+            d = max(rr[0] - target, target - rr[1], 0.0)
+            if d < gap:
+                best, gap = (idx, i_r, rr), d
+    if best is None:
+        raise Infeasible("no load geometry fits the aspect range")
+    idx, i_r, (q_lo, q_hi) = best
+    entry = entries[idx]
+    q = _nearest_band(q_lo, q_hi, float(r_values[i_r]) + m_tip, sigma, rng)
+    geo = _geometry_for(cfg, ctx, entry["kind"], q, rng, n=4096) or _geometry_for(cfg, ctx, entry["kind"], 0.5 * (q_lo + q_hi), rng, n=4096)
+    if geo is None:
+        raise Infeasible("no load geometry near the tip margin")
+    spec = cfg.catalog["loads"][entry["kind"]]
+    return entry, deck, {**geo, **_hidden_load(cfg, spec, deck["kind"], rng)}, i_r, ("tip",)
 
 
 def _brake_layout(cfg: SimgenConfig, ctx: Context, p: dict, m_stop: float, rng) -> tuple[float, float]:
@@ -289,7 +277,7 @@ def _build_carrying(cfg: SimgenConfig, ctx: Context, margins: dict, rng) -> Worl
     if ctx.maneuver == "brake":
         lo, hi = p["_moderate_range"]
         decels = _grid(max(lo, p["decel_gentle"] + 0.1), min(hi, p["decel_hard"] - 0.1), 0.1)
-        entry, deck, hidden, i_r, inexact = _solve_load(cfg, ctx, decels / G, margins["tip"], margins.get("slide"), rng)
+        entry, deck, hidden, i_r, inexact = _solve_load(cfg, ctx, decels / G, margins["tip"], rng)
         p["decel_moderate"] = float(decels[i_r])
         if ctx.scene == "p3p5_carrying_mixed":
             entry_c, fill = _spill_fill(cfg, ctx, margins["spill"], p["decel_moderate"], rng)
@@ -308,12 +296,12 @@ def _build_carrying(cfg: SimgenConfig, ctx: Context, margins: dict, rng) -> Worl
         for _ in range(6):
             geometry = _turn_geometry(cfg, ctx, rng)
             try:
-                solved = _solve_load(cfg, ctx, speeds**2 / (G * geometry["radius"]), margins["tip"], margins.get("slide"), rng, strict=True)
+                solved = _solve_load(cfg, ctx, speeds**2 / (G * geometry["radius"]), margins["tip"], rng, strict=True)
                 break
             except Infeasible:
                 continue
         if solved is None:
-            solved = _solve_load(cfg, ctx, speeds**2 / (G * geometry["radius"]), margins["tip"], margins.get("slide"), rng)
+            solved = _solve_load(cfg, ctx, speeds**2 / (G * geometry["radius"]), margins["tip"], rng)
         entry, deck, hidden, i_r, inexact = solved
         v0 = float(speeds[i_r])
         if ctx.scene == "p3p5_carrying_mixed":
@@ -326,7 +314,7 @@ def _build_carrying(cfg: SimgenConfig, ctx: Context, margins: dict, rng) -> Worl
     else:  # start
         cruise = round_to(rng.uniform(*speed_range(cfg, ctx)), body["speed_resolution"])
         accels = _grid(*cfg.catalog["p3"]["start_accel"][ctx.body], 0.05)
-        entry, deck, hidden, i_r, inexact = _solve_load(cfg, ctx, accels / G, margins["tip"], margins["slide"], rng)
+        entry, deck, hidden, i_r, inexact = _solve_load(cfg, ctx, accels / G, margins["tip"], rng)
         p["accel"] = float(accels[i_r])
         values.update(hidden)
         robot = _make_robot(p, 0.0, cruise)
@@ -358,13 +346,15 @@ def _build_ramp(cfg: SimgenConfig, ctx: Context, margins: dict, rng) -> World:
     lo, hi = ctx.range("ramp_angle", spec["ramp_angle_deg"][ctx.body])
     if hi < lo:
         raise Infeasible("ramp angle range empty")
-    angle = round_to(rng.uniform(lo + 0.25, hi - 0.25) if hi - lo > 0.5 else (lo + hi) / 2.0, 0.5)
+    # 경사(글에 0.5° 배수로 보인다 — 빼 둔 칸 경계에서 0.25° 띄운다)가 기준 쏠림 비를 정한다: 그 값들 가운데서 여유에 맞는 것을 고른다
+    angles = _grid(lo + 0.25, hi - 0.25, 0.5) if hi - lo > 0.5 else np.array([round_to((lo + hi) / 2.0, 0.5)])
     length = round_to(_u(rng, spec["ramp_length"]), 0.5)
     speed = round_to(rng.uniform(*speed_range(cfg, ctx)), body["speed_resolution"])
     robot = _make_robot(p, speed) if ctx.maneuver == "down" else _make_robot(p, 0.0, speed)
-    geometry = {"angle_deg": angle, "length": length}
-    ratio_ref = reference_ratio(robot, ctx.scene, ctx.maneuver, geometry)
-    entry, deck, hidden, _, inexact = _solve_load(cfg, ctx, [ratio_ref], margins["tip"], margins["slide"], rng)
+    accel = robot.decel_moderate if ctx.maneuver == "down" else robot.accel
+    r_values = np.array([float(ph.incline_ratio(accel, math.radians(a))) for a in angles])
+    entry, deck, hidden, i_r, inexact = _solve_load(cfg, ctx, r_values, margins["tip"], rng)
+    geometry = {"angle_deg": float(angles[i_r]), "length": length}
     parts = {"maneuver": ctx.maneuver, "load": entry, "deck": deck, "detour_s": round_to(_u(rng, spec["detour_s"]), 1.0), "inexact": inexact,
              **_times(cfg, ctx, rng)}  # fmt: skip
     return World(ctx.scene, ctx.domain, ctx.variant, robot, None, None, dict(hidden), {}, geometry=geometry, parts=parts)
@@ -378,7 +368,7 @@ def _build_step_in_tall(cfg: SimgenConfig, ctx: Context, margins: dict, rng) -> 
     r_sum = p["radius"] + ra
     lo, hi = p["_moderate_range"]
     decels = _grid(max(lo, p["decel_gentle"] + 0.1), min(hi, p["decel_hard"] - 0.1), 0.1)
-    entry, deck, hidden, i_r, inexact = _solve_load(cfg, ctx, decels / G, margins["tip"], None, rng)
+    entry, deck, hidden, i_r, inexact = _solve_load(cfg, ctx, decels / G, margins["tip"], rng)
     p["decel_moderate"] = float(decels[i_r])
     v0, gap = _solve_speed_for_gap(cfg, ctx, p, r_sum, margins["step_in"], p["decel_moderate"], rng)
     values, at_obs = _step_in_agent(cfg, ctx, ra, r_sum, rng)
@@ -478,11 +468,10 @@ def margins_of(cfg: SimgenConfig, world: World) -> dict[str, float]:
     out: dict[str, float] = {}
     for name in scene_margins(world.scene, maneuver if world.scene != "p1p3_step_in_carrying_tall" else None):
         if name == "tip":
-            ratio = reference_ratio(r, world.scene, maneuver, world.geometry)
-            h = v["com"] * v["height"]
-            out[name] = float(b_eff(v["base"], v["off"], _direction(world.scene, maneuver))) / h - ratio
+            spec = cfg.catalog["loads"][world.parts["load"]["kind"]]
+            out[name] = float(nominal_ratio(spec, v["base"], v["height"])) - reference_ratio(r, world.scene, maneuver, world.geometry)
         elif name == "slide":
-            out[name] = v["mu"] - reference_ratio(r, world.scene, maneuver, world.geometry)
+            out[name] = mu_mid(cfg, world.parts["deck"]["kind"]) - reference_ratio(r, world.scene, maneuver, world.geometry)
         elif name == "stop":
             out[name] = v["obstacle"] - r.radius - ph.stopping_distance(r.speed, r.latency, r.decel_moderate)
         elif name == "spill":
@@ -513,13 +502,12 @@ def flip(cfg: SimgenConfig, world: World, name: str, rng):
         changes: dict[str, float] = {}
         if name == "tip":
             ratio = reference_ratio(r, world.scene, maneuver, world.geometry)
-            b = float(b_eff(v["base"], v["off"], _direction(world.scene, maneuver)))
             if ratio + target <= 0.02:
                 continue
-            height = b / (v["com"] * (ratio + target))
-            spec = cfg.catalog["loads"][world.parts["load"]["kind"]]["height"]
+            spec = cfg.catalog["loads"][world.parts["load"]["kind"]]
+            height = v["base"] / 2.0 / (com_mid(spec) * (ratio + target))
             changes["height"] = height
-            ok = 0.5 * spec[0] <= height <= 1.5 * spec[1]
+            ok = 0.5 * spec["height"][0] <= height <= 1.5 * spec["height"][1]
         elif name == "stop":
             changes["obstacle"] = v["obstacle"] + (target - m)
             ok = changes["obstacle"] - r.radius >= 0.5 * cfg.body(r.body)["gap_min"]

@@ -1,0 +1,1323 @@
+# 상황 옷 카드 v0.2의 한국어 문구 (Task v0b) — 영어 문구(skins-v0.2.yaml) → 한국어. 읽는 곳: robo_jev.simgen.korean.KoSkins.
+#
+# text — 그대로 바꾸는 문구. 끼워 넣는 꼴을 지킨다: 상황·방해·오래된 카메라의 까닭은 '…다.'로 끝나는 합니다체 문장, 몸 이름·장소·
+#        장애물·가림·막힘·경사로(끝)·돌아가는 길·쌓을 곳·모퉁이·센서 단서 물체·받침 표면·놓는 물건·자리는 조사 없는 명사구, carry는
+#        '…에'로 끝나는 자리 말, 과제는 '중입니다' 앞에 오는 '…는' 마디({container:을} = 용기 문구 + 을/를).
+# descriptors — 상대 묘사(np: 처음 소개하는 명사구, ref: 다시 가리키는 짧은 말). 의도·움직임을 암시하는 말을 더하지 않는다.
+# objects — 용기·키 큰 물건·쌓을 물건(np: 명사구, ref: 다시 가리키는 짧은 말).
+# cues — 단서 문장 틀. {ref:조사}의 조사는 받침이 있을 때의 꼴(이·은·을·과·아·으로)로 적고, 알맞은 꼴은 korean.kfmt가 고른다.
+# 숫자·코드(14번 랙, B12 게이트, LH 718)와 단위(°C, ml, %)는 그대로 둔다. 영어 문구를 바꾸면 이 파일도 함께 고친다.
+version: skins-ko-v0.2
+
+text:
+  # --- 몸 기본 이름·기본 carry·받침 표면·오래된 카메라의 까닭 ---
+  "a wheeled service robot": "바퀴로 움직이는 서비스 로봇"
+  "a small autonomous mobile robot": "소형 자율 이동 로봇"
+  "a humanoid robot": "휴머노이드 로봇"
+  "a bipedal humanoid robot": "이족 보행 휴머노이드 로봇"
+  "an autonomous forklift": "자율 주행 지게차"
+  "a driverless pallet mover": "무인 팔레트 운반차"
+  "a fixed robot arm": "고정식 로봇 팔"
+  "a collaborative robot arm": "협동 로봇 팔"
+  "in your gripper": "그리퍼에"
+  "on your forks": "포크 위에"
+  "in your hands": "두 손에"
+  "on your top deck": "상단 데크 위에"
+  "a rubber anti-slip mat": "고무 미끄럼 방지 매트"
+  "a textured anti-slip tray liner": "요철이 있는 미끄럼 방지 트레이 깔개"
+  "a smooth plastic tray": "매끈한 플라스틱 트레이"
+  "bare stainless steel": "맨 스테인리스강 면"
+  "a wooden carrying board": "나무 운반판"
+  "a rubber-lined tray": "고무를 덧댄 트레이"
+  "a tray with a grippy liner": "미끄럼을 잡아 주는 깔개를 깐 트레이"
+  "a polished metal tray": "광택 나는 금속 트레이"
+  "a wooden pallet": "나무 팔레트"
+  "the bare steel forks": "맨 강철 포크"
+  "a pallet topped with a rubber anti-slip sheet": "고무 미끄럼 방지 시트를 깐 팔레트"
+  "your own forearm has been blocking the wrist camera since the release": "물건을 놓은 뒤로 자신의 팔뚝이 손목 카메라를 가리고 있습니다."
+  "the cell camera dropped frames while the arm moved away": "팔이 물러나는 동안 셀 카메라의 프레임이 빠졌습니다."
+  "your hand has been in front of the head camera since you let go": "물건을 놓은 뒤로 손이 머리 카메라 앞을 가리고 있습니다."
+  "the head camera is still re-focusing after the turn": "몸을 돌린 뒤라 머리 카메라가 아직 초점을 다시 맞추고 있습니다."
+  "the mast has been blocking the fork camera since you lowered the load": "짐을 내린 뒤로 마스트가 포크 카메라를 가리고 있습니다."
+  "the fork camera is still adjusting to the darker rack bay": "랙 베이가 더 어두워서 포크 카메라가 아직 노출을 맞추고 있습니다."
+  # --- warehouse ---
+  "warehouse": "창고"
+  "Night shift in a large distribution warehouse.": "대형 물류 창고의 야간 근무 시간입니다."
+  "A busy morning in the fulfilment centre; trucks are being loaded.": "풀필먼트 센터의 바쁜 아침이며, 트럭에 짐을 싣고 있습니다."
+  "Inventory week in a cold-storage warehouse.": "저온 창고의 재고 조사 주간입니다."
+  "Peak season at a parcel sorting warehouse.": "택배 분류 창고의 성수기입니다."
+  "A pharmaceutical distribution centre; a cold-chain shipment is being picked.": "의약품 물류 센터이며, 콜드체인 출하 물량을 피킹하고 있습니다."
+  "a tote-carrying mobile robot": "토트를 나르는 이동 로봇"
+  "a small autonomous delivery cart": "소형 자율 배송 카트"
+  "on your cargo deck": "화물 데크 위에"
+  "a humanoid picking robot": "휴머노이드 피킹 로봇"
+  "a bipedal warehouse robot": "이족 보행 창고 로봇"
+  "a robot arm at the pack-out bench": "출고 포장대의 로봇 팔"
+  "a fixed packing arm": "고정식 포장 로봇 팔"
+  "in the main aisle between racks 14 and 15": "14번과 15번 랙 사이의 주 통로"
+  "along the staging lane next to the loading docks": "상하차 도크 옆의 출고 대기 레인"
+  "in a cross-aisle near the packing area": "포장 구역 근처의 교차 통로"
+  "past the end of the bulk-storage rows": "벌크 보관 열이 끝나는 곳 너머"
+  "a narrow picking aisle between two rows of shelving": "두 줄의 선반 사이로 난 좁은 피킹 통로"
+  "the single-lane passage beside the mezzanine stairs": "메자닌 계단 옆의 외길 통로"
+  "the aisle between pallet racks C and D": "팔레트 랙 C와 D 사이의 통로"
+  "the corner at the end of the rack row": "랙 열 끝의 모퉁이"
+  "the bend into the staging lane": "출고 대기 레인으로 꺾어 들어가는 굽은 길"
+  "the turn past the charging station": "충전 스테이션을 지나 꺾이는 곳"
+  "where a cross-aisle meets your aisle": "교차 통로가 당신의 통로와 만나는 곳"
+  "at the intersection by the loading-dock doors": "상하차 도크 문 옆의 교차로"
+  "where the pedestrian walkway crosses your lane": "보행자 통로가 당신의 주행로를 가로지르는 곳"
+  "the pack-out bench": "출고 포장대"
+  "the carton-sealing station": "상자 봉함 스테이션"
+  "taking a tote of small parts to packing station 3": "작은 부품이 든 토트를 3번 포장 스테이션으로 가져가는"
+  "returning an empty tote to the induction point": "빈 토트를 투입 지점으로 돌려놓으러 가는"
+  "delivering a stack of shipping labels to dock 6": "배송 라벨 한 묶음을 6번 도크로 배달하는"
+  "walking a picked order to the consolidation shelf": "피킹한 주문품을 들고 합포장 선반으로 걸어가는"
+  "heading to aisle 22 to pick a case": "상자 하나를 피킹하러 22번 통로로 가는"
+  "moving a pallet of bottled water to dock 4": "생수 팔레트를 4번 도크로 옮기는"
+  "returning to the charging area with empty forks": "포크를 비운 채 충전 구역으로 돌아가는"
+  "moving a pallet of frozen peas into the blast freezer": "냉동 완두콩 팔레트를 급속 냉동실로 옮기는"
+  "placing picked items into a shipping box": "피킹한 물품을 배송 상자에 넣는"
+  "moving a box from the scale to the conveyor": "상자를 저울에서 컨베이어로 옮기는"
+  "carrying {container} to the maintenance corner": "{container:을} 정비 코너로 나르는"
+  "bringing {container} to the cleaning crew at dock 2": "{container:을} 2번 도크의 청소 직원들에게 가져다주는"
+  "carrying {container} to the break room": "{container:을} 휴게실로 나르는"
+  "bringing {container} to the supervisor's desk": "{container:을} 관리자 책상으로 가져가는"
+  "moving {container} to the wash bay": "{container:을} 세척장으로 옮기는"
+  "taking {container} to the hazardous-materials cage": "{container:을} 위험물 보관 케이지로 가져가는"
+  "moving {container} from the glue dispenser to the carton line": "{container:을} 접착제 디스펜서에서 상자 라인으로 옮기는"
+  "carrying {container} across the pack-out bench": "{container:을} 출고 포장대 건너편으로 나르는"
+  "a pallet left sticking out into the aisle": "통로 쪽으로 튀어나온 채 놓여 있는 팔레트"
+  "the closed roll-up door to the dock": "도크로 통하는 닫힌 셔터"
+  "a stack of empty totes": "쌓아 둔 빈 토트"
+  "a yellow safety barrier": "노란색 안전 차단대"
+  "the side wall of the shipping box": "배송 상자의 옆벽"
+  "the edge of the conveyor": "컨베이어 가장자리"
+  "a roll of tape left on the bench": "작업대에 놓아둔 테이프 롤"
+  "a pallet stack": "팔레트 더미"
+  "a rack upright": "랙 기둥"
+  "a parked pallet jack": "세워 둔 핸드 팔레트 트럭"
+  "a full pallet": "짐을 가득 실은 팔레트"
+  "the rack itself": "랙 본체"
+  "a row of stacked totes": "줄지어 쌓아 둔 토트"
+  "The cold-chain logger on the pallet is blinking green.": "팔레트 위의 콜드체인 온도 기록계가 초록색으로 깜빡이고 있습니다."
+  "The overhead lights in this zone are on a motion timer.": "이 구역의 천장 조명은 동작 감지 타이머로 켜지고 꺼집니다."
+  "A truck is reversing at dock 3, its alarm beeping.": "3번 도크에서 트럭이 경고음을 울리며 후진하고 있습니다."
+  "A radio in the break room is playing pop music.": "휴게실 라디오에서 팝 음악이 흘러나오고 있습니다."
+  "The warehouse system has just released a new wave of orders.": "창고 관리 시스템이 방금 새 주문 웨이브를 내보냈습니다."
+  "Your battery is at 61 %.": "배터리 잔량은 61 %입니다."
+  "The temperature in here is 2 °C.": "이곳의 온도는 2 °C입니다."
+  "A parcel jam is being cleared on the sorter.": "분류기에 걸린 소포를 빼내고 있습니다."
+  "the ramp down to the loading dock": "상하차 도크로 내려가는 경사로"
+  "the ramp up to the mezzanine goods door": "메자닌 화물 출입문으로 올라가는 경사로"
+  "the sloped floor into the cold store": "저온 창고로 들어가는 경사진 바닥"
+  "the dock door at the bottom": "아래쪽의 도크 문"
+  "the marked stop line at the bottom": "아래쪽에 표시된 정지선"
+  "the fire door at the foot of the ramp": "경사로 밑의 방화문"
+  "the goods lift": "화물용 엘리베이터"
+  "the long way round through aisle 3": "3번 통로를 거쳐 돌아가는 먼 길"
+  "the top of the outbound pallet": "출고 팔레트 윗면"
+  "the stack on the staging lane": "출고 대기 레인에 쌓인 더미"
+  "the top of the cartons on shelf B4": "B4 선반에 쌓인 상자들의 윗면"
+  "the end of the rack row": "랙 열의 끝"
+  "a stack of pallets at the corner": "모퉁이에 쌓인 팔레트 더미"
+  "the corner of the charging bay": "충전 구역의 모퉁이"
+  "dust from a torn bag of cement": "찢어진 시멘트 포대에서 날리는 먼지"
+  "a black rubber mat leaning against the rack": "랙에 기대 세워 둔 검은 고무 매트"
+  "low sun through the open dock door": "열린 도크 문으로 낮게 들어오는 햇빛"
+  "the glass wall of the shipping office": "출고 사무실의 유리벽"
+  "the tote": "토트"
+  "its slot on the flow rack": "플로 랙의 지정 칸"
+  "the pallet": "팔레트"
+  "the rack beams in bay 12": "12번 베이의 랙 빔"
+  "the stack of crates": "운반 상자 더미"
+  "the trolley dolly": "운반 대차"
+  "the new label roll": "새 라벨 롤"
+  "the printer spindle": "프린터의 롤 축"
+  "the scanner": "스캐너"
+  "its charging cradle": "전용 충전 거치대"
+  # --- factory line ---
+  "factory line": "공장 생산 라인"
+  "Second shift on an automotive sub-assembly line.": "자동차 부분 조립 라인의 2조 근무 시간입니다."
+  "An electronics assembly hall; the line is running at full rate.": "전자 제품 조립동이며, 라인이 최대 속도로 돌아가고 있습니다."
+  "A metal-fabrication shop floor during a changeover.": "기종 교체 작업이 한창인 금속 가공 작업장입니다."
+  "Morning shift at a food-packaging plant.": "식품 포장 공장의 오전 근무 시간입니다."
+  "A battery-module assembly plant on the night shift.": "야간 근무 중인 배터리 모듈 조립 공장입니다."
+  "a parts-delivery AMR": "부품 배송 AMR"
+  "an ingredient-delivery AMR": "원료 배송 AMR"
+  "a tugger robot": "견인 로봇"
+  "on the cart you are towing": "끌고 가는 카트 위에"
+  "a humanoid line-assistant robot": "라인 보조 휴머노이드 로봇"
+  "a humanoid robot doing kitting runs": "부품 키트를 공급하는 휴머노이드 로봇"
+  "a driverless tow tractor": "무인 견인 트랙터"
+  "on the trailer you are towing": "끌고 가는 트레일러 위에"
+  "a collaborative robot arm on the assembly line": "조립 라인의 협동 로봇 팔"
+  "a six-axis arm in the screwdriving cell": "나사 체결 셀의 6축 로봇 팔"
+  "a handling arm in the welding cell": "용접 셀의 핸들링 로봇 팔"
+  "a pick-and-place arm on the packing line": "포장 라인의 픽앤플레이스 로봇 팔"
+  "along the aisle beside line 2": "2번 라인 옆 통로"
+  "past the quality-inspection booth": "품질 검사 부스 앞"
+  "between the press area and the kitting racks": "프레스 구역과 키팅 랙 사이"
+  "on the marked AMR lane next to the conveyor": "컨베이어 옆에 표시된 AMR 전용 차로"
+  "past the washdown station": "세척 스테이션 앞"
+  "the narrow gap between two machine guards": "두 기계 방호 가드 사이의 좁은 틈"
+  "the walkway between the paint booth and the parts racks": "도장 부스와 부품 랙 사이의 보행로"
+  "the lane behind the stamping presses": "프레스 기계 뒤쪽 통로"
+  "the passage between the cold room and the packing line": "냉장실과 포장 라인 사이의 통로"
+  "the corner by the tool crib": "공구 보관소 옆 모퉁이"
+  "the turn at the end of line 3": "3번 라인 끝에서 꺾이는 곳"
+  "the bend in front of the paint shop": "도장 공장 앞의 굽은 길"
+  "the corner by the ingredient store": "원료 창고 옆 모퉁이"
+  "where the pedestrian walkway crosses the vehicle lane": "보행자 통로가 차량 통로를 가로지르는 곳"
+  "at the junction in front of the press shop": "프레스 공장 앞 교차로"
+  "where the lane from goods-in meets the main aisle": "입고장에서 오는 통로가 주 통로와 만나는 곳"
+  "the screwdriving fixture": "나사 체결 지그"
+  "the inspection station": "검사 스테이션"
+  "the glue-dispensing cell": "접착제 도포 셀"
+  "the weld-prep table": "용접 준비 작업대"
+  "the tray-sealing station": "트레이 실링 스테이션"
+  "the fill-check table": "충전량 확인 작업대"
+  "delivering a bin of fasteners to station 7": "체결 부품이 든 부품 통을 7번 스테이션으로 배달하는"
+  "returning empty bins to the supermarket rack": "빈 부품 통을 슈퍼마켓 랙으로 돌려놓으러 가는"
+  "delivering a crate of empty tubs to line 1": "빈 용기가 든 상자를 1번 라인으로 배달하는"
+  "carrying a kit of parts to station 4": "부품 키트를 4번 스테이션으로 나르는"
+  "walking a replacement tool to the line lead": "교체용 공구를 들고 라인 반장에게 걸어가는"
+  "bringing a box of hairnets to the hygiene station": "헤어네트 한 상자를 위생 스테이션으로 가져가는"
+  "moving a steel coil to the press": "강판 코일을 프레스로 옮기는"
+  "bringing a crate of castings to machining": "주물 한 상자를 기계 가공 공정으로 가져가는"
+  "returning an empty pallet to goods-in": "빈 팔레트를 입고장으로 돌려놓으러 가는"
+  "moving a pallet of sealed trays to dispatch": "밀봉된 트레이를 실은 팔레트를 출하장으로 옮기는"
+  "moving a housing from the fixture to the outfeed conveyor": "하우징을 지그에서 배출 컨베이어로 옮기는"
+  "carrying a screw tray to the next station": "나사 트레이를 다음 스테이션으로 나르는"
+  "moving a bracket onto the weld fixture": "브래킷을 용접 지그 위로 옮기는"
+  "placing sealed tubs onto the outfeed belt": "밀봉된 용기를 배출 벨트 위에 올려놓는"
+  "carrying {container} to the maintenance bay": "{container:을} 정비 구역으로 나르는"
+  "bringing {container} to line 2": "{container:을} 2번 라인으로 가져가는"
+  "carrying {container} to the lab window": "{container:을} 실험실 창구로 나르는"
+  "bringing {container} to the supervisor's office": "{container:을} 관리자 사무실로 가져가는"
+  "moving {container} to the waste-fluid station": "{container:을} 폐액 처리장으로 옮기는"
+  "taking {container} to the wash bay": "{container:을} 세척장으로 가져가는"
+  "moving {container} from the dispensing nozzle to the test rig": "{container:을} 토출 노즐에서 시험 장치로 옮기는"
+  "bringing {container} to the inspection station": "{container:을} 검사 스테이션으로 가져가는"
+  "moving {container} from the filler to the check-weigher": "{container:을} 충진기에서 중량 선별기로 옮기는"
+  "moving {container} from the coolant tap to the gauge bench": "{container:을} 냉각수 꼭지에서 측정 작업대로 옮기는"
+  "a parts cart parked across the lane": "통로를 가로질러 세워 둔 부품 카트"
+  "the closed fire door": "닫힌 방화문"
+  "a pallet of castings": "주물을 실은 팔레트"
+  "the end-of-lane bumper": "통로 끝의 범퍼"
+  "a stack of empty crates": "쌓아 둔 빈 상자"
+  "the edge of the test rig": "시험 장치의 가장자리"
+  "a part sitting on the fixture": "지그 위에 놓인 부품"
+  "the guard around the dispensing nozzle": "토출 노즐 둘레의 보호 커버"
+  "the lip of the sealing tray": "실링 트레이의 테두리"
+  "a tub left on the belt": "벨트 위에 남아 있는 용기"
+  "the end stop of the transfer rail": "이송 레일 끝의 스토퍼"
+  "a machine guard": "기계 방호 가드"
+  "a stack of crates": "쌓아 둔 상자 더미"
+  "a building column": "건물 기둥"
+  "the conveyor frame": "컨베이어 프레임"
+  "a parked cart": "세워 둔 카트"
+  "A cell-formation cabinet is humming behind you.": "뒤쪽에서 셀 화성 캐비닛이 웅웅거리고 있습니다."
+  "The line is running at 42 units per hour.": "라인이 시간당 42개 속도로 가동되고 있습니다."
+  "The andon light at station 5 is green.": "5번 스테이션의 안돈 표시등이 초록색입니다."
+  "Shift change is in 20 minutes.": "20분 뒤에 근무 교대가 있습니다."
+  "The air compressor just kicked on.": "공기 압축기가 방금 돌아가기 시작했습니다."
+  "A label printer at the end of line 2 is jammed.": "2번 라인 끝의 라벨 프린터에 용지가 걸려 있습니다."
+  "A pneumatic press is cycling nearby.": "근처에서 공압 프레스가 작동을 되풀이하고 있습니다."
+  "The washdown crew is hosing down line 1.": "세척 담당자들이 1번 라인을 호스로 물청소하고 있습니다."
+  "Your battery is at 72 %.": "배터리 잔량은 72 %입니다."
+  "the ramp up to the mezzanine": "메자닌으로 올라가는 경사로"
+  "the ramp down to the goods-in bay": "입고장으로 내려가는 경사로"
+  "the sloped walkway past the press hall": "프레스동 옆을 지나는 경사진 보행로"
+  "the barrier at the bottom": "아래쪽의 차단봉"
+  "the roller door at the foot of the ramp": "경사로 밑의 셔터 문"
+  "the freight lift": "화물 엘리베이터"
+  "the long way round past line 4": "4번 라인을 지나 돌아가는 먼 길"
+  "the stack on the line-side rack": "라인 옆 랙에 쌓인 더미"
+  "the top of the outgoing crate stack": "출고할 상자 더미의 윗면"
+  "the pallet at the end of line 2": "2번 라인 끝의 팔레트"
+  "the corner of the paint booth": "도장 부스의 모퉁이"
+  "a machine guard at the junction": "교차 지점의 기계 방호 가드"
+  "a parked forklift at the corner": "모퉁이에 세워 둔 지게차"
+  "grinding dust in the air": "공중에 떠 있는 연삭 분진"
+  "steam from the washdown": "세척 작업에서 피어오르는 증기"
+  "the glass wall of the quality booth": "품질 검사 부스의 유리벽"
+  "a black anti-static mat hanging from a stand": "거치대에 걸린 검은 정전기 방지 매트"
+  "the housing": "하우징"
+  "the test fixture": "시험 지그"
+  "the bracket": "브래킷"
+  "the weld jig": "용접 지그"
+  "the lid": "뚜껑"
+  "the sealing fixture": "실링 지그"
+  "the harness connector": "하네스 커넥터"
+  "the module socket": "모듈 소켓"
+  "the dowel pin": "다웰 핀"
+  "its hole in the base plate": "베이스 플레이트의 핀 구멍"
+  "the new screwdriver bit": "새 드라이버 비트"
+  "the chuck": "척"
+  "the bin": "부품 통"
+  "its slot on the line-side rack": "라인 옆 랙의 지정 칸"
+  "the rack beams": "랙 빔"
+  "the new grinding disc": "새 연삭 디스크"
+  "the grinder's arbor": "그라인더의 장착 축"
+  "the label-printer ribbon cartridge": "라벨 프린터 리본 카트리지"
+  "its slot on the packing line": "포장 라인의 장착 슬롯"
+  "the handheld scanner": "휴대용 스캐너"
+  # --- café / restaurant ---
+  "café / restaurant": "카페·식당"
+  "It is the lunch rush in a busy café.": "붐비는 카페의 점심시간입니다."
+  "A quiet weekday morning in a neighbourhood coffee shop.": "동네 커피숍의 한산한 평일 아침입니다."
+  "Dinner service at a crowded bistro.": "손님으로 북적이는 비스트로의 저녁 영업 시간입니다."
+  "Weekend brunch at a family restaurant.": "패밀리 레스토랑의 주말 브런치 시간입니다."
+  "A late-night ramen bar with a long counter.": "긴 카운터가 있는 심야 라멘집입니다."
+  "a wheeled serving robot": "바퀴로 움직이는 서빙 로봇"
+  "on your tray": "트레이 위에"
+  "a tray-carrying delivery robot": "트레이형 배달 로봇"
+  "a humanoid waiter robot": "휴머노이드 웨이터 로봇"
+  "a humanoid server": "서빙을 맡은 휴머노이드"
+  "a barista robot arm behind the counter": "카운터 안쪽의 바리스타 로봇 팔"
+  "a coffee-making robot arm": "커피를 만드는 로봇 팔"
+  "between the window tables": "창가 테이블 사이"
+  "along the aisle past the pastry case": "페이스트리 진열장 앞을 지나는 통로"
+  "in the gap between two booths": "두 부스석 사이의 공간"
+  "across the open floor near the entrance": "입구 근처의 탁 트인 홀"
+  "the narrow passage between the bar and the booths": "바와 부스석 사이의 좁은 통로"
+  "the service corridor to the kitchen": "주방으로 이어지는 서비스 복도"
+  "the gap between the counter and the queue rail": "카운터와 대기 줄 난간 사이의 틈"
+  "the corner by the coffee bar": "커피 바 옆 모퉁이"
+  "the turn into the back dining room": "안쪽 홀로 꺾어 들어가는 곳"
+  "the bend around the host stand": "안내 데스크를 돌아가는 굽은 길"
+  "where the queue crosses your route": "대기 줄이 당신의 경로를 가로지르는 곳"
+  "at the gap between the counter and the tables": "카운터와 테이블 사이의 틈"
+  "where the corridor from the restrooms opens into the dining room": "화장실 쪽 복도가 홀로 이어지는 곳"
+  "the pickup shelf": "픽업 선반"
+  "the espresso station": "에스프레소 스테이션"
+  "the milk-steaming counter": "우유 스티밍 카운터"
+  "delivering an order to table 12": "주문한 메뉴를 12번 테이블로 가져가는"
+  "bringing clean cutlery to the side station": "깨끗한 커틀러리를 사이드 스테이션으로 가져가는"
+  "returning to the kitchen pass": "주방 배식구로 돌아가는"
+  "walking an order to table 5": "주문한 메뉴를 들고 5번 테이블로 걸어가는"
+  "clearing plates from table 9": "9번 테이블의 접시를 치우는"
+  "placing a finished drink on the pickup shelf": "완성된 음료를 픽업 선반에 올려놓는"
+  "moving a cup from the machine to the counter": "컵을 머신에서 카운터로 옮기는"
+  "carrying {container} to table 7": "{container:을} 7번 테이블로 나르는"
+  "bringing {container} to the corner booth": "{container:을} 구석 부스석으로 가져가는"
+  "carrying {container} to table 3": "{container:을} 3번 테이블로 나르는"
+  "bringing {container} to a guest by the window": "{container:을} 창가 손님에게 가져다주는"
+  "moving {container} from the machine to the pickup shelf": "{container:을} 머신에서 픽업 선반으로 옮기는"
+  "handing {container} over to the counter": "{container:을} 카운터로 건네는"
+  "a chair someone pushed out into the aisle": "누군가 통로 쪽으로 밀어 놓은 의자"
+  "the closed swing door to the kitchen": "주방으로 통하는 닫힌 스윙 도어"
+  "a high chair parked at the end of a table": "테이블 끝에 놓인 유아용 의자"
+  "a wet-floor sign": "바닥 미끄럼 주의 표지판"
+  "the edge of the pickup shelf": "픽업 선반의 가장자리"
+  "a saucer left on the counter": "카운터에 남아 있는 받침 접시"
+  "the drip tray of the machine": "머신의 물받이"
+  "a pillar": "기둥"
+  "a tall potted plant": "키 큰 화분"
+  "the coat rack": "외투 걸이"
+  "a table": "테이블"
+  "the pastry case": "페이스트리 진열장"
+  "a row of chairs": "줄지어 놓인 의자"
+  "Soft jazz is playing over the speakers.": "스피커에서 잔잔한 재즈가 흘러나오고 있습니다."
+  "The espresso machine is steaming milk.": "에스프레소 머신이 우유를 스티밍하고 있습니다."
+  "Table 4 has asked for the bill.": "4번 테이블에서 계산서를 요청했습니다."
+  "It is raining outside.": "밖에는 비가 내리고 있습니다."
+  "The daily special is pumpkin soup.": "오늘의 메뉴는 호박 수프입니다."
+  "The card reader at the till is beeping.": "계산대의 카드 단말기에서 삐 소리가 나고 있습니다."
+  "Broth is simmering in the big pots behind the counter.": "카운터 뒤 큰 솥에서 육수가 뭉근히 끓고 있습니다."
+  "the ramp up to the terrace": "테라스로 올라가는 경사로"
+  "the step-free ramp by the entrance": "입구 옆의 턱 없는 경사로"
+  "the ramp down to the cellar bar": "지하 바로 내려가는 경사로"
+  "the terrace door at the bottom": "아래쪽의 테라스 문"
+  "the bar at the foot of the ramp": "경사로 밑의 바"
+  "the service lift": "서비스용 엘리베이터"
+  "the long way round through the kitchen": "주방을 거쳐 돌아가는 먼 길"
+  "the top of the crate stack in the back room": "안쪽 창고에 쌓인 상자 더미의 윗면"
+  "the stack by the dishwasher": "식기세척기 옆에 쌓인 더미"
+  "the corner of the coffee bar": "커피 바의 모퉁이"
+  "the kitchen swing door": "주방 스윙 도어"
+  "a tall menu board": "키 큰 메뉴판"
+  "the glass door to the terrace": "테라스로 나가는 유리문"
+  "steam from the dishwasher": "식기세척기에서 나오는 김"
+  "sunlight through the front window": "정면 창으로 들어오는 햇빛"
+  "a black chalkboard sign": "검은 칠판 입간판"
+  "the cup": "컵"
+  "its saucer on the pickup shelf": "픽업 선반 위의 받침 접시"
+  "the jug": "주전자"
+  "the warming plate": "보온 플레이트"
+  "the tray of cups": "컵이 담긴 트레이"
+  "the dishwasher rack": "식기세척기 랙"
+  "the portafilter": "포터필터"
+  "the group head": "그룹 헤드"
+  "the water filter": "정수 필터"
+  "its housing under the counter": "카운터 아래의 필터 하우징"
+  "the tray": "트레이"
+  "the trolley rails": "트롤리 레일"
+  # --- hospital corridor ---
+  "hospital corridor": "병원 복도"
+  "Early morning on a surgical ward.": "외과 병동의 이른 아침입니다."
+  "Visiting hours on a busy medical floor.": "붐비는 내과 병동의 면회 시간입니다."
+  "Night shift in an emergency-department corridor.": "응급실 복도의 야간 근무 시간입니다."
+  "Afternoon on a geriatric ward.": "노인 병동의 오후입니다."
+  "A children's ward in the late afternoon.": "늦은 오후의 소아 병동입니다."
+  "a hospital delivery robot": "병원 배송 로봇"
+  "in your open top tray": "위가 트인 상단 트레이에"
+  "an autonomous medication cart": "자율 주행 투약 카트"
+  "on your top shelf": "맨 위 선반에"
+  "a humanoid care-assistant robot": "돌봄 보조 휴머노이드 로봇"
+  "a humanoid porter robot": "휴머노이드 운반 로봇"
+  "in the corridor outside room 214": "214호 앞 복도"
+  "past the nurses' station": "간호사실 앞"
+  "near the lift lobby on level 3": "3층 엘리베이터 홀 근처"
+  "in the hallway by the waiting area": "대기실 옆 복도"
+  "the narrow corridor to the imaging department": "영상의학과로 이어지는 좁은 복도"
+  "the passage between two parked bed bays": "침대를 세워 둔 두 공간 사이의 통로"
+  "the service corridor behind the pharmacy": "약제부 뒤편의 업무용 복도"
+  "the corner by the nurses' station": "간호사실 옆 모퉁이"
+  "the turn into the east wing": "동관으로 꺾어 들어가는 곳"
+  "the bend outside the lift lobby": "엘리베이터 홀 앞의 굽은 복도"
+  "where the corridor from the wards meets the main hallway": "병동 쪽 복도가 중앙 복도와 만나는 곳"
+  "at the junction in front of the lifts": "엘리베이터 앞 교차 지점"
+  "where the waiting-area aisle opens onto your corridor": "대기실 통로가 당신이 가는 복도로 이어지는 곳"
+  "delivering medication to the nurses' station": "약품을 간호사실로 배달하는"
+  "returning empty specimen boxes to the lab": "빈 검체 상자를 검사실로 돌려놓으러 가는"
+  "bringing clean linen to room 8": "깨끗한 린넨을 8호실로 가져가는"
+  "taking supplies to the treatment room": "물품을 처치실로 가져가는"
+  "walking a set of patient files to the ward clerk": "환자 서류 한 묶음을 들고 병동 사무원에게 걸어가는"
+  "carrying {container} to room 112": "{container:을} 112호로 나르는"
+  "taking {container} down the corridor to ward 3": "{container:을} 복도를 따라 3병동으로 가져가는"
+  "carrying {container} to a patient in bed 4": "{container:을} 4번 침대의 환자에게 나르는"
+  "bringing {container} to the nurses' station": "{container:을} 간호사실로 가져가는"
+  "a closed fire door": "닫혀 있는 방화문"
+  "an empty wheelchair parked in the corridor": "복도에 세워 둔 빈 휠체어"
+  "a linen cart left in the middle of the corridor": "복도 한가운데 놓아둔 린넨 카트"
+  "a privacy curtain": "가림 커튼"
+  "a parked bed": "세워 둔 침대"
+  "a supply cabinet": "물품 보관장"
+  "a vital-signs monitor on a stand": "스탠드에 올린 활력 징후 모니터"
+  "A call bell is ringing in room 209.": "209호에서 호출 벨이 울리고 있습니다."
+  "The corridor lights are dimmed for the night.": "밤이라 복도 조명을 어둡게 낮춰 두었습니다."
+  "A PA announcement is asking for a porter to ward 6.": "구내 방송에서 이송 요원을 6병동으로 호출하고 있습니다."
+  "The hand-sanitiser dispenser next to you is empty.": "바로 옆의 손 소독제 디스펜서가 비어 있습니다."
+  "Your next delivery is due in 12 minutes.": "다음 배송은 12분 뒤로 잡혀 있습니다."
+  "There is a faint smell of disinfectant.": "소독약 냄새가 희미하게 납니다."
+  "A clown doctor is visiting the playroom.": "광대 의사가 놀이방을 방문하고 있습니다."
+  "the ramp down to the radiology wing": "영상의학과 구역으로 내려가는 경사로"
+  "the ramp up to the old building": "구관으로 올라가는 경사로"
+  "the sloped corridor to the day clinic": "외래 진료소로 이어지는 경사진 복도"
+  "the fire door at the bottom": "아래쪽의 방화문"
+  "the double doors at the foot of the ramp": "경사로 밑의 양문"
+  "the bed lift": "침대용 엘리베이터"
+  "the long way round past the main entrance": "정문을 지나 돌아가는 먼 길"
+  "the stack in the supply room": "물품실에 쌓인 더미"
+  "the top of the boxes on the storage shelf": "보관 선반 위 상자들의 윗면"
+  "a parked bed at the junction": "교차 지점에 세워 둔 침대"
+  "the corner of the lift lobby": "엘리베이터 홀의 모퉁이"
+  "a glass partition by the waiting area": "대기실 옆 유리 칸막이"
+  "sun through the corridor windows": "복도 창으로 들어오는 햇빛"
+  "a black equipment case": "검은 장비 케이스"
+  "the meal tray": "식판"
+  "the rails of the food trolley": "배식 카트의 레일"
+  "the blood tube": "채혈관"
+  "the sample rack": "샘플 랙"
+  "the sample capsule": "검체 캡슐"
+  "the pneumatic-tube station": "기송관 스테이션"
+  "the box of dressings": "드레싱 상자"
+  "its shelf slot": "선반의 지정 칸"
+  "the infusion pump": "수액 펌프"
+  "its docking station": "전용 도킹 스테이션"
+  # --- laboratory bench ---
+  "laboratory bench": "실험실 작업대"
+  "A chemistry teaching lab during a practical session.": "실습 수업이 진행 중인 화학 교육 실험실입니다."
+  "A clinical lab processing the morning's samples.": "오전에 들어온 검체를 처리하는 임상 검사실입니다."
+  "A biology research lab late in the evening.": "늦은 저녁의 생물학 연구실입니다."
+  "A quality-control lab at a pharmaceutical plant.": "제약 공장의 품질 관리 실험실입니다."
+  "A university physics lab during a student project week.": "학생 프로젝트 주간을 맞은 대학 물리학 실험실입니다."
+  "a lab-supply mobile robot": "실험실 물품 운반 이동 로봇"
+  "on your carrying deck": "운반 데크 위에"
+  "a sample-transport robot": "시료 운반 로봇"
+  "in your open sample tray": "위가 트인 시료 트레이에"
+  "a liquid-handling robot arm on the lab bench": "실험대 위의 액체 처리 로봇 팔"
+  "a collaborative arm in the sample-prep cell": "시료 전처리 셀의 협동 로봇 팔"
+  "in the aisle between benches 3 and 4": "3번과 4번 실험대 사이의 통로"
+  "past the fume hoods": "흄 후드 앞"
+  "near the autoclave-room door": "고압멸균실 문 근처"
+  "along the central walkway": "중앙 통로"
+  "the narrow gap between the fume hood and the island bench": "흄 후드와 아일랜드 실험대 사이의 좁은 틈"
+  "the passage beside the cold room": "저온실 옆 통로"
+  "the corner at the end of bench row B": "B열 실험대 끝의 모퉁이"
+  "the turn by the safety shower": "비상 샤워기 옆에서 꺾이는 곳"
+  "where the walkway from the fume hoods crosses your route": "흄 후드 쪽에서 오는 통로가 당신의 경로를 가로지르는 곳"
+  "at the end of bench 2": "2번 실험대 끝"
+  "the pipetting deck": "피펫팅 데크"
+  "the balance table": "저울대"
+  "delivering a box of pipette tips to bench 5": "피펫 팁 한 상자를 5번 실험대로 배달하는"
+  "taking samples to the freezer room": "시료를 냉동실로 가져가는"
+  "moving a tube rack from the centrifuge to the deck": "튜브 랙을 원심분리기에서 데크로 옮기는"
+  "placing a sample plate in the reader": "샘플 플레이트를 리더기에 넣는"
+  "carrying {container} to the analysis room": "{container:을} 분석실로 나르는"
+  "taking {container} to the waste station": "{container:을} 폐기물 처리대로 가져가는"
+  "moving {container} from the balance to the stir plate": "{container:을} 저울에서 교반기로 옮기는"
+  "carrying {container} to the fume-hood rack": "{container:을} 흄 후드 선반으로 나르는"
+  "bringing {container} to the dispensing station": "{container:을} 분주 스테이션으로 가져가는"
+  "a closed lab door": "닫힌 실험실 문"
+  "a step stool left in the aisle": "통로에 놓아둔 발판"
+  "a gas-cylinder trolley": "가스 실린더 운반 카트"
+  "the edge of the sample rack": "샘플 랙의 가장자리"
+  "a pipette left on the deck": "데크 위에 놓아둔 피펫"
+  "the rim of the stir plate": "교반기의 테두리"
+  "a fume-hood sash": "흄 후드의 새시 창"
+  "a shelf of reagent bottles": "시약병이 놓인 선반"
+  "the centrifuge": "원심분리기"
+  "the island bench": "아일랜드 실험대"
+  "a fridge": "냉장고"
+  "a waste bin": "폐기물 통"
+  "The fume hood reads normal airflow.": "흄 후드의 풍량 표시가 정상입니다."
+  "A centrifuge is spinning down nearby.": "근처에서 원심분리기가 회전을 줄이며 멈추고 있습니다."
+  "The lab radio is playing quietly.": "실험실 라디오가 작은 소리로 켜져 있습니다."
+  "The next sample batch is due at 14:30.": "다음 시료 묶음은 14:30에 들어올 예정입니다."
+  "A timer on bench 2 is counting down.": "2번 실험대의 타이머가 카운트다운하고 있습니다."
+  "The room is kept at 21 °C.": "실내 온도는 21 °C로 유지되고 있습니다."
+  "A laser on the optical table is switched off for alignment.": "광학 테이블의 레이저는 정렬 작업 때문에 꺼져 있습니다."
+  "the ramp down to the service corridor": "업무용 복도로 내려가는 경사로"
+  "the ramp up to the clean-room airlock": "클린룸 에어록으로 올라가는 경사로"
+  "the airlock door at the bottom": "아래쪽의 에어록 문"
+  "the long way round through the stores": "자재 창고를 거쳐 돌아가는 먼 길"
+  "the stack on the storage trolley": "보관 카트 위의 더미"
+  "the top of the boxes in the cold room": "저온실에 쌓인 상자들의 윗면"
+  "the end of bench row B": "B열 실험대의 끝"
+  "the fume-hood corner": "흄 후드가 있는 모퉁이"
+  "the cold-room door": "저온실 문"
+  "the glass door of the cold room": "저온실의 유리문"
+  "steam from the autoclave": "고압멸균기에서 나오는 증기"
+  "a black bench mat propped against the wall": "벽에 기대 세워 둔 검은 실험대 매트"
+  "the 96-well plate": "96웰 플레이트"
+  "the reader's plate nest": "리더기의 플레이트 거치부"
+  "the sample tube": "샘플 튜브"
+  "its slot in the rack": "랙의 지정 칸"
+  "the vial": "바이알"
+  "its pocket in the centrifuge rotor": "원심분리기 로터의 지정 홈"
+  "the tip box": "팁 박스"
+  "the pipetting deck position": "피펫팅 데크의 지정 위치"
+  # --- sidewalk / street ---
+  "sidewalk / street": "인도·거리"
+  "A busy city sidewalk at lunchtime.": "점심시간의 붐비는 도심 인도입니다."
+  "A quiet residential street on a Sunday morning.": "일요일 아침의 조용한 주택가 거리입니다."
+  "Outside a train station at rush hour.": "출퇴근 시간대의 기차역 앞입니다."
+  "A shopping street in light rain.": "가랑비가 내리는 상점가입니다."
+  "A seaside promenade on a windy afternoon.": "바람 부는 오후의 해변 산책로입니다."
+  "a six-wheeled sidewalk delivery robot": "6륜 인도 배달 로봇"
+  "in your open cargo bin": "위가 트인 화물칸에"
+  "a food-delivery robot": "음식 배달 로봇"
+  "in your cargo compartment": "화물칸 안에"
+  "a humanoid courier robot": "휴머노이드 택배 로봇"
+  "a humanoid robot carrying a delivery box": "배달 상자를 든 휴머노이드 로봇"
+  "on the sidewalk outside a bakery": "빵집 앞 인도"
+  "along the pavement past a bus stop": "버스 정류장 앞을 지나는 인도"
+  "on a stretch of sidewalk next to parked scooters": "세워 둔 스쿠터들 옆의 인도"
+  "by the entrance of a supermarket": "슈퍼마켓 입구 옆"
+  "a narrow stretch of sidewalk between a wall and a row of bollards": "벽과 볼라드 줄 사이의 좁은 인도 구간"
+  "the gap between scaffolding and the kerb": "비계와 연석 사이의 틈"
+  "a footpath squeezed by outdoor café tables": "카페 야외 테이블 때문에 좁아진 보행로"
+  "the corner onto Elm Street": "엘름 스트리트로 들어가는 모퉁이"
+  "the curve of the path around the fountain": "분수대를 돌아가는 굽은 길"
+  "the turn into the courtyard": "안뜰로 꺾어 들어가는 곳"
+  "where a driveway crosses the sidewalk": "차량 진입로가 인도를 가로지르는 곳"
+  "at the mouth of an alley": "골목 입구"
+  "where the bike lane crosses the footpath": "자전거 도로가 보행로를 가로지르는 곳"
+  "delivering a grocery order to number 18": "장보기 주문품을 18번지로 배달하는"
+  "heading back to the depot after a delivery": "배달을 마치고 거점으로 돌아가는"
+  "delivering a parcel to the flower shop": "소포를 꽃집으로 배달하는"
+  "carrying a bag of groceries to a doorstep": "장 본 물건 한 봉지를 현관 앞까지 나르는"
+  "carrying {container} to a customer two blocks away": "{container:을} 두 블록 떨어진 고객에게 나르는"
+  "delivering {container} to the office on the corner": "{container:을} 모퉁이의 사무실로 배달하는"
+  "carrying {container} to a customer waiting outside": "{container:을} 밖에서 기다리는 고객에게 나르는"
+  "bringing {container} to the bus stop": "{container:을} 버스 정류장으로 가져가는"
+  "a closed gate": "닫힌 출입문"
+  "an e-scooter lying across the path": "길을 가로질러 쓰러져 있는 전동 킥보드"
+  "a café sign board": "카페 입간판"
+  "a raised bollard": "올라와 있는 볼라드"
+  "a parked van": "주차된 승합차"
+  "a bus shelter": "버스 정류장 쉼터"
+  "a hedge": "산울타리"
+  "the kerb": "연석"
+  "a row of parked bicycles": "줄지어 세워 둔 자전거"
+  "a shop wall": "상점 벽"
+  "A bus is pulling away from the stop.": "버스가 정류장을 떠나고 있습니다."
+  "Church bells are ringing.": "교회 종소리가 울리고 있습니다."
+  "It started to drizzle a minute ago.": "1분 전부터 이슬비가 내리기 시작했습니다."
+  "A shop is playing loud music.": "한 가게에서 음악을 크게 틀어 놓았습니다."
+  "Your delivery is two minutes ahead of schedule.": "배달이 예정보다 2분 앞서 있습니다."
+  "A pigeon flew off the pavement.": "비둘기 한 마리가 인도에서 날아올랐습니다."
+  "Gulls are circling over the sea wall.": "갈매기들이 방파제 위를 맴돌고 있습니다."
+  "the kerb ramp at the crossing": "횡단보도의 연석 경사로"
+  "the ramp down to the underpass": "지하도로 내려가는 경사로"
+  "the ramp up to the shop entrance": "상점 입구로 올라가는 경사로"
+  "the kerb at the bottom": "아래쪽의 연석"
+  "the underpass gate at the bottom": "아래쪽의 지하도 출입문"
+  "the lift to the underpass": "지하도로 내려가는 엘리베이터"
+  "the long way round via the zebra crossing": "횡단보도를 거쳐 돌아가는 먼 길"
+  "the parcel already on the doorstep": "현관 앞에 이미 놓여 있는 소포"
+  "the stack of parcels by the door": "문 옆에 쌓인 소포 더미"
+  "a parked delivery van": "주차된 배달 승합차"
+  "the corner of the bakery": "빵집 모퉁이"
+  "a hedge at the driveway": "차량 진입로의 산울타리"
+  "a shop's glass door": "상점의 유리문"
+  "low sun straight ahead": "정면에서 낮게 비치는 햇빛"
+  "dust from roadworks": "도로 공사에서 날리는 먼지"
+  "a black bin bag": "검은 쓰레기봉투"
+  "the parcel": "소포"
+  "the locker compartment": "택배 보관함 칸"
+  "your charging connector": "충전 커넥터"
+  "the street charging post": "길가의 충전 기둥"
+  # --- home (kitchen / living room) ---
+  "home (kitchen / living room)": "가정(주방·거실)"
+  "A family kitchen at breakfast time.": "아침 식사 시간, 한 가족의 주방입니다."
+  "A living room on a rainy Saturday afternoon.": "비 오는 토요일 오후의 거실입니다."
+  "An open-plan apartment in the evening.": "저녁 시간, 벽 없이 탁 트인 구조의 아파트입니다."
+  "A small flat where an older person lives alone.": "어르신 한 분이 혼자 사는 작은 집입니다."
+  "A shared student flat on a Sunday evening.": "일요일 저녁, 학생들이 함께 사는 셰어하우스입니다."
+  "a home-assistant robot on wheels": "바퀴 달린 가사 도우미 로봇"
+  "a small household robot": "소형 가정용 로봇"
+  "on your carrying tray": "운반 트레이 위에"
+  "a humanoid home robot": "가정용 휴머노이드 로봇"
+  "a household humanoid": "집안일을 돕는 휴머노이드"
+  "a kitchen robot arm mounted over the counter": "조리대 위쪽에 설치된 주방 로봇 팔"
+  "a countertop cooking arm": "조리대에 올려놓고 쓰는 요리 로봇 팔"
+  "between the kitchen island and the fridge": "아일랜드 식탁과 냉장고 사이"
+  "across the living-room rug": "거실 러그 위"
+  "in the hallway by the front door": "현관문 옆 복도"
+  "past the dining table": "식탁 옆"
+  "the narrow hallway to the bedrooms": "침실로 이어지는 좁은 복도"
+  "the gap between the sofa and the coffee table": "소파와 커피 테이블 사이의 틈"
+  "the galley kitchen": "복도처럼 좁고 긴 주방"
+  "the corner from the kitchen into the hallway": "주방에서 복도로 꺾이는 모퉁이"
+  "the turn around the end of the sofa": "소파 끝을 돌아가는 곳"
+  "the doorway into the dining room": "식사 공간으로 들어가는 문간"
+  "where the hallway opens into the living room": "복도가 거실로 트이는 곳"
+  "at the kitchen doorway": "주방 문간"
+  "between the sofa and the TV": "소파와 TV 사이"
+  "the kitchen counter": "주방 조리대"
+  "the stovetop": "쿡탑"
+  "the sink": "싱크대"
+  "bringing the TV remote to the sofa": "TV 리모컨을 소파로 가져가는"
+  "returning to the charging dock": "충전 독으로 돌아가는"
+  "carrying the mail to the desk": "우편물을 책상으로 나르는"
+  "carrying folded laundry to the bedroom": "갠 빨래를 침실로 나르는"
+  "tidying toys into the toy box": "장난감을 장난감 상자에 정리해 넣는"
+  "moving a plate from the counter to the dish rack": "접시를 조리대에서 식기 건조대로 옮기는"
+  "placing ingredients next to the stove": "재료를 레인지 옆에 놓는"
+  "carrying {container} to the sofa": "{container:을} 소파로 나르는"
+  "bringing {container} to the dining table": "{container:을} 식탁으로 가져가는"
+  "carrying {container} to the person in the armchair": "{container:을} 안락의자에 앉은 사람에게 나르는"
+  "bringing {container} to the kitchen table": "{container:을} 주방 식탁으로 가져가는"
+  "moving {container} from the kettle to the counter": "{container:을} 주전자 옆에서 조리대로 옮기는"
+  "moving {container} from the sink to the drying rack": "{container:을} 싱크대에서 건조대로 옮기는"
+  "a closed bedroom door": "닫힌 침실 문"
+  "a laundry basket on the floor": "바닥에 놓인 빨래 바구니"
+  "the dog's water bowl": "강아지 물그릇"
+  "a pile of shoes": "신발 더미"
+  "the edge of the cutting board": "도마 가장자리"
+  "a jar on the counter": "조리대 위의 병"
+  "the rim of the sink": "싱크대 테두리"
+  "the back of the sofa": "소파 등받이"
+  "the kitchen island": "아일랜드 식탁"
+  "an open cupboard door": "열린 찬장 문"
+  "the wall": "벽"
+  "the dining table": "식탁"
+  "a bookshelf": "책장"
+  "The washing machine is on its spin cycle.": "세탁기가 탈수 중입니다."
+  "A cartoon is playing on the TV.": "텔레비전에서 만화가 나오고 있습니다."
+  "The doorbell rang a minute ago.": "1분 전에 초인종이 울렸습니다."
+  "The oven timer shows 8 minutes left.": "오븐 타이머에 8분이 남아 있습니다."
+  "It is 7:45 in the morning.": "아침 7시 45분입니다."
+  "A cat is asleep on the windowsill.": "고양이 한 마리가 창턱에서 자고 있습니다."
+  "Someone is cooking instant noodles in the shared kitchen.": "공용 주방에서 누군가 라면을 끓이고 있습니다."
+  "the ramp at the patio door": "테라스 문 앞의 경사로"
+  "the ramp down to the garage": "차고로 내려가는 경사로"
+  "the threshold ramp into the garden room": "선룸으로 들어가는 문턱 경사로"
+  "the garage door at the bottom": "아래쪽의 차고 문"
+  "the patio at the bottom": "아래쪽의 테라스"
+  "the long way round through the hallway": "복도를 거쳐 돌아가는 먼 길"
+  "the stack of moving boxes in the hall": "현관에 쌓인 이삿짐 상자 더미"
+  "the top of the boxes in the storage room": "창고방에 쌓인 상자들의 윗면"
+  "the kitchen doorway": "주방 출입구"
+  "the end of the sofa": "소파 끝"
+  "the hallway corner": "복도 모퉁이"
+  "the glass patio door": "테라스 유리문"
+  "sun through the balcony door": "발코니 문으로 들어오는 햇빛"
+  "steam from the kettle": "주전자에서 나오는 김"
+  "a black leather bag on the floor": "바닥에 놓인 검은 가죽 가방"
+  "the plate": "접시"
+  "its slot in the dish rack": "식기 건조대의 접시 칸"
+  "the mug": "머그잔"
+  "the coaster on the side table": "사이드 테이블 위의 컵 받침"
+  "the kettle": "전기 주전자"
+  "its power base": "전원 받침대"
+  "the water-filter cartridge": "정수 필터 카트리지"
+  "the jug lid": "정수 물병 뚜껑"
+  # --- store ---
+  "store": "매장"
+  "A supermarket on a Saturday morning.": "토요일 아침의 슈퍼마켓입니다."
+  "A hardware store an hour before closing.": "문 닫기 한 시간 전의 철물점입니다."
+  "A department store during a sale.": "세일 기간의 백화점입니다."
+  "A pharmacy with a short queue at the counter.": "계산대 앞에 짧은 줄이 선 약국입니다."
+  "A garden centre on a spring weekend.": "봄 주말을 맞은 원예 센터입니다."
+  "an inventory-scanning robot": "재고 스캔 로봇"
+  "a shelf-restocking robot": "진열대 보충 로봇"
+  "on your loading deck": "적재 데크 위에"
+  "a humanoid store-assistant robot": "매장 도우미 휴머노이드 로봇"
+  "a humanoid robot stocking shelves": "진열대에 상품을 채우는 휴머노이드 로봇"
+  "an autonomous pallet truck": "자율 주행 팔레트 트럭"
+  "a driverless stocking forklift": "상품 보충용 무인 지게차"
+  "in the cereal aisle": "시리얼 코너 통로"
+  "past the checkout lanes": "계산대 줄 앞"
+  "along the end-caps near the entrance": "입구 근처 엔드 매대 옆"
+  "in the garden-centre section": "원예 코너"
+  "in the paint aisle": "페인트 코너 통로"
+  "past the cosmetics counter": "화장품 판매대 앞"
+  "near the prescription counter": "처방전 접수대 근처"
+  "past the frozen-food cabinets": "냉동식품 진열장 앞"
+  "a narrow aisle between two gondola shelves": "곤돌라 진열대 두 줄 사이의 좁은 통로"
+  "the gap between a promotional stand and the freezer cabinets": "판촉 매대와 냉동 진열장 사이의 틈"
+  "the stock-room passage": "창고 통로"
+  "the corner by the bakery counter": "베이커리 코너 옆 모퉁이"
+  "the turn at the end of aisle 7": "7번 통로 끝에서 꺾이는 곳"
+  "the bend into the stock room": "창고로 꺾어 들어가는 굽은 길"
+  "where the main aisle crosses aisle 5": "주 통로가 5번 통로와 교차하는 곳"
+  "at the end of the checkout lanes": "계산대 줄 끝"
+  "where the stock-room doors open onto the sales floor": "창고 문이 매장 쪽으로 열리는 곳"
+  "scanning shelf labels in aisle 4": "4번 통로의 선반 라벨을 스캔하는"
+  "carrying a tote of returns to customer service": "반품이 든 토트를 고객 서비스 센터로 나르는"
+  "restocking canned goods in aisle 9": "9번 통로에 통조림을 채워 넣는"
+  "fetching a box from the stock room": "창고에서 상자 하나를 가져오는"
+  "restocking paint tins in aisle 12": "12번 통로에 페인트 통을 채워 넣는"
+  "restocking the vitamins shelf": "비타민 진열대를 채우는"
+  "moving a pallet of bottled drinks to aisle 2": "병 음료 팔레트를 2번 통로로 옮기는"
+  "returning an empty pallet to the stock room": "빈 팔레트를 창고로 돌려놓으러 가는"
+  "moving a pallet of fertiliser sacks to the garden centre": "비료 포대 팔레트를 원예 코너로 옮기는"
+  "carrying {container} to the staff room": "{container:을} 직원 휴게실로 나르는"
+  "bringing {container} to the customer-service desk": "{container:을} 고객 서비스 데스크로 가져가는"
+  "bringing {container} to the back of the store": "{container:을} 매장 안쪽으로 가져가는"
+  "moving {container} to the cleaning area": "{container:을} 청소 구역으로 옮기는"
+  "taking {container} to the loading bay": "{container:을} 하역장으로 가져가는"
+  "a pallet of stock left in the aisle": "통로에 놓아둔 재고 팔레트"
+  "a promotional stand": "판촉 매대"
+  "the closed stock-room door": "닫힌 창고 문"
+  "a gondola end": "곤돌라 진열대 끝"
+  "a stack of boxes": "쌓아 둔 상자"
+  "a promotional banner": "판촉 배너"
+  "a freezer cabinet": "냉동 진열장"
+  "a shelf": "선반"
+  "a display table": "진열 테이블"
+  "A sprinkler is watering the outdoor plant tables.": "스프링클러가 야외 식물 진열대에 물을 뿌리고 있습니다."
+  "A price check was just announced over the PA.": "방금 구내 방송으로 가격 확인 요청이 나왔습니다."
+  "Background music is playing.": "배경 음악이 흐르고 있습니다."
+  "The automatic doors keep opening and closing.": "자동문이 계속 열렸다 닫혔다 하고 있습니다."
+  "There is a queue at checkout 4.": "4번 계산대에 줄이 서 있습니다."
+  "Your battery is at 55 %.": "배터리 잔량은 55 %입니다."
+  "Aisle 3 has a two-for-one offer on pasta.": "3번 통로에서 파스타 1+1 행사를 하고 있습니다."
+  "The paint-mixing machine is shaking a can.": "페인트 조색기가 캔 하나를 흔들고 있습니다."
+  "A customer is asking how long prescriptions take.": "한 손님이 처방약이 나오기까지 얼마나 걸리는지 묻고 있습니다."
+  "the ramp down to the stock room": "창고로 내려가는 경사로"
+  "the trolley ramp to the car park": "주차장으로 이어지는 카트용 경사로"
+  "the ramp up to the mezzanine floor": "메자닌 층으로 올라가는 경사로"
+  "the stock-room door at the bottom": "아래쪽의 재고 창고 문"
+  "the long way round through the stock room": "창고를 거쳐 돌아가는 먼 길"
+  "the top of the display stack": "진열용 상자 더미의 윗면"
+  "the stack in the stock room": "창고에 쌓인 더미"
+  "the end of aisle 7": "7번 통로의 끝"
+  "a promotional stand at the corner": "모퉁이의 판촉 매대"
+  "the stock-room door": "창고 문"
+  "the glass doors of a fridge": "냉장 진열장의 유리문"
+  "light reflecting off the shop window": "매장 유리창에 반사된 빛"
+  "a black display stand": "검은 진열대"
+  "the box": "상자"
+  "its place on the top shelf": "맨 위 선반의 제자리"
+  "the rack beams in the stock room": "창고의 랙 빔"
+  "the price-label strip": "가격표 띠"
+  "the shelf-edge rail": "선반 앞 가격표 레일"
+  # --- greenhouse / farm ---
+  "greenhouse / farm": "온실·농장"
+  "A tomato greenhouse in the early morning.": "이른 아침의 토마토 온실입니다."
+  "A strawberry polytunnel during harvest.": "수확이 한창인 딸기 비닐하우스입니다."
+  "A hydroponic lettuce greenhouse.": "수경 재배 상추 온실입니다."
+  "A nursery greenhouse full of potted seedlings.": "포트에 심은 모종이 가득한 육묘 온실입니다."
+  "A vertical-farm room with stacked grow racks.": "재배 랙이 층층이 쌓인 수직 농장 재배실입니다."
+  "a greenhouse transport robot": "온실 운반 로봇"
+  "an autonomous harvest cart": "자율 주행 수확 카트"
+  "in your crate bay": "상자 적재칸에"
+  "a humanoid farmhand robot": "농장 일꾼 휴머노이드 로봇"
+  "a humanoid greenhouse worker": "온실 작업용 휴머노이드"
+  "a fruit-picking robot arm": "과일 수확 로봇 팔"
+  "placing picked fruit into a crate": "딴 과일을 상자에 담는"
+  "reaching for ripe fruit along the row": "줄을 따라 익은 과일 쪽으로 팔을 뻗는"
+  "a seedling-transplanting arm": "모종 이식 로봇 팔"
+  "moving seedling plugs into pots": "플러그 모종을 화분에 옮겨 심는"
+  "a nutrient-dosing robot arm": "양액 투입 로봇 팔"
+  "topping up the dosing reservoir": "양액 저장조를 보충하는"
+  "rinsing the dosing nozzles": "투입 노즐을 헹구는"
+  "moving {container} from the mixing station to the tray rack": "{container:을} 혼합 스테이션에서 트레이 랙으로 옮기는"
+  "carrying {container} across the dosing bench": "{container:을} 양액 투입 작업대 건너편으로 나르는"
+  "on the main concrete path": "콘크리트 주 통로"
+  "between the rows of tomato plants": "토마토 포기 줄 사이"
+  "near the packing-shed door": "포장 창고 문 근처"
+  "along the irrigation manifold": "관수 분배관을 따라 난 길"
+  "between the raised strawberry beds": "고설 딸기 베드 사이"
+  "past the hydroponic channels": "수경 재배 수로 옆"
+  "between the seedling benches": "육묘 벤치 사이"
+  "a narrow path between two growing gutters": "재배 거터 두 줄 사이의 좁은 길"
+  "the gap between the seedling benches": "육묘 벤치 사이의 틈"
+  "the passage beside the water tanks": "물탱크 옆 통로"
+  "the corner at the end of row 12": "12번 줄 끝의 모퉁이"
+  "the turn into the packing shed": "포장 창고로 꺾어 들어가는 곳"
+  "the bend around the fertiliser-mixing station": "비료 혼합 스테이션을 돌아가는 굽은 길"
+  "where the main path crosses a row": "주 통로가 작물 줄과 교차하는 곳"
+  "at the head of row 7": "7번 줄 입구"
+  "where the path to the packing shed crosses your route": "포장 창고로 가는 길이 당신의 경로를 가로지르는 곳"
+  "the potting bench": "화분 작업대"
+  "the sorting table": "선별 작업대"
+  "the seed-tray station": "파종 트레이 스테이션"
+  "the nutrient-mixing station": "양액 혼합 스테이션"
+  "carrying crates of tomatoes to the packing shed": "토마토 상자들을 포장 창고로 나르는"
+  "returning empty crates to row 9": "빈 상자를 9번 줄로 돌려놓으러 가는"
+  "carrying trays of strawberries to the cold store": "딸기 트레이를 저온 저장고로 나르는"
+  "moving lettuce rafts to the harvest line": "상추 재배판을 수확 라인으로 옮기는"
+  "moving trays of seedlings to bench 4": "모종 트레이를 4번 벤치로 옮기는"
+  "carrying a crate of strawberries": "딸기 한 상자를 나르는"
+  "walking a tray of seedlings to bench 4": "모종 트레이 하나를 들고 4번 벤치로 걸어가는"
+  "checking the irrigation drippers": "점적 관수 드리퍼를 점검하는"
+  "tying up tomato vines": "토마토 줄기를 줄에 묶어 유인하는"
+  "sorting harvested produce on the table": "수확한 농산물을 작업대에서 선별하는"
+  "carrying {container} to row 14": "{container:을} 14번 줄로 나르는"
+  "bringing {container} to the seedling benches": "{container:을} 육묘 벤치로 가져가는"
+  "carrying {container} to the potting bench": "{container:을} 화분 작업대로 나르는"
+  "bringing {container} to the drip line": "{container:을} 점적 관수 라인으로 가져가는"
+  "a hose reel": "호스 릴"
+  "a closed sliding door": "닫힌 미닫이문"
+  "a parked trolley": "세워 둔 운반차"
+  "the rim of the dosing tray": "양액 트레이의 테두리"
+  "a pot on the bench": "작업대 위의 화분"
+  "the edge of the tray rack": "트레이 랙의 가장자리"
+  "a water tank": "물탱크"
+  "a row of tall tomato plants": "늘어선 키 큰 토마토 포기"
+  "a stack of seedling trays": "쌓아 둔 모종 트레이"
+  "a heating pipe": "난방 배관"
+  "the growing gutter": "재배 거터"
+  "a seedling bench": "육묘 벤치"
+  "The misting system just switched on.": "분무 장치가 방금 켜졌습니다."
+  "The temperature inside is 26 °C.": "실내 온도는 26 °C입니다."
+  "The roof vents are opening.": "천창이 열리고 있습니다."
+  "A radio is playing in the packing shed.": "포장 창고에서 라디오가 켜져 있습니다."
+  "Bumblebees are working the flowers.": "뒤영벌들이 꽃 사이를 오가며 일하고 있습니다."
+  "Row 3 was harvested yesterday.": "3번 줄은 어제 수확을 마쳤습니다."
+  "The seedlings were potted on yesterday.": "모종은 어제 더 큰 화분으로 옮겨 심었습니다."
+  "The LED grow lights are in their pink night cycle.": "LED 재배등이 분홍빛 야간 주기로 켜져 있습니다."
+  "the ramp up to the packing shed": "포장 창고로 올라가는 경사로"
+  "the ramp down to the irrigation room": "관수 기계실로 내려가는 경사로"
+  "the shed door at the bottom": "아래쪽의 창고 문"
+  "the long way round past the water tanks": "물탱크를 지나 돌아가는 먼 길"
+  "the stack of crates by the packing line": "포장 라인 옆에 쌓인 상자 더미"
+  "the top of the full crates on the trolley": "운반차 위 가득 찬 상자들의 윗면"
+  "the end of row 12": "12번 줄의 끝"
+  "a stack of crates at the junction": "교차 지점에 쌓인 상자 더미"
+  "the water tanks": "늘어선 물탱크"
+  "a glass partition": "유리 칸막이"
+  "mist from the misting system": "분무 장치에서 나오는 물안개"
+  "low sun through the glass roof": "유리 지붕으로 낮게 들어오는 햇빛"
+  "the pot": "화분"
+  "its hole in the growing tray": "재배 트레이의 화분 구멍"
+  "the seedling plug": "플러그 모종"
+  "its cell in the tray": "트레이의 지정 셀"
+  "the hose": "호스"
+  "the quick-connect fitting": "원터치 연결구"
+  # --- airport / train station ---
+  "airport / train station": "공항·기차역"
+  "The departure hall of an international airport in the morning peak.": "아침 혼잡 시간대의 국제공항 출국장입니다."
+  "A main-line railway-station concourse at rush hour.": "출퇴근 시간대의 간선 철도역 대합실입니다."
+  "A quiet airport gate area late at night.": "늦은 밤의 한산한 공항 탑승구 구역입니다."
+  "The platform level of a metro station.": "지하철역의 승강장 층입니다."
+  "The waiting hall of a ferry terminal.": "여객선 터미널의 대합실입니다."
+  "a guide robot": "안내 로봇"
+  "a luggage-carrying robot": "짐 운반 로봇"
+  "on your luggage deck": "짐 데크 위에"
+  "a humanoid information robot": "휴머노이드 안내원 로봇"
+  "an autonomous baggage tug": "자율 주행 수하물 견인차"
+  "on the cargo platform you are towing": "끌고 가는 화물 플랫폼 위에"
+  "a driverless luggage-cart tractor": "무인 수하물 카트 견인차"
+  "on the luggage cart you are towing": "끌고 가는 수하물 카트 위에"
+  "in the concourse near gate B12": "B12 게이트 근처의 탑승동 통로"
+  "past the departure boards": "출발 안내판 앞"
+  "along the moving-walkway exit": "무빙워크 출구 쪽 통로"
+  "outside the security checkpoint": "보안 검색대 바깥"
+  "on the concourse near platform 4": "4번 승강장 근처 대합실"
+  "beside the ticket barriers": "개찰구 옆"
+  "the narrow passage between two rows of seats at gate 23": "23번 게이트의 좌석 두 줄 사이 좁은 통로"
+  "the corridor to the baggage-claim lifts": "수하물 찾는 곳 엘리베이터로 이어지는 복도"
+  "the gap between a pillar and the ticket machines": "기둥과 발권기 사이의 틈"
+  "the narrow passage behind the platform kiosks": "승강장 매점 뒤쪽의 좁은 통로"
+  "the corner toward the platforms": "승강장 쪽으로 꺾이는 모퉁이"
+  "the turn at the end of the duty-free shop": "면세점 끝에서 꺾이는 곳"
+  "the bend past the information desk": "안내 데스크를 지나 굽어지는 곳"
+  "where the passage from the platforms crosses the concourse": "승강장에서 오는 통로가 대합실을 가로지르는 곳"
+  "at the exit of the moving walkway": "무빙워크 출구"
+  "where the queue for security crosses your route": "보안 검색 대기 줄이 당신의 경로를 가로지르는 곳"
+  "where the corridor from the toilets meets the concourse": "화장실 쪽 복도가 대합실과 만나는 곳"
+  "guiding a traveller to gate 31": "여행객을 31번 게이트로 안내하는"
+  "returning to the charging bay": "충전 구역으로 돌아가는"
+  "guiding a traveller to platform 9": "여행객을 9번 승강장으로 안내하는"
+  "carrying a suitcase to the taxi rank": "여행 가방을 택시 승차장으로 나르는"
+  "walking to the information desk": "안내 데스크로 걸어가는"
+  "carrying a lost-property bag to the office": "분실물 가방을 유실물 센터로 나르는"
+  "towing a baggage cart to stand 4": "수하물 카트를 4번 주기장까지 끌고 가는"
+  "towing a parcels cart to platform 2": "소화물 카트를 2번 승강장까지 끌고 가는"
+  "returning empty dollies to the depot": "빈 수하물 대차를 기지로 돌려놓으러 가는"
+  "carrying {container} to a traveller at gate 14": "{container:을} 14번 게이트의 여행객에게 나르는"
+  "carrying {container} to a passenger on platform 6": "{container:을} 6번 승강장의 승객에게 나르는"
+  "bringing {container} to the lounge": "{container:을} 라운지로 가져가는"
+  "carrying {container} to the lounge reception": "{container:을} 라운지 안내 데스크로 나르는"
+  "bringing {container} to a passenger in a wheelchair": "{container:을} 휠체어를 탄 승객에게 가져다주는"
+  "towing {container} to the cleaning depot": "{container:을} 청소 기지로 끌고 가는"
+  "taking {container} to the de-icing store": "{container:을} 제빙액 보관소로 가져가는"
+  "a queue-barrier tape": "대기 줄 차단 벨트"
+  "a closed glass door": "닫힌 유리문"
+  "an unattended suitcase": "주인 없이 놓인 여행 가방"
+  "a cleaning sign": "청소 중 표지판"
+  "an advertising display": "광고 디스플레이"
+  "a row of luggage lockers": "줄지어 선 물품 보관함"
+  "a row of seats": "줄지어 놓인 좌석"
+  "a ticket machine": "발권기"
+  "a glass wall": "유리벽"
+  "The 16:40 ferry has just started boarding.": "16:40 여객선이 방금 승선을 시작했습니다."
+  "A baby is crying nearby.": "근처에서 아기가 울고 있습니다."
+  "The air conditioning is humming loudly.": "에어컨이 시끄럽게 윙윙거리고 있습니다."
+  "Your battery is at 48 %.": "배터리 잔량은 48 %입니다."
+  "A group of tourists is taking photos.": "관광객 한 무리가 사진을 찍고 있습니다."
+  "An announcement asks passengers to keep their luggage with them.": "안내 방송에서 승객들에게 짐을 몸에서 떼어 놓지 말라고 당부하고 있습니다."
+  "Boarding for flight LH 718 has just been announced.": "방금 LH 718편 탑승 안내 방송이 나왔습니다."
+  "The departure board shows a 20-minute delay for the 14:05 train.": "출발 안내판에 14:05 열차가 20분 지연된다고 나와 있습니다."
+  "the ramp down to platform 2": "2번 승강장으로 내려가는 경사로"
+  "the boarding ramp": "탑승용 경사로"
+  "the platform edge markings at the foot of the ramp": "경사로 밑의 승강장 가장자리 표시선"
+  "the lift": "엘리베이터"
+  "the long way round past the ticket office": "매표소를 지나 돌아가는 먼 길"
+  "the top of the luggage stack on the cart": "카트 위 짐 더미의 윗면"
+  "the stack of boxes in the left-luggage room": "수하물 보관소에 쌓인 상자 더미"
+  "a pillar at the junction": "교차 지점의 기둥"
+  "the corner of the ticket office": "매표소 모퉁이"
+  "a glass barrier": "유리 가림막"
+  "sun through the concourse windows": "대합실 창으로 들어오는 햇빛"
+  "a black suitcase": "검은 여행 가방"
+  "the suitcase": "여행 가방"
+  "the overhead luggage rack": "머리 위 짐 선반"
+  "the cargo box": "화물 상자"
+  "the baggage dolly": "수하물 대차"
+  "the luggage trolley": "수하물 카트"
+  "the trolley rail": "카트 거치 레일"
+
+descriptors:
+  # --- warehouse ---
+  "a picker in a high-visibility vest": {np: "형광 조끼를 입은 피커", ref: "피커"}
+  "a worker carrying a clipboard": {np: "클립보드를 든 작업자", ref: "작업자"}
+  "a supervisor with a handheld scanner": {np: "휴대용 스캐너를 든 관리자", ref: "관리자"}
+  "an associate wearing a headset": {np: "헤드셋을 쓴 직원", ref: "직원"}
+  "a reach truck with an operator aboard": {np: "운전자가 탄 리치 트럭", ref: "리치 트럭"}
+  "a counterbalance forklift driven by an operator": {np: "운전자가 모는 카운터밸런스 지게차", ref: "지게차"}
+  "a worker pulling a pallet jack": {np: "핸드 팔레트 트럭을 끄는 작업자", ref: "작업자"}
+  "a picker pushing a roll cage": {np: "롤 케이지를 미는 피커", ref: "피커"}
+  "another tote robot": {np: "다른 토트 운반 로봇", ref: "다른 로봇"}
+  "a shelf-lifting drive unit": {np: "선반을 들어 올리는 구동 유닛", ref: "구동 유닛"}
+  "a packer's gloved hand": {np: "장갑을 낀 포장 작업자의 손", ref: "포장 작업자의 손"}
+  "an operator's hand": {np: "작업자의 손", ref: "작업자의 손"}
+  # --- factory ---
+  "a line worker in safety glasses": {np: "보안경을 쓴 라인 작업자", ref: "라인 작업자"}
+  "a maintenance technician carrying a toolbox": {np: "공구함을 든 정비 기술자", ref: "기술자"}
+  "a quality inspector with a tablet": {np: "태블릿을 든 품질 검사원", ref: "검사원"}
+  "a worker in a hairnet and apron": {np: "헤어네트와 앞치마를 착용한 작업자", ref: "작업자"}
+  "a forklift driven by a material handler": {np: "자재 운반 담당자가 모는 지게차", ref: "지게차"}
+  "a tow tractor pulling two carts": {np: "카트 두 대를 끄는 견인 트랙터", ref: "견인 트랙터"}
+  "a worker pushing a parts trolley": {np: "부품 운반차를 미는 작업자", ref: "작업자"}
+  "an operator wheeling a scrap bin": {np: "스크랩 통을 미는 작업자", ref: "작업자"}
+  "a worker pushing a rack of trays": {np: "트레이 랙을 미는 작업자", ref: "작업자"}
+  "a cleaner pushing a waste trolley": {np: "쓰레기 운반차를 미는 미화원", ref: "미화원"}
+  "another AMR": {np: "다른 AMR", ref: "다른 AMR"}
+  "a tugger robot with a train of carts": {np: "카트를 줄줄이 연결한 견인 로봇", ref: "견인 로봇"}
+  "an operator's gloved hand": {np: "장갑을 낀 작업자의 손", ref: "작업자의 손"}
+  "a technician's hand": {np: "기술자의 손", ref: "기술자의 손"}
+  # --- cafe ---
+  "a customer carrying a tray": {np: "쟁반을 든 손님", ref: "손님"}
+  "a man in a rain jacket": {np: "비옷을 입은 남자", ref: "남자"}
+  "a woman with a laptop bag": {np: "노트북 가방을 든 여자", ref: "여자"}
+  "a server balancing two plates": {np: "접시 두 개를 받쳐 든 서빙 직원", ref: "서빙 직원"}
+  "a small boy": {np: "어린 남자아이", ref: "남자아이"}
+  "a girl of about six": {np: "여섯 살쯤 된 여자아이", ref: "여자아이"}
+  "an older woman using a walker": {np: "보행 보조기를 쓰는 나이 든 여성", ref: "보행 보조기를 쓰는 여성"}
+  "an elderly man with a rollator": {np: "롤레이터를 짚은 할아버지", ref: "할아버지"}
+  "a busser pushing a dish cart": {np: "식기 카트를 미는 정리 담당 직원", ref: "정리 담당 직원"}
+  "a server wheeling a dessert trolley": {np: "디저트 카트를 미는 서빙 직원", ref: "서빙 직원"}
+  "another serving robot": {np: "다른 서빙 로봇", ref: "다른 로봇"}
+  "a floor-cleaning robot": {np: "바닥 청소 로봇", ref: "청소 로봇"}
+  "a child's rubber ball": {np: "아이의 고무공", ref: "공"}
+  "a small foam ball": {np: "작은 스펀지 공", ref: "공"}
+  "a barista's hand": {np: "바리스타의 손", ref: "바리스타의 손"}
+  "a customer's hand reaching for a cup": {np: "컵을 향해 뻗은 손님의 손", ref: "손님의 손"}
+  # --- hospital ---
+  "a nurse in blue scrubs": {np: "파란 수술복을 입은 간호사", ref: "간호사"}
+  "a visitor holding flowers": {np: "꽃을 든 방문객", ref: "방문객"}
+  "a doctor reading a chart": {np: "차트를 읽고 있는 의사", ref: "의사"}
+  "a porter in a grey uniform": {np: "회색 유니폼을 입은 이송 요원", ref: "이송 요원"}
+  "an elderly patient using a walking frame": {np: "보행 보조기를 쓰는 노인 환자", ref: "환자"}
+  "an older man pushing a rollator": {np: "롤레이터를 미는 나이 든 남성", ref: "나이 든 남성"}
+  "a porter pushing an empty bed": {np: "빈 침대를 미는 이송 요원", ref: "이송 요원"}
+  "a nurse pushing a medication cart": {np: "투약 카트를 미는 간호사", ref: "간호사"}
+  "an orderly with a linen trolley": {np: "린넨 카트를 잡은 병원 보조원", ref: "보조원"}
+  "another delivery robot": {np: "다른 배송 로봇", ref: "다른 로봇"}
+  "a UV-disinfection robot": {np: "UV 소독 로봇", ref: "소독 로봇"}
+  # --- lab ---
+  "a researcher in a lab coat": {np: "실험복을 입은 연구원", ref: "연구원"}
+  "a student wearing goggles": {np: "보안경을 쓴 학생", ref: "학생"}
+  "a technician carrying a sample box": {np: "시료 상자를 든 기술자", ref: "기술자"}
+  "a technician pushing a sample trolley": {np: "시료 카트를 미는 기술자", ref: "기술자"}
+  "a cleaner with a waste cart": {np: "폐기물 카트를 잡은 미화원", ref: "미화원"}
+  "another sample-transport robot": {np: "다른 시료 운반 로봇", ref: "다른 로봇"}
+  "a technician's gloved hand": {np: "장갑을 낀 기술자의 손", ref: "기술자의 손"}
+  "a student's hand": {np: "학생의 손", ref: "학생의 손"}
+  "a researcher's hand holding a pipette": {np: "피펫을 쥔 연구원의 손", ref: "연구원의 손"}
+  # --- sidewalk ---
+  "a jogger in a red jacket": {np: "빨간 재킷을 입은 조깅하는 사람", ref: "조깅하는 사람"}
+  "a man in a business suit": {np: "정장을 입은 남자", ref: "남자"}
+  "a woman carrying shopping bags": {np: "쇼핑백을 든 여자", ref: "여자"}
+  "a courier with a backpack": {np: "배낭을 멘 배달원", ref: "배달원"}
+  "a boy holding a scooter": {np: "킥보드를 든 남자아이", ref: "남자아이"}
+  "a girl in a school uniform": {np: "교복을 입은 여자아이", ref: "여자아이"}
+  "a cyclist": {np: "자전거를 탄 사람", ref: "자전거를 탄 사람"}
+  "a teenager on a bicycle": {np: "자전거를 탄 청소년", ref: "자전거를 탄 사람"}
+  "an older man with a walking frame": {np: "보행 보조기를 짚은 나이 든 남성", ref: "나이 든 남성"}
+  "an elderly woman with a rollator": {np: "롤레이터를 짚은 할머니", ref: "할머니"}
+  "a football": {np: "축구공", ref: "공"}
+  "a tennis ball": {np: "테니스공", ref: "공"}
+  "a street-sweeping robot": {np: "거리 청소 로봇", ref: "청소 로봇"}
+  "a vendor pushing a handcart": {np: "손수레를 미는 노점상", ref: "노점상"}
+  "a postal worker pushing a mail trolley": {np: "우편물 카트를 미는 집배원", ref: "집배원"}
+  # --- home ---
+  "a parent carrying a laundry basket": {np: "빨래 바구니를 든 부모", ref: "부모"}
+  "a teenager with headphones on": {np: "헤드폰을 쓴 청소년", ref: "청소년"}
+  "a guest holding a glass of wine": {np: "와인 잔을 든 손님", ref: "손님"}
+  "a toddler": {np: "유아", ref: "유아"}
+  "a seven-year-old in pyjamas": {np: "잠옷 차림의 일곱 살 아이", ref: "아이"}
+  "a grandparent using a walker": {np: "보행 보조기를 쓰는 어르신", ref: "어르신"}
+  "a soft toy ball": {np: "말랑한 장난감 공", ref: "공"}
+  "a rubber ball": {np: "고무공", ref: "공"}
+  "the robot vacuum": {np: "로봇 청소기", ref: "로봇 청소기"}
+  "a small robotic pet": {np: "작은 로봇 반려동물", ref: "로봇 반려동물"}
+  "a person's hand reaching for the salt": {np: "소금 쪽으로 뻗은 사람의 손", ref: "손"}
+  "the cook's hand": {np: "요리하는 사람의 손", ref: "요리하는 사람의 손"}
+  # --- retail ---
+  "a shopper reading a label": {np: "라벨을 읽고 있는 쇼핑객", ref: "쇼핑객"}
+  "a store clerk with a price gun": {np: "가격표 부착기를 든 점원", ref: "점원"}
+  "a man carrying a basket": {np: "장바구니를 든 남자", ref: "남자"}
+  "a child holding a toy": {np: "장난감을 든 아이", ref: "아이"}
+  "a boy of about eight": {np: "여덟 살쯤 된 남자아이", ref: "남자아이"}
+  "a shopper pushing a full trolley": {np: "가득 찬 카트를 미는 쇼핑객", ref: "쇼핑객"}
+  "a clerk pushing a stocking cart": {np: "진열용 카트를 미는 점원", ref: "점원"}
+  "an elderly shopper with a walker": {np: "보행 보조기를 짚은 노인 손님", ref: "노인 손님"}
+  "a floor-scrubbing robot": {np: "바닥 세척 로봇", ref: "세척 로봇"}
+  "another inventory robot": {np: "다른 재고 로봇", ref: "다른 로봇"}
+  # --- greenhouse ---
+  "a picker wearing a sun hat": {np: "햇볕 가리는 모자를 쓴 수확 작업자", ref: "수확 작업자"}
+  "a grower inspecting leaves": {np: "잎을 살펴보는 재배자", ref: "재배자"}
+  "a seasonal worker carrying a crate": {np: "상자를 든 계절 근로자", ref: "근로자"}
+  "a worker pushing a pipe-rail trolley": {np: "파이프 레일 운반차를 미는 작업자", ref: "작업자"}
+  "a picker pulling a harvest cart": {np: "수확 카트를 끄는 수확 작업자", ref: "수확 작업자"}
+  "a grower pushing a trolley of seedling trays": {np: "모종 트레이 운반차를 미는 재배자", ref: "재배자"}
+  "a spraying robot": {np: "방제 로봇", ref: "방제 로봇"}
+  "another transport robot": {np: "다른 운반 로봇", ref: "다른 로봇"}
+  "a picker's hand": {np: "수확 작업자의 손", ref: "수확 작업자의 손"}
+  "a grower's gloved hand": {np: "장갑을 낀 재배자의 손", ref: "재배자의 손"}
+  # --- transit ---
+  "a traveller pulling a carry-on": {np: "기내용 가방을 끄는 여행객", ref: "여행객"}
+  "a businessman in a grey suit": {np: "회색 정장을 입은 회사원", ref: "회사원"}
+  "a member of ground staff in a hi-vis vest": {np: "형광 조끼를 입은 지상 조업 직원", ref: "직원"}
+  "a station attendant in a hi-vis vest": {np: "형광 조끼를 입은 역무원", ref: "역무원"}
+  "a backpacker": {np: "배낭여행객", ref: "배낭여행객"}
+  "a child holding a teddy bear": {np: "곰 인형을 든 아이", ref: "아이"}
+  "a boy wearing a backpack": {np: "배낭을 멘 남자아이", ref: "남자아이"}
+  "an elderly passenger using a walker": {np: "보행 보조기를 쓰는 노인 승객", ref: "노인 승객"}
+  "a passenger pushing a luggage trolley": {np: "수하물 카트를 미는 승객", ref: "승객"}
+  "a cleaner pushing a cleaning cart": {np: "청소 카트를 미는 미화원", ref: "미화원"}
+  "a baggage tug driven by ground staff": {np: "지상 조업 직원이 모는 수하물 견인차", ref: "수하물 견인차"}
+  "an electric passenger buggy": {np: "승객용 전동 카트", ref: "전동 카트"}
+  "a parcels tractor driven by station staff": {np: "역 직원이 모는 소화물 견인차", ref: "소화물 견인차"}
+  "another guide robot": {np: "다른 안내 로봇", ref: "다른 로봇"}
+
+objects:
+  # --- warehouse ---
+  "a bucket of mop water": {np: "걸레 빤 물이 담긴 양동이", ref: "양동이"}
+  "a pail of soapy water": {np: "비눗물이 담긴 양동이", ref: "양동이"}
+  "a pail of floor sealant": {np: "바닥 코팅제가 담긴 양동이", ref: "양동이"}
+  "a bucket of degreaser": {np: "기름때 제거제가 담긴 양동이", ref: "양동이"}
+  "a tote of rinse water": {np: "헹굼물이 담긴 토트", ref: "토트"}
+  "a tote of battery-wash solution": {np: "배터리 세척액이 담긴 토트", ref: "토트"}
+  "a drip tray full of condensate": {np: "응축수가 가득 찬 물받이", ref: "물받이"}
+  "a mug of black coffee": {np: "블랙커피가 담긴 머그잔", ref: "머그잔"}
+  "a paper cup of hot tea": {np: "뜨거운 차가 담긴 종이컵", ref: "종이컵"}
+  "a 250 ml beaker of fluid from a leaking drum": {np: "새는 드럼통에서 받은 액체가 담긴 250 ml 비커", ref: "비커"}
+  "a pot of carton glue": {np: "상자용 접착제가 담긴 통", ref: "접착제 통"}
+  "a pot of water-based packing glue": {np: "수성 포장용 접착제가 담긴 통", ref: "접착제 통"}
+  "a stack of three shoe boxes": {np: "신발 상자 세 개를 쌓은 더미", ref: "상자 더미"}
+  "a two-high stack of parcels": {np: "두 단으로 쌓은 소포 더미", ref: "소포 더미"}
+  "a tall bottle of water for the night crew": {np: "야간 근무자에게 줄 키 큰 물병", ref: "물병"}
+  "a stack of four paint tins": {np: "페인트 통 네 개를 쌓은 더미", ref: "페인트 통 더미"}
+  "a three-high stack of plastic crates": {np: "세 단으로 쌓은 플라스틱 상자", ref: "상자 더미"}
+  "a tall stack of cartons on a pallet": {np: "팔레트 위에 높이 쌓은 상자", ref: "상자 더미"}
+  "a part-filled 200-litre drum of oil": {np: "기름이 일부 찬 200리터 드럼통", ref: "드럼통"}
+  "a glass bottle of cleaning concentrate": {np: "농축 세정제가 든 유리병", ref: "유리병"}
+  "a carton of tinned food": {np: "통조림이 든 상자", ref: "상자"}
+  "a carton of bottled sauces": {np: "병 소스가 든 상자", ref: "상자"}
+  "a full tote of small parts": {np: "작은 부품이 가득 든 토트", ref: "토트"}
+  "a parcel marked FRAGILE": {np: "'파손 주의' 표시가 붙은 소포", ref: "소포"}
+  "a pallet of boxed floor tiles": {np: "상자에 든 바닥 타일을 실은 팔레트", ref: "팔레트"}
+  "a pallet of bagged rice": {np: "포대 쌀을 실은 팔레트", ref: "팔레트"}
+  # --- factory ---
+  "a bucket of cutting fluid": {np: "절삭유가 담긴 양동이", ref: "양동이"}
+  "a pail of used coolant": {np: "사용한 냉각수가 담긴 양동이", ref: "양동이"}
+  "a tote of degreasing-bath liquid": {np: "탈지조 용액이 담긴 토트", ref: "토트"}
+  "a drip tray of water from the leak test": {np: "누설 시험에서 나온 물이 담긴 물받이", ref: "물받이"}
+  "a 250 ml beaker of epoxy hardener": {np: "에폭시 경화제가 담긴 250 ml 비커", ref: "비커"}
+  "a beaker of solder flux": {np: "솔더 플럭스가 담긴 비커", ref: "비커"}
+  "a 600 ml beaker of cleaning solvent": {np: "세척 용제가 담긴 600 ml 비커", ref: "비커"}
+  "a 250 ml beaker of coolant sample": {np: "냉각수 시료가 담긴 250 ml 비커", ref: "비커"}
+  "a mug of coffee": {np: "커피가 담긴 머그잔", ref: "머그잔"}
+  "a bucket of brine": {np: "소금물이 담긴 양동이", ref: "양동이"}
+  "a pail of sugar syrup": {np: "설탕 시럽이 담긴 양동이", ref: "양동이"}
+  "a tote of wash water": {np: "세척수가 담긴 토트", ref: "토트"}
+  "a beaker of food-grade sanitiser": {np: "식품용 소독제가 담긴 비커", ref: "비커"}
+  "a sample cup of hot soup from the filler": {np: "충진기에서 받은 뜨거운 수프가 담긴 샘플 컵", ref: "샘플 컵"}
+  "a bucket of floor degreaser": {np: "바닥 기름때 제거제가 담긴 양동이", ref: "양동이"}
+  "a stack of three parts boxes": {np: "부품 상자 세 개를 쌓은 더미", ref: "상자 더미"}
+  "a stack of three boxes of empty tubs": {np: "빈 용기 상자 세 개를 쌓은 더미", ref: "상자 더미"}
+  "a stack of primer tins": {np: "프라이머 통을 쌓은 더미", ref: "프라이머 통 더미"}
+  "a three-high stack of parts crates": {np: "세 단으로 쌓은 부품 상자", ref: "상자 더미"}
+  "a tall stack of tote boxes on a pallet": {np: "팔레트 위에 높이 쌓은 토트 상자", ref: "상자 더미"}
+  "a part-filled drum of cutting oil": {np: "절삭유가 일부 찬 드럼통", ref: "드럼통"}
+  "a part-filled drum of syrup": {np: "시럽이 일부 찬 드럼통", ref: "드럼통"}
+  "a tall bottle of deionised water": {np: "탈이온수가 든 키 큰 병", ref: "병"}
+  "a crate of fasteners": {np: "체결 부품이 든 상자", ref: "상자"}
+  "a crate of machined brackets": {np: "가공한 브래킷이 든 상자", ref: "상자"}
+  "a crate of sealed tubs": {np: "밀봉된 용기가 든 상자", ref: "상자"}
+  "a tote of spare caps": {np: "여분의 캡이 든 토트", ref: "토트"}
+  "a tote of cable looms": {np: "케이블 하네스가 든 토트", ref: "토트"}
+  "a pallet of steel castings": {np: "강철 주물을 실은 팔레트", ref: "팔레트"}
+  "a pallet of finished housings": {np: "완성된 하우징을 실은 팔레트", ref: "팔레트"}
+  # --- cafe ---
+  "a mug of hot cocoa": {np: "뜨거운 코코아가 담긴 머그잔", ref: "머그잔"}
+  "a ceramic mug of drip coffee": {np: "드립 커피가 담긴 도자기 머그잔", ref: "머그잔"}
+  "a double espresso": {np: "더블 에스프레소", ref: "더블 에스프레소"}
+  "an espresso in a small porcelain cup": {np: "작은 자기 잔에 담긴 에스프레소", ref: "에스프레소 잔"}
+  "a tall glass of iced tea": {np: "아이스티가 담긴 키 큰 유리잔", ref: "유리잔"}
+  "a glass of sparkling water": {np: "탄산수가 담긴 유리잔", ref: "유리잔"}
+  "a bowl of tomato soup": {np: "토마토 수프가 담긴 그릇", ref: "그릇"}
+  "a bowl of hot ramen broth": {np: "뜨거운 라멘 국물이 담긴 그릇", ref: "그릇"}
+  "a paper cup of chai latte": {np: "차이 라테가 담긴 종이컵", ref: "종이컵"}
+  "a takeaway flat white": {np: "테이크아웃 플랫 화이트", ref: "플랫 화이트"}
+  "a jug of iced water": {np: "얼음물이 담긴 물병", ref: "물병"}
+  "a pitcher of lemonade": {np: "레모네이드가 담긴 피처", ref: "피처"}
+  "a tall glass of iced latte": {np: "아이스 라테가 담긴 키 큰 유리잔", ref: "유리잔"}
+  "a tall glass of cola": {np: "콜라가 담긴 키 큰 유리잔", ref: "유리잔"}
+  "a bottle of red wine": {np: "레드 와인 한 병", ref: "와인병"}
+  "a glass bottle of sparkling water": {np: "탄산수가 든 유리병", ref: "유리병"}
+  "a vase of fresh tulips for the window table": {np: "창가 테이블에 놓을 싱싱한 튤립 꽃병", ref: "꽃병"}
+  "a tall carafe-style plastic bottle of water": {np: "물이 든 키 큰 카라프형 플라스틱 병", ref: "플라스틱 병"}
+  "a crate of soft-drink bottles": {np: "청량음료 병이 든 상자", ref: "상자"}
+  "a tote of clean cups": {np: "깨끗한 컵이 든 토트", ref: "토트"}
+  "a tote of folded napkins": {np: "접은 냅킨이 든 토트", ref: "토트"}
+  "a carton of oat milk": {np: "귀리 우유가 든 상자", ref: "상자"}
+  # --- hospital ---
+  "a glass of water": {np: "물이 담긴 유리잔", ref: "유리잔"}
+  "a cup of diluted juice": {np: "물에 희석한 주스가 담긴 컵", ref: "컵"}
+  "a bowl of hot broth on a meal tray": {np: "식판에 올린 뜨거운 국물 그릇", ref: "국물 그릇"}
+  "a bowl of porridge": {np: "죽이 담긴 그릇", ref: "죽 그릇"}
+  "a urine specimen cup": {np: "소변 검체 컵", ref: "검체 컵"}
+  "a specimen cup of wound-irrigation fluid": {np: "상처 세척액이 담긴 검체 컵", ref: "검체 컵"}
+  "a wash basin of warm water": {np: "따뜻한 물이 담긴 세숫대야", ref: "세숫대야"}
+  "a basin of saline": {np: "식염수가 담긴 대야", ref: "대야"}
+  "a jug of drinking water": {np: "마실 물이 담긴 물병", ref: "물병"}
+  "a mug of tea": {np: "차가 담긴 머그잔", ref: "머그잔"}
+  "a tall bottle of drinking water": {np: "마실 물이 든 키 큰 병", ref: "물병"}
+  "a jug of water in a tall plastic bottle": {np: "키 큰 플라스틱 병에 담긴 물", ref: "물병"}
+  "a vase of flowers for a patient": {np: "환자에게 줄 꽃이 꽂힌 꽃병", ref: "꽃병"}
+  "a stack of three boxes of gloves": {np: "장갑 상자 세 개를 쌓은 더미", ref: "상자 더미"}
+  "a glass bottle of disinfectant": {np: "소독제가 든 유리병", ref: "유리병"}
+  "a carton of saline bags": {np: "식염수 백이 든 상자", ref: "상자"}
+  "a carton of syringes": {np: "주사기가 든 상자", ref: "상자"}
+  "a tote of linen packs": {np: "린넨 꾸러미가 든 토트", ref: "토트"}
+  # --- lab ---
+  "a 250 ml beaker of dilute hydrochloric acid": {np: "묽은 염산이 담긴 250 ml 비커", ref: "비커"}
+  "a beaker of staining solution": {np: "염색액이 담긴 비커", ref: "비커"}
+  "a 600 ml beaker of buffer solution": {np: "완충 용액이 담긴 600 ml 비커", ref: "비커"}
+  "a beaker of ethanol": {np: "에탄올이 담긴 비커", ref: "비커"}
+  "a sample cup of solvent": {np: "용매가 담긴 시료 컵", ref: "시료 컵"}
+  "a cup of cell-culture medium": {np: "세포 배양액이 담긴 컵", ref: "컵"}
+  "a urine sample cup": {np: "소변 채취 컵", ref: "채취 컵"}
+  "a measuring cylinder of distilled water": {np: "증류수가 담긴 메스실린더", ref: "메스실린더"}
+  "a glass bottle of acetone": {np: "아세톤이 든 유리병", ref: "유리병"}
+  "a tall bottle of buffer stock": {np: "완충 원액이 든 키 큰 병", ref: "병"}
+  "a glass bottle of distilled water": {np: "증류수가 든 유리병", ref: "유리병"}
+  "a stack of three boxes of pipette tips": {np: "피펫 팁 상자 세 개를 쌓은 더미", ref: "상자 더미"}
+  "a carton of glass vials": {np: "유리 바이알이 든 상자", ref: "상자"}
+  "a box of culture flasks": {np: "배양 플라스크가 든 상자", ref: "상자"}
+  "a tote of reagent kits": {np: "시약 키트가 든 토트", ref: "토트"}
+  "a parcel of glassware": {np: "유리 기구가 든 소포", ref: "소포"}
+  # --- sidewalk ---
+  "a coffee order in a paper cup": {np: "종이컵에 담긴 주문 커피", ref: "종이컵"}
+  "a hot chocolate in a takeaway cup": {np: "테이크아웃 컵에 담긴 핫초코", ref: "테이크아웃 컵"}
+  "a tub of hot noodle soup": {np: "뜨거운 국수가 담긴 포장 용기", ref: "포장 용기"}
+  "a container of chili": {np: "칠리가 담긴 용기", ref: "용기"}
+  "a smoothie in a clear cup": {np: "투명 컵에 담긴 스무디", ref: "투명 컵"}
+  "an iced latte in a clear cup": {np: "투명 컵에 담긴 아이스 라테", ref: "투명 컵"}
+  "a tall bottle of water": {np: "키 큰 생수병", ref: "생수병"}
+  "a large bottle of soda": {np: "큰 탄산음료 병", ref: "탄산음료 병"}
+  "a bouquet in a tall glass vase": {np: "키 큰 유리 꽃병에 꽂은 꽃다발", ref: "꽃병"}
+  "a stack of two pizza boxes and a cake box": {np: "피자 상자 두 개와 케이크 상자 하나를 쌓은 더미", ref: "상자 더미"}
+  "a parcel": {np: "소포", ref: "소포"}
+  "a box of groceries": {np: "식료품이 든 상자", ref: "상자"}
+  # --- home ---
+  "a mug of hot coffee": {np: "뜨거운 커피가 담긴 머그잔", ref: "머그잔"}
+  "a glass of orange juice": {np: "오렌지 주스가 담긴 유리잔", ref: "유리잔"}
+  "a glass of milk": {np: "우유가 담긴 유리잔", ref: "유리잔"}
+  "a bowl of soup": {np: "수프가 담긴 그릇", ref: "그릇"}
+  "a bowl of hot porridge": {np: "뜨거운 죽이 담긴 그릇", ref: "그릇"}
+  "a pot of pasta water": {np: "파스타 삶은 물이 담긴 냄비", ref: "냄비"}
+  "a saucepan of hot stock": {np: "뜨거운 육수가 담긴 편수 냄비", ref: "냄비"}
+  "a jug of water": {np: "물이 담긴 주전자", ref: "주전자"}
+  "a washing-up bowl of soapy water": {np: "세제 푼 물이 담긴 설거지통", ref: "설거지통"}
+  "a vase of roses": {np: "장미를 꽂은 꽃병", ref: "꽃병"}
+  "a tall vase of sunflowers": {np: "해바라기를 꽂은 키 큰 꽃병", ref: "꽃병"}
+  "a bottle of olive oil": {np: "올리브유 한 병", ref: "올리브유 병"}
+  "a bottle of wine": {np: "와인 한 병", ref: "와인병"}
+  "a tall glass of milk": {np: "우유가 담긴 키 큰 유리잔", ref: "유리잔"}
+  "a tall glass of juice": {np: "주스가 담긴 키 큰 유리잔", ref: "유리잔"}
+  "a potted fern": {np: "화분에 심은 양치식물", ref: "화분"}
+  "a box of books": {np: "책이 든 상자", ref: "상자"}
+  "a box of kitchen things": {np: "주방용품이 든 상자", ref: "상자"}
+  "a parcel of glasses": {np: "유리잔이 든 소포", ref: "소포"}
+  # --- retail ---
+  "a sample cup of coffee": {np: "시음용 커피가 담긴 컵", ref: "시음 컵"}
+  "a paper cup of hot soup": {np: "뜨거운 수프가 담긴 종이컵", ref: "종이컵"}
+  "a mop bucket": {np: "대걸레 양동이", ref: "양동이"}
+  "a bucket of water": {np: "물이 담긴 양동이", ref: "양동이"}
+  "a bucket of floor-cleaning concentrate": {np: "바닥 세정 원액이 담긴 양동이", ref: "양동이"}
+  "a drip tray of meltwater": {np: "녹은 물이 담긴 물받이", ref: "물받이"}
+  "a tub of hot mac and cheese": {np: "뜨거운 맥앤치즈가 담긴 용기", ref: "용기"}
+  "a can of wood stain": {np: "목재 착색제가 든 캔", ref: "캔"}
+  "a tin of paint": {np: "페인트 한 통", ref: "페인트 통"}
+  "a cup of water for a customer": {np: "손님에게 드릴 물이 담긴 컵", ref: "컵"}
+  "a stack of paint tins": {np: "쌓아 올린 페인트 통", ref: "페인트 통 더미"}
+  "a tall bottle of water for the staff room": {np: "직원 휴게실에 둘 키 큰 생수병", ref: "생수병"}
+  "a stack of boxed lamps": {np: "상자에 든 램프를 쌓은 더미", ref: "상자 더미"}
+  "a tall potted olive tree": {np: "화분에 심은 키 큰 올리브나무", ref: "올리브나무 화분"}
+  "a pallet with a tall potted olive tree": {np: "키 큰 올리브나무 화분을 올린 팔레트", ref: "올리브나무 화분"}
+  "a tall stack of drinks crates on a pallet": {np: "팔레트 위에 높이 쌓은 음료 상자", ref: "상자 더미"}
+  "a carton of tinned tomatoes": {np: "토마토 통조림이 든 상자", ref: "상자"}
+  "a box of light bulbs": {np: "전구가 든 상자", ref: "상자"}
+  "a tote of returns": {np: "반품이 든 토트", ref: "토트"}
+  "a pallet of bottled water": {np: "생수를 실은 팔레트", ref: "팔레트"}
+  "a pallet of compost bags": {np: "퇴비 포대를 실은 팔레트", ref: "팔레트"}
+  # --- greenhouse ---
+  "a bucket of irrigation water": {np: "관수용 물이 담긴 양동이", ref: "양동이"}
+  "a pail of rainwater": {np: "빗물이 담긴 양동이", ref: "양동이"}
+  "a bucket of nutrient concentrate": {np: "양액 원액이 담긴 양동이", ref: "양동이"}
+  "a pail of diluted fungicide": {np: "희석한 살균제가 담긴 양동이", ref: "양동이"}
+  "a seedling tray standing in water": {np: "물이 고인 모종 트레이", ref: "모종 트레이"}
+  "a beaker of mixed fertiliser solution": {np: "혼합 비료 용액이 담긴 비커", ref: "비커"}
+  "a 250 ml beaker of pH-adjusting acid": {np: "산도 조절용 산이 담긴 250 ml 비커", ref: "비커"}
+  "a tall potted tomato plant": {np: "화분에 심은 키 큰 토마토 포기", ref: "토마토 화분"}
+  "a potted citrus tree": {np: "화분에 심은 감귤나무", ref: "감귤나무 화분"}
+  "a pallet with a tall potted fig tree": {np: "키 큰 무화과나무 화분을 올린 팔레트", ref: "무화과나무 화분"}
+  "a potted palm on a pallet": {np: "팔레트에 올린 야자나무 화분", ref: "야자나무 화분"}
+  "a tall bottle of plant feed": {np: "식물 영양제가 든 키 큰 병", ref: "영양제 병"}
+  "a stack of three seed-tray boxes": {np: "파종 트레이 상자 세 개를 쌓은 더미", ref: "상자 더미"}
+  "a crate of tomatoes": {np: "토마토가 든 상자", ref: "상자"}
+  "a crate of lettuce heads": {np: "상추 포기가 든 상자", ref: "상자"}
+  "a tote of seedling plugs": {np: "플러그 모종이 든 토트", ref: "토트"}
+  # --- transit ---
+  "a paper cup of black coffee": {np: "블랙커피가 담긴 종이컵", ref: "종이컵"}
+  "a mug of hot chocolate": {np: "핫초코가 담긴 머그잔", ref: "머그잔"}
+  "a bowl of noodle soup": {np: "국수가 담긴 그릇", ref: "그릇"}
+  "a tote of de-icing fluid": {np: "제빙액이 담긴 토트", ref: "토트"}
+  "a tall bottle of water for a passenger": {np: "승객에게 줄 키 큰 생수병", ref: "생수병"}
+  "a bouquet in a tall vase for the lounge": {np: "라운지에 둘 키 큰 꽃병에 꽂은 꽃다발", ref: "꽃병"}
+  "a stack of three duty-free boxes": {np: "면세품 상자 세 개를 쌓은 더미", ref: "상자 더미"}
+  "a tall stack of parcels on a cart": {np: "카트 위에 높이 쌓은 소포", ref: "소포 더미"}
+  "a suitcase": {np: "여행 가방", ref: "여행 가방"}
+  "a boxed parcel": {np: "상자로 포장된 소포", ref: "소포"}
+  "a pallet of mailbags": {np: "우편 자루를 실은 팔레트", ref: "팔레트"}
+
+cues:
+  # --- person ---
+  "{Ref} has been slowing down over the last half second.": "{ref:은} 지난 0.5초 동안 점점 느려지고 있습니다."
+  "{Ref}'s steps have become shorter.": "{ref}의 보폭이 짧아졌습니다."
+  "{Ref} has lost some pace in the last moment.": "{ref}의 속도가 방금 조금 떨어졌습니다."
+  "{Ref} is moving at a steady pace.": "{ref:은} 일정한 속도로 움직이고 있습니다."
+  "{Ref} has not changed pace.": "{ref:은} 속도를 바꾸지 않았습니다."
+  "{Ref} is still mid-stride.": "{ref:은} 아직 걸음을 옮기는 중입니다."
+  "{Ref} glanced toward you.": "{ref:이} 당신 쪽을 힐끗 보았습니다."
+  "{Ref} looked up at you.": "{ref:이} 고개를 들어 당신을 보았습니다."
+  "{Ref} turned their head toward you.": "{ref:이} 당신 쪽으로 고개를 돌렸습니다."
+  "{Ref} is looking down at a phone.": "{ref:은} 휴대폰을 내려다보고 있습니다."
+  "{Ref}'s attention seems to be on something off to the side.": "{ref}의 주의가 옆쪽의 무언가에 쏠려 있는 것 같습니다."
+  "{Ref} is talking to someone and not looking your way.": "{ref:은} 누군가와 이야기하고 있으며 당신 쪽을 보고 있지 않습니다."
+  "{Ref} is taking quick, hurried steps.": "{ref:은} 빠르고 다급한 걸음으로 걷고 있습니다."
+  "{Ref} is moving briskly, almost jogging.": "{ref:은} 거의 뛰다시피 빠르게 움직이고 있습니다."
+  "{Ref} seems to be in a hurry.": "{ref:은} 서두르는 것 같습니다."
+  "{Ref} is drifting toward your left.": "{ref:이} 당신의 왼쪽으로 조금씩 치우치고 있습니다."
+  "{Ref} has started edging over to your left.": "{ref:이} 당신의 왼쪽으로 조금씩 옮겨 가기 시작했습니다."
+  "{Ref} is drifting toward your right.": "{ref:이} 당신의 오른쪽으로 조금씩 치우치고 있습니다."
+  "{Ref} has started edging over to your right.": "{ref:이} 당신의 오른쪽으로 조금씩 옮겨 가기 시작했습니다."
+  "{Ref} is holding a straight line down the middle.": "{ref:은} 한가운데를 따라 곧게 나아가고 있습니다."
+  "{Ref} is coming straight down the centre.": "{ref:이} 가운데로 곧장 다가오고 있습니다."
+  # --- vehicle ---
+  "{Ref}'s brake lights are on.": "{ref}의 브레이크등이 켜져 있습니다."
+  "{Ref}'s brake lights just lit up.": "{ref}의 브레이크등이 방금 켜졌습니다."
+  "{Ref} is holding a steady speed.": "{ref:은} 일정한 속도를 유지하고 있습니다."
+  "{Ref} has not slowed.": "{ref:은} 속도를 줄이지 않았습니다."
+  "{Ref}'s reversing alarm is beeping.": "{ref}의 후진 경보음이 울리고 있습니다."
+  "{Ref} has its reverse beeper going.": "{ref}에서 후진 경고음이 울리고 있습니다."
+  "{Ref} sounded its horn.": "{ref:이} 경적을 울렸습니다."
+  "{Ref} gave a short honk.": "{ref:이} 경적을 짧게 한 번 울렸습니다."
+  "{Ref} is easing toward your left.": "{ref:이} 당신의 왼쪽으로 서서히 옮겨 가고 있습니다."
+  "{Ref} has started steering over to your left.": "{ref:이} 당신의 왼쪽으로 방향을 틀기 시작했습니다."
+  "{Ref} is easing toward your right.": "{ref:이} 당신의 오른쪽으로 서서히 옮겨 가고 있습니다."
+  "{Ref} has started steering over to your right.": "{ref:이} 당신의 오른쪽으로 방향을 틀기 시작했습니다."
+  "{Ref} is holding the middle of the aisle.": "{ref:은} 통로 한가운데를 벗어나지 않고 있습니다."
+  # --- robot ---
+  "{Ref}'s status light has turned amber, its yield signal.": "{ref}의 상태 표시등이 양보 신호인 주황색으로 바뀌었습니다."
+  "{Ref} is showing an amber yield light.": "{ref:이} 주황색 양보 표시등을 켜고 있습니다."
+  "{Ref}'s status light is green (proceeding).": "{ref}의 상태 표시등이 초록색(진행)입니다."
+  "{Ref} is showing a steady green light.": "{ref:이} 초록색 표시등을 깜빡임 없이 켜고 있습니다."
+  "{Ref}'s white reversing light is on.": "{ref}의 흰색 후진등이 켜져 있습니다."
+  "{Ref} is showing its reversing light.": "{ref:이} 후진등을 켜고 있습니다."
+  "{Ref} is flashing its blue priority-transit light.": "{ref:이} 파란색 우선 통행 표시등을 깜빡이고 있습니다."
+  "{Ref} has its priority light flashing.": "{ref}의 우선 통행 표시등이 깜빡이고 있습니다."
+  "{Ref} is edging toward your left.": "{ref:이} 당신의 왼쪽으로 조금씩 움직이고 있습니다."
+  "{Ref} has started shifting over to your left.": "{ref:이} 당신의 왼쪽으로 옮겨 가기 시작했습니다."
+  "{Ref} is edging toward your right.": "{ref:이} 당신의 오른쪽으로 조금씩 움직이고 있습니다."
+  "{Ref} has started shifting over to your right.": "{ref:이} 당신의 오른쪽으로 옮겨 가기 시작했습니다."
+  "{Ref} is holding the centre line.": "{ref:은} 중앙선을 벗어나지 않고 있습니다."
+  "{Ref} is coming straight down the middle.": "{ref:이} 한가운데로 곧장 다가오고 있습니다."
+  # --- hand ---
+  "{Ref} is holding something close to the work surface.": "{ref:이} 작업면 가까이에서 무언가를 들고 있습니다."
+  "{Ref} is gripping an item near the fixture.": "{ref:이} 고정 장치 근처에서 물건 하나를 쥐고 있습니다."
+  "{Ref} is extended toward the far side of the cell.": "{ref:이} 셀의 먼 쪽을 향해 뻗어 있습니다."
+  "{Ref} is stretched out across the work area.": "{ref:이} 작업 영역을 가로질러 쭉 뻗어 있습니다."
+  "The elbow behind {ref} is bending back toward the person.": "{ref} 뒤쪽의 팔꿈치가 사람 쪽으로 다시 굽혀지고 있습니다."
+  "{Ref}'s wrist is turning back toward the person.": "{ref:이} 손목에서부터 사람 쪽으로 돌아가고 있습니다."
+  "{Ref} is not moving at the moment.": "{ref:은} 지금 움직이지 않고 있습니다."
+  "{Ref} has been motionless for a moment.": "{ref:은} 잠시 동안 움직임이 없습니다."
+  "{Ref} is reaching steadily across the bench.": "{ref:이} 작업대를 가로질러 꾸준히 뻗어 가고 있습니다."
+  "{Ref} is sweeping across at an even pace.": "{ref:이} 고른 속도로 쓸듯이 가로지르고 있습니다."
+  "{Ref} paused for a moment mid-reach.": "{ref:이} 뻗던 도중에 잠깐 멈췄습니다."
+  "{Ref} hesitated briefly.": "{ref:이} 잠깐 머뭇거렸습니다."
+  "{Ref} is moving quickly.": "{ref:이} 빠르게 움직이고 있습니다."
+  "{Ref} darted forward.": "{ref:이} 앞으로 휙 뻗어 나왔습니다."

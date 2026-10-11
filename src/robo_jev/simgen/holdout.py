@@ -112,7 +112,7 @@ class Split:
     groups: tuple[str, ...] = tuple(g for g in GROUPS if g != "P1+P3")
     cell: str | None = None
     train_ranges: bool = True
-    ko_share: float = 0.0   # 한국어 단계(B3)에서 0.15로
+    ko_share: float = 0.15
     extra: dict = field(default_factory=dict)
 
     @property

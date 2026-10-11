@@ -427,7 +427,7 @@ margins:
     half_range: {mobile_base: 0.40, humanoid: 0.35, forklift_amr: 0.80, arm: 0.05}
   # Task v0b 결정 여유(같은 혼합분포):
   #   tip      = b_eff/h − a_ref/g   (경사로는 b_eff/h − 쏠림 비) — 기준 움직임(단단한 제동·지금 속도의 회전·보통 출발·보통 경사로)  [무차원]
-  #   slide    = μ − a_ref/g (경사로 μ − 쏠림 비)                                                                                       [무차원]
+  #   slide    = μ − a_ref/g — v0b: 설계 여유가 아니다(표면의 마찰 사전과 r이 정한다; 값만 남겨 둔다)                                                                                      [무차원]
   #   stack    = L_low/2 − |d|   (명목: 무게 가운데·놓기 오차 0; c·ε는 숨은 값)                                                                                                       [m]
   #   seat     = logit P(제대로 | 측정) — 닻 측정의 사후 로그 오즈(0 근처 = 측정만으로 갈리지 않음)                                           [무차원]
   #   sight    = d_vis − (반응 거리 + 최대 제동 거리) — 오래된 추적: 다시 보이는 거리 안에 서나                                      [m]
@@ -545,14 +545,14 @@ p4:
         tolerance: {depth_mm: 0.5}
         depth_mm: {inserted: [0.0, 0.25], stuck: [3.5, 1.2], misaligned: [1.5, 0.7]}
         force_n: {inserted: [12.0, 3.0], stuck: [30.0, 6.0], misaligned: [25.0, 6.0]}
-        lateral_n: {inserted: [1.0, 0.5], stuck: [1.5, 0.8], misaligned: [6.0, 2.0]}
+        lateral_n: {inserted: [0.0, 1.0], stuck: [0.0, 1.6], misaligned: [6.0, 2.0]}     # 옆 힘은 부호가 있다(+ = 왼쪽): 들어감·걸림은 0 둘레, 어긋남은 ±
         sensor_sigma: {depth_mm: [0.10, 0.30], force_n: [0.5, 1.5], lateral_n: [0.3, 0.8]}
       medium:  # 플러그·카트리지·필터 바스켓·호스 이음
         prior: {inserted: 0.75, stuck: 0.15, misaligned: 0.10}
         tolerance: {depth_mm: 2.0}
         depth_mm: {inserted: [0.0, 1.0], stuck: [8.0, 3.0], misaligned: [4.0, 2.0]}
         force_n: {inserted: [20.0, 5.0], stuck: [45.0, 10.0], misaligned: [38.0, 10.0]}
-        lateral_n: {inserted: [2.0, 1.0], stuck: [3.0, 1.5], misaligned: [10.0, 3.0]}
+        lateral_n: {inserted: [0.0, 2.0], stuck: [0.0, 3.2], misaligned: [10.0, 3.0]}
         sensor_sigma: {depth_mm: [0.5, 1.5], force_n: [1.0, 3.0], lateral_n: [0.5, 1.5]}
   measured_share: {force_n: 0.75, lateral_n: 0.75, tilt_deg: 0.8}   # 이 측정이 있는 비율(높이·깊이는 늘 있다)
   # 행동의 결과(상태별): fix = 바로잡힐 확률, damage = 망가질 확률(그 나머지는 그대로). reseat/retry = 처음부터 다시(성공 확률), 시간은 글에 적는다.

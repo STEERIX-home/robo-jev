@@ -110,7 +110,7 @@ _SHORT_ARM = {
 }
 _SHORT_HEAD_ON = {"sidestep_left": "move over to the left wall and keep going slowly", "sidestep_right": "move over to the right wall and keep going slowly"}
 _SHORT_P6 = {"look_again": "pause briefly and look again", "creep": "creep up to the corner", "detour": "go around it"}
-_SHORT_P4 = {"look_again": "measure it again before deciding"}
+_SHORT_P4 = {"look_again": "measure it again before deciding", "continue": "leave it as it is and move on"}
 
 
 def option_short(canon: str, obs: Observation) -> str:
@@ -119,14 +119,14 @@ def option_short(canon: str, obs: Observation) -> str:
         ratio = int(canon.split("_")[1]) / 100.0
         speed = speed_text(obs, ratio * obs.robot.speed)
         return f"take the turn at {speed}" if ratio < 1.0 else f"take the turn without slowing ({speed})"
+    if obs.scene.startswith(("p4",)) and canon in _SHORT_P4:     # 놓기·끼우기 확인의 '계속'은 그대로 두고 넘어가기(팔이어도)
+        return _SHORT_P4[canon]
     if obs.body == "arm" and canon in _SHORT_ARM:
         return _SHORT_ARM[canon]
     if obs.scene == "p1_head_on" and canon in _SHORT_HEAD_ON:
         return _SHORT_HEAD_ON[canon]
     if obs.scene.startswith(("p6", "p1p6")) and canon in _SHORT_P6:
         return _SHORT_P6[canon]
-    if obs.scene.startswith(("p4",)) and canon in _SHORT_P4:
-        return _SHORT_P4[canon]
     return _SHORT[canon]
 
 
@@ -232,6 +232,10 @@ _DESCRIPTIONS_P6 = {
     "detour": _T(["Go around it the other way (about {t_detour} longer).", "Avoid it by taking the other route (about {t_detour} more).", "Steer around the area; that adds about {t_detour}."],
                  ["Route around it, adding roughly {t_detour}."]),
 }
+_DESCRIPTIONS_P4 = {
+    "continue": _T(["Leave it as it is and move on to the next step.", "Accept it as placed and carry on.", "Do nothing more to it and continue with the task."],
+                   ["Let it stand and proceed without further checks."]),
+}
 _DESCRIPTIONS_TURN = _T(["Take the corner at {speed}.", "Slow to {speed} for the bend.", "Go through the turn at {speed}."], ["Round the bend at {speed}."])
 _DESCRIPTIONS_TURN_FULL = _T(["Take the corner without slowing ({speed}).", "Keep your current speed ({speed}) through the bend.", "Do not slow down for the turn ({speed})."],
                              ["Carry your full {speed} through the turn."])
@@ -245,7 +249,9 @@ def option_descriptions(canon: str, obs: Observation, pool: str = "train") -> li
         bank = _DESCRIPTIONS_TURN_FULL if ratio >= 1.0 else _DESCRIPTIONS_TURN
         return [t.format(speed=speed) for t in bank[pool]]
     numbers = _numbers(obs)
-    if obs.body == "arm" and canon in _DESCRIPTIONS_ARM:
+    if obs.scene.startswith("p4") and canon in _DESCRIPTIONS_P4:
+        bank = _DESCRIPTIONS_P4[canon]
+    elif obs.body == "arm" and canon in _DESCRIPTIONS_ARM:
         bank = _DESCRIPTIONS_ARM[canon]
     elif obs.scene == "p1_head_on" and canon in _DESCRIPTIONS_HEAD_ON:
         bank = _DESCRIPTIONS_HEAD_ON[canon]

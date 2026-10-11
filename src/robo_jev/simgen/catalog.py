@@ -140,7 +140,7 @@ SCENE_MARGINS = {
     "p5_braking": ("spill", "stop"),
     "p5_turning": ("spill",),
     "p1p5_step_in_carrying": ("step_in", "spill"),
-    "p3_ramp": ("tip", "slide"),
+    "p3_ramp": ("tip",),
     "p3_place_stack": ("stack",),
     "p4_place_check": ("seat",),
     "p4_insert": ("seat",),
@@ -152,7 +152,7 @@ SCENE_MARGINS = {
     "p1p3_step_in_carrying_tall": ("step_in", "tip"),
 }
 _MANEUVER_MARGINS = {
-    ("p3_carrying_tall", "brake"): ("tip", "slide", "stop"), ("p3_carrying_tall", "turn"): ("tip", "slide"), ("p3_carrying_tall", "start"): ("tip", "slide"),
+    ("p3_carrying_tall", "brake"): ("tip", "stop"), ("p3_carrying_tall", "turn"): ("tip",), ("p3_carrying_tall", "start"): ("tip",),
     ("p3p5_carrying_mixed", "brake"): ("tip", "spill", "stop"), ("p3p5_carrying_mixed", "turn"): ("tip", "spill"),
 }  # fmt: skip
 

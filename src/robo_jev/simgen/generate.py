@@ -279,6 +279,19 @@ def _scene_meta(obs: Observation) -> dict:
     return out
 
 
+def _holdout_vars(obs: Observation) -> dict[str, float]:
+    """이 관측의 T3 칸 변수 값(글에 보인 값) — 학습 세트 전부를 훑는 겹침 검사가 레코드만으로 칸을 다시 잴 수 있게."""
+    from robo_jev.simgen.holdout import load_holdout, observed_value
+
+    out = {}
+    for cell in load_holdout().ranges:
+        if obs.scene in cell.scenes and cell.var not in out:
+            value = observed_value(obs, cell.var)
+            if value is not None:
+                out[cell.var] = round(float(value), 6)
+    return out
+
+
 def assemble(
     cfg: SimgenConfig,
     moment: Moment,
@@ -291,25 +304,56 @@ def assemble(
     forced: dict | None = None,
     surface: dict | None = None,
     split_spec: dict | None = None,
+    t6: dict | None = None,
 ) -> dict:
-    """판단 순간 하나 → 레코드(dict)."""
+    """판단 순간 하나 → 레코드(dict).
+
+    ``t6``(교란 세트의 변형 — testsets): ``style``(서술 문체 바꾸기), ``fact_seed``(사실 순서 섞기), ``state_post``·``request_post``(글·요청의
+    뒤처리), ``extra_question``(한 가지 더 정하기), ``recommendation``(기준 레코드의 권고를 그대로 — 정식 선택지·있음·틀림),
+    ``posterior_source``((기준 관측, 사후 세계 변환) — 거울상의 공통 난수), ``options``(선택지 순서 — 거울상은 기준의 순서를 뒤집은 이름으로),
+    ``meta``(meta.t6에 적을 것)."""
+    t6 = t6 or {}
     seed, ctx, anchor, obs = moment.seed, moment.ctx, moment.world, moment.obs
+    style = t6.get("style", ctx.style)
     k = int(k or cfg.catalog["posterior_k"])
-    options = available_options(obs)
-    qset = write_questions(cfg, obs, options, stream(seed, "questions"), Surface(lang=ctx.lang, pool=moment.pool, **(surface or {})))
-    batch = sample_posterior(cfg, obs, k, stream(seed, "posterior"))
+    options = tuple(t6.get("options") or available_options(obs))
+    surface_obj = Surface(lang=ctx.lang, pool=moment.pool, **(surface or {}))
+    qset = write_questions(cfg, obs, options, stream(seed, "questions"), surface_obj)
+    if t6.get("extra_question"):
+        from robo_jev.simgen.questions import candidates, identity
+
+        used = {identity(q.recipe) for q in qset.questions}
+        names = {q.name for q in qset.questions}
+        fresh = [c for c in candidates(cfg, obs, options, stream(seed, "t6-extra"), surface_obj, qset.key_style) if c.ident not in used]
+        if fresh:
+            extra = fresh[int(stream(seed, "t6-pick").integers(len(fresh)))].build()
+            while extra.name in names:
+                extra.name += "_x"
+            qset.questions.append(extra)
+    source_obs, transform = t6.get("posterior_source", (obs, None))
+    batch = sample_posterior(cfg, source_obs, k, stream(seed, "posterior"))
+    if transform is not None:
+        batch = transform(batch)
     out: Outcomes = rollout(cfg, obs, batch, options)
     exact = exact_labels(cfg, obs)
     labels = {q.name: label_for(out, q.recipe, cfg.values, exact) for q in qset.questions}
     primary = next(q for q in qset.questions if q.name == qset.primary_action)
-    recommendation = recommend(cfg, seed, ctx.style, out)
+    recommendation = recommend(cfg, seed, style, out)
+    if "recommendation" in t6:
+        keep = t6["recommendation"]
+        recommendation.update(present=keep["present"], canonical=keep["canonical"], wrong=keep["wrong"])
+        recommendation["gap"] = None if keep["canonical"] is None else round(recommendation["costs"][keep["canonical"]] - min(recommendation["costs"].values()), 4)
     rec_key = next((key for key, canon in primary.recipe["options"].items() if canon == recommendation["canonical"]), None)
     hint = _hint(cfg, seed, obs)
-    plan = RenderPlan(ctx.style, options, recommendation["canonical"], hint)
+    plan = RenderPlan(style, options, recommendation["canonical"], hint, t6.get("fact_seed"))
     state = render_state(obs, plan, stream(seed, "render"))
+    if t6.get("state_post"):
+        state = t6["state_post"](state)
     # 참 세계 = 정답의 사후에서 한 번 더 뽑은 세계(닻 세계가 아니다 — 리뷰 1 I4). 행동 결과가 확률인 장면(P4)은 결과도 뽑는다(갈래
     # truth-outcome); 다시 보기의 결정 규칙은 정답의 사후에서(policy).
-    true_batch = sample_posterior(cfg, obs, 1, stream(seed, "truth"))
+    true_batch = sample_posterior(cfg, source_obs, 1, stream(seed, "truth"))
+    if transform is not None:
+        true_batch = transform(true_batch)
     true_world = truth_world(cfg, obs, true_batch)
     true_out = rollout(cfg, obs, true_batch, options, rng=stream(seed, "truth-outcome"))
     true_out.policy = out
@@ -331,7 +375,7 @@ def assemble(
         "agent": None if a is None else {"kind": a.kind, "group": a.group, "cue": a.cue, "velocity_mode": "direct" if a.speed is not None else "two_fix", "age_s": a.age},
         "container": None if obs.container is None else {"kind": obs.container.kind, "content": obs.container.content, "fill_mode": obs.container.fill_mode, "lid_view": obs.container.lid},
         **_scene_meta(obs),
-        "style": ctx.style,
+        "style": style,
         "language": ctx.lang,
         "units": {"distance": obs.fmt.distance_unit, "speed": obs.fmt.speed_unit, "time": obs.fmt.time_unit},
         "hint": hint is not None,
@@ -350,7 +394,10 @@ def assemble(
         "sides": None if obs.env.sides is None else [s.status for s in obs.env.sides],
         "margin_redraws": moment.margin_redraws,
         "margin_fallback": list(anchor.parts.get("inexact", ())),
+        "holdout_vars": _holdout_vars(obs),
     }
+    if t6.get("meta"):
+        meta["t6"] = t6["meta"]
     generator = {
         "version": GENERATOR_VERSION,
         "catalog": cfg.versions["catalog"],
@@ -369,7 +416,7 @@ def assemble(
         "id": f"{id_prefix}-{index:06d}",
         "generator": generator,
         "meta": meta,
-        "request": {"state": state, "questions": {q.name: q.request_entry() for q in qset.questions}},
+        "request": (t6.get("request_post") or (lambda r: r))({"state": state, "questions": {q.name: q.request_entry() for q in qset.questions}}),
         "labels": labels,
         "truth": truth,
         "rationale": write_rationale(cfg, obs, true_world, out, true_out, primary.recipe, labels[primary.name], exact),

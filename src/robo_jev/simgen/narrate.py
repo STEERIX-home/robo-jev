@@ -1,4 +1,6 @@
-"""관측 서술기 3종(영어): ``facts``(글머리 목록), ``prose``(문단), ``planner``(계획표) (docs/12 §6, Task v0a 지시서 §3.8).
+"""관측 서술기(영어): ``facts``(글머리 목록), ``prose``(문단), ``planner``(계획표) — 학습 문체 셋 — 와 빼 둔 문체 ``log``(시각이 찍힌
+사건 기록 — 시험 세트 T2 전용, configs/simgen/holdout-v0b.yaml) (docs/12 §6, Task v0a 지시서 §3.8, v0b §4). 한국어 글은
+:mod:`~robo_jev.simgen.narrate_ko` (같은 사실, 같은 수).
 
 **관측만 받는다** — 세계 모듈을 import하지 않는다. 같은 관측이면 숨은 값이 무엇이든 같은 글이 나온다(시험이 바이트 단위로 확인).
 
@@ -31,6 +33,15 @@ class RenderPlan:
     actions: tuple[str, ...]              # 계획표의 '가능한 동작'(정식 선택지)
     recommendation: str | None = None     # 계획기 권고(정식 선택지)
     hint: str | None = None               # 계산된 힌트 문장
+    fact_seed: int | None = None          # 사실 순서 섞기(교란 T6 '사실 순서') — None이면 정해진 순서
+
+
+def ordered(facts: list, plan: RenderPlan) -> list:
+    """사실 조각의 순서(T6 '사실 순서' 변형이면 섞는다 — 같은 사실·같은 수)."""
+    if plan.fact_seed is None:
+        return facts
+    order = np.random.default_rng(plan.fact_seed).permutation(len(facts))
+    return [facts[int(i)] for i in order]
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -208,6 +219,7 @@ class _Fact:
     sentence: str
     section: str
     line: str
+    events: tuple = ()        # 사건 기록(log) 문체의 (나이 s 또는 None = 지금, 글) — 비면 ((None, line),)
 
 
 def _identity(obs: Observation, u: np.ndarray) -> str:
@@ -333,12 +345,15 @@ def _agent_facts(obs: Observation, u: np.ndarray) -> list[_Fact]:
             p0, p1 = _side_of(obs, a.track[0], axis), _side_of(obs, a.track[1], axis)
             motion = f"{p0} {_ago(obs, a.track_ages[0])}, {p1} {_ago(obs, a.track_ages[1])} (moving {heading})"
             motion_sent = f"{cap(ref)} was {p0} {_ago(obs, a.track_ages[0])} and {p1} {_ago(obs, a.track_ages[1])}, heading {heading}."
+            events = ((a.track_ages[0], f"{ref} at {p0}"), (a.track_ages[1], f"{ref} at {p1}, moving {heading}"))
         else:
             pos = _side_of(obs, a.track[0], axis)
             motion = f"{pos}, moving {heading} at {_speed(obs, a.speed)} (last update {_ago(obs, a.age)})"
             motion_sent = f"As of {_ago(obs, a.age)}, {ref} was {pos} and moving {heading} at {_speed(obs, a.speed)}."
-        facts.append(_Fact(f"{cap(np_)} {verb}, {gap} ahead of you.", f"{cap(np_)} {verb}, {gap} ahead of you.", "PERCEIVED", f"{np_}: {gap} ahead"))
-        facts.append(_Fact(f"{cap(ref)}: {motion}.", motion_sent, "PERCEIVED", f"  {motion}"))
+            events = ((a.age, f"{ref} at {pos}, moving {heading} at {_speed(obs, a.speed)}"),)
+        facts.append(_Fact(f"{cap(np_)} {verb}, {gap} ahead of you.", f"{cap(np_)} {verb}, {gap} ahead of you.", "PERCEIVED", f"{np_}: {gap} ahead",
+                           ((None, f"{np_} {verb}; gap now {gap}"),)))  # fmt: skip
+        facts.append(_Fact(f"{cap(ref)}: {motion}.", motion_sent, "PERCEIVED", f"  {motion}", events))
     elif obs.scene == "p1_crossing":
         side = "left" if a.heading == "from_left" else "right"
         line = _dist(obs, a.ahead)
@@ -352,11 +367,13 @@ def _agent_facts(obs: Observation, u: np.ndarray) -> list[_Fact]:
             d0, d1 = _dist(obs, a.track[0]), _dist(obs, a.track[1])
             motion = f"{d0} from your path {_ago(obs, a.track_ages[0])}, {d1} from it {_ago(obs, a.track_ages[1])}"
             sent = f"{cap(_ago(obs, a.track_ages[0]))} {ref} was {d0} from the edge of your path; {_ago(obs, a.track_ages[1])} it was {d1}."
+            events = ((a.track_ages[0], f"{ref} {d0} from the edge of your path"), (a.track_ages[1], f"{ref} {d1} from the edge of your path"))
         else:
             d1 = _dist(obs, a.track[0])
             motion = f"{d1} from your path, closing at {_speed(obs, a.speed)} (last update {_ago(obs, a.age)})"
             sent = f"As of {_ago(obs, a.age)}, {ref} was {d1} from the edge of your path, moving toward it at {_speed(obs, a.speed)}."
-        facts.append(_Fact(f"{cap(ref)}: {motion}.", sent, "PERCEIVED", f"  {motion}"))
+            events = ((a.age, f"{ref} {d1} from the edge of your path, closing at {_speed(obs, a.speed)}"),)
+        facts.append(_Fact(f"{cap(ref)}: {motion}.", sent, "PERCEIVED", f"  {motion}", events))
     else:  # p1_head_on
         size = _dist(obs, a.size)
         lateral = _side_of(obs, a.lateral, "the aisle centre")
@@ -369,11 +386,13 @@ def _agent_facts(obs: Observation, u: np.ndarray) -> list[_Fact]:
             d0, d1 = _dist(obs, a.track[0]), _dist(obs, a.track[1])
             motion = f"{d0} ahead {_ago(obs, a.track_ages[0])}, {d1} ahead {_ago(obs, a.track_ages[1])}"
             sent = f"The gap between you was {d0} {_ago(obs, a.track_ages[0])} and {d1} {_ago(obs, a.track_ages[1])}."
+            events = ((a.track_ages[0], f"gap to {ref}: {d0}"), (a.track_ages[1], f"gap to {ref}: {d1}"))
         else:
             d1 = _dist(obs, a.track[0])
             motion = f"{d1} ahead, moving toward you at {_speed(obs, a.speed)} (last update {_ago(obs, a.age)})"
             sent = f"As of {_ago(obs, a.age)} the gap between you was {d1}, with {ref} moving toward you at {_speed(obs, a.speed)}."
-        facts.append(_Fact(f"{cap(ref)}: {motion}.", sent, "PERCEIVED", f"  {motion}"))
+            events = ((a.age, f"gap to {ref}: {d1}; {ref} moving toward you at {_speed(obs, a.speed)}"),)
+        facts.append(_Fact(f"{cap(ref)}: {motion}.", sent, "PERCEIVED", f"  {motion}", events))
     if a.cue_phrase:
         facts.append(_Fact(a.cue_phrase, a.cue_phrase, "PERCEIVED", f"  cue: {a.cue_phrase}"))
     return facts
@@ -481,7 +500,8 @@ def _v0b_facts(obs: Observation, u: np.ndarray) -> list[_Fact]:
         text = (f"{cap(s.descriptor.np)} was standing at {s.spot} — now {ahead} ahead of you — when you last saw {s.pronoun} {_time(obs, s.age, 0.1)} ago; "
                 f"since then {s.occluder} has blocked your view of that spot.")  # fmt: skip
         out.append(_Fact(f"{cap(s.descriptor.np)}: last seen {_time(obs, s.age, 0.1)} ago at {s.spot}, now {ahead} ahead; view blocked by {s.occluder}.", text,
-                         "PERCEIVED", f"{s.descriptor.np}: last seen {_time(obs, s.age, 0.1)} ago, {ahead} ahead; hidden by {s.occluder}"))  # fmt: skip
+                         "PERCEIVED", f"{s.descriptor.np}: last seen {_time(obs, s.age, 0.1)} ago, {ahead} ahead; hidden by {s.occluder}",
+                         ((s.age, f"{s.descriptor.np} standing at {s.spot}; then lost behind {s.occluder}"), (None, f"{s.spot}: now {ahead} ahead, still hidden"))))  # fmt: skip
         sight = _len(obs, s.sight, 0.05)
         text = f"You will see that spot again only when you are about {sight} from it."
         out.append(_Fact(text, text, "PERCEIVED", f"view reopens at about {sight} from the spot"))
@@ -531,10 +551,12 @@ def _place_facts(obs: Observation) -> list[_Fact]:
     parts, lines = [], []
     if "height_mm" in readings:
         r = readings["height_mm"]
-        parts.append(f"height {_mm(r.value, 2 if r.resolution < 0.1 else 1)} above nominal (gauge accuracy ±{_mm(r.sigma, 2)})")
+        where = "above" if r.value >= 0 else "below"
+        parts.append(f"height {_mm(abs(r.value), 2 if r.resolution < 0.1 else 1)} {where} nominal (gauge accuracy ±{_mm(r.sigma, 2)})")
     if "depth_mm" in readings:
         r = readings["depth_mm"]
-        parts.append(f"insertion depth {_mm(r.value, 2 if r.resolution < 0.1 else 1)} short of fully home (accuracy ±{_mm(r.sigma, 2)})")
+        where = "short of fully home" if r.value >= 0 else "past the fully-home mark"
+        parts.append(f"insertion depth {_mm(abs(r.value), 2 if r.resolution < 0.1 else 1)} {where} (accuracy ±{_mm(r.sigma, 2)})")
     if "tilt_deg" in readings:
         r = readings["tilt_deg"]
         side = "" if abs(r.value) < 0.05 else " " + _TILT_SIDE[r.value > 0]
@@ -559,7 +581,8 @@ def _place_facts(obs: Observation) -> list[_Fact]:
         age = max(p.ages.values())
         names = " and ".join({"height_mm": "height", "tilt_deg": "tilt", "depth_mm": "depth"}[n] for n in p.ages)
         text = f"The camera readings ({names}) are {_time(obs, age, 0.1)} old because {p.stale_reason}; the force reading is current."
-        out.append(_Fact(text, text, "PERCEIVED", f"camera readings {_time(obs, age, 0.1)} old ({p.stale_reason}); force current"))
+        out.append(_Fact(text, text, "PERCEIVED", f"camera readings {_time(obs, age, 0.1)} old ({p.stale_reason}); force current",
+                         ((age, f"last camera reading ({names})"), (None, f"camera view lost: {p.stale_reason}; force reading current"))))  # fmt: skip
     return out
 
 
@@ -592,7 +615,7 @@ def _recommendation_sentence(obs: Observation, canon: str, u: float) -> str:
 
 def _render_facts(obs: Observation, plan: RenderPlan, u: np.ndarray, rng: np.random.Generator) -> str:
     lines = [f"{obs.skin.setting} {_identity(obs, u)}"]
-    facts = _all_facts(obs, u)
+    facts = ordered(_all_facts(obs, u), plan)
     body = [f.bullet for f in facts]
     extra = list(obs.skin.distractors)
     if plan.hint:
@@ -606,7 +629,7 @@ def _render_facts(obs: Observation, plan: RenderPlan, u: np.ndarray, rng: np.ran
 
 
 def _render_prose(obs: Observation, plan: RenderPlan, u: np.ndarray, rng: np.random.Generator) -> str:
-    facts = _all_facts(obs, u)
+    facts = ordered(_all_facts(obs, u), plan)
     robot = [f.sentence for f in facts if f.section == "ROBOT"]
     world = [f.sentence for f in facts if f.section == "PERCEIVED"]
     first = " ".join([obs.skin.setting, _identity(obs, u)] + robot)
@@ -622,8 +645,44 @@ def _render_prose(obs: Observation, plan: RenderPlan, u: np.ndarray, rng: np.ran
     return "\n\n".join(p for p in paragraphs if p)
 
 
+#: 사건 기록 문체의 말(언어별)
+LOG_LABELS = {
+    "en": {"header": "EVENT LOG — {setting}", "unit": "unit: {body} — task: {task}", "now": "now", "robot": "robot", "sensors": "sensors",
+           "note": "note", "calc": "estimate", "planner": "planner", "recommend": "recommendation: {action}", "actions": "actions available: "},
+}  # fmt: skip
+
+
+def render_log(obs: Observation, plan: RenderPlan, rng: np.random.Generator, facts: list, labels: dict, action_text, recommend_text: str | None) -> str:
+    """빼 둔 문체 '사건 기록'(Task v0b T2): 사실마다 시각(나이)이 찍힌 줄 — 오래된 것부터, 지금은 끝. 같은 사실·같은 수(문체만 다르다)."""
+    entries = []
+    for f in facts:
+        source = labels["robot"] if f.section == "ROBOT" else labels["sensors"]
+        for age, text in f.events or ((None, f.line.strip()),):
+            entries.append((age, source, text))
+    notes = [(labels["note"], d) for d in obs.skin.distractors] + ([(labels["calc"], plan.hint)] if plan.hint else [])
+    for i in rng.permutation(len(notes)):
+        entries.append((None, *notes[int(i)]))
+    if recommend_text:
+        entries.append((None, labels["planner"], recommend_text))
+    timed = sorted((e for e in entries if e[0] is not None and e[0] >= 0.025), key=lambda e: -e[0])
+    now = [e for e in entries if e[0] is None or e[0] < 0.025]
+    width = max(len(labels["now"]), *(len(_time(obs, e[0], 0.05)) + 1 for e in timed)) if timed else len(labels["now"])
+    lines = [labels["header"].format(setting=obs.skin.setting), labels["unit"].format(body=obs.skin.body_name, task=obs.skin.task)]
+    for age, source, text in timed + now:
+        stamp = f"−{_time(obs, age, 0.05)}" if age is not None and age >= 0.025 else labels["now"]
+        lines.append(f"[{stamp:>{width}}] {source}: {text}")
+    lines.append(labels["actions"] + "; ".join(action_text(a) for a in plan.actions))
+    return "\n".join(lines)
+
+
+def _render_log(obs: Observation, plan: RenderPlan, u: np.ndarray, rng: np.random.Generator) -> str:
+    labels = LOG_LABELS["en"]
+    rec = labels["recommend"].format(action=option_short(plan.recommendation, obs)) if plan.recommendation else None
+    return render_log(obs, plan, rng, ordered(_all_facts(obs, u), plan), labels, lambda a: option_short(a, obs), rec)
+
+
 def _render_planner(obs: Observation, plan: RenderPlan, u: np.ndarray, rng: np.random.Generator) -> str:
-    facts = _all_facts(obs, u)
+    facts = ordered(_all_facts(obs, u), plan)
     out = [f"CONTEXT: {obs.skin.setting}", f"TASK: you are {obs.skin.body_name}, {obs.skin.task}"]
     out.append("ROBOT STATE")
     out += [f"  {f.line}" for f in facts if f.section == "ROBOT"]
@@ -642,8 +701,14 @@ def _render_planner(obs: Observation, plan: RenderPlan, u: np.ndarray, rng: np.r
 
 
 def render_state(obs: Observation, plan: RenderPlan, rng: np.random.Generator) -> str:
-    """상태 글 하나."""
+    """상태 글 하나(관측의 언어로)."""
+    if obs.skin.lang == "ko":
+        from robo_jev.simgen.narrate_ko import render_state_ko
+
+        return render_state_ko(obs, plan, rng)
     u = rng.random(8)
+    if plan.style == "log":
+        return _render_log(obs, plan, u, rng)
     if plan.style == "facts":
         return _render_facts(obs, plan, u, rng)
     if plan.style == "prose":

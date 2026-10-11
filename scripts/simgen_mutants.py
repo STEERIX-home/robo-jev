@@ -44,6 +44,29 @@ MUTANTS = {
     ]),
     "Mpremise": ("src/robo_jev/simgen/posterior.py", "    ok = np.flatnonzero((entering >= 0.0) & (entering <= band * (obs.robot.radius + ra)))",
                  "    ok = np.arange(m)", "step-in posterior ignores the text premise"),
+    # v0b — 새 현상·빼 둔 칸·교란·한국어
+    "Mp3prior": ("src/robo_jev/simgen/p3.py", '"com": _uniform(rng, spec["com_ratio"], k)', '"com": _uniform(rng, (spec["com_ratio"][0], spec["com_ratio"][0] + 0.02), k)',
+                 "P3 posterior: centre-of-mass ratio squeezed to the bottom of its range"),
+    "Mp4prior": ("src/robo_jev/simgen/p4.py", "return StateModel(family, dims, prior / prior.sum(), mean, sd, np.array([0, 1, 2, 2]))",
+                 "return StateModel(family, dims, np.full(4, 0.25), mean, sd, np.array([0, 1, 2, 2]))", "P4 state prior replaced by a uniform one"),
+    "Mp6stay": ("src/robo_jev/simgen/p6.py", "    return _uniform_exp_mean(lo, hi, age)\n", "    return math.exp(-0.5 * (lo + hi) * age)\n",
+                "P6 still-there probability at the mean rate (Jensen error)"),
+    "Mvoi": ("src/robo_jev/simgen/voi.py", "expected = (self.likelihood * w[None, :]) @ costs.T", "expected = self.likelihood @ costs.T",
+             "look-again decision ignores the posterior weights"),
+    "Mstack": ("src/robo_jev/simgen/p3.py", "toward = sum(w * share(lo, hi) for lo, hi, w in pieces)", "toward = sum(w for lo, hi, w in pieces if (lo >= 0) == (st.offset > 0))",
+               "stack weight-side closed form back to the piece-sign bug"),
+    "Mcorner": ("src/robo_jev/simgen/p6.py", "            d_hard = ph.stopping_distance(obs.robot.speed, obs.robot.latency, obs.robot.decel_hard)\n",
+                "            d_hard = ph.stopping_distance(obs.robot.speed, obs.robot.latency, obs.robot.decel_moderate)\n",
+                "blind-corner closed form uses firm instead of maximum braking"),
+    "Mholdout": ("training split may hit range cells", [
+        ("src/robo_jev/simgen/holdout.py", "    if split.train_ranges and split.cell is None and hit:\n", "    if False:\n"),
+        ("src/robo_jev/simgen/holdout.py", "        elif split.train_ranges:\n", "        elif False:\n"),
+    ]),
+    "Mmirror": ("src/robo_jev/simgen/perturb.py", '        v["lat0"], v["dir"] = -v["lat0"], -v["dir"]\n', '        v["lat0"] = -v["lat0"]\n',
+                "T6 mirror forgets the step-in direction"),
+    "Mjosa": ("src/robo_jev/simgen/korean.py", "    return with_final if final else without\n", "    return with_final\n", "Korean particles ignore the final sound"),
+    "Mimpact": ("src/robo_jev/simgen/questions.py", '    return obs.scene == "p3p5_carrying_mixed" and obs.env.maneuver == "brake"\n', "    return False\n",
+                "spill wording for P3+P5 braking stops naming the collision"),
 }  # fmt: skip
 
 
@@ -91,10 +114,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--work", type=Path, required=True, help="사본을 둘 작업 폴더(저장소 밖, 예: artifacts/scratch/…)")
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--only", nargs="*", default=None, help="이 변이체만(기본: 전부)")
+    parser.add_argument("--jobs", type=int, default=1, help="동시에 돌릴 사본 수")
     args = parser.parse_args(argv)
     results = {}
     names = [n for n in MUTANTS if args.only is None or n in args.only]
-    for name in ("control", *names):
+
+    def one(name: str) -> tuple[str, dict]:
         dest = args.work.resolve() / name
         _copy(dest)
         if name != "control":
@@ -104,9 +129,15 @@ def main(argv: list[str] | None = None) -> int:
         # 사본이 정말 쓰였는지: 사본의 패키지 경로를 확인한다
         where = subprocess.run([sys.executable, "-c", "import robo_jev.simgen as s; print(s.__file__)"], cwd=dest,
                                env={**os.environ, "PYTHONPATH": str(dest / "src")}, capture_output=True, text=True).stdout.strip()  # fmt: skip
-        results[name] = {"description": _edits(name)[0] if name in MUTANTS else "no mutation", "returncode": code, "summary": summary,
-                         "failed": failed, "package": where}  # fmt: skip
         print(f"{name}: {summary} ({len(failed)} failed) — {where}", flush=True)
+        return name, {"description": _edits(name)[0] if name in MUTANTS else "no mutation", "returncode": code, "summary": summary,
+                      "failed": failed, "package": where}  # fmt: skip
+
+    from concurrent.futures import ThreadPoolExecutor
+
+    with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+        for name, result in pool.map(one, ("control", *names)):
+            results[name] = result
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     ok = results["control"]["returncode"] == 0 and all(results[m]["failed"] for m in names)

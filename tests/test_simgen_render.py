@@ -16,7 +16,11 @@ from robo_jev.simgen.spec import Reading, stream
 
 HINT_OPENINGS = ("Estimated stopping distance", "At their current pace", "At its current pace", "Free width", "Sideways acceleration",
                  "If the load's centre of mass sat at half its height", "On this slope, ", "If the weight of ", "Computed from the readings:",
-                 "At your current speed you reach that spot", "Stopping distance with maximum braking")  # fmt: skip
+                 "At your current speed you reach that spot", "Stopping distance with maximum braking",
+                 # 한국어 힌트(phrases_ko_data.HINTS_KO의 고정된 첫머리)
+                 "추정 정지 거리는", "현재 속도 그대로라면", "둘 다 각자 벽 쪽으로 붙을 때 남는 폭:", "이 회전의 횡가속도(지금 속도 기준):",
+                 "짐의 무게중심이 높이의 절반에", "이 기울기에서는", "무게가 한가운데 있다고 치면", "측정값으로 계산하면", "현재 속도로 그 자리까지 약",
+                 "최대 제동 시 정지 거리")  # fmt: skip
 
 
 @pytest.fixture(scope="module")
@@ -105,14 +109,23 @@ def test_sample_texts_carry_recommendation_hint_and_distractors_as_flagged():
     for r in sample_records()[:400]:
         state, meta = r["request"]["state"], r["meta"]
         rec = meta["recommendation"]
-        has_rec = "PLANNER RECOMMENDATION:" in state or "planner suggests" in state or "planner's recommendation" in state or "Planner advice" in state
+        has_rec = any(m in state for m in ("PLANNER RECOMMENDATION:", "planner suggests", "planner's recommendation", "Planner advice",
+                                            "계획기 권고:", "모션 계획기는", "계획기의 권고:", "계획기 조언:"))  # fmt: skip
         assert has_rec == rec["present"], r["id"]
         assert any(opening in state for opening in HINT_OPENINGS) == meta["hint"], r["id"]
         card = cfg.domain(meta["domain"])
-        assert sum(entry_text(d) in state for d in card["distractors"]) == meta["distractors"], r["id"]
+        texts = [entry_text(d) for d in card["distractors"]]
+        if meta["language"] == "ko":
+            from robo_jev.simgen.korean import ko_skins
+
+            texts = [ko_skins().t(t) for t in texts]
+        assert sum(t in state for t in texts) == meta["distractors"], r["id"]
 
 
 def test_state_lengths_are_mostly_400_to_1500_characters():
-    lengths = np.array([len(r["request"]["state"]) for r in sample_records()])
-    assert np.mean((lengths >= 400) & (lengths <= 1500)) >= 0.9
-    assert lengths.min() >= 250 and lengths.max() <= 2500
+    """영어 글은 대부분 400~1,500자; 한국어는 같은 사실을 더 짧게 쓴다(한 글자가 더 많은 뜻을 담는다) — 대부분 150~1,300자."""
+    for lang, (lo, hi, floor) in {"en": (400, 1500, 250), "ko": (150, 1300, 120)}.items():
+        lengths = np.array([len(r["request"]["state"]) for r in sample_records() if r["meta"]["language"] == lang])
+        assert len(lengths) > 200
+        assert np.mean((lengths >= lo) & (lengths <= hi)) >= 0.9, lang
+        assert lengths.min() >= floor and lengths.max() <= 2500, (lang, lengths.min(), lengths.max())

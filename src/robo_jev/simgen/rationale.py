@@ -96,6 +96,58 @@ def _lead(cfg: SimgenConfig, obs: Observation, out: Outcomes, exact: dict) -> li
         c = obs.container
         lid = {"open": "no lid", "lid": "a lid", "unknown": "an unseen lid status"}[c.lid]
         parts.append(f"Fill is reported as {c.fill.value:.2f} (σ_eff {c.fill.sigma_eff:.2f}) with {lid}; slosh factor k and floor tilt are hidden.")
+    parts.extend(_lead_v0b(cfg, obs, out, exact))
+    return parts
+
+
+def _lead_v0b(cfg: SimgenConfig, obs: Observation, out: Outcomes, exact: dict) -> list[str]:
+    """새 현상(Task v0b)의 핵심 계산 한두 문장."""
+    parts: list[str] = []
+    r = obs.robot
+    if obs.load is not None:
+        ld = obs.load
+        spec = cfg.catalog["loads"][ld.kind]
+        ratio = ld.base.value / 2.0 / (0.5 * (spec["com_ratio"][0] + spec["com_ratio"][1]) * ld.height.value)
+        tip = out.events.get("tip")
+        best = ", ".join(f"{o} {float(wmean(tip[i], out)):.2f}" for i, o in enumerate(out.options) if tip is not None)
+        parts.append(
+            f"The load tips when the tilting ratio min(a/g, μ)·h exceeds the distance from its centre of mass to the edge it tips over; with the centre of"
+            f" mass at the middle of its prior range (com {spec['com_ratio'][0]:.2f}–{spec['com_ratio'][1]:.2f} of the height, hidden) the nominal tipping"
+            f" ratio is about {ratio:.2f}, and friction μ on {ld.deck} is hidden (uniform over that surface's range). P(tip) per option: {best}."
+        )
+    if obs.stack is not None:
+        st = obs.stack
+        parts.append(
+            f"The item stays if |planned offset + placement error + hidden weight offset| < half the support ({st.length_low / 2:.3f} m); the planned offset is"
+            f" {st.offset:+.3f} m, the placement error has σ {st.sigma_place:.3f} m, and the weight offset is uniform over ±c_max"
+            + (f" with the lift cue '{st.cue}' (right 80 % of the time)" if st.cue else " (no cue)")
+            + f" — P(topple | place now) = {exact.get('topple|place_now', float('nan')):.2f}, P(topple | recentre) = {exact.get('topple|recentre', float('nan')):.2f}."
+        )
+    if obs.place is not None:
+        dist = exact.get("p4_state")
+        if dist is not None:
+            from robo_jev.simgen.p4 import STATES
+
+            names = STATES[obs.place.family]
+            parts.append(
+                "Exact Bayes over the states from the class prior and the per-state measurement model (true value ~ N(μ_s, σ_s), report = true + sensor"
+                f" noise{', camera readings from before a possible change' if obs.place.ages else ''}): "
+                + ", ".join(f"{n} {p:.2f}" for n, p in zip(names, dist, strict=True)) + "."
+            )
+    if obs.stale is not None:
+        parts.append(f"P(still there after {obs.stale.age:.1f} s) = E_λ[e^(−λ·age)] over the leave-rate range of a {obs.stale.kind} = {exact.get('present', float('nan')):.2f}"
+                     f"; if it is there you see it again only {obs.stale.sight:.2f} m before the spot.")  # fmt: skip
+    if obs.corner is not None:
+        stop = r.speed * r.latency + r.speed**2 / (2 * r.decel_hard)
+        parts.append(f"Maximum-braking stop from {r.speed:.2f} m/s needs {stop:.2f} m against {obs.corner.ahead.value:.2f} m to the corner"
+                     f" (P(stop before it) = {exact.get('stops_before_corner', float('nan')):.2f}); P(someone emerges within 3 s) = {exact.get('emerge_3s', float('nan')):.2f}.")  # fmt: skip
+    if obs.conflict is not None:
+        c = obs.conflict
+        parts.append(f"P(object really there | lidar {'yes' if c.lidar else 'no'}, camera {'yes' if c.camera else 'no'}, cue '{c.cue}') = {exact.get('present', float('nan')):.2f}"
+                     " from the prior and the cue's sensor reliability table.")  # fmt: skip
+    if out.voi is not None:
+        parts.append(f"Looking again ({out.voi.time:.1f} s) is costed as the delay plus the expected cost of the best action after seeing the new signal"
+                     " (decision rule from the posterior; exact over discrete signals, quasi-random integration for a re-measurement).")  # fmt: skip
     return parts
 
 

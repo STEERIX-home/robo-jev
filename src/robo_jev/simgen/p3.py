@@ -375,6 +375,11 @@ def exact(cfg, obs: Observation) -> dict:
         "topple|recentre": 1.0 - _p_stable(0.0, half, st.sigma_place, pieces),
     }
     if st.offset != 0.0:
-        toward = sum(w for lo, hi, w in pieces if (lo >= 0) == (st.offset > 0))
+        # 무게가 튀어나올 쪽(계획 어긋남과 같은 부호)에 있을 확률 = 조각마다 그 쪽에 놓인 비율 × 무게(단서가 없으면 반반)
+        def share(lo: float, hi: float) -> float:
+            part = (max(hi, 0.0) - max(lo, 0.0)) if st.offset > 0 else (min(hi, 0.0) - min(lo, 0.0))
+            return part / (hi - lo)
+
+        toward = sum(w * share(lo, hi) for lo, hi, w in pieces)
         out["weight_toward"] = np.array([1.0 - toward, toward])
     return out

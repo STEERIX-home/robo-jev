@@ -47,6 +47,7 @@ class Surface:
     shift: int = 0          # 지시문 묶음에서 고른 번호를 이만큼 옮긴다
     desc_shift: int = 0     # 선택지 설명 묶음에서
     key_style: str | None = None
+    mirror: bool = False    # 좌우 거울상 변형(T6): 왼쪽·오른쪽 후보를 거꾸로 돌아 기준 레코드와 같은 자리에 거울상 질문이 오게
 
 
 @dataclass
@@ -320,19 +321,20 @@ def _action_question(c: _Ctx, options: tuple[str, ...], style: str, prefix: str,
     return Question(name, "choice", instructions, criteria, {"kind": "action", "options": keymap, "criterion": criterion})
 
 
-def _look_phrase(c: _Ctx) -> str:
+def _look_values(c: _Ctx) -> dict:
+    """'다시 볼까' 문구의 자리 표시 값(영어: {look} 명령형; 한국어: {look} 명사 꼴·{look_then} 연결 꼴)."""
     if c.lang == "ko":
-        from robo_jev.simgen.phrases_ko import look_phrase
+        from robo_jev.simgen.phrases_ko import look_forms
 
-        return look_phrase(c.obs)
+        return look_forms(c.obs)
     obs = c.obs
     if obs.place is not None:
-        return "measure it again"
+        return {"look": "measure it again"}
     if obs.stack is not None:
-        return "check how the weight sits"
+        return {"look": "check how the weight sits"}
     if obs.corner is not None:
-        return "stop at the corner and look"
-    return "pause and look again"
+        return {"look": "stop at the corner and look"}
+    return {"look": "pause and look again"}
 
 
 def look_option(obs: Observation) -> str:
@@ -351,11 +353,11 @@ def look_time(obs: Observation) -> float:
 
 def _voi_question(c: _Ctx, options: tuple[str, ...], style: str) -> Question:
     """'다시 볼까' — 지금 정하기(지금 가능한 행동 가운데 최선) 대 먼저 다시 보기(보는 시간 + 본 뒤의 최선)."""
-    look = _look_phrase(c)
+    look = _look_values(c)
     t = textfmt.time(look_time(c.obs), 0.1, c.obs.fmt.time_unit)
-    descriptions = [c.text("voi.decide_now"), c.text("voi.look_first", look=look, t=t)]
+    descriptions = [c.text("voi.decide_now"), c.text("voi.look_first", t=t, **look)]
     criteria, keymap = _choice(c, ["decide_now", "look_first"], descriptions, style, "v")
-    instructions = c.text("voi", look=look)
+    instructions = c.text("voi", **look)
     look_opt = look_option(c.obs)
     base = sorted(o for o in options if o != look_opt)
     recipe = {"kind": "voi", "options": {k: ("look_again" if v == "look_first" else "decide_now") for k, v in keymap.items()}, "criterion": None,
@@ -457,7 +459,8 @@ def _extra_nouls(c: _Ctx, options: tuple[str, ...]) -> list:
             cands.append(_Cand(_ev("world", "in_lane_2s"), lambda: _noul(
                 c, c.name("still_in_lane_2s", "in_path_in_2s"), "noul.in_lane_2s", {"source": "world", "event": "in_lane_2s"})))
         if obs.env.sides is not None:
-            for side, s in zip(("left", "right"), obs.env.sides, strict=True):
+            pairs = list(zip(("left", "right"), obs.env.sides, strict=True))
+            for side, s in pairs[::-1] if c.surface.mirror else pairs:
                 if s.status == "occluded":
                     cands.append(_Cand(_ev("world", f"side_free_{side}"), lambda side=side: _noul(
                         c, c.name(f"{side}_side_free", f"room_{side}"), "noul.side_free", {"source": "world", "event": f"side_free_{side}"}, **_side_values(c, side))))
