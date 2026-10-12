@@ -13,7 +13,9 @@ distribution, placement error) are written into the compiled model before every 
   sticking out past the support's edge. Outcome after 2 s (and settling): ``fall`` (its centre ended below the support's top, or tilt
   > 30°) or ``stay``.
 * **push** (:func:`push_xml`, :func:`run_push`) — a box on the floor pushed by a horizontal bumper bar at a chosen height
-  (a heavy body on a slide joint following a smooth velocity profile). Outcome: ``tip`` (final tilt > 45°) or ``slide``.
+  (a heavy body on a slide joint following a smooth velocity profile: forward by the planned travel, then back away 0.30 m so
+  nothing holds the box). Outcome: ``tip`` (final tilt > 45°) or ``upright``. The push is displacement-limited: the higher the
+  bar, the more travel it takes to pivot the box to its critical angle, so tipping is not monotone in the bar height.
 
 Contact model (all families): timestep 1 ms, ``implicitfast`` integrator, elliptic friction cones with ``impratio`` 10
 (no measurable creep under static friction — checked in the tests), contact ``solref`` 0.004 s, ``condim`` 3. The surface
@@ -300,20 +302,35 @@ def turn_profile(v0: float, radius: float, *, angle_deg: float = 90.0, direction
     return Profile(q=pos[:-1], v=vel2[:-1], a=acc, start=n_pre, end=n_pre + 2 * n_r + n_h)
 
 
-def push_profile(speed: float, travel: float, *, ramp: float = 0.3, pre: float = 0.2, post: float = 1.0, dt: float = TIMESTEP) -> Profile:
-    """Bumper motion along +x: rest for `pre` s, smooth (raised-cosine) speed-up to `speed` over `ramp` s, cruise, smooth stop, so the
-    bar moves `travel` m in all; then `post` s at rest. One column (x)."""
+#: After the push the robot backs the bar away by this much (m) at :data:`RETREAT_SPEED`, so a box left leaning on the bar settles on its
+#: own — the outcome is where it ends up once nothing holds it.
+RETREAT = 0.30
+RETREAT_SPEED = 0.25
+
+
+def push_profile(speed: float, travel: float, *, ramp: float = 0.3, pre: float = 0.2, pause: float = 0.3, retreat: float = RETREAT,
+                 post: float = 1.0, dt: float = TIMESTEP) -> Profile:
+    """Bumper motion along x: rest for `pre` s, smooth (raised-cosine) speed-up to `speed` over `ramp` s, cruise, smooth stop, so the
+    bar moves `travel` m forward; `pause` s still; then back by `retreat` m the same way at :data:`RETREAT_SPEED`; then `post` s at rest.
+    One column (x)."""
     speed, travel = float(speed), float(travel)
     if speed <= 0 or travel <= speed * ramp:
         raise ValueError("push profile needs speed > 0 and travel longer than the two half-ramps")
-    th = (travel - speed * ramp) / speed
-    n_pre, n_r, n_h, n_post = (int(round(t / dt)) for t in (pre, ramp, th, post))
-    s = (np.arange(n_r) + 0.5) / max(n_r, 1)
-    up = 0.5 * (1 - np.cos(np.pi * s))
-    vel_target = speed * np.concatenate([np.zeros(n_pre), up, np.ones(n_h), up[::-1], np.zeros(n_post)])
+
+    def leg(v: float, distance: float) -> np.ndarray:
+        hold = (distance - v * ramp) / v
+        n_r, n_h = int(round(ramp / dt)), int(round(hold / dt))
+        s = (np.arange(n_r) + 0.5) / max(n_r, 1)
+        up = 0.5 * (1 - np.cos(np.pi * s))
+        return v * np.concatenate([up, np.ones(n_h), up[::-1]])
+
+    n_pre, n_pause, n_post = (int(round(t / dt)) for t in (pre, pause, post))
+    forward = leg(speed, travel)
+    back = -leg(RETREAT_SPEED, retreat) if retreat > 0 else np.zeros(0)
+    vel_target = np.concatenate([np.zeros(n_pre), forward, np.zeros(n_pause), back, np.zeros(n_post)])
     acc = np.diff(np.concatenate([[0.0], vel_target])) / dt
     pos, vel = _integrate(acc[:, None], np.zeros(1), dt)
-    return Profile(q=pos[:-1], v=vel[:-1], a=acc[:, None], start=n_pre, end=n_pre + 2 * n_r + n_h)
+    return Profile(q=pos[:-1], v=vel[:-1], a=acc[:, None], start=n_pre, end=n_pre + forward.size)
 
 
 def _track(data: Any, profile: Profile, i: int, dofs: Sequence[int], masses: Sequence[float]) -> None:
@@ -432,7 +449,7 @@ def run_stack(scene: Scene, *, x_centre: float, drop: float, tilt0_deg: float, m
 
 
 def run_push(scene: Scene, profile: Profile, *, mu: float, com: Sequence[float]) -> dict[str, Any]:
-    """One push → ``{"outcome": slide|tip, "final_tilt", "max_tilt", "moved_m"}``."""
+    """One push (forward, pause, back away) → ``{"outcome": upright|tip, "final_tilt", "max_tilt", "moved_m", "unstable", "settle_steps"}``."""
     scene.set_hidden(mu, com)
     model, data = scene.model, scene.data
     mujoco.mj_forward(model, data)
@@ -454,5 +471,5 @@ def run_push(scene: Scene, profile: Profile, *, mu: float, com: Sequence[float])
     extra, top = _settle(scene, hold)
     top_z = max(top_z, top)
     tilt = scene.tilt_deg()
-    return {"outcome": "tip" if tilt > TIP_DEG else "slide", "final_tilt": tilt, "max_tilt": max(max_tilt, tilt),
+    return {"outcome": "tip" if tilt > TIP_DEG else "upright", "final_tilt": tilt, "max_tilt": max(max_tilt, tilt),
             "moved_m": float(data.xpos[scene.load][0]) - x0, "unstable": bool(top_z - z0 > max_rise(scene.dims)), "settle_steps": extra}

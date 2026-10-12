@@ -257,6 +257,11 @@ def cmd_score(args: argparse.Namespace) -> int:
 
     sets = {name: read_records(Path(args.data) / f"{name}.jsonl") for name in ("T8a", "T8b") if (Path(args.data) / f"{name}.jsonl").is_file()}
     models = _load_models(args, list(sets))
+    if "T8b" in sets:  # analysis reference: closed-form statics on the same hidden draws (privileged priors — not a competitor)
+        from robo_jev.outside.reference import static_prediction
+
+        models.append({"tag": "static-reference", "label": "static calculator (reference)", "role": "reference", "bench_tag": None,
+                       "predictions": {"T8b": [static_prediction(r) for r in sets["T8b"]]}})
     bench = json.loads(Path(args.bench_results).read_text(encoding="utf-8")) if Path(args.bench_results).is_file() else {"models": []}
     bench_skill = {m["tag"]: ((m.get("pooled") or {}).get("unseen") or {}).get("skill") for m in bench["models"]}
     base = next(m for m in models if m["tag"] == BASE_TAG)
@@ -314,7 +319,7 @@ def _render(results: dict[str, Any], fmt: Any, fmt_ci: Any, families: Sequence[s
         a, b = m.get("T8a") or {}, m.get("T8b") or {}
         a1, a2 = a.get("single_order") or {}, a.get("order_averaged") or {}
         b1, b2 = b.get("single_order") or {}, b.get("order_averaged") or {}
-        name = f"**{m['label']}**" if m["role"] != "api" else m["label"]
+        name = f"**{m['label']}**" if m["role"] in ("ours", "baseline") else (f"_{m['label']}_" if m["role"] == "reference" else m["label"])
         lines.append(f"| {name} | {fmt(a1.get('accuracy'))}{fmt_ci(a1.get('accuracy_ci'))} | {fmt(a2.get('accuracy'))} | {fmt(a.get('first_option_share'), 2)} | "
                      f"{fmt((b1.get('pooled') or {}).get('skill'))}{fmt_ci(b1.get('skill_ci'), signed=True)} | {fmt((b2.get('pooled') or {}).get('skill'))} | "
                      f"{fmt(b1.get('noul_brier'))} | {fmt(b1.get('score_brier'))} | {fmt(b1.get('outcome_accuracy'))} | "

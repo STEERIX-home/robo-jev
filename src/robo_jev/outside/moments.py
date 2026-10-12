@@ -15,8 +15,8 @@ Families (``meta.scene``):
 * ``stack`` — a box released on top of a fixed support with its far end sticking out past the support's edge.
   Questions: falls off? (noul), how likely it falls off if it stuck out further (score), would it fall off if it stuck out
   less (noul).
-* ``push`` — a box on the floor pushed by the robot's bumper bar at a chosen height. Questions: tips over instead of
-  sliding? (noul), would it tip at another height? (noul), how likely it tips at a third height (score).
+* ``push`` — a box on the floor pushed by the robot's bumper bar at a chosen height, after which the robot backs away.
+  Questions: does it end up knocked over? (noul), would it at another height? (noul), how likely at a third height (score).
 
 **Text.** Written for T8 in a first-person robot voice with its own wording; nothing is imported or copied from
 :mod:`robo_jev.simgen` (phrase banks, narrators, skins). Every number the physics needs is in the text; the hidden values
@@ -58,7 +58,7 @@ __all__ = [
 GENERATOR = "t8b-mujoco-v1"
 DEFAULT_K = 64
 FAMILIES = ("deck_brake", "deck_turn", "stack", "push")
-OUTCOMES = {"deck_brake": ("stay", "slide", "tip"), "deck_turn": ("stay", "slide", "tip"), "stack": ("stay", "fall"), "push": ("slide", "tip")}
+OUTCOMES = {"deck_brake": ("stay", "slide", "tip"), "deck_turn": ("stay", "slide", "tip"), "stack": ("stay", "fall"), "push": ("upright", "tip")}
 G = ph.GRAVITY
 
 # --------------------------------------------------------------------------
@@ -547,9 +547,9 @@ def _push_state(moment: Moment, rng: random.Random) -> str:
            f"{_m(width)} wide and {_m(height)} tall, about {v['mass']:.1f} kg.")
     spread = PUSH_SPREADS[v["spread"]]["text"]
     plan = rng.choice((f"I plan to push it {_m(v['travel'])} forward at {v['speed']:.2f} m/s, with the bar pressing on its near face "
-                       f"{_m(v['push_height'])} above the floor.",
+                       f"{_m(v['push_height'])} above the floor, and then back away 0.30 m.",
                        f"My plan: nudge it forward by {_m(v['travel'])} at {v['speed']:.2f} m/s, the bar touching its near face at a height of "
-                       f"{_m(v['push_height'])}."))
+                       f"{_m(v['push_height'])}, then reverse 0.30 m away from it."))
     return " ".join((intro, box, spread, plan))
 
 
@@ -557,12 +557,12 @@ def _push_questions(moment: Moment) -> dict[str, dict[str, Any]]:
     v = moment.visible
     box = v["box_name"]
     return {
-        "tips_over": {"type": "noul", "instructions": f"If I push as planned, does the {box} tip over instead of sliding along?"},
-        "tips_at_other_height": {"type": "noul", "instructions": f"Would the {box} tip over if the bar met it {_m(v['push_height_noul'])} above the "
-                                 "floor instead?"},
-        "tip_risk_other_height": {"type": "score", "instructions": f"If the bar met the {box} {_m(v['push_height_score'])} above the floor, how "
-                                  "likely is it to tip over?",
-                                  "criteria": ["0 = it certainly slides along upright", "1 = it certainly tips over"]},
+        "tips_over": {"type": "noul", "instructions": f"If I push as planned and then back away, does the {box} end up knocked over?"},
+        "tips_at_other_height": {"type": "noul", "instructions": f"Would the {box} end up knocked over if the bar met it {_m(v['push_height_noul'])} "
+                                 "above the floor instead (same push, then backing away)?"},
+        "tip_risk_other_height": {"type": "score", "instructions": f"If the bar met the {box} {_m(v['push_height_score'])} above the floor instead, how "
+                                  "likely is it to end up knocked over?",
+                                  "criteria": ["0 = it certainly ends up standing on its base", "1 = it certainly ends up knocked over"]},
     }
 
 

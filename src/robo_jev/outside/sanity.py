@@ -2,8 +2,9 @@
 
 * **Monotonicity** — for candidate moments of each family, the planned action is swept along its physical axis with the
   moment's own hidden draws held fixed (common random numbers): harder braking (deck_brake), a faster curve (deck_turn),
-  more overhang (stack), a higher push (push). The outcome frequency must never go down along the sweep (label level);
-  the report also counts single draws whose outcome flips back (draw level).
+  more overhang (stack) — the outcome frequency must never go down along the sweep (label level; the report also counts
+  single draws whose outcome flips back). A higher push (push) is swept and reported but not required to be monotone
+  (:data:`MONOTONE_EXPECTED`).
 * **Analytic thresholds** — bisection on the action for cases with a closed-form answer:
   tipping onset on a braking deck, a* = g·(L/2)/h_c (no slip, μ = 1.5); sliding onset, a* = μ·g (wide low box, μ = 0.3);
   tipping over under a long hold (just above the onset); the push height where a pushed box tips instead of sliding,
@@ -32,6 +33,10 @@ SWEEPS = {
     "push": (0.5, 0.75, 1.0, 1.25, 1.5),
 }
 G = ph.GRAVITY
+#: Families whose outcome must not get rarer along the sweep: harder braking, a faster curve, more overhang. The push sweep is
+#: reported only — with a fixed bar travel, a higher bar tilts the box less far (it needs ≈ L(1 − cos θ) + (h − L sin θ) tan θ of travel
+#: to reach the angle θ), so a high push can leave the box leaning, and it rocks back once the robot backs away.
+MONOTONE_EXPECTED = ("deck_brake", "deck_turn", "stack")
 
 
 def label_hash(label: dict[str, Any]) -> str:
@@ -216,7 +221,8 @@ def summarize(job_list: list[tuple[str, dict[str, Any]]], results: list[Any]) ->
         fam["draw_violations"] += entry["draw_violations"]
         fam["draw_steps"] += entry["draws"] * max(0, len(entry["x"]) - 1)
     verdict = {
-        "monotone_label_level": all(f["label_violations"] == 0 for f in by_family.values()),
+        # push is displacement-limited (a higher bar needs more travel to reach the critical angle), so it is reported, not required
+        "monotone_label_level": all(f["label_violations"] == 0 for name, f in by_family.items() if name in MONOTONE_EXPECTED),
         "analytic": all(e["within_tolerance"] for e in analytic),
         "deterministic": all(e["identical"] for e in determ),
     }

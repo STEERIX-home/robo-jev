@@ -15,6 +15,12 @@ sets:
     unit: all
     expect: {source_sha256: 33b0bae6c7b1ef9afb7fea8dec92df988a74a486b1679259f2e9b34697f1473e, records: 1838, questions: 1838,
              ids_sha256: b05b2b099d35998f62b163adc175d5479c54db47357afcefc6bc6ba8604c43c3}
+  T8b:
+    what: robot moments labelled by MuJoCo rollouts (deck braking/turning, release over an edge, push height) — outside our engine
+    source: artifacts/t8/T8b.jsonl
+    unit: all
+    expect: {source_sha256: 6ffec6ee2dadb283720c9e046136c119cd25f2af1deaa559c2d84889cbdca92b, records: 480, questions: 1680,
+             ids_sha256: 50af2fc68e89e21a87903a9e56f70512e073e5c446738efd006fc5531e6353e7}
 
 # Same request conversion as bench-v0: choice criteria as stored, noul instructions as is, score with its two anchors as written
 # (the API accepts at most 10 levels — see configs/bench/bench-v0.yaml).
