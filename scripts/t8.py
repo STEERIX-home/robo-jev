@@ -8,6 +8,9 @@
     python scripts/t8.py moments --workers 12
     # physics sanity report (monotonicity, analytic tipping, determinism) → artifacts/t8/T8b-sanity.json
     python scripts/t8.py sanity
+    # task B2: relabel the same 480 moments (same scenes, facts and hidden-draw points, K from each record) under prior settings →
+    # label-only rows artifacts/b2/T8b-labels-<prior>.jsonl + manifest (artifacts/t8/* is never written)
+    python scripts/t8.py relabel --priors original alt_a alt_b --workers 8
     # scoring tables (CPU): our models' diagnosis predictions + the OpenRouter predictions written by scripts/bench.py
     python scripts/t8.py score
 
@@ -31,7 +34,7 @@ from typing import Any, Sequence
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-SCRIPT_VERSION = "t8-1"
+SCRIPT_VERSION = "t8-2"
 DEFAULT_OUT = REPO / "artifacts" / "t8"
 
 
@@ -393,6 +396,77 @@ def _render(results: dict[str, Any], fmt: Any, fmt_ci: Any, families: Sequence[s
     return "\n".join(lines) + "\n"
 
 
+def _relabel_job(job: tuple[dict[str, Any], str, int]) -> dict[str, Any]:
+    """One stored T8b record under one prior setting → a label-only row (task B2). The scene is rebuilt from the record and checked
+    against T8b's own generator (same candidate), and the rebuilt request must equal the stored one (same text, same questions)."""
+    import time
+
+    import mujoco
+
+    from robo_jev.outside.moments import candidate, label_moment, moment_from_record, moment_record
+
+    record, prior, master = job
+    started = time.perf_counter()
+    moment = moment_from_record(record)
+    regenerated = candidate(moment.family, moment.index, master)
+    scene_matches = (regenerated.seed == moment.seed and regenerated.target == moment.target and regenerated.visible == moment.visible
+                     and {k: tuple(v) for k, v in regenerated.hidden.items()} == moment.hidden and regenerated.variants == moment.variants)
+    label = label_moment(moment, k=int(record["generator"]["k"]), prior=prior)
+    number = int(str(record["id"]).rsplit("-", 1)[1])
+    rebuilt = moment_record(moment, label, number=number, mujoco_version=mujoco.__version__)
+    return {"id": record["id"], "family": moment.family, "prior": prior, "k": label["k"], "draws_seed": label["draws_seed"],
+            "draws_seed_matches": label["draws_seed"] == int(record["generator"]["draws_seed"]), "scene_matches_generator": bool(scene_matches),
+            "request_matches": rebuilt["id"] == record["id"] and rebuilt["request"] == record["request"],
+            "hidden": label.get("hidden") or {name: list(spec) for name, spec in moment.hidden.items()},
+            "labels": rebuilt["labels"], "outcomes": {name: entry["freq"] for name, entry in label["variants"].items()},
+            "majority": label["majority"], "unstable": label["unstable"], "off_deck": label["off_deck"],
+            "seconds": round(time.perf_counter() - started, 3)}
+
+
+def cmd_relabel(args: argparse.Namespace) -> int:
+    """Task B2: relabel the stored T8b moments under prior settings (``robo_jev.outside.moments.PRIOR_SETTINGS``); one label-only file
+    per prior and a manifest. Nothing under artifacts/t8 is written."""
+    import collections
+
+    import mujoco
+
+    from robo_jev.decisions.records import file_sha256, read_records
+    from robo_jev.outside.moments import PRIOR_SETTINGS
+
+    out_dir = Path(args.out_dir)
+    if out_dir.resolve() == DEFAULT_OUT.resolve() or DEFAULT_OUT.resolve() in out_dir.resolve().parents:
+        raise SystemExit(f"{out_dir}: relabelled moments never go under {DEFAULT_OUT} (artifacts/t8 stays as it is)")
+    unknown = [p for p in args.priors if p not in PRIOR_SETTINGS]
+    if unknown:
+        raise SystemExit(f"unknown prior settings {unknown} (known: {sorted(PRIOR_SETTINGS)})")
+    records = read_records(args.input)
+    jobs = [(record, prior, args.master) for prior in args.priors for record in records]
+    _log(f"relabelling {len(records)} moments under {args.priors} ({len(jobs)} jobs) on {args.workers} workers")
+    started = dt.datetime.now()
+    rows = _pool_map(_relabel_job, jobs, args.workers)
+    seconds = (dt.datetime.now() - started).total_seconds()
+    out_dir.mkdir(parents=True, exist_ok=True)
+    files = {}
+    for prior in args.priors:
+        mine = [row for row in rows if row["prior"] == prior]
+        path = out_dir / f"T8b-labels-{prior}.jsonl"
+        _write_jsonl(path, mine)
+        files[prior] = {"file": str(path), "sha256": file_sha256(path), "rows": len(mine),
+                        "scene_matches_generator": sum(r["scene_matches_generator"] for r in mine), "request_matches": sum(r["request_matches"] for r in mine),
+                        "draws_seed_matches": sum(r["draws_seed_matches"] for r in mine),
+                        "moments_with_unstable_rollouts": sum(1 for r in mine if r["unstable"]), "moments_off_deck": sum(1 for r in mine if r["off_deck"]),
+                        "unstable_by_family": dict(collections.Counter(r["family"] for r in mine if r["unstable"])),
+                        "worker_seconds": round(sum(r["seconds"] for r in mine), 1)}
+    manifest = {"kind": "t8b-relabel", "what": "the stored T8b moments relabelled by T8b's own labeller under prior settings (task B2): same scenes, "
+                "stated facts and hidden-draw points; label-only rows", "input": str(args.input), "input_sha256": file_sha256(args.input),
+                "master_seed": args.master, "priors": {p: PRIOR_SETTINGS[p] for p in args.priors}, "files": files, "mujoco": mujoco.__version__,
+                "workers": args.workers, "wall_seconds": round(seconds, 1), "script_version": SCRIPT_VERSION, "git": _git_sha(),
+                "created": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
+    _write_json(out_dir / "T8b-labels.manifest.json", manifest)
+    _log(f"relabelled in {seconds:.0f} s → {out_dir}: " + json.dumps({p: {k: v for k, v in f.items() if k not in ('file', 'sha256')} for p, f in files.items()}))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -415,6 +489,13 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--workers", type=int, default=8)
     check.add_argument("--out", type=Path, default=DEFAULT_OUT)
     check.set_defaults(func=cmd_sanity)
+    relabel = sub.add_parser("relabel", help="task B2: relabel the stored T8b moments under prior settings (CPU — capped unit)")
+    relabel.add_argument("--input", type=Path, default=DEFAULT_OUT / "T8b.jsonl")
+    relabel.add_argument("--priors", nargs="+", default=["original", "alt_a", "alt_b"])
+    relabel.add_argument("--master", type=int, default=20261012, help="T8b's master seed (the scenes are checked against its generator)")
+    relabel.add_argument("--workers", type=int, default=8)
+    relabel.add_argument("--out-dir", type=Path, default=REPO / "artifacts" / "b2")
+    relabel.set_defaults(func=cmd_relabel)
     score = sub.add_parser("score", help="scoring tables for our models and the OpenRouter models (CPU)")
     score.add_argument("--data", type=Path, default=DEFAULT_OUT, help="directory with T8a.jsonl and T8b.jsonl")
     score.add_argument("--reports", type=Path, default=REPO / "artifacts" / "reports" / "t8", help="our models' <set>-<tag>.predictions.jsonl")

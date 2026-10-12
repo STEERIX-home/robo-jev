@@ -45,13 +45,17 @@ __all__ = [
     "DEFAULT_K",
     "FAMILIES",
     "GENERATOR",
+    "HIDDEN_RULE",
     "OUTCOMES",
+    "PRIOR_SETTINGS",
     "Moment",
     "candidate",
     "hidden_draws",
     "label_moment",
+    "moment_from_record",
     "moment_record",
     "moment_seed",
+    "prior_ranges",
     "select_balanced",
 ]
 
@@ -187,6 +191,63 @@ def hidden_draws(ranges: dict[str, tuple[float, float] | tuple[str, float, float
                 draw[name] = lo + (hi - lo) * float(u)
         out.append(draw)
     return out
+
+
+#: Alternative priors (task B2, v0.3b's rule applied to T8b's hidden parameters). ``original`` = T8b's own word→range priors, used
+#: unchanged; ``alt_a`` / ``alt_b`` scale the friction ranges, widen or narrow the centre-of-mass ranges around the same centre, and
+#: scale the σ of the placement error and of the release tilt. Every variant of a moment is rolled on the same hidden-draw points
+#: (the unit Latin hypercube of :func:`hidden_draws` depends only on the moment's draw seed and the parameter names).
+PRIOR_SETTINGS = {
+    "original": {"friction": 1.0, "spread": 1.0, "sigma": 1.0, "what": "T8b's own priors (the ranges behind the words), unchanged"},
+    "alt_a": {"friction": 0.7, "spread": 1.5, "sigma": 1.5,
+              "what": "friction ranges x 0.7; centre-of-mass ranges 1.5 x wider around the same centre; placement-error and release-tilt sigma x 1.5"},
+    "alt_b": {"friction": 1.3, "spread": 0.5, "sigma": 0.75,
+              "what": "friction ranges x 1.3; centre-of-mass ranges half as wide around the same centre; placement-error and release-tilt sigma x 0.75"},
+}
+#: Which rule each hidden parameter follows: friction (``mu``), centre of mass (``kh`` height ratio, ``cx`` offset fraction), σ of a
+#: normal (``eps`` placement error, ``tilt0`` release tilt). A parameter without a rule is refused.
+HIDDEN_RULE = {"mu": "friction", "kh": "spread", "cx": "spread", "eps": "sigma", "tilt0": "sigma"}
+#: A centre-of-mass range must stay inside the box (fractions of its height / of its length).
+COM_BOUNDS = {"kh": (0.0, 1.0), "cx": (-0.5, 0.5)}
+
+
+def prior_ranges(hidden: dict[str, Any], setting: str = "original") -> dict[str, Any]:
+    """A moment's hidden priors under one prior setting (:data:`PRIOR_SETTINGS`). ``original`` returns them unchanged (the same objects,
+    so labelling is bit-identical to T8b's); the alternatives follow :data:`HIDDEN_RULE` and refuse a centre-of-mass range that would
+    leave the box."""
+    if setting == "original":
+        return dict(hidden)
+    factors = PRIOR_SETTINGS[setting]
+    out: dict[str, Any] = {}
+    for name, spec in hidden.items():
+        rule = HIDDEN_RULE.get(name)
+        if rule is None:
+            raise ValueError(f"hidden parameter {name!r} has no prior rule")
+        if rule == "sigma":
+            if spec[0] != "normal":
+                raise ValueError(f"{name}: a σ rule needs a normal prior (got {spec!r})")
+            out[name] = ("normal", float(spec[1]), float(spec[2]) * factors["sigma"])
+            continue
+        lo, hi = float(spec[0]), float(spec[1])
+        if rule == "friction":
+            out[name] = (lo * factors["friction"], hi * factors["friction"])
+            continue
+        centre, half = (lo + hi) / 2, (hi - lo) / 2 * factors["spread"]
+        low, high = centre - half, centre + half
+        bounds = COM_BOUNDS[name]
+        if low < bounds[0] or high > bounds[1]:
+            raise ValueError(f"{name}: {setting} range ({low:.3f}, {high:.3f}) leaves the box {bounds}")
+        out[name] = (low, high)
+    return out
+
+
+def moment_from_record(record: dict[str, Any]) -> Moment:
+    """The candidate behind a stored T8b record (family, candidate index, seed, target, stated facts, priors, variants) — relabelling
+    rolls the same scenes on the same hidden-draw points."""
+    meta, gen = record["meta"], record["generator"]
+    hidden = {name: tuple(spec) for name, spec in meta["hidden_prior"].items()}
+    return Moment(family=meta["scene"], index=int(gen["candidate"]), seed=int(gen["seed"]), target=meta["target"], visible=meta["visible"],
+                  hidden=hidden, variants=meta["variants"])
 
 
 def _uniform(rng: random.Random, span: Sequence[float], digits: int = 2) -> float:
@@ -409,11 +470,14 @@ def _roll_variant(moment: Moment, name: str, draws: list[dict[str, float]], scen
     return out
 
 
-def label_moment(moment: Moment, k: int = DEFAULT_K) -> dict[str, Any]:
+def label_moment(moment: Moment, k: int = DEFAULT_K, *, prior: str = "original") -> dict[str, Any]:
     """Roll every variant out for the same K hidden draws → ``{"k", "draws_seed", "variants": {name: {"freq": {outcome: share},
-    "n": {...}, "max_tilt_mean", "slide_mean"?}}, "majority"}``."""
+    "n": {...}, "max_tilt_mean", "slide_mean"?}}, "majority"}``. `prior` (task B2): the hidden priors' setting
+    (:data:`PRIOR_SETTINGS`, :func:`prior_ranges`) — the draw points stay the same; ``original`` (default) is T8b's labelling unchanged,
+    and any other setting adds ``"prior"`` and the ``"hidden"`` ranges it used to the result."""
     draws_seed = moment.seed ^ 0x5EED
-    draws = hidden_draws(moment.hidden, k, draws_seed)
+    ranges = prior_ranges(moment.hidden, prior)
+    draws = hidden_draws(ranges, k, draws_seed)
     scenes: dict[Any, ph.Scene] = {}
     outcomes = OUTCOMES[moment.family]
     variants = {}
@@ -431,8 +495,11 @@ def label_moment(moment: Moment, k: int = DEFAULT_K) -> dict[str, Any]:
     majority = max(outcomes, key=lambda o: (planned[o], -outcomes.index(o)))
     unstable = sum(entry["unstable"] for entry in variants.values())
     off_deck = sum(entry.get("off_deck", 0) for entry in variants.values())
-    return {"k": int(k), "draws_seed": int(draws_seed), "variants": variants, "majority": majority, "unstable": int(unstable),
-            "off_deck": int(off_deck)}
+    out = {"k": int(k), "draws_seed": int(draws_seed), "variants": variants, "majority": majority, "unstable": int(unstable),
+           "off_deck": int(off_deck)}
+    if prior != "original":
+        out.update({"prior": prior, "hidden": {name: list(spec) for name, spec in ranges.items()}})
+    return out
 
 
 # --------------------------------------------------------------------------
