@@ -14,7 +14,7 @@ This page keeps the numbers and caveats behind the [README](../README.md). All c
 | G1 | general reading: non-robot rules, workflows, page layouts, spatial facts (mostly Korean) |
 | G2 | general reading: public BoolQ + MultiNLI (1,000 questions) |
 
-The physics sets come from our own simulation engine: the training generator cannot produce their held-out cells, but they share its phenomena and text skins. Tests outside this engine are still ahead.
+The physics sets come from our own simulation engine: the training generator cannot produce their held-out cells, but they share its phenomena and text skins. For tests outside this engine, see [Outside test (T8)](#outside-test-t8).
 
 ## First trained version (v0)
 
@@ -179,3 +179,46 @@ Single-order reading (deployment condition) unless noted: our models' numbers ar
 | ours v0.1-mix (2B) | -0.260 [-0.276, -0.243] (~typesafe/jev-latest) | -0.431 [-0.518, -0.349] (~typesafe/jev-latest) |
 
 OpenRouter spend (T8 ledger): $0.2854 over 14704 calls (uncertain $0.0001).
+
+### System-1 scores on T8b, all versions (single order)
+
+robo-jev is a System 1: it should know which way risk moves, which action is riskier and roughly how high the risk is, while exact numbers belong to the controller below it. These metrics read the same predictions as the tables above.
+- **Direction:** the answer moves the right way between two moments that differ in one fact.
+- **Comparison:** the riskier of two actions within a moment.
+- **Risk level:** accuracy over the bands low (< 1/3), middle and high (> 2/3), averaged per band; chance is 0.33.
+- **Mixed up:** answers in the opposite band (high ↔ low).
+
+| model | direction ↑ | comparison ↑ | risk level, balanced ↑ | mixed up ↓ | high called low ↓ | T8a PIQA ↑ |
+|---|---|---|---|---|---|---|
+| Qwen3.5-2B (untrained) | 0.404 [0.374, 0.437] | 0.477 [0.453, 0.502] | 0.368 [0.355, 0.380] | 0.155 | 0.126 | 0.662 |
+| ours v0 (2B) | 0.515 | 0.503 | 0.322 | 0.326 | 0.273 | 0.700 |
+| ours v0.1-mix (2B) | 0.565 | 0.648 | 0.346 | 0.278 | 0.237 | 0.686 |
+| **ours v0.3 (2B, research checkpoint)** | **0.827 [0.787, 0.865]** | **0.860** | 0.370 | 0.259 | 0.193 | 0.723 |
+| ~typesafe/jev-latest | 0.869 | 0.885 | 0.429 | 0.128 | 0.117 | 0.946 |
+| microsoft/microsoft-decision-1 | 0.801 | 0.795 | 0.382 | 0.263 | 0.107 | 0.915 |
+| togethercomputer/tev1-4b-experimental | 0.548 | 0.651 | 0.366 | 0.176 | 0.118 | 0.848 |
+| openai/gpt-6-luna-decisions | 0.713 | 0.810 | 0.453 | 0.207 | 0.125 | 0.920 |
+| liquid/d1 | 0.821 | 0.847 | 0.432 | 0.158 | 0.099 | 0.936 |
+| upstage/solar-decide | 0.693 | 0.734 | 0.434 | 0.162 | 0.041 | 0.899 |
+| _static calculator (reference)_ | 0.896 | 0.930 | 0.713 | 0.020 | 0.005 | — |
+
+**v0.3 vs the untrained base** (paired, 2000 record-bootstrap draws):
+- Direction +0.423 [+0.369, +0.473] and comparison +0.382 [+0.340, +0.426].
+- Risk level +0.002 [−0.033, +0.039], so no change.
+- Mixed up +0.104 [+0.078, +0.129]; high called low +0.068 [+0.047, +0.089].
+
+**By law** (v0.3 vs base). v0.3's MuJoCo training families share laws with the deck and stack families: tip or slide under acceleration, and centre of mass past an edge. Pushing is the only law it never trained on.
+
+| group | records | direction | comparison | risk level, balanced | mixed up ↓ |
+|---|---|---|---|---|---|
+| shared law (deck_brake, deck_turn, stack) | 360 | 0.933 vs 0.387 | 0.961 vs 0.499 | 0.389 vs 0.380 | 0.206 vs 0.125 |
+| unseen law (push) | 120 | 0.591 vs 0.442 | 0.631 vs 0.428 | 0.333 vs 0.320 | 0.415 vs 0.243 |
+
+**v0.3 against its pre-declared gate:** does not pass.
+- **Outside (T8b): fails.** Risk level does not exceed the base, and the mixed-up rate rises; direction passes (≥ 0.70).
+- **Home (T2–T4 risk level and mixed-up rate vs v0.1-mix): passes.**
+- **General reading (G2): fails.** 0.668 vs 0.738 untrained.
+  - All of the G2 loss is in MultiNLI (−0.199; the model rarely answers "neutral"); BoolQ rose +0.058.
+- **Not gating:** action choice on the home sets fell 6–14 points against v0.1-mix.
+
+T8 has now served as a gate, so the next version will be judged on a new, independently built outside test (T9).
