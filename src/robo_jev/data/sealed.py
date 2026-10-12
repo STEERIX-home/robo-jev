@@ -15,10 +15,41 @@ import json
 from pathlib import Path
 from typing import Any
 
-__all__ = ["SEALED_SPLITS", "episode_entries", "read_episode_ids", "read_open_episodes"]
+__all__ = ["NEVER_SENT_SETS", "SEALED_RECORD_FILES", "SEALED_RECORD_PREFIXES", "SEALED_RECORD_SETS", "SEALED_SPLITS", "episode_entries",
+           "read_episode_ids", "read_open_episodes", "refuse_sealed_records", "sealed_record_set"]
 
 #: 봉인 분할 — 이 적재기는 이 분할의 파일을 열지 않는다.
 SEALED_SPLITS = ("ood_test",)
+
+#: Sealed outside tests in the Decisions-record format that must never be part of a training input (Task T9: T9 is the gate of the
+#: next trained version). A record belongs to one if its ``meta.set`` names it or its id carries the set's prefix.
+SEALED_RECORD_SETS = ("T9",)
+SEALED_RECORD_PREFIXES = {"T9": "t9-"}
+#: Their files (relative to the repository root) — the training-input assembly checks every input against them when present.
+SEALED_RECORD_FILES = {"T9": "artifacts/t9/T9.jsonl"}
+#: Sets that are never sent to any API (OpenRouter, the narration rewriter, …).
+NEVER_SENT_SETS = ("T9",)
+
+
+def sealed_record_set(record: dict[str, Any]) -> str | None:
+    """The sealed outside test a Decisions record belongs to (:data:`SEALED_RECORD_SETS`), else None."""
+    meta = record.get("meta") if isinstance(record, dict) else None
+    name = (meta or {}).get("set") if isinstance(meta, dict) else None
+    if name in SEALED_RECORD_SETS:
+        return str(name)
+    rid = str((record or {}).get("id") or "")
+    for set_name, prefix in SEALED_RECORD_PREFIXES.items():
+        if rid.startswith(prefix):
+            return set_name
+    return None
+
+
+def refuse_sealed_records(records: Any, *, where: str) -> None:
+    """Raise ``ValueError`` if any record belongs to a sealed outside test (T9 is never trained on and never sent anywhere)."""
+    found = [(str(r.get("id")), sealed_record_set(r)) for r in records if sealed_record_set(r)]
+    if found:
+        sets = sorted({s for _, s in found})
+        raise ValueError(f"{where}: {len(found)} record(s) of the sealed outside test {sets} (first {[i for i, _ in found[:3]]}) — sealed, never used here")
 
 
 def episode_entries(directory: str | Path) -> dict[str, dict[str, Any]]:

@@ -597,6 +597,9 @@ class DecisionTrainer:
             records, validation = load_training_records(cfg["train_input"])
         records = list(records)
         _need(bool(records), "학습 기록이 하나도 없다")
+        from robo_jev.data.sealed import refuse_sealed_records
+
+        refuse_sealed_records(records, where="training input")  # Task T9: the sealed outside test never enters training
         if tokenizer is None:
             from robo_jev.model.tokenizer import available_tokenizer, load_tokenizer
 

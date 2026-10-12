@@ -444,6 +444,40 @@ def _token_estimate(parts: dict[str, list[dict[str, Any]]], examples: dict[str, 
     return out
 
 
+def _state_key(record: dict[str, Any]) -> str:
+    import hashlib
+
+    return hashlib.sha256(" ".join(str((record.get("request") or {}).get("state") or "").split()).encode("utf-8")).hexdigest()
+
+
+def outside_sealed_check(parts: dict[str, list[dict[str, Any]]], extra_sealed: list[Path]) -> dict[str, Any]:
+    """Task T9: no input record may belong to a sealed outside test (``meta.set`` or id prefix, :mod:`robo_jev.data.sealed`), nor share
+    an id or a whole state with its file — the registered files (:data:`robo_jev.data.sealed.SEALED_RECORD_FILES`, T9) whenever they
+    exist, plus any further ``--sealed`` file. Refuses (SystemExit) on any hit; returns the record for the manifest."""
+    from robo_jev.data.sealed import SEALED_RECORD_FILES, sealed_record_set
+    from robo_jev.decisions.records import file_sha256, read_records
+
+    for name, records in parts.items():
+        marked = [str(r.get("id")) for r in records if sealed_record_set(r)]
+        if marked:
+            raise SystemExit(f"{name}: {len(marked)} record(s) of a sealed outside test (first {marked[:3]}) — never part of a training input")
+    files = {set_name: REPO / rel for set_name, rel in SEALED_RECORD_FILES.items()}
+    files.update({Path(p).stem: Path(p) for p in extra_sealed})
+    out: dict[str, Any] = {"files": {}, "absent": sorted(n for n, p in files.items() if not p.is_file())}
+    ids = {name: {str(r.get("id")) for r in records} for name, records in parts.items()}
+    states = {name: {_state_key(r) for r in records} for name, records in parts.items()}
+    for set_name, path in sorted(files.items()):
+        if not path.is_file():
+            continue
+        sealed = read_records(path)
+        sealed_ids, sealed_states = {str(r.get("id")) for r in sealed}, {_state_key(r) for r in sealed}
+        shared = {name: {"ids": len(ids[name] & sealed_ids), "states": len(states[name] & sealed_states)} for name in parts}
+        if any(v["ids"] or v["states"] for v in shared.values()):
+            raise SystemExit(f"the training input shares ids or whole states with the sealed {set_name} ({path}): {shared}")
+        out["files"][set_name] = {"path": str(path), "sha256": file_sha256(path), "records": len(sealed), "shared": shared}
+    return out
+
+
 def cmd_mix(args: argparse.Namespace) -> int:
     from robo_jev.decisions.examples import split_dev
     from robo_jev.decisions.records import file_sha256
@@ -462,17 +496,19 @@ def cmd_mix(args: argparse.Namespace) -> int:
         raise SystemExit(f"{len(clash)} record ids appear in both files (first {sorted(clash)[:3]})")
     extras = _load_extras(args.extra or [], taken={str(r["id"]) for r in base} | {str(r["id"]) for r in probe})
     sealed = None
-    if args.sealed is not None:
-        g1, _ = load_training_records(args.sealed)
+    sealed_paths = list(args.sealed) if isinstance(args.sealed, (list, tuple)) else ([args.sealed] if args.sealed is not None else [])
+    if sealed_paths:
+        g1_path = sealed_paths[0]
+        g1, _ = load_training_records(g1_path)
         crossing = overlap(g1, probe)
         if crossing["origin_groups"] or crossing["source_records"]:
-            raise SystemExit(f"{args.probe} shares origin groups / records with the sealed {args.sealed}: {crossing}")
+            raise SystemExit(f"{args.probe} shares origin groups / records with the sealed {g1_path}: {crossing}")
         if {str(r["id"]) for r in g1} & {str(r["id"]) for r in base}:
             raise SystemExit(f"{args.base} contains sealed G1 record ids")
         for extra in extras:
             if {str(r["id"]) for r in g1} & {str(r["id"]) for r in extra["records"]}:
                 raise SystemExit(f"{extra['path']} contains sealed G1 record ids")
-        sealed = {"path": str(args.sealed), "sha256": file_sha256(args.sealed), "overlap": {"origin_groups": 0, "source_records": 0, "base_ids": 0}}
+        sealed = {"path": str(g1_path), "sha256": file_sha256(g1_path), "overlap": {"origin_groups": 0, "source_records": 0, "base_ids": 0}}
     config = resolve_config(_read_yaml(args.train_config)) if args.train_config else resolve_config({})
     q = int(config["questions_per_request"])
     train_base, dev_base = split_dev(base, fraction=config["dev_fraction"], salt=config["dev_salt"])
@@ -534,6 +570,9 @@ def cmd_mix(args: argparse.Namespace) -> int:
             "records_by_source": dict(sorted(Counter(r["meta"]["source"]["set"] for r in used).items())),
             "train_examples_by_source": dict(sorted(Counter(r["meta"]["source"]["set"] for r in train_general).items())),
         }  # fmt: skip
+    parts = {"base": base, "probe": probe, **{f"extra:{e['name']}": e["records"] + e["copies"] for e in extras},
+             **({"general": used} if args.general is not None else {})}
+    sealed_outside = outside_sealed_check(parts, sealed_paths[1:])
     dev_used = {}
     room = (cap - len(dev_base)) if cap else None
     for name, dev in ([(extra["name"], extra["dev"] + extra["copy_dev"]) for extra in extras] + [("probe", dev_probe), ("general", dev_general)]):
@@ -572,6 +611,7 @@ def cmd_mix(args: argparse.Namespace) -> int:
         "base": {"path": str(args.base), "sha256": file_sha256(args.base), "records": len(base), "validation": base_check},
         "probe": {"path": str(args.probe), "sha256": file_sha256(args.probe), "records": len(probe), "validation": probe_check},
         "sealed_check": sealed,
+        "sealed_outside": sealed_outside,
         "train_config": {"path": str(args.train_config) if args.train_config else None, "questions_per_request": q, "dev_fraction": config["dev_fraction"],
                          "dev_salt": config["dev_salt"], "dev_max_records": cap, "batch_examples": batch},
         "split": {"base_train": len(train_base), "base_dev": len(dev_base), "probe_train": len(train_probe), "probe_dev": len(dev_probe),
@@ -648,7 +688,10 @@ def build_parser() -> argparse.ArgumentParser:
     mix = sub.add_parser("mix", help="학습 파일 + G1-train-mix를 이어 붙인 학습 입력과 manifest (CPU)")
     mix.add_argument("--base", type=Path, required=True, help="학습 파일 (예: artifacts/simgen/v01/train-50k.jsonl)")
     mix.add_argument("--probe", type=Path, required=True, help="G1-train-mix.jsonl")
-    mix.add_argument("--sealed", type=Path, required=True, help="봉인 G1.jsonl — 섞기용과 origin group·원본 레코드가 겹치지 않는지 본다 (반드시 준다: 빠뜨리면 계보 검사가 조용히 빠졌다 — 리뷰 1 M4)")
+    mix.add_argument("--sealed", type=Path, nargs="+", required=True,
+                     help="봉인 G1.jsonl — 섞기용과 origin group·원본 레코드가 겹치지 않는지 본다 (반드시 준다: 빠뜨리면 계보 검사가 조용히 빠졌다 — 리뷰 1 M4). "
+                          "Further files (Task T9) are sealed outside tests: no input may share an id or a whole state with them; the registered "
+                          "T9 file (artifacts/t9/T9.jsonl) is always checked when it exists")
     mix.add_argument("--train-config", type=Path, default=None, help="학습 설정 YAML — 주면 그 dev 나눔·q로 epoch당 예 수와 섞인 몫을 정확히 센다")
     mix.add_argument("--general", type=Path, default=None,
                      help="general-reading training file (scripts/convert_general_sets.py, Task v0.2) — a prefix of it goes after the probe file")

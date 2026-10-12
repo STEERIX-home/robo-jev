@@ -101,6 +101,8 @@ def assert_sendable(record: dict[str, Any], texts: Iterable[str], index: SealedI
     rid = str(record.get("id"))
     if rid.startswith(("t8", "e1c", "e1d")) or (record.get("meta") or {}).get("set") in ("T8a", "T8b"):
         raise SealedTextError(f"{rid}: T8-derived record — never sent")
+    if rid.startswith("t9") or (record.get("meta") or {}).get("set") == "T9":
+        raise SealedTextError(f"{rid}: T9 record — sealed, never sent to any API")
     state = record["request"]["state"]
     if _sha(state) in index.states:
         raise SealedTextError(f"{rid}: the state is a sealed state")

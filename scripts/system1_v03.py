@@ -4,7 +4,7 @@
     # derived questions (CPU, a few minutes): v02 train-50k → engine-s1 + manifest (statistics, per-epoch exposure, checks)
     python scripts/system1_v03.py transform --input artifacts/simgen/v02/train-50k.jsonl --out artifacts/simgen/v03/engine-s1.jsonl \
         --train-config configs/train/decisions-v0-lora-h100.yaml
-    # every record of a training input against every sealed set (T1–T7, G1, G2, T8a, T8b): ids, whole requests, whole states, and the
+    # every record of a training input against every sealed set (T1–T7, G1, G2, T8a, T8b, T9): ids, whole requests, whole states, and the
     # text units of the sets written outside our engine; plus the d1 lineage check against G1 and the engine seed ranges
     python scripts/system1_v03.py overlap --input artifacts/simgen/v03/train-v03.jsonl --out artifacts/simgen/v03/train-v03.overlap.json
 
@@ -37,11 +37,12 @@ CODE_PATHS = ("src/robo_jev/simgen/system1_questions.py", "scripts/system1_v03.p
 TESTS = REPO / "artifacts" / "simgen" / "v0b" / "tests"
 PROBES = REPO / "artifacts" / "simgen" / "probes"
 T8 = REPO / "artifacts" / "t8"
-#: Every sealed set (the v0.3 rule's readings and the secondary sets): name → path.
+T9 = REPO / "artifacts" / "t9"
+#: Every sealed set (the v0.3 rule's readings, the secondary sets and T9, the next gate): name → path.
 SEALED = {**{f"T{i}": TESTS / f"T{i}.jsonl" for i in range(1, 8)}, "G1": PROBES / "G1.jsonl", "G2": PROBES / "G2.jsonl",
-          "T8a": T8 / "T8a.jsonl", "T8b": T8 / "T8b.jsonl"}  # fmt: skip
+          "T8a": T8 / "T8a.jsonl", "T8b": T8 / "T8b.jsonl", "T9": T9 / "T9.jsonl"}  # fmt: skip
 #: Directories and files a training input must never come from.
-SEALED_LOCATIONS = (TESTS, T8, PROBES / "G1.jsonl", PROBES / "G2.jsonl")
+SEALED_LOCATIONS = (TESTS, T8, T9, PROBES / "G1.jsonl", PROBES / "G2.jsonl")
 
 
 def _log(message: str) -> None:
@@ -260,11 +261,18 @@ def cmd_overlap(args: argparse.Namespace) -> int:
     d1_records: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
     duplicates = 0
+    from robo_jev.data.sealed import sealed_record_set
+
     for record in _lines(args.input):
         part = part_of(record)
         tally = per_part[part]
         tally["records"] += 1
         rid = str(record["id"])
+        marked = sealed_record_set(record)
+        if marked:
+            tally[f"{marked}:marked"] += 1  # a record that names a sealed outside test (meta.set or id prefix)
+            if len(report["hits"][part]) < 20:
+                report["hits"][part].append(f"{rid} ↔ {marked}: marked as a sealed outside record")
         duplicates += rid in seen_ids
         seen_ids.add(rid)
         rh, sh = request_hash(record), state_sha256(record["request"]["state"])
@@ -311,7 +319,7 @@ def cmd_overlap(args: argparse.Namespace) -> int:
         "checks": {"ids": "record id equal to a sealed record id", "request": "whole-request sha256 (holdout.request_hash)",
                    "state": "whole-state sha256 (normalised, narration.state_sha256)",
                    "units": "text units (normalised state, state lines / list items and option texts with >= 5 words) shared with a set "
-                            "written outside our engine (G1, G2, T8a, T8b; T1–T7 share the engine's templates, so they are matched on whole "
+                            "written outside our engine (G1, G2, T8a, T8b, T9; T1–T7 share the engine's templates, so they are matched on whole "
                             "texts only — the narration task's rule)",
                    "seed_range": f"engine records' generator seeds inside the training range [{train_low}, {train_high}] (holdout-v0b)",
                    "d1_lineage": "d1 mix vs G1: shared origin groups / source records (single_probe.overlap — the mix command's check). "

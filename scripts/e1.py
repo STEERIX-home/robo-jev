@@ -111,8 +111,9 @@ CHAT_URL = "https://openrouter.ai/api/v1/chat/completions"
 ALL_MODELS_URL = "https://openrouter.ai/api/v1/models"
 SEALED_FILES = {**{f"T{i}": REPO / "artifacts" / "simgen" / "v0b" / "tests" / f"T{i}.jsonl" for i in range(1, 8)},
                 "G1": REPO / "artifacts" / "simgen" / "probes" / "G1.jsonl", "G2": REPO / "artifacts" / "simgen" / "probes" / "G2.jsonl",
-                "T8a": REPO / "artifacts" / "t8" / "T8a.jsonl", "T8b": REPO / "artifacts" / "t8" / "T8b.jsonl"}
-OUTSIDE_SETS = ("G1", "G2", "T8a", "T8b")
+                "T8a": REPO / "artifacts" / "t8" / "T8a.jsonl", "T8b": REPO / "artifacts" / "t8" / "T8b.jsonl",
+                "T9": REPO / "artifacts" / "t9" / "T9.jsonl"}
+OUTSIDE_SETS = ("G1", "G2", "T8a", "T8b", "T9")
 
 
 def cmd_rewrite_b(args) -> int:
