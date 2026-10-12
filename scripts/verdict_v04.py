@@ -74,6 +74,8 @@ SEEDS = (0, 1)
 SEEN_LAW_GROUPS = ("seen_law_new_scene", "seen_law_new_mechanism")
 R_SETS = ("T1", "T3", "T4", "T5", "T7")
 HOME = ("T2", "T3", "T4")
+#: The rule's seen-law slice of the sealed T9: 300 records of these families.
+SEEN_LAW_RECORDS, SEEN_LAW_FAMILIES = 300, ("conveyor", "overhang", "suction")
 #: Sets the v0.4 jobs score on the pod (their own checkpoint), and the Spark-only sets (scored for every model by score_spark.sh).
 POD_SETS = ("T1", "T2", "T3", "T4", "T5", "T6", "T7", "G1", "G2", "T8a")
 SPARK_SETS = ("T9", "T8b", "B1", "Hset")
@@ -475,7 +477,8 @@ def prediction_paths(args: argparse.Namespace) -> dict[tuple[str, str], Path]:
         paths[("mix", name)] = args.mix_dir / f"after-v01mix-2b-{name}.predictions.jsonl"
     for name in SPARK_SETS:
         for model in ("v04s0", "v04s1", "v03", "base"):
-            paths[(model, name)] = EXISTING_SPARK.get((model, name)) or args.spark_dir / spark_prediction_name(name, model)
+            fresh = args.spark_dir / spark_prediction_name(name, model)  # score_spark.sh's file wins over an earlier task's
+            paths[(model, name)] = fresh if fresh.is_file() or (model, name) not in EXISTING_SPARK else EXISTING_SPARK[(model, name)]
     paths[("base", "G2")] = args.base_g2
     paths[("base", "T8a")] = EXISTING_SPARK[("base", "T8a")]
     return paths
@@ -553,8 +556,11 @@ def render(result: Mapping[str, Any]) -> str:
                 lines.append(f"| {name} | {_ci(sec[name])} |")
         for rival, d in (sec.get("PIQA") or {}).items():
             lines.append(f"| PIQA (T8a) vs {rival} | {_ci(d)} |")
-        for task, d in (sec.get("G2_by_task_vs_v03") or {}).items():
-            lines.append(f"| G2 {task} vs v0.3 | {_fmt((d or {}).get('diff'), signed=True)} [{_fmt((d or {}).get('low'), signed=True)}, {_fmt((d or {}).get('high'), signed=True)}] |")
+        for rival in ("v03", "base"):
+            for task, d in (sec.get(f"G2_by_task_vs_{rival}") or {}).items():
+                d = d or {}
+                lines.append(f"| G2 {task} vs {rival} | {_fmt(d.get('diff'), signed=True)} [{_fmt(d.get('low'), signed=True)}, {_fmt(d.get('high'), signed=True)}] "
+                             f"({_fmt(d.get('a'))} vs {_fmt(d.get('b'))}) |")
         hedge = sec.get("T9_hedge_share_prior_dependent") or {}
         lines += ["", "Hedge share on prior-dependent T9 questions: " + ", ".join(f"{m} {_fmt(x)}" for m, x in hedge.items()) + ".", ""]
     spread = result["readings"].get("seed_spread") or {}
@@ -577,12 +583,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--spark-dir", type=Path, default=SPARK_DIR, help="score_spark.sh's predictions (<SET>-<tag>.predictions.jsonl)")
     parser.add_argument("--base-g2", type=Path, default=BASE_G2_POD)
     parser.add_argument("--hset", type=Path, default=SET_PATHS["Hset"], help="v0.4a's scene holdout (H-set)")
+    parser.add_argument("--t9", type=Path, default=SET_PATHS["T9"], help="the sealed T9 (default); another file only for a pipeline check")
     parser.add_argument("--n-boot", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--allow-mismatch", action="store_true", help="read even if a prediction file was scored on another set file or conditions")
     parser.add_argument("--out", type=Path, default=REPO / "artifacts" / "reports" / "v04" / "verdict.json")
     args = parser.parse_args(argv)
-    set_paths = {**SET_PATHS, "Hset": args.hset}
+    set_paths = {**SET_PATHS, "Hset": args.hset, "T9": args.t9}
+    if args.t9.resolve() != SET_PATHS["T9"].resolve():
+        _log(f"T9 is not the sealed file: {args.t9} — a pipeline check, not the verdict")
     paths = prediction_paths(args)
     missing = [f"{m} {s}: {paths[(m, s)]}" for m, s in required_inputs() if not paths[(m, s)].is_file()]
     if missing:
@@ -599,10 +608,16 @@ def main(argv: list[str] | None = None) -> int:
         preds[model][name] = _read(path)
         sources[f"{model} {name}"] = check_source(path, set_paths[name], sets[name], preds[model][name])
     problems = [f"{k}: {'; '.join(v['problems'])}" for k, v in sources.items() if v["problems"]]
+    seen = seen_law(sets["T9"])
+    if args.t9.resolve() == SET_PATHS["T9"].resolve() and (len(seen) != SEEN_LAW_RECORDS or sorted({str(r["meta"].get("family")) for r in seen}) != sorted(SEEN_LAW_FAMILIES)):
+        problems.append(f"T9's seen-law slice is {len(seen)} records of {sorted({str(r['meta'].get('family')) for r in seen})}, not the rule's "
+                        f"{SEEN_LAW_RECORDS} records of {list(SEEN_LAW_FAMILIES)}")
     if problems and not args.allow_mismatch:
         raise SystemExit("refusing (use --allow-mismatch to read anyway):\n  " + "\n  ".join(problems))
     readings = compute(sets, preds, n_boot=args.n_boot, seed=args.seed)
     verdict = decide(readings)
+    if args.t9.resolve() != SET_PATHS["T9"].resolve():
+        notes.insert(0, f"PIPELINE CHECK ONLY: T9 is {args.t9}, not the sealed T9 — this is not the v0.4 verdict")
     notes += ["T9, T8b, B1-infamily and the H-set were scored on Spark (GB10) for every model; T1–T7, G2 and T8a on H100 pods (v0.4, v0.3, "
               "v0.1-mix; the base's G2 on the v0.1 main pod; the base's T8a on Spark).",
               "(R) reads scripts/diagnose_decisions.py --compare's differences (compare_runs, single order, record bootstrap) with the rule's 2,000 "
