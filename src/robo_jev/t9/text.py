@@ -71,6 +71,11 @@ def _num(x: float, digits: int = 2) -> str:
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
+def _a(phrase: str) -> str:
+    """The phrase with its indefinite article ("an acrylic sheet", "a tin of …")."""
+    return ("an " if phrase[:1].lower() in "aeio" else "a ") + phrase
+
+
 def _pick(rng: random.Random, *options: str) -> str:
     return options[rng.randrange(len(options))]
 
@@ -97,10 +102,10 @@ def _roll(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], rng:
         opener = _pick(rng, "I am a serving arm with a flat tray locked in my gripper.", "Serving arm here; a flat tray is clamped level in my gripper.")
         where = "the tray"
     if item["shape"] == "capsule":
-        body = (f"On {where} lies a {item['name']}, {item['contents']}, resting on its side with its length across the way it would roll. "
+        body = (f"On {where} lies {_a(item['name'])}, {item['contents']}, resting on its side with its length across the way it would roll. "
                 f"It is {_cm(2 * vis['radius'])} cm across and {_cm(vis['length'])} cm long, and weighs roughly {_num(vis['mass'])} kg.")
     else:
-        body = (f"On {where} sits a loose {item['name']}, {item['contents']}, {_cm(2 * vis['radius'])} cm across and roughly "
+        body = (f"On {where} sits {_a('loose ' + item['name'])}, {item['contents']}, {_cm(2 * vis['radius'])} cm across and roughly "
                 f"{_num(vis['mass'], 3)} kg.")
     floor = _pick(rng, f"Underneath it is {surface}.", f"The floor it rests on is {surface}.")
     edge = (f"Downhill of it, once I tilt, runs a rounded lip {_cm(lip)} cm high; {thing} meets the floor {_cm(dist)} cm short of the lip's foot. "
@@ -164,7 +169,7 @@ def _swing(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], rng
     opener = {"gantry": "Overhead gantry speaking: my hook is running along the aisle with a load slung beneath it.",
               "arm": "Mobile arm here, carrying a load that dangles from the hook on my wrist.",
               "rail": "I am the ceiling-rail carrier, moving a hanging load down the bay."}[vis["context"]]
-    body = (f"The load is a {load['name']}, {_cm(b)} cm long in the direction I travel, {_cm(w)} cm wide and {_cm(h)} cm tall, "
+    body = (f"The load is {_a(load['name'])}, {_cm(b)} cm long in the direction I travel, {_cm(w)} cm wide and {_cm(h)} cm tall, "
             f"weighing about {_num(vis['mass'], 1)} kg.")
     hang = _pick(rng, f"It hangs on {strap}; from hook to the top of the load is {_cm(vis['strap_len'])} cm when it is not moving.",
                  f"The strap is {strap}, and at rest {_cm(vis['strap_len'])} cm of it runs between the hook and the top of the load.")
@@ -223,7 +228,7 @@ def _knock(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], rng
     limb = {"forearm": "my forearm", "gripper": "the side of my open gripper", "elbow": "my elbow"}[vis["context"]]
     opener = _pick(rng, f"I am clearing a shelf, and on my next motion {limb} will clip something on the way past.",
                    f"Shelf work: my planned path brings {limb} into light contact with an item standing in the way.")
-    body = (f"It is a {obj['name']}, {obj['contents']}, standing on {surface}. Its footprint is {_cm(b)} cm in the direction I move by "
+    body = (f"It is {_a(obj['name'])}, {obj['contents']}, standing on {surface}. Its footprint is {_cm(b)} cm in the direction I move by "
             f"{_cm(w)} cm across; it rises {_cm(h)} cm, with a weight of roughly {_num(vis['mass'])} kg.")
     plan = (f"{limb[0].upper() + limb[1:]} moves at {_num(vis['speed'])} m/s and meets its face {_cm(vis['height'])} cm above the shelf. "
             f"The moment I feel the touch I brake, coming to rest within {_cm(vis['stop'])} cm, then pull back 10 cm.")
@@ -272,13 +277,13 @@ def _conveyor(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], 
     belt = F.CONVEYOR_BELTS[vis["belt"]]["text"]
     opener = {"packing": "I run the infeed conveyor of my packing cell and decide how it starts and stops.",
               "sorting": "Sorting station robot: the takeaway belt in front of me answers to my commands."}[vis["context"]]
-    body = (f"Standing upright on it is a {item['name']}, {item['contents']}: {_cm(b)} cm deep along the belt, {_cm(w)} cm across and "
+    body = (f"Standing upright on it is {_a(item['name'])}, {item['contents']}: {_cm(b)} cm deep along the belt, {_cm(w)} cm across and "
             f"{_cm(h)} cm high, roughly {_num(vis['mass'])} kg in weight. The belt is {belt}.")
     if vis["event"] == "stop":
         plan = (f"The belt now runs at {_num(vis['speed'])} m/s, and I am about to halt it at {_num(vis['rate'], 1)} m/s², reaching that rate "
                 f"within {_num(vis['ramp'])} s.")
     else:
-        plan = (f"The belt is standing still, and I am about to start it, speeding up at {_num(vis['rate'], 1)} m/s² — I get to that rate in "
+        plan = (f"For now it stands still, and I am about to start it, speeding up at {_num(vis['rate'], 1)} m/s² — I get to that rate in "
                 f"{_num(vis['ramp'])} s — until it runs at {_num(vis['speed'])} m/s.")
     state = " ".join([opener, body, plan])
     names = NAMES["conveyor"]
@@ -327,11 +332,11 @@ def _overhang(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], 
     thing = "the " + item["name"].split(" of ")[0]
     d, w, _ = item["dims"]
     opener = {"pantry": "I am putting the shopping away on the pantry shelves.", "workshop": "I am tidying the workshop shelving."}[vis["context"]]
-    board_s = (f"A loose {board} lies on a shelf, {_cm(vis['board_len'])} cm long, {_cm(vis['board_w'])} cm wide and {_cm(vis['board_t'])} cm "
+    board_s = (f"{_a('loose ' + board).capitalize()} lies on a shelf, {_cm(vis['board_len'])} cm long, {_cm(vis['board_w'])} cm wide and {_cm(vis['board_t'])} cm "
                f"thick, with {_cm(vis['over'])} cm of it reaching beyond the shelf's front lip. Nothing fixes it down.")
     contents = f", {item['contents']}" if item["contents"] else ""
     weight = (f"about {_num(item['mass'], 1)} kg" if item["stated"] else f"about {_num(item['mass'], 1)} kg when full")
-    item_s = (f"In my gripper is a {item['name']}{contents}, {_cm(d)} cm along the board by {_cm(w)} cm and {_cm(vis['item_height'])} cm high; "
+    item_s = (f"In my gripper is {_a(item['name'])}{contents}, {_cm(d)} cm along the board by {_cm(w)} cm and {_cm(vis['item_height'])} cm high; "
               f"it should weigh {weight}.")
     inset = vis["inset"]
     where = (f"its middle {_cm(inset)} cm in from the board's outer end" if inset > 0.0005 else
@@ -376,7 +381,7 @@ def _overhang_dir_text(change: F.Change, vis: dict[str, Any], thing: str) -> str
     if change.field == "board_len":
         return (f"Picture the board {_cm(change.value)} cm long instead of {_cm(vis['board_len'])} cm, still reaching {_cm(vis['over'])} cm beyond "
                 "the lip, nothing else changed.")
-    return f"Picture the board being a {F.OVERHANG_BOARDS[change.value]['text']} of the same size instead, nothing else changed."
+    return f"Picture the board being {_a(F.OVERHANG_BOARDS[change.value]['text'])} of the same size instead, nothing else changed."
 
 
 # ==========================================================================================================================
@@ -389,7 +394,7 @@ def _suction(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], r
     pl, pw, pt = panel["dims"]
     thing = "the " + panel["name"].split()[-1]
     opener = {"glazing": "Glazing cell, vacuum gripper on my wrist.", "kitting": "I am the kitting robot, holding a flat part on my suction cup."}[vis["context"]]
-    body = (f"Hanging flat under one {_cm(vis['cup'])} cm cup is a {panel['name']}, {_cm(pl)} by {_cm(pw)} cm and {_num(1000 * pt, 0)} mm thick, "
+    body = (f"Hanging flat under one {_cm(vis['cup'])} cm cup is {_a(panel['name'])}, {_cm(pl)} by {_cm(pw)} cm and {_num(1000 * pt, 0)} mm thick, "
             f"about {_num(panel['mass'], 1)} kg. Its upper face is {F.SUCTION_FACES[vis['face']]['text']}, and "
             f"{F.SUCTION_PUMPS[vis['pump']]['text']}.")
     off = (f"I gripped it {_cm(vis['offset'])} cm off its centre, toward the front." if vis["offset"] >= 0.0005 else "I gripped it at its centre.")
