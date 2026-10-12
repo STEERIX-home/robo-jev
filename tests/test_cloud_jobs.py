@@ -397,6 +397,7 @@ def test_every_shipped_step_parses_with_the_merged_tools_and_refers_only_to_ship
     spec = load_job(job_path)
     job = spec["job"]
     inputs = set(job["inputs"])
+    optional_inputs = set(job.get("optional_inputs") or [])  # uploaded only when present (Task v0.2) — a step reading one must require it
     models = json_module.loads((REPO / "artifacts" / "models" / "manifest.json").read_text(encoding="utf-8"))["models"]
     candidates = yaml.safe_load((REPO / "configs" / "model" / "candidates.yaml").read_text(encoding="utf-8"))
     candidate_ids = {entry["id"] for entry in candidates["candidates"]}
@@ -419,7 +420,10 @@ def test_every_shipped_step_parses_with_the_merged_tools_and_refers_only_to_ship
             assert resolved["model_id"] in models, f"{step['name']}: {resolved['model_id']}의 고정 revision이 모델 manifest에 없다"
         elif script == "scripts/diagnose_decisions.py":
             args = _script("diagnose_decisions.py")._parser().parse_args(argv[2:])
-            assert str(args.input) in inputs, f"{step['name']}: 진단 입력 {args.input}이 job inputs에 없다"
+            if str(args.input) in optional_inputs:
+                assert step["optional"] and str(args.input) in step["requires"], f"{step['name']}: an optional input must be required by an optional step"
+            else:
+                assert str(args.input) in inputs, f"{step['name']}: 진단 입력 {args.input}이 job inputs에 없다"
             assert args.model in models, f"{step['name']}: {args.model}의 고정 revision이 모델 manifest에 없다"
             if args.checkpoint is not None:
                 run_name = Path(args.checkpoint).parent.name

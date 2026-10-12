@@ -1,0 +1,156 @@
+# v0.2 run a (one pod): the v0.1-mix recipe with v0.2 data — Task v0.2 §1-4. Training config unchanged (decisions-v0-lora-h100: 2B LoRA
+# bf16 + fp32 master, λ 0.2, prompt v0c-p3, 1 epoch, final checkpoint); only train_input and run_name differ from v0.1-mix.
+# Training input artifacts/simgen/v02/train-v02-a.jsonl (dose a: general reading ≈ 10 % of train examples per epoch), built on this box with
+#   uv run python scripts/convert_single_probe.py mix --base artifacts/simgen/v02/train-50k.jsonl --probe artifacts/simgen/probes/G1-train-mix.jsonl \
+#       --sealed artifacts/simgen/probes/G1.jsonl --general artifacts/simgen/v02/general-train.jsonl --general-share 0.10 \
+#       --train-config configs/train/decisions-v0-lora-h100.yaml --token-sample 2000 --out artifacts/simgen/v02/train-v02-a.jsonl
+# = physics train-50k v02 (wording balance v01b + fact shuffle 0.5; first, so the trainer's dev set is unchanged) + G1-train-mix (d1 train split ×1,
+# as in v0.1-mix) + the first 11,442 records of general-train.jsonl (CommonsenseQA, HellaSwag, Social IQa, QASC, CosmosQA train splits;
+# MIT / CC-BY-4.0; no BoolQ, no NLI, no PIQA). Measured with the trainer's own counting (manifest train-v02-a.manifest.json):
+# 62,881 records, 111,972 train examples per epoch (general 11,198 = 10 %), 3,500 steps per epoch (v0.1-mix 3,150),
+# prompt tokens ≈ 44.2 M (+5.7 % vs v0.1-mix); sha256 at build 1ab9a020417e9fe7cbf118d4d49ca905b24aaa013df9d0c9e326b9ca68549098.
+# Diagnoses on its own checkpoint (after-v02a-2b-*), the sets the pre-declared v0.2 rule reads first — G2, T1–T5, T7 — then the
+# secondary ones — G1, T6 — so a slow pod can only cut secondary readings; then the outside test T8
+# **if its files exist when the job is prepared** (Task T8 builds them in parallel, in artifacts/t8/ — the brief said artifacts/simgen/t8/,
+# the T8 task writes artifacts/t8/): artifacts/t8/T8a.jsonl and T8b.jsonl are
+# optional_inputs, and the after-T8a / after-T8b steps `require` them — absent files are not uploaded and the runner skips those steps
+# (status skipped, reason missing-inputs); the job goes on. T8 runs last, so it never delays the gating sets.
+# Same-hardware baselines are not repeated: the untrained 2B on G1/G2 was measured on the v0.1 main pod (base-2b-G1/G2); v0.1-mix's own
+# G1/G2/T1–T7 come from its pod (after-v01mix-2b-*).
+kind: robojev-cloud-job-v0
+name: decisions-v02-a-h100
+job:
+  kind: decisions
+  model: Qwen/Qwen3.5-2B
+  inputs:
+    - artifacts/simgen/v02/train-v02-a.jsonl
+    - artifacts/simgen/v0b/tests/T1.jsonl
+    - artifacts/simgen/v0b/tests/T2.jsonl
+    - artifacts/simgen/v0b/tests/T3.jsonl
+    - artifacts/simgen/v0b/tests/T4.jsonl
+    - artifacts/simgen/v0b/tests/T5.jsonl
+    - artifacts/simgen/v0b/tests/T6.jsonl
+    - artifacts/simgen/v0b/tests/T7.jsonl
+    - artifacts/simgen/v0b/tests/manifest.json
+    - artifacts/simgen/probes/G1.jsonl
+    - artifacts/simgen/probes/G1.manifest.json
+    - artifacts/simgen/probes/G2.jsonl
+    - artifacts/simgen/probes/G2.manifest.json
+  optional_inputs:
+    - artifacts/t8/T8a.jsonl
+    - artifacts/t8/T8a.manifest.json
+    - artifacts/t8/T8b.jsonl
+    - artifacts/t8/T8b.manifest.json
+  runtime:
+    env:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      HF_HUB_DISABLE_TELEMETRY: "1"
+  setup:
+    - name: sync
+      argv: ["{uv}", "sync", "--frozen", "--group", "backbone"]
+      fallback: ["{uv}", "sync", "--frozen", "--group", "backbone", "--no-install-package", "evdev"]
+      max_minutes: 15
+      est_minutes: 1.5
+      env: {UV_LINK_MODE: copy, UV_PYTHON_DOWNLOADS: automatic}
+  steps:
+    - name: env
+      argv: ["{python}", "-m", "robo_jev.launch.envprobe", "--out", "{reports}/env.json"]
+      max_minutes: 3
+      est_minutes: 0.3
+    - name: weights
+      argv: ["{python}", "scripts/fetch_backbone.py", "--from-manifest", "artifacts/models/manifest.json", "--id", "{model}"]
+      max_minutes: 10
+      est_minutes: 0.5
+    - name: train
+      argv: ["{python}", "scripts/train_decisions.py", "train", "--config", "configs/train/decisions-v0-lora-h100.yaml",
+             "--set", "train_input=artifacts/simgen/v02/train-v02-a.jsonl", "--set", "out_dir={runs}", "--set", "run_name=v02-a-2b",
+             "--gpu-memory-fraction", "0.92"]
+      wall_set: max_wall_hours
+      max_minutes: 300
+      est_minutes: 75
+    - name: after-G2
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/simgen/probes/G2.jsonl", "--out", "{reports}/after-v02a-2b-G2.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 20
+      est_minutes: 3
+      optional: true
+    - name: after-T1
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T1.jsonl", "--out", "{reports}/after-v02a-2b-T1.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 27
+      optional: true
+    - name: after-T2
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T2.jsonl", "--out", "{reports}/after-v02a-2b-T2.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 27
+      optional: true
+    - name: after-T3
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T3.jsonl", "--out", "{reports}/after-v02a-2b-T3.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 26
+      optional: true
+    - name: after-T4
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T4.jsonl", "--out", "{reports}/after-v02a-2b-T4.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 15
+      optional: true
+    - name: after-T5
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T5.jsonl", "--out", "{reports}/after-v02a-2b-T5.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 14
+      optional: true
+    - name: after-T7
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T7.jsonl", "--out", "{reports}/after-v02a-2b-T7.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 27
+      optional: true
+    - name: after-G1
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/simgen/probes/G1.jsonl", "--out", "{reports}/after-v02a-2b-G1.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 45
+      est_minutes: 10
+      optional: true
+    - name: after-T6
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T6.jsonl", "--out", "{reports}/after-v02a-2b-T6.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 90
+      est_minutes: 54
+      optional: true
+    - name: after-T8a
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/t8/T8a.jsonl", "--out", "{reports}/after-v02a-2b-T8a.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 30
+      est_minutes: 3
+      optional: true
+      requires: [artifacts/t8/T8a.jsonl]
+    - name: after-T8b
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/t8/T8b.jsonl", "--out", "{reports}/after-v02a-2b-T8b.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 45
+      est_minutes: 12
+      optional: true
+      requires: [artifacts/t8/T8b.jsonl]
+  fetch:
+    - runs/*/metrics.json
+    - runs/*/config.yaml
+    - runs/*/checkpoint.pt
+    - reports/*
+provider:
+  name: runpod
+  gpu_type: NVIDIA H100 80GB HBM3
+  gpu_count: 1
+  cloud: SECURE
+  image: runpod/base:1.4.0-cuda1300-ubuntu2404
+  min_cuda_version: "13.0"
+  disk_gb: 100
+  boot_timeout_minutes: 15
+  fetch_reserve_minutes: 8
+  delete_margin_minutes: 2
+  start_grace_minutes: 30
+  done_grace_minutes: 30
+budget:
+  hourly_usd: 3.99
+  max_wall_hours: 6
+  max_usd: null
+  price_source: "RunPod v2 카탈로그 (launch 직전 대조)"
+  phase: {name: cloud-phase-1, cap_usd: 150}
+estimate:
+  boot_minutes: 3
+  uplink_mbps: 40
+  fetch_minutes: 3
+  assumption: "Step times from the v0.1 pods (H100): v0.1-mix trained 3,150 steps in 65.7 min; this input has 3,500 steps and ≈ 44.2 M (+5.7 % vs v0.1-mix) prompt tokens, so train ≈ 75 min (scaled by steps, the larger of the two). Diagnoses = the slower of the two v0.1 pods: G1 9.3, G2 2.7, T1 26.4, T2 26.9, T3 25.8, T4 14.5, T5 13.6, T6 53.5, T7 26.6 min. T8 (if present): T8a ≈ 3 min (PIQA validation, 1,838 two-option questions), T8b ≈ 12 min (480 moments, about 4 questions each)."

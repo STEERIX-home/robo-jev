@@ -7,6 +7,14 @@
 * **난수.** v01의 고르기는 주 난수 흐름(``questions``)을 건드리지 않는다: v0b 묶음 크기로 뽑던 수는 그대로 뽑아 버리고(소비가 같다), 넓은
   묶음에서의 고르기는 레코드 seed와 열쇠 이름의 별도 흐름(:func:`pick_stream`)에서 한다. 그래서 같은 seed면 질문 이름·조리법·선택지·순서·
   정답이 v0b와 바이트 단위로 같고 글만 다르다(시험).
+* **v01b** (Task v0.2 §1-2 — wording balance). Same wide pool ``train_v01`` and the same guard (training split only), but the pick is
+  weighted: with probability :data:`V01B_ORIGINAL_SHARE` (0.5) the use keeps **the original (v0b) wording that the main stream drew for this
+  seed** (the v0b index — byte-for-byte the v0b record's wording), otherwise it takes a new v01 wording, uniformly among the key's new
+  wordings. The coin and the new-wording index come from a third stream, :func:`pick_stream_v01b` (``phrasing-v01b`` + record seed + key
+  name); each use draws both, so the k-th use of a key does not depend on earlier coins. The main stream is untouched, so moments, questions
+  and labels stay byte-identical to v0b and v01 for the same seeds; with the same ``fact_shuffle`` the state text equals v01's too (the fact
+  coin is the separate ``train-facts`` stream). Why: v01's uniform pick over the wide pool cut the original wordings — the ones T1–T7 use —
+  to about a third of the picks (EN), and v0.1 regressed slightly in-distribution.
 * **빼 둔 문구에 가까이 가지 않기**(시험이 고정): 새 문구는 같은 열쇠의 빼 둔 문구와 정규화(소문자, 문장부호 제거, 자리 표시 → ``{}``) 뒤
   같지 않고, 낱말(한국어는 어절) 단위 :class:`difflib.SequenceMatcher` 유사도가 0.8 미만이며, 빼 둔 문구에만 있는 낱말 3-gram(그 열쇠의
   빼 둔 문구에는 있고 v0b 학습 문구에는 없는 것)을 쓰지 않는다. 자리 표시는 그 열쇠의 v0b 학습 문구가 쓰는 것만 쓴다.
@@ -27,6 +35,8 @@ __all__ = [
     "STOPWORDS_EN",
     "STOPWORDS_KO",
     "PHRASINGS",
+    "V01B_ORIGINAL_SHARE",
+    "WIDE_PHRASINGS",
     "TABLES",
     "bank_digest",
     "base_tables",
@@ -43,7 +53,9 @@ __all__ = [
     "ngrams",
     "normalize",
     "pick_stream",
+    "pick_stream_v01b",
     "pick_table",
+    "pick_v01b",
     "placeholders",
     "proximity",
     "required_new",
@@ -54,10 +66,15 @@ __all__ = [
     "wide",
     "without_text",
     "wording_stats",
+    "wording_summary",
 ]
 
-PHRASINGS = ("v0b", "v01")
+PHRASINGS = ("v0b", "v01", "v01b")
 DEFAULT_PHRASING = "v0b"
+#: Phrasings that pick from the wide training pool (v0b training wordings + new ones) — training split only.
+WIDE_PHRASINGS = ("v01", "v01b")
+#: v01b: probability that a use keeps the original (v0b) wording (Task v0.2 §1-2).
+V01B_ORIGINAL_SHARE = 0.5
 #: 새 문구와 같은 열쇠의 빼 둔 문구 사이 낱말 유사도의 상한(미만이어야 한다)
 MAX_SIMILARITY = 0.8
 #: 같은 열쇠의 빼 둔 문구와의 글자 단위 유사도(정규화한 글의 difflib ratio) 상한 — 낱말만 바꾼 베끼기를 막는다(리뷰 1 M2)
@@ -220,6 +237,24 @@ def pick_stream(seed: int, name: str):
     from robo_jev.simgen.spec import stream
 
     return stream(seed, "phrasing-v01", name)
+
+
+def pick_stream_v01b(seed: int, name: str):
+    """The separate v01b pick stream (record seed + key name) — independent of the main stream and of v01's (Task v0.2 §1-2)."""
+    from robo_jev.simgen.spec import stream
+
+    return stream(seed, "phrasing-v01b", name)
+
+
+def pick_v01b(rng, index: int, n_v0b: int, size: int) -> int:
+    """One v01b pick: an index into the wide pool (size `size`; its first `n_v0b` entries are the v0b training wordings). If the coin
+    (`rng.random()`) is below :data:`V01B_ORIGINAL_SHARE`, keep the v0b index `index` that the main stream drew (the original wording);
+    otherwise pick uniformly among the new wordings. Every use draws both numbers (coin, new-wording index)."""
+    if not 0 <= int(index) < int(n_v0b) < int(size):
+        raise ValueError(f"v01b pick needs 0 <= index < n_v0b < size (got {index}, {n_v0b}, {size})")
+    coin = float(rng.random())
+    new = int(n_v0b) + int(rng.integers(int(size) - int(n_v0b)))
+    return int(index) if coin < V01B_ORIGINAL_SHARE else new
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -389,8 +424,23 @@ def wording_stats(records) -> dict:
         size_v0b = len(base_tables(lang)[table][key]["train"])
         out.setdefault(lang, {}).setdefault(table, {})[key] = {
             "uses": row["uses"], "bank_v0b": size_v0b, "bank_v01": len(wide(lang, table, key)), "used_v0b": len(row["v0b"]),
-            "used_v01": len(row["v01"]), "new_share": round(row["new"] / row["uses"], 4),
+            "used_v01": len(row["v01"]), "new_share": round(row["new"] / row["uses"], 4), "new_uses": int(row["new"]),
         }  # fmt: skip
+    return out
+
+
+def wording_summary(stats: dict) -> dict:
+    """Per language, from :func:`wording_stats`: total uses, uses of a new wording, and the **original (v0b) share** = 1 − new share
+    (Task v0.2: v01 ≈ 0.36 EN / 0.50 KO; v01b ≈ 0.5 in both)."""
+    out = {}
+    for lang, tables in stats.items():
+        rows = [row for table in tables.values() for row in table.values()]
+        uses = sum(row["uses"] for row in rows)
+        new = sum(row["new_uses"] for row in rows)
+        out[lang] = {"uses": uses, "new_uses": new, "original_share": round(1.0 - new / uses, 4) if uses else None}
+    total = sum(v["uses"] for v in out.values())
+    new_total = sum(v["new_uses"] for v in out.values())
+    out["all"] = {"uses": total, "new_uses": new_total, "original_share": round(1.0 - new_total / total, 4) if total else None}
     return out
 
 

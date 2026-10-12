@@ -9,6 +9,11 @@
     # 섞기용 학습 파일 (CPU) — 학습 파일 뒤에 G1-train-mix를 그대로 이어 붙이고 섞인 몫(예 기준)을 manifest에 적는다
     uv run python scripts/convert_single_probe.py mix --base artifacts/simgen/v01/train-50k.jsonl --probe artifacts/simgen/probes/G1-train-mix.jsonl \
         --sealed artifacts/simgen/probes/G1.jsonl --train-config configs/train/decisions-v0-lora-h100.yaml --out <mix>.jsonl
+    # Task v0.2 — the same, plus the shortest prefix of the general-reading file that makes ~10 % (v02-a) or ~25 % (v02-b) of the
+    # train examples per epoch (counted with the trainer's own dev split and q), and a sampled token estimate
+    uv run python scripts/convert_single_probe.py mix --base artifacts/simgen/v02/train-50k.jsonl --probe artifacts/simgen/probes/G1-train-mix.jsonl \
+        --sealed artifacts/simgen/probes/G1.jsonl --general artifacts/simgen/v02/general-train.jsonl --general-share 0.10 \
+        --train-config configs/train/decisions-v0-lora-h100.yaml --token-sample 2000 --out artifacts/simgen/v02/train-v02-a.jsonl
 
 규칙은 :mod:`robo_jev.decisions.single_probe` 의 모듈 설명이다. 모든 변환본은 진단 도구·학습기와 같은 형식 검사
 (:func:`robo_jev.decisions.records.validate_record`)를 통과해야 하고, 상태 글은 원래 dict로 되돌아가야 한다(둘 중 하나라도 어긋나면 쓰지 않는다).
@@ -35,9 +40,10 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-SCRIPT_VERSION = "v01b-probe-1"
+SCRIPT_VERSION = "v02-mix-1"
 #: 변환본이 기대는 코드 — manifest의 ``git_dirty``는 이 파일들이 HEAD와 다른지다.
-CODE_PATHS = ("src/robo_jev/decisions/single_probe.py", "src/robo_jev/decisions/records.py", "scripts/convert_single_probe.py")
+CODE_PATHS = ("src/robo_jev/decisions/single_probe.py", "src/robo_jev/decisions/records.py", "scripts/convert_single_probe.py",
+              "src/robo_jev/data/general_sets.py")
 
 
 def _log(message: str) -> None:
@@ -232,6 +238,55 @@ def _examples(records: list[dict[str, Any]], q: int) -> int:
     return examples_per_epoch(records, q=q)
 
 
+def _general_prefix(general: list[dict[str, Any]], *, target: float, fixed: int, config: dict[str, Any], q: int) -> int:
+    """The shortest prefix length of the general file whose **train** examples (after the trainer's own dev split) reach `target` of
+    all train examples per epoch, `fixed` being the examples of the other parts (Task v0.2 §1-3). The general file interleaves its
+    sources, so a prefix stays balanced."""
+    from fractions import Fraction
+
+    from robo_jev.decisions.examples import is_dev
+
+    if not 0.0 < target < 1.0:
+        raise SystemExit(f"--general-share must be in (0, 1) (got {target})")
+    share = Fraction(str(target))  # exact: general / (fixed + general) >= share  <=>  general · (1 − share) >= share · fixed
+    examples = 0
+    for index, record in enumerate(general):
+        if not is_dev(record, fraction=config["dev_fraction"], salt=config["dev_salt"]):
+            examples += min(q, len(record["request"]["questions"]))
+        if examples * (1 - share) >= share * fixed:
+            return index + 1
+    raise SystemExit(f"the general file has too few records for a share of {target} (reached {examples} of {float(share / (1 - share) * fixed):.0f} examples)")
+
+
+def _token_estimate(parts: dict[str, list[dict[str, Any]]], examples: dict[str, int], *, sample: int, config: dict[str, Any]) -> dict[str, Any]:
+    """Prompt tokens per example (the training prompt — chat format, the run's prompt version, one seeded listing per question), from a
+    seeded sample of `sample` train records per part, and the token share of each part = examples × mean tokens. An estimate."""
+    import random
+
+    from robo_jev.decisions.prompt import build_prompts
+    from robo_jev.decisions.records import shuffle_key
+    from robo_jev.model.tokenizer import available_tokenizer, load_tokenizer
+
+    tokenizer = load_tokenizer(available_tokenizer()[0])
+    out: dict[str, Any] = {"sample_records_per_part": sample, "sample_seed": "random.Random('tokens|<part>')", "format": config["format"],
+                           "prompt_version": config["prompt_version"]}
+    totals = {}
+    for name, records in parts.items():
+        chosen = random.Random(f"tokens|{name}").sample(records, min(sample, len(records))) if records else []
+        lengths = []
+        for record in chosen:
+            for prompt in build_prompts(record["request"], tokenizer, key=shuffle_key(record), seed=1, fmt=config["format"], mode="direct",
+                                        orders="seeded", version=config["prompt_version"]):  # fmt: skip
+                lengths.append(len(prompt["tokens"]))
+        mean = sum(lengths) / len(lengths) if lengths else 0.0
+        totals[name] = mean * examples[name]
+        out[name] = {"mean_tokens_per_example": round(mean, 1), "est_tokens_per_epoch": round(totals[name])}
+    total = sum(totals.values())
+    for name in parts:
+        out[name]["est_token_share"] = round(totals[name] / total, 4) if total else None
+    return out
+
+
 def cmd_mix(args: argparse.Namespace) -> int:
     from robo_jev.decisions.examples import split_dev
     from robo_jev.decisions.records import file_sha256
@@ -257,6 +312,56 @@ def cmd_mix(args: argparse.Namespace) -> int:
         if {str(r["id"]) for r in g1} & {str(r["id"]) for r in base}:
             raise SystemExit(f"{args.base} contains sealed G1 record ids")
         sealed = {"path": str(args.sealed), "sha256": file_sha256(args.sealed), "overlap": {"origin_groups": 0, "source_records": 0, "base_ids": 0}}
+    config = resolve_config(_read_yaml(args.train_config)) if args.train_config else resolve_config({})
+    q = int(config["questions_per_request"])
+    train_base, dev_base = split_dev(base, fraction=config["dev_fraction"], salt=config["dev_salt"])
+    train_probe, dev_probe = split_dev(probe, fraction=config["dev_fraction"], salt=config["dev_salt"])
+    cap = config["dev_max_records"]
+    examples = {"base": _examples(train_base, q), "probe": _examples(train_probe, q)}
+    general_block, general_lines, train_general, dev_general = None, [], [], []
+    if args.general is not None:
+        from robo_jev.data.general_sets import SOURCES
+
+        if args.general_share is None:
+            raise SystemExit("--general needs --general-share (target share of train examples per epoch, e.g. 0.10)")
+        general, general_check = load_training_records(args.general)
+        if general_check["invalid"] or not general:
+            raise SystemExit(f"{args.general}: {general_check['invalid']} invalid records — not a general training file")
+        bad = [r["id"] for r in general if (r.get("meta") or {}).get("split") != "train" or ((r.get("meta") or {}).get("source") or {}).get("set") not in SOURCES]
+        if bad:
+            raise SystemExit(f"{args.general}: {len(bad)} records are not train-split records of a known general source (first {bad[:3]})")
+        manifest_path = args.general.with_name(args.general.stem + ".manifest.json")
+        general_manifest = json.loads(manifest_path.read_text(encoding="utf-8")) if manifest_path.is_file() else None
+        if general_manifest is None or general_manifest["file"]["sha256"] != file_sha256(args.general):
+            raise SystemExit(f"{args.general}: its manifest is missing or does not match the file (sha256) — rebuild with scripts/convert_general_sets.py")
+        if any((general_manifest.get("overlap_check") or {}).get("overlap_after_build", {"missing": 1}).values()):
+            raise SystemExit(f"{args.general}: the manifest does not record a zero overlap with the sealed sets")
+        n = _general_prefix(general, target=float(args.general_share), fixed=examples["base"] + examples["probe"], config=config, q=q)
+        used = general[:n]
+        clash = {str(r["id"]) for r in used} & ({str(r["id"]) for r in base} | {str(r["id"]) for r in probe})
+        if clash:
+            raise SystemExit(f"{len(clash)} general record ids clash with the other files (first {sorted(clash)[:3]})")
+        with args.general.open("rb") as handle:
+            general_lines = [line for line in handle if line.strip()][:n]
+        train_general, dev_general = split_dev(used, fraction=config["dev_fraction"], salt=config["dev_salt"])
+        examples["general"] = _examples(train_general, q)
+        from collections import Counter
+
+        general_block = {
+            "path": str(args.general), "sha256": file_sha256(args.general), "records_in_file": len(general), "records_used": n,
+            "prefix": f"first {n} of {len(general)} records (the file interleaves its sources)", "target_share": float(args.general_share),
+            "manifest": {"path": str(manifest_path), "sha256": file_sha256(manifest_path), "licenses": general_manifest.get("licenses"),
+                         "overlap_after_build": general_manifest["overlap_check"]["overlap_after_build"]},
+            "records_by_source": dict(sorted(Counter(r["meta"]["source"]["set"] for r in used).items())),
+            "train_examples_by_source": dict(sorted(Counter(r["meta"]["source"]["set"] for r in train_general).items())),
+        }  # fmt: skip
+    dev_used = {}
+    room = (cap - len(dev_base)) if cap else None
+    for name, dev in (("probe", dev_probe), ("general", dev_general)):
+        used_now = len(dev) if room is None else max(0, min(len(dev), room))
+        dev_used[name] = used_now
+        if room is not None:
+            room -= used_now
     args.out.parent.mkdir(parents=True, exist_ok=True)
     temp = args.out.with_name(args.out.name + ".tmp")
     with temp.open("wb") as out:
@@ -265,35 +370,43 @@ def cmd_mix(args: argparse.Namespace) -> int:
             out.write(data)
             if data and not data.endswith(b"\n"):
                 out.write(b"\n")
+        for line in general_lines:
+            out.write(line if line.endswith(b"\n") else line + b"\n")
     temp.replace(args.out)
-    config = resolve_config(_read_yaml(args.train_config)) if args.train_config else resolve_config({})
-    q = int(config["questions_per_request"])
-    train_base, dev_base = split_dev(base, fraction=config["dev_fraction"], salt=config["dev_salt"])
-    train_probe, dev_probe = split_dev(probe, fraction=config["dev_fraction"], salt=config["dev_salt"])
-    cap = config["dev_max_records"]
-    dev_used_probe = max(0, min(len(dev_probe), (cap - len(dev_base)) if cap else len(dev_probe)))
-    examples = {"base": _examples(train_base, q), "probe": _examples(train_probe, q)}
-    total = examples["base"] + examples["probe"]
+    total = sum(examples.values())
     batch = int(config["batch_examples"])
+    epoch = {**examples, "total": total, "probe_share": examples["probe"] / total if total else None}
+    if general_block is not None:
+        epoch["general_share"] = examples["general"] / total if total else None
     manifest = {
         "kind": "decisions-train-mix-v0", "script_version": SCRIPT_VERSION, "git": _git(),
-        "out": {"path": str(args.out), "sha256": file_sha256(args.out), "bytes": args.out.stat().st_size, "records": len(base) + len(probe)},
-        "order": "base file first, then the probe file (byte-for-byte) — the trainer's dev set is the first dev_max_records dev records in file order, "
-                 "so a mixed run keeps the unmixed run's dev records",
+        "out": {"path": str(args.out), "sha256": file_sha256(args.out), "bytes": args.out.stat().st_size,
+                "records": len(base) + len(probe) + len(general_lines)},
+        "order": "base file first, then the probe file (byte-for-byte)" + (", then a prefix of the general file (whole lines)" if general_block else "")
+                 + " — the trainer's dev set is the first dev_max_records dev records in file order, so a mixed run keeps the unmixed run's dev records",
         "base": {"path": str(args.base), "sha256": file_sha256(args.base), "records": len(base), "validation": base_check},
         "probe": {"path": str(args.probe), "sha256": file_sha256(args.probe), "records": len(probe), "validation": probe_check},
         "sealed_check": sealed,
         "train_config": {"path": str(args.train_config) if args.train_config else None, "questions_per_request": q, "dev_fraction": config["dev_fraction"],
                          "dev_salt": config["dev_salt"], "dev_max_records": cap, "batch_examples": batch},
         "split": {"base_train": len(train_base), "base_dev": len(dev_base), "probe_train": len(train_probe), "probe_dev": len(dev_probe),
-                  "probe_dev_used": dev_used_probe, "probe_dev_unused": len(dev_probe) - dev_used_probe},
-        "examples_per_epoch": {**examples, "total": total, "probe_share": examples["probe"] / total if total else None},
+                  "probe_dev_used": dev_used["probe"], "probe_dev_unused": len(dev_probe) - dev_used["probe"]},
+        "examples_per_epoch": epoch,
         "records_share": len(train_probe) / (len(train_base) + len(train_probe)) if (train_base or train_probe) else None,
         "steps_per_epoch": {"base_only": -(-examples["base"] // batch), "mixed": -(-total // batch)},
         "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
     }  # fmt: skip
+    if general_block is not None:
+        manifest["general"] = general_block
+        manifest["split"].update(general_train=len(train_general), general_dev=len(dev_general), general_dev_used=dev_used["general"],
+                                 general_dev_unused=len(dev_general) - dev_used["general"])  # fmt: skip
+        manifest["steps_per_epoch"]["base_and_probe"] = -(-(examples["base"] + examples["probe"]) // batch)
+    if args.token_sample:
+        parts = {"base": train_base, "probe": train_probe, **({"general": train_general} if general_block is not None else {})}
+        manifest["tokens"] = _token_estimate(parts, examples, sample=int(args.token_sample), config=config)
     _write_json(args.out.with_name(args.out.stem + ".manifest.json"), manifest)
-    _log(f"mix: {len(base)} + {len(probe)} records → {args.out} · probe share {manifest['examples_per_epoch']['probe_share']:.4f} of examples/epoch")
+    shares = f"probe share {epoch['probe_share']:.4f}" + (f", general share {epoch['general_share']:.4f}" if general_block else "")
+    _log(f"mix: {len(base)} + {len(probe)} + {len(general_lines)} records → {args.out} · {shares} of examples/epoch")
     return 0
 
 
@@ -338,6 +451,12 @@ def build_parser() -> argparse.ArgumentParser:
     mix.add_argument("--probe", type=Path, required=True, help="G1-train-mix.jsonl")
     mix.add_argument("--sealed", type=Path, required=True, help="봉인 G1.jsonl — 섞기용과 origin group·원본 레코드가 겹치지 않는지 본다 (반드시 준다: 빠뜨리면 계보 검사가 조용히 빠졌다 — 리뷰 1 M4)")
     mix.add_argument("--train-config", type=Path, default=None, help="학습 설정 YAML — 주면 그 dev 나눔·q로 epoch당 예 수와 섞인 몫을 정확히 센다")
+    mix.add_argument("--general", type=Path, default=None,
+                     help="general-reading training file (scripts/convert_general_sets.py, Task v0.2) — a prefix of it goes after the probe file")
+    mix.add_argument("--general-share", type=float, default=None,
+                     help="target share of train examples per epoch for the general data (e.g. 0.10, 0.25) — the shortest prefix that reaches it")
+    mix.add_argument("--token-sample", type=int, default=0,
+                     help="estimate prompt tokens per example from this many train records per part (0 = off; needs the tokenizer)")
     mix.add_argument("--out", type=Path, required=True)
     mix.set_defaults(func=cmd_mix)
     return parser

@@ -278,3 +278,20 @@ v0 학습 모델은 학습 문구(열쇠마다 3개)로 물으면 가정 질문�
   corridor outside room 214')인데 v0b의 상태 글('was standing at {spot}')·규칙 글('the distance to {spot}')·학습 문구 둘('still at {spot}',
   'toward {spot}')이 앞에 전치사를 붙인다. v01의 새 문구는 `{spot}`을 전치사구로 쓴다.
 
+
+## 8. Task v0.2 — wording balance `v01b`
+
+v0.1 trained on `v01`, whose uniform pick over the wide pool cut the original (v0b) wordings — the ones T1–T7 use — to about a third
+of the English picks (0.36 EN, 0.50 KO). v0.1 then lost a little in-distribution action regret. `v01b` restores them to half:
+
+* **Pick.** Same wide pool `train_v01` (no new wordings, no new rules). Each use keeps, with probability 0.5
+  (`phrasing.V01B_ORIGINAL_SHARE`), **the v0b wording the main stream drew for this seed** — byte-for-byte the v0b record's wording —
+  and otherwise takes one of the key's new wordings uniformly (`phrasing.pick_v01b`).
+* **Streams.** The coin and the new index come from a third stream, `stream(seed, "phrasing-v01b", key)`; each use draws both. The main
+  stream is untouched, so moments, questions, options and labels are byte-identical to v0b and v01 for the same seeds. With the same
+  `fact_shuffle` (0.5, stream `train-facts`) the state text is byte-identical to v01's as well — `v01b` differs from `v01` only in the
+  instruction and option texts (`scripts/simgen_v0b.py compare --same-facts`).
+* **Same guard and log.** Training split only (`assemble` refuses it elsewhere); `generator.phrasing = "v01b"`; `meta.phrasing.picks` keeps
+  the `[key, v0b index, wide index]` form, so `wording_stats` / `wording_summary` read it unchanged (original share = picks below the v0b
+  list length).
+* **Data.** `scripts/simgen_v0b.py train --phrasing v01b --out artifacts/simgen/v02/train-50k.jsonl` (fact shuffle 0.5 by default).

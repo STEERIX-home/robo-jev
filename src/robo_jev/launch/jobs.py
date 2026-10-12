@@ -11,9 +11,15 @@ YAML만 고친다.
       kind: decisions
       model: Qwen/Qwen3.5-2B            # 가중치는 원격이 HF에서 받고 artifacts/models/manifest.json의 revision·sha256과 대조한다
       inputs: [<저장소 기준 경로>…]      # **올려 보낸다** — 도착 뒤 sha256 대조 (다른 CPU에서 다시 만들면 끝자리가 다를 수 있다)
+      optional_inputs: [<경로>…]         # prepare 때 **있으면** 올린다 (없으면 빠진다 — Task v0.2, 병렬로 만들어지는 T8 같은 파일)
       setup:  [{name, argv, fallback?, max_minutes}]   # 환경 맞추기 (uv sync --frozen --group backbone)
-      steps:  [{name, argv, max_minutes, optional?, wall_set?, est_minutes?}]
+      steps:  [{name, argv, max_minutes, optional?, wall_set?, est_minutes?, requires?}]
       fetch:  [<원격 run 디렉터리 기준 glob>…]
+
+**Optional inputs and steps that need them** (Task v0.2 §1-4). ``optional_inputs`` are uploaded only if they exist when the job
+is prepared; the manifest lists which were found. A step may name ``requires: [<path>…]`` (each path an input or optional input;
+only on ``optional: true`` steps): if any of them is not on the remote, the runner does not start the step and records it as
+``skipped`` with reason ``missing-inputs`` — the job goes on. The dry-run plan marks such a step and counts no time for it.
     provider: {...}   budget: {...}   estimate: {...}
 
 tokenizer(파일 + manifest)와 모델 manifest(`artifacts/models/manifest.json`)는 입력에 **저절로** 더해진다.
@@ -52,6 +58,8 @@ __all__ = [
     "expand",
     "format_plan",
     "load_job",
+    "missing_requirements",
+    "optional_inputs_status",
     "plan_job",
     "resolve_job",
     "run_job",
@@ -68,11 +76,11 @@ AUTO_TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json")
 MIN_STEP_SECONDS = 20.0
 #: SIGTERM 뒤 SIGKILL까지.
 KILL_GRACE_SECONDS = 30.0
-STEP_KEYS = {"name", "argv", "fallback", "max_minutes", "optional", "wall_set", "est_minutes", "env"}
+STEP_KEYS = {"name", "argv", "fallback", "max_minutes", "optional", "wall_set", "est_minutes", "env", "requires"}
 #: argv 틀의 자리 표시 — `{이름}` 꼴만 채운다. 다른 중괄호(`lora={r: 4, …}` 같은 YAML 값)는 그대로 둔다.
 PLACEHOLDERS = ("python", "uv", "repo", "run_dir", "runs", "reports", "model", "step", "run_id")
 _PLACEHOLDER = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
-JOB_KEYS = {"kind", "model", "inputs", "setup", "steps", "fetch", "runtime", "code", "deadline_epoch", "deadline_limit"}
+JOB_KEYS = {"kind", "model", "inputs", "optional_inputs", "setup", "steps", "fetch", "runtime", "code", "deadline_epoch", "deadline_limit"}
 TOP_KEYS = {"kind", "name", "description", "job", "provider", "budget", "estimate", "notes"}
 
 
@@ -130,9 +138,14 @@ def _step(raw: Any, where: str) -> dict[str, Any]:
         "wall_set": raw.get("wall_set"),
         "est_minutes": None if raw.get("est_minutes") is None else float(raw["est_minutes"]),
         "env": {str(k): str(v) for k, v in (raw.get("env") or {}).items()},
+        "requires": [str(p) for p in (raw.get("requires") or [])],
     }
     if step["max_minutes"] <= 0:
         raise JobError(f"{where}: max_minutes는 양수다")
+    if not isinstance(raw.get("requires") or [], list) or not all(isinstance(p, str) and p for p in step["requires"]):
+        raise JobError(f"{where}: requires는 경로 목록이다")
+    if step["requires"] and not step["optional"]:
+        raise JobError(f"{where}: requires는 optional 단계에만 — 입력이 없으면 건너뛰는 단계다")
     return step
 
 
@@ -159,6 +172,15 @@ def resolve_job(data: dict[str, Any]) -> dict[str, Any]:
         if Path(path).is_absolute() or ".." in Path(path).parts:
             raise JobError(f"job.inputs: {path} — 저장소 안의 상대 경로여야 한다 (원격의 같은 자리에 놓는다)")
     job["inputs"] = list(dict.fromkeys(inputs))
+    optional_inputs = job.get("optional_inputs") or []
+    if not isinstance(optional_inputs, list) or not all(isinstance(p, str) and p for p in optional_inputs):
+        raise JobError("job.optional_inputs: 저장소 기준 경로 목록이다")
+    for path in optional_inputs:
+        if Path(path).is_absolute() or ".." in Path(path).parts:
+            raise JobError(f"job.optional_inputs: {path} — 저장소 안의 상대 경로여야 한다")
+        if path in job["inputs"]:
+            raise JobError(f"job.optional_inputs: {path}는 이미 inputs에 있다")
+    job["optional_inputs"] = list(dict.fromkeys(optional_inputs))
     job["setup"] = [_step(raw, f"job.setup[{i}]") for i, raw in enumerate(job.get("setup") or [])]
     job["steps"] = [_step(raw, f"job.steps[{i}]") for i, raw in enumerate(job.get("steps") or [])]
     if not job["steps"]:
@@ -166,6 +188,11 @@ def resolve_job(data: dict[str, Any]) -> dict[str, Any]:
     names = [s["name"] for s in job["setup"] + job["steps"]]
     if len(names) != len(set(names)):
         raise JobError(f"단계 이름이 겹친다: {names}")
+    known = set(job["inputs"]) | set(job["optional_inputs"])
+    for step in job["setup"] + job["steps"]:
+        unknown = [p for p in step["requires"] if p not in known]
+        if unknown:
+            raise JobError(f"{step['name']}: requires {unknown} — inputs나 optional_inputs에 있어야 한다")
     job["fetch"] = [str(p) for p in (job.get("fetch") or [])]
     runtime = dict(job.get("runtime") or {})
     runtime.setdefault("python", DEFAULT_PYTHON)
@@ -194,12 +221,26 @@ def tokenizer_inputs(repo: Path) -> list[str]:
     return out
 
 
+def optional_inputs_status(job: dict[str, Any], repo: Path) -> dict[str, bool]:
+    """Optional input → whether it exists under `repo` now (it is uploaded only then)."""
+    return {path: (Path(repo) / path).is_file() for path in job.get("optional_inputs") or []}
+
+
 def all_inputs(job: dict[str, Any], repo: Path) -> list[str]:
-    """올려 보낼 파일 전부: job의 입력 + tokenizer + (실제 모델이면) 모델 manifest."""
+    """올려 보낼 파일 전부: job의 입력 + 지금 있는 optional 입력 + tokenizer + (실제 모델이면) 모델 manifest."""
     extra = tokenizer_inputs(repo)
     if job["model"] != "tiny":
         extra.append(MODEL_MANIFEST)
-    return list(dict.fromkeys([*job["inputs"], *extra]))
+    present = [path for path, found in optional_inputs_status(job, repo).items() if found]
+    return list(dict.fromkeys([*job["inputs"], *present, *extra]))
+
+
+def missing_requirements(step: dict[str, Any], available: set[str] | None = None, repo: Path | None = None) -> list[str]:
+    """The paths a step `requires` that are not available — among the uploaded paths (`available`, the dry-run) or as files under
+    `repo` (the remote runner)."""
+    if available is not None:
+        return [p for p in step.get("requires") or [] if p not in available]
+    return [p for p in step.get("requires") or [] if not (Path(repo) / p).is_file()]
 
 
 def hash_inputs(paths: list[str], repo: Path) -> list[dict[str, Any]]:
@@ -292,10 +333,12 @@ def plan_job(manifest: dict[str, Any], *, ledger: Any = None, lifetime: tuple[fl
     upload_minutes = upload_bytes * 8 / (uplink * 1e6) / 60.0
     fetch_minutes = float(estimate.get("fetch_minutes") or 2.0)
     rows = []
+    uploaded = {item["path"] for item in job.get("uploads") or []}
     for phase in ("setup", "steps"):
         for step in job.get(phase) or []:
-            rows.append({"phase": phase, "name": step["name"], "est_minutes": round(_minutes(step), 2), "max_minutes": step["max_minutes"],
-                         "optional": step["optional"], "argv": " ".join(step["argv"])})  # fmt: skip
+            missing = missing_requirements(step, available=uploaded)
+            rows.append({"phase": phase, "name": step["name"], "est_minutes": 0.0 if missing else round(_minutes(step), 2), "max_minutes": step["max_minutes"],
+                         "optional": step["optional"], "argv": " ".join(step["argv"]), "skipped_missing_inputs": missing})  # fmt: skip
     work_minutes = sum(row["est_minutes"] for row in rows)
     total_minutes = boot + upload_minutes + work_minutes + fetch_minutes
     hourly = float(budget.hourly_usd)
@@ -358,6 +401,8 @@ def format_plan(plan: dict[str, Any]) -> str:
     lines.append("단계")
     for row in plan["steps"]:
         flag = " (선택)" if row["optional"] else ""
+        if row.get("skipped_missing_inputs"):
+            flag += f" — 건너뜀: 입력 없음 {row['skipped_missing_inputs']}"
         lines.append(f"  {row['phase']:<5} {row['name']:<24} 예상 {row['est_minutes']:>6.1f}분 · 상한 {row['max_minutes']:>5.1f}분{flag}")
     up = plan["uploads"]
     lines.append(f"올리기   코드 {up['code'].get('commit') or up['code'].get('ref')} ({up['code'].get('payload_bytes')} B, sha256 {str(up['code'].get('payload_sha256'))[:12]}…) "
@@ -551,6 +596,14 @@ def _run_job(bundle: str | Path, *, repo: str | Path) -> int:
             outcome = ("failed", "budget", EXIT_BUDGET, deadline_limit)
             results.append(record)
             break
+        missing = missing_requirements(step, repo=repo)
+        if missing:
+            # an optional step whose optional inputs were not uploaded (Task v0.2): not started, recorded, the job goes on
+            record["reason"] = "missing-inputs"
+            record["missing"] = missing
+            results.append(record)
+            _log(f"[{index + 1}/{len(phases)}] {step['name']} 건너뜀 — 입력 없음 {missing}")
+            continue
         allowed = float(step["max_minutes"]) * 60.0 if remaining is None else min(float(step["max_minutes"]) * 60.0, remaining)
         argv = expand(step["argv"], {**context, "step": step["name"]})
         if step.get("wall_set"):

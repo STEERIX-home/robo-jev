@@ -315,7 +315,7 @@ def prepare_job(
     기본이다(첫 단계 $150). 그 상한이 남은 돈을 넘으면 여기서 거절한다 — launch가 같은 검사를 잠금 안에서 다시 한다.
     """
     from robo_jev.launch.cloud import DEFAULT_ROOT, DEFAULT_SSH_KEY, build_payload, pod_lifetime
-    from robo_jev.launch.jobs import JobError, all_inputs, decisions_artifact_plan, hash_inputs, load_job, model_entry
+    from robo_jev.launch.jobs import JobError, all_inputs, decisions_artifact_plan, hash_inputs, load_job, model_entry, optional_inputs_status
     from robo_jev.launch.ledger import DEFAULT_PHASE, Ledger
     from robo_jev.launch.providers.ssh import DEFAULT_SSH_OPTIONS
 
@@ -353,6 +353,7 @@ def prepare_job(
         )
     inputs = hash_inputs(all_inputs(job, repo), repo)
     entry = model_entry(job["model"], repo)
+    optional = optional_inputs_status(job, repo)
 
     bundle = bundle_dir(manifest_path)
     if bundle.exists():
@@ -361,7 +362,9 @@ def prepare_job(
     code = {"ref": ref, "commit": None}
     if provider is not None:
         code = build_payload(ref, bundle / "code.tar.gz", repo=repo)
-    job_block = {**job, "code": code, "uploads": inputs, "model_entry": entry}
+    job_block = {**job, "code": code, "uploads": inputs, "model_entry": entry,
+                 "optional_inputs_found": [p for p, found in optional.items() if found],
+                 "optional_inputs_missing": [p for p, found in optional.items() if not found]}  # fmt: skip
     job_text = json.dumps(spec, ensure_ascii=False, sort_keys=True)
     remote_root = (provider or {}).get("remote_root") or DEFAULT_ROOT
     if provider is not None:
@@ -410,6 +413,10 @@ def prepare_job(
     )
     if code.get("commit") and code["commit"] != revision["git_sha"]:
         manifest["notes"].append(f"pod에 가는 코드는 {code['commit'][:12]}({ref})다 — 이 체크아웃의 HEAD {str(revision['git_sha'])[:12]}와 다르다")
+    if optional:
+        missing = job_block["optional_inputs_missing"]
+        manifest["notes"].append(f"optional inputs: {len(optional) - len(missing)} of {len(optional)} found"
+                                 + (f" (missing: {missing}) — optional steps that require a missing one are skipped" if missing else ""))
     note_state(manifest, "prepared", note=f"{Path(job_path).name} · job decisions · 입력 {len(inputs)}개 · 마감 {deadline} h")
     (bundle / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     save_manifest(manifest_path, manifest)
