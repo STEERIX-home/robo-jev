@@ -283,3 +283,37 @@ def test_repos_are_created_private_and_a_public_repo_stops_the_upload():
     assert H.ensure_private_repo(api, "Steerix-org/robo-jev-2b")["created"] is False
     with pytest.raises(PermissionError, match="not private"):
         H.ensure_private_repo(_FakeApi({"Steerix-org/robo-jev-2b": False}), "Steerix-org/robo-jev-2b")
+
+
+class _Ref:
+    def __init__(self, name, target_commit):
+        self.name, self.target_commit = name, target_commit
+
+
+class _TagApi:
+    """Annotated tags: ``list_repo_refs`` gives the tag object's id; ``model_info(revision=tag).sha`` gives the commit."""
+
+    def __init__(self):
+        self.tags, self.created = [], []
+
+    def list_repo_refs(self, repo_id, *, repo_type):
+        refs = type("Refs", (), {})()
+        refs.tags = list(self.tags)
+        return refs
+
+    def create_tag(self, repo_id, *, tag, tag_message, revision, repo_type):
+        self.created.append((tag, tag_message, revision))
+        self.tags.append(_Ref(tag, "tag-object-id"))
+
+    def model_info(self, repo_id, revision=None, **_):
+        info = type("Info", (), {})()
+        info.sha = "head-commit"
+        return info
+
+
+def test_the_release_tag_reports_the_commit_it_resolves_to():
+    api = _TagApi()
+    assert H.tag_release(api, "Steerix-org/robo-jev-2b", "v0.1", message="robo-jev v0.1") == {
+        "tag": "v0.1", "commit": "head-commit", "main": "head-commit", "created": True}
+    assert api.created == [("v0.1", "robo-jev v0.1", None)]
+    assert H.tag_release(api, "Steerix-org/robo-jev-2b", "v0.1", message="robo-jev v0.1")["created"] is False and len(api.created) == 1

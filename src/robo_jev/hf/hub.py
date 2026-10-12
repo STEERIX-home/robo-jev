@@ -77,15 +77,19 @@ def upload(api: Any, repo_id: str, folder: str | Path, *, message: str) -> dict[
     return {"commit": getattr(commit, "oid", None), "url": getattr(commit, "commit_url", None)}
 
 
+def _resolve(api: Any, repo_id: str, revision: str) -> str:
+    """The commit a branch or tag points to (an annotated tag's ``target_commit`` in ``list_repo_refs`` is the tag object, not the commit)."""
+    return api.model_info(repo_id, revision=revision).sha
+
+
 def tag_release(api: Any, repo_id: str, tag: str, *, message: str, revision: str | None = None) -> dict[str, Any]:
-    """Create the release tag on `revision` (default: the head); an existing tag is left as it is and reported."""
+    """Create the release tag on `revision` (default: the head of main); an existing tag is left as it is. Returns the tag, the commit it
+    resolves to, the head of main, and whether it was created now."""
     refs = api.list_repo_refs(repo_id, repo_type="model")
-    existing = {ref.name: ref.target_commit for ref in refs.tags}
-    if tag in existing:
-        return {"tag": tag, "commit": existing[tag], "created": False}
-    api.create_tag(repo_id, tag=tag, tag_message=message, revision=revision, repo_type="model")
-    refs = api.list_repo_refs(repo_id, repo_type="model")
-    return {"tag": tag, "commit": {ref.name: ref.target_commit for ref in refs.tags}.get(tag), "created": True}
+    created = tag not in {ref.name for ref in refs.tags}
+    if created:
+        api.create_tag(repo_id, tag=tag, tag_message=message, revision=revision, repo_type="model")
+    return {"tag": tag, "commit": _resolve(api, repo_id, tag), "main": _resolve(api, repo_id, "main"), "created": created}
 
 
 def remote_listing(api: Any, repo_id: str, *, revision: str | None = None) -> dict[str, Any]:
@@ -99,6 +103,6 @@ def remote_listing(api: Any, repo_id: str, *, revision: str | None = None) -> di
     refs = api.list_repo_refs(repo_id, repo_type="model")
     return {
         "repo_id": repo_id, "private": info.private, "sha": info.sha, "files": files, "bytes": sum(f["bytes"] or 0 for f in files),
-        "tags": {ref.name: ref.target_commit for ref in refs.tags}, "card": dict(info.card_data or {}) if info.card_data else None,
-        "url": f"https://huggingface.co/{repo_id}",
+        "tags": {ref.name: _resolve(api, repo_id, ref.name) for ref in refs.tags},
+        "card": info.card_data.to_dict() if info.card_data is not None else None, "url": f"https://huggingface.co/{repo_id}",
     }
