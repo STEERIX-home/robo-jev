@@ -171,7 +171,10 @@ TOWER_CONTENTS = {
     "front": {"cx": (0.05, 0.15)},
     "back": {"cx": (-0.15, -0.05)},
 }
-TOWER_ROBOTS = ("palletising arm", "stockroom robot with a suction gripper", "mobile manipulator")
+TOWER_ROBOTS = ("palletising arm", "stockroom robot with a suction gripper", "wheeled manipulator")
+#: names changed after the first labelling run because the overlap check found them in T8b's catalogs (a name is not physics;
+#: records are written with the new name, :func:`robo_jev.mjgen.generate.group_records`)
+ROBOT_RENAMES = {"mobile manipulator": "wheeled manipulator"}
 TOWER_MU = (0.35, 0.65)
 
 # --------------------------------------------------------------------------

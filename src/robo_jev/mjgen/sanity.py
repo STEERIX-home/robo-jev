@@ -114,21 +114,25 @@ def analytic_tilt_tip(length: float, height: float, kh: float) -> dict[str, Any]
     return {"case": f"tilt-tip L={length} H={height} kh={kh}", "expected": expected, "found": found, "ratio": found / expected, "bracket": [low, high]}
 
 
-def analytic_grip(move: str, accel: float, mu: float = 0.5, mass: float = 1.0, *, mode: str = "slip") -> dict[str, Any]:
+def analytic_grip(move: str, accel: float, mu: float = 0.5, mass: float = 1.0, *, mode: str = "slip", peak: float = 1.5,
+                  distance: float = 0.8) -> dict[str, Any]:
     """Held box, a move at `accel`: the squeeze below which it slips 1 cm or more (``slip``: vs m·load/(2μ)) or falls out
-    (``drop`` with a gentle move: vs m·g/(2μ))."""
+    (``drop`` with a gentle move: vs m·g/(2μ)). The default move has a long acceleration phase (1.5 m/s peak): with a short one
+    the box cannot slip a full centimetre just below the static threshold, so the 1-cm threshold sits a few per cent lower
+    (0.95 × for a 0.12 s phase — a real duration effect, reported by :func:`jobs` as its own case)."""
     load = math.hypot(G, accel) if move == "swing" else G + accel
-    expected = mass * (load if mode == "slip" else G) / (2 * mu)
+    expected = mass * (G if mode == "drop" else load) / (2 * mu)
     rig = ph.grip_rig((0.10, 0.08, 0.16), mass)
-    path, axis = ph.move_profile(move, 0.30, 0.6, accel)
+    path, axis = ph.move_profile(move, distance, peak, accel)
 
     def event(force: float) -> bool:  # True when the grip holds (above the threshold)
         outcome = ph.run_grip(rig, path, axis, mu=mu, mass=mass, squeeze=force)["outcome"]
-        return outcome == "hold" if mode == "slip" else outcome != "drop"
+        return outcome != "drop" if mode == "drop" else outcome == "hold"
 
     low, high = _bisect(event, 0.7 * expected, 1.3 * expected)
     found = (low + high) / 2
-    return {"case": f"grip-{mode} {move} a={accel} mu={mu}", "expected": expected, "found": found, "ratio": found / expected, "bracket": [low, high]}
+    return {"case": f"grip-{mode} {move} a={accel} peak={peak} mu={mu}", "expected": expected, "found": found, "ratio": found / expected,
+            "bracket": [low, high]}
 
 
 def creep_grip(ratio: float = 1.2, seconds: float = 3.0) -> dict[str, Any]:
@@ -180,6 +184,7 @@ def jobs(*, master: int, k: int, moments: int) -> list[tuple[str, dict[str, Any]
     out += [("analytic_tilt_tip", {"length": L, "height": H, "kh": kh}) for (L, H, kh) in ((0.20, 0.60, 0.5), (0.30, 0.70, 0.5), (0.25, 0.60, 0.35))]
     out += [("analytic_grip", {"move": move, "accel": a}) for move, a in (("lift", 3.0), ("lower", 4.0), ("swing", 5.0))]
     out += [("analytic_grip", {"move": "lift", "accel": 0.5, "mode": "drop"})]
+    out += [("analytic_grip", {"move": "swing", "accel": 5.0, "peak": 0.6, "distance": 0.3, "mode": "short"})]
     out += [("creep_grip", {})]
     out += [("analytic_tower_top", {"lower": lo, "upper": up}) for lo, up in ((0.40, 0.30), (0.30, 0.45))]
     out += [("analytic_tower_pair", {"top_offset": d}) for d in (0.05, 0.12)]
@@ -190,7 +195,7 @@ def jobs(*, master: int, k: int, moments: int) -> list[tuple[str, dict[str, Any]
 def summarize(job_list: list[tuple[str, dict[str, Any]]], results: list[Any]) -> dict[str, Any]:
     """Results → report with a verdict: zero label-level monotonicity violations, analytic ratios within tolerance (slide and slip
     0.95–1.05, tip 0.90–1.05 — the pitch motion itself helps a tall box over a little early —, drop 0.90–1.10, tower |found −
-    expected| < 5 mm), creep < 2 mm, identical determinism hashes (twice in a worker and once in this process)."""
+    expected| < 5 mm; the short-phase slip 0.90–1.05), creep < 2 mm, identical determinism hashes (twice in a worker and once in this process)."""
     mono = [r for (kind, _), r in zip(job_list, results) if kind == "monotone"]
     analytic = [r for (kind, _), r in zip(job_list, results) if kind.startswith("analytic")]
     creep = [r for (kind, _), r in zip(job_list, results) if kind == "creep_grip"]
@@ -204,7 +209,8 @@ def summarize(job_list: list[tuple[str, dict[str, Any]]], results: list[Any]) ->
         case = entry["case"]
         if case.startswith("tower"):
             return abs(entry["found"] - entry["expected"]) < 0.005
-        lo, hi = ((0.95, 1.05) if case.startswith(("tilt-slide", "grip-slip")) else (0.90, 1.05) if case.startswith("tilt-tip") else (0.90, 1.10))
+        lo, hi = ((0.95, 1.05) if case.startswith(("tilt-slide", "grip-slip")) else (0.90, 1.05) if case.startswith(("tilt-tip", "grip-short"))
+                  else (0.90, 1.10))
         return lo <= entry["ratio"] <= hi
 
     for entry in analytic:

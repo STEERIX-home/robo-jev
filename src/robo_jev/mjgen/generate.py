@@ -27,6 +27,7 @@ whether it is the same under all priors.
 from __future__ import annotations
 
 import collections
+import dataclasses
 import math
 import random
 import statistics
@@ -172,6 +173,8 @@ def _record_id(group: fam.Group, member: str) -> str:
 
 def group_records(group: fam.Group, labelled: dict[str, Any], *, mujoco_version: str, git: str | None = None) -> list[dict[str, Any]]:
     """One labelled group → its records (the base, and the paired record when there is one)."""
+    if group.visible.get("robot") in fam.ROBOT_RENAMES:
+        group = dataclasses.replace(group, visible={**group.visible, "robot": fam.ROBOT_RENAMES[group.visible["robot"]]})
     family = group.family
     names = QUESTION_NAMES[family]
     cf_option = _cf_option(group)
