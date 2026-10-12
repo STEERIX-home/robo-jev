@@ -295,3 +295,46 @@ of the English picks (0.36 EN, 0.50 KO). v0.1 then lost a little in-distribution
   the `[key, v0b index, wide index]` form, so `wording_stats` / `wording_summary` read it unchanged (original share = picks below the v0b
   list length).
 * **Data.** `scripts/simgen_v0b.py train --phrasing v01b --out artifacts/simgen/v02/train-50k.jsonl` (fact shuffle 0.5 by default).
+
+## 9. Task v0.3a — varied narration (`narrated-train`)
+
+The outside test T8 showed that v0.1 learned our engine's way of *writing*. v0.3a retells training moments in other voices and
+formats with an LLM, keeps every fact, and drops every rewrite that cannot be shown to keep them. **No new moments, no new labels.**
+
+* **Source.** `artifacts/simgen/v02/train-50k.jsonl` (labels byte-identical to v0b). Only `request.state` and the question texts
+  are sent; the state is an observation and never holds hidden values.
+* **Voices** (`narration.VOICES`, ten per language, chosen for breadth of person, format, register and length): EN
+  `robot_monologue` (first person), `radio_call`, `maintenance_log`, `formal_report` (third person), `supervisor_note`,
+  `chatty_colleague`, `terse_bullets` (second person), `sensor_json`, `field_table` (data formats), `control_dialogue`; KO
+  `ko_monologue`, `ko_radio`, `ko_work_log`, `ko_formal_report`, `ko_handover_note`, `ko_chatty`, `ko_terse`, `ko_json`, `ko_table`,
+  `ko_dialogue`. Korean moments stay Korean. A per-call order hint varies where the text starts. The held-out T2 style (a
+  time-stamped event log) is refused by a check, so T2 still measures an unseen style.
+* **Questions.** First- and third-person voices re-voice the questions in the same call: only "you/your" → "I/my" or → "the
+  robot/its" (Korean: only the 당신 token). A re-voiced question must keep its type, option keys and order, numbers, names and every
+  other content word (`narration_checks.check_question`); a question that fails keeps its original text.
+* **Checks** (`narration_checks.check_state`, every one must pass): numbers with units as a multiset (no conversion; ±
+  kept), no new numbers, every catalog name (agents, objects, containers, loads, the robot's body name …) word for word, language,
+  length bounds per voice, left/right and above/below bindings, fill band, lid state, every item of an `AVAILABLE ACTIONS` list, no
+  added prediction / advice / safety-judgement words, no time-stamped log lines, and (except JSON) not a near-copy (≤ 0.5 of the
+  word 4-grams copied).
+* **Back-check.** A second model (a different family from the rewriter) lists the fact differences between the original and each
+  rewrite that passed the checks, each `major` (could change a physical judgement) or `minor` (setting, task wording, a side
+  remark). A rewrite is kept with no major and at most one minor difference.
+* **Record.** The source record with a new `id` (`<source id>~<voice>`), a new `request.state`, re-voiced question texts where they
+  passed, and `meta.narration`: `{version, voice, person, family, language, order_hint, model, resolved_model, provider,
+  prompt_version, source_id, source_state_sha256, plan_rank, checks, questions (per question: revoiced / original (why)),
+  back_check {model, minor, differences}, length_ratio}`. `labels`, `truth`, `rationale`, `generator` and every other `meta` field
+  are the source's, unchanged; `meta.style` and `meta.fact_order` describe the source text, not the narration.
+* **Sealed sets.** Nothing from T1–T7, G1, G2, T8a or T8b is sent: before every request the source and every text are checked
+  against the whole-state / whole-request hashes of all sealed sets and the text units of the sets written outside our engine
+  (`narration.SealedIndex`); every sent request is logged with these hashes and `narrate_v03.py audit` re-checks the log.
+* **Spend.** OpenRouter chat completions through the bench client's cache, retry and ledger: one cumulative ledger, a reservation
+  before every request, a hard stop below the cap.
+
+```bash
+python scripts/narrate_v03.py index && python scripts/narrate_v03.py plan
+python scripts/narrate_v03.py pipeline --model google/gemma-4-31b-it --judge-model anthropic/claude-haiku-5.5 --start 0 --count 200 --max-total-usd 14.7
+python scripts/narrate_v03.py report --model google/gemma-4-31b-it --judge-model anthropic/claude-haiku-5.5 --start 0 --count 200 --out artifacts/simgen/v03/pilot-report.json
+python scripts/narrate_v03.py assemble --model google/gemma-4-31b-it --judge-model anthropic/claude-haiku-5.5
+python scripts/narrate_v03.py audit
+```
