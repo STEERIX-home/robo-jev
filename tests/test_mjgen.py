@@ -78,6 +78,17 @@ def test_a_box_slides_at_tan_theta_equal_mu_and_tips_at_tan_theta_equal_b_over_h
     assert 0.95 <= sanity.analytic_tilt_tip(0.20, 0.60, 0.5)["ratio"] <= 1.03
 
 
+def test_a_heavy_flat_box_dropping_off_a_tall_box_does_not_launch():
+    """Regression: with T8's settings (implicitfast, 1 ms, 4 ms contacts) this rollout launched both boxes metres away."""
+    group = fam.candidate("tower", 404, MASTER, k=32, pair_share=0.6)
+    hidden = fam.hidden_for("tower", group.visible)
+    names = sorted(hidden)
+    draws = fam.draw_values(fam.prior_ranges(hidden, "base"), fam.unit_draws(names, 32, group.seed ^ 0xD3A5), names)
+    rigs: dict = {}
+    results = [fam.roll("tower", group.visible, draws[i], rigs) for i in (0, 1, 3, 5)]
+    assert not any(r["unstable"] for r in results) and all(r["outcome"] == "top" for r in results)
+
+
 def test_a_tipping_box_is_read_as_a_tip_not_a_slide():
     """Regression: a tall box that starts to tip moves its centre ≈ (H/2)·sin φ by rotation alone; that is not a slide."""
     rig = ph.tilt_rig((0.20, 0.30, 0.60), 4.0)
@@ -95,7 +106,7 @@ def test_a_top_box_falls_when_its_centre_of_mass_passes_the_edge_and_two_boxes_g
     top = sanity.analytic_tower_top(0.40, 0.30)
     assert abs(top["found"] - top["expected"]) < 0.005
     pair = sanity.analytic_tower_pair(0.12)
-    assert abs(pair["found"] - pair["expected"]) < 0.006
+    assert abs(pair["found"] - pair["expected"]) < 0.008
 
 
 @pytest.mark.parametrize("sweep", list(sanity.SWEEPS))

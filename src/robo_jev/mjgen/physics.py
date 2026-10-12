@@ -273,7 +273,9 @@ def run_tilt(rig: Rig, path: Path1D, *, mu: float, com: Sequence[float], orienta
     mujoco.mj_forward(model, data)
     start = np.asarray(data.xmat[deck]).reshape(3, 3).T @ (np.asarray(data.xpos[rig.boxes["load"]["body"]]) - np.asarray(data.xpos[deck]))
     z0 = top = float(start[2])
-    rise_limit = t8.max_rise(rig.boxes["load"]["dims"])
+    # largest possible rise of the centre when the box rotates onto an edge, in its actual orientation (+ 5 cm)
+    half = np.abs(orientation_frame(orientation)) @ (np.asarray(rig.boxes["load"]["dims"], dtype=float) / 2)
+    rise_limit = math.hypot(max(half[0], half[1]), half[2]) - half[2] + 0.05
     max_tilt, steps, outcome = 0.0, 0, None
     total = int(path.q.size)
     settle_cap = total + int(round(SETTLE_MAX / TIMESTEP))
@@ -408,10 +410,25 @@ def run_grip(rig: Rig, path: Path1D, axis: int, *, mu: float, mass: float, squee
 # --------------------------------------------------------------------------
 
 
+#: tower: full ``implicit`` integration, a 0.5 ms step and softer contacts (time constant 8 ms). With T8's settings (``implicitfast``,
+#: 1 ms, 4 ms) a heavy box dropping onto the edge of the box below, or tumbling off it, sometimes gained energy and launched itself
+#: and the box below metres away: 10.7 % of the first 449 tower groups had a rollout flagged by the rise guard, and the same
+#: rollouts turned "top" into "more". ``implicit`` alone (keeps the gyroscopic terms), a 0.5 ms or 0.25 ms step alone, or 8 ms
+#: contacts alone each left 10–20 % of the flagged rollouts unstable; the three together left none (0 of 192 on the worst groups),
+#: at about the same cost per rollout. The other families have no impacts or tumbling and keep T8's settings.
+TOWER_INTEGRATOR = "implicit"
+TOWER_TIMESTEP = 0.0005
+TOWER_SOLREF = "0.008 1"
+
+
 def tower_xml(boxes: Sequence[tuple[Sequence[float], float]]) -> str:
     """MJCF of the tower scene: a floor and the boxes (``(dims, mass)`` from the bottom up, dims = L fore-aft × W × H); the
     positions are written per rollout."""
-    out = t8._header("v03-tower") + "  <worldbody>\n" + '    <geom name="floor" type="plane" size="3 3 0.1" priority="1"/>\n'
+    header = (t8._header("v03-tower").replace('integrator="implicitfast"', f'integrator="{TOWER_INTEGRATOR}"')
+              .replace(f'timestep="{TIMESTEP}"', f'timestep="{TOWER_TIMESTEP}"').replace(f'solref="{t8.SOLREF}"', f'solref="{TOWER_SOLREF}"'))
+    if f'timestep="{TOWER_TIMESTEP}"' not in header or f'solref="{TOWER_SOLREF}"' not in header:
+        raise AssertionError("tower header: T8's option line changed")
+    out = header + "  <worldbody>\n" + '    <geom name="floor" type="plane" size="3 3 0.1" priority="1"/>\n'
     z = 0.0
     for i, (dims, mass) in enumerate(boxes):
         out += _box_body(f"box{i}", dims, mass, (0.0, 0.0, z + dims[2] / 2 + 0.0005))
@@ -443,13 +460,15 @@ def run_tower(rig: Rig, *, centres: Sequence[float], drop: float, mu: float, com
     mujoco.mj_forward(model, data)
     tops = list(start_z)
     steps = 0
-    limit = int(round((TOWER_SECONDS + SETTLE_MAX) / TIMESTEP))
+    dt = float(model.opt.timestep)
+    chunk = int(round(0.05 / dt))  # check every 50 ms
+    limit = int(round((TOWER_SECONDS + SETTLE_MAX) / dt))
     while steps < limit:
-        mujoco.mj_step(model, data, nstep=50)
-        steps += 50
+        mujoco.mj_step(model, data, nstep=chunk)
+        steps += chunk
         for i, name in enumerate(names):
             tops[i] = max(tops[i], float(data.xpos[rig.boxes[name]["body"]][2]))
-        if steps >= int(round(TOWER_SECONDS / TIMESTEP)) and steps % 100 == 0:
+        if steps >= int(round(TOWER_SECONDS / dt)) and steps % (2 * chunk) == 0:
             if all(np.linalg.norm(rig.velocity(n)[:3]) < SETTLE_LIN and np.linalg.norm(rig.velocity(n)[3:]) < SETTLE_ANG for n in names):
                 break
     tilts, fallen = [], []
