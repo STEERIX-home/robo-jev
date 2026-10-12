@@ -342,6 +342,29 @@ def _upload(args: argparse.Namespace) -> int:
     return 0
 
 
+def drop_page_cache(*roots: str | Path) -> int:
+    """Evict the page cache of the large files under `roots` (fsync, then ``posix_fadvise(DONTNEED)``); returns the bytes covered.
+
+    On the GB10's unified memory the free figure that :func:`robo_jev.gpu.require_free` reads tracks MemFree, and a few GB of fresh
+    downloads or model reads sit in the page cache — clean, reclaimable pages that still push that figure under the threshold. Dropping our
+    own files' pages restores the honest figure instead of lowering the threshold."""
+    covered = 0
+    for root in roots:
+        root = Path(root)
+        files = [root] if root.is_file() else [p for p in root.rglob("*") if p.is_file()] if root.is_dir() else []
+        for path in files:
+            if path.is_symlink() or path.stat().st_size < (1 << 20):
+                continue
+            fd = os.open(path, os.O_RDONLY)
+            try:
+                os.fsync(fd)
+                os.posix_fadvise(fd, 0, 0, os.POSIX_FADV_DONTNEED)
+                covered += path.stat().st_size
+            finally:
+                os.close(fd)
+    return covered
+
+
 def _answers_equal(a: dict[str, Any], b: dict[str, Any]) -> bool:
     return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
 
@@ -354,20 +377,26 @@ def _verify_hub(args: argparse.Namespace) -> int:
     from robo_jev.decisions.records import read_records, shuffle_key
     from robo_jev.hf.export import ADAPTER_REPO, MERGED_REPO, TAG
     from robo_jev.hf.hub import load_token, redact
-    from robo_jev.infer import RoboJev
+    from robo_jev.infer import RoboJev, file_sha256
 
     records = read_records(args.input)[: args.limit]
     cache = Path(tempfile.mkdtemp(prefix="hf0-clean-cache-", dir=args.cache_parent))
     token = load_token(args.token_file)
     report: dict[str, Any] = {"records": [r["id"] for r in records], "cache": str(cache), "tag": TAG, "runs": {}}
 
+    def ready(what: str) -> None:
+        dropped = drop_page_cache(cache, args.root, args.base_model)
+        _log(f"{what}: dropped the page cache of {dropped / 2**30:.1f} GiB of model files · memory {memory_report()}")
+        require_free(MIN_FREE, what=what)
+
     def run_robojev(label: str, source: str, **kwargs: Any) -> dict[str, Any]:
-        require_free(MIN_FREE, what=f"load {label}")
+        ready(f"load {label}")
         started = time.perf_counter()
         model = RoboJev.from_pretrained(source, device="cuda", **kwargs)
         answers = {str(r["id"]): model.decide(r["request"]["state"], r["request"]["questions"], key=shuffle_key(r), orders=args.orders)
                    for r in records}
         report["runs"][label] = {"model": model.name, "seconds": round(time.perf_counter() - started, 1)}
+        _log(f"{label}: {model.name} answered {len(answers)} records in {report['runs'][label]['seconds']} s")
         del model
         torch.cuda.empty_cache()
         return answers
@@ -386,7 +415,7 @@ def _verify_hub(args: argparse.Namespace) -> int:
                                     for r in records), encoding="utf-8")
         standalone = {}
         for variant, repo_id in (("merged", MERGED_REPO), ("adapter", ADAPTER_REPO)):
-            require_free(MIN_FREE, what=f"standalone {variant}")
+            ready(f"standalone {variant}")
             script = Path(hub_snapshot(repo_id, cache, token)) / "robo_jev_decide.py"
             # the standalone script, as a user would run it — in a child process with the same fence, the clean cache and the token in its env
             launcher = (f"import runpy, sys, torch; torch.cuda.set_per_process_memory_fraction({args.gpu_memory_fraction}); "
@@ -398,7 +427,9 @@ def _verify_hub(args: argparse.Namespace) -> int:
             if done.returncode != 0:
                 raise RuntimeError(f"standalone {variant} failed: {redact(done.stderr[-2000:])}")
             standalone[variant] = {line["id"]: line["answers"] for line in map(json.loads, done.stdout.splitlines()) if line}
-            report["runs"][f"standalone {variant}"] = {"seconds": round(time.perf_counter() - started, 1), "script": str(script)}
+            report["runs"][f"standalone {variant}"] = {"seconds": round(time.perf_counter() - started, 1), "script": str(script),
+                                                       "script_sha256": file_sha256(script)}
+            _log(f"standalone {variant}: {len(standalone[variant])} records in {report['runs'][f'standalone {variant}']['seconds']} s")
     except Exception as error:  # noqa: BLE001
         raise SystemExit(f"verify failed: {redact(error)}") from None
     checks = {}
