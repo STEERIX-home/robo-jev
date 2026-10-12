@@ -136,7 +136,8 @@ LEAK_CASES = [
 ]
 
 
-@pytest.mark.parametrize("knobs", [{}, {"phrasing": "v01", "fact_shuffle": 0.5}], ids=["v0b", "v01"])     # 학습 문구 판 v01·사실 순서 섞기도(Task v0.1a)
+@pytest.mark.parametrize("knobs", [{}, {"phrasing": "v01", "fact_shuffle": 0.5}, {"phrasing": "v01b", "fact_shuffle": 0.5}],
+                         ids=["v0b", "v01", "v01b"])     # 학습 문구 판 v01·사실 순서 섞기도(Task v0.1a), v01b (Task v0.2)
 @pytest.mark.parametrize(("seed", "domain", "forced"), LEAK_CASES)
 def test_two_worlds_that_differ_only_in_hidden_values_give_the_same_observation_and_record(seed, domain, forced, knobs):
     cfg = default_config()

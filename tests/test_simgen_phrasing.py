@@ -31,6 +31,7 @@ ARTIFACTS = Path(__file__).resolve().parents[1] / "artifacts" / "simgen"
 V0B_TRAIN = ARTIFACTS / "v0b" / "train-50k.jsonl"
 V0B_TESTS = ARTIFACTS / "v0b" / "tests"
 V01_TRAIN = ARTIFACTS / "v01" / "train-50k.jsonl"
+V02_TRAIN = ARTIFACTS / "v02" / "train-50k.jsonl"
 
 #: v0b 문구 목록(학습·빼 둔 — 영어·한국어, 질문 열쇠와 선택지 설명 전부)의 sha256 — 바이트 단위로 손대지 않는다
 V0B_BANKS_SHA256 = "131d9def2a5c826cde118c55ed626f59f10e4e30d0c8dac0760202882f4dbba1"
@@ -115,7 +116,7 @@ def test_the_v0b_training_set_reproduces_byte_for_byte(cfg):
             assert lines == list(islice(handle, len(lines)))
 
 
-@pytest.mark.parametrize("knob", [{"phrasing": "v01"}, {"fact_shuffle": 0.5}])
+@pytest.mark.parametrize("knob", [{"phrasing": "v01"}, {"phrasing": "v01b"}, {"fact_shuffle": 0.5}])
 def test_non_default_knobs_are_refused_outside_the_training_split(cfg, knob):
     moment = build_moment(cfg, 2_000_123, "cafe", {"group": "P1"}, None, split_for("T1"))
     with pytest.raises(ValueError, match="training split only"):
@@ -391,3 +392,94 @@ def test_the_v01_training_set_matches_its_manifest_and_shuffles_about_half():
     assert digest.hexdigest() == manifest["sha256"] and n == manifest["records"] == 50_000
     assert manifest["phrasing"] == "v01" and manifest["fact_shuffle"] == 0.5
     assert abs(shuffled / n - 0.5) < 0.01, shuffled / n
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# Task v0.2 §1-2 — wording balance v01b
+# ----------------------------------------------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def v01b_batch(cfg):
+    """The same 200 seeds as `paired_batches`, phrasing v01b with the same fact shuffle."""
+    return list(generate_batch(200, base_seed=21, cfg=cfg, git="fixed", phrasing="v01b", fact_shuffle=0.5))
+
+
+def test_v01b_keeps_the_moments_and_labels_of_v0b_and_the_state_text_of_v01(paired_batches, v01b_batch):
+    a, b = paired_batches
+    differs = Counter()
+    for ra, rb, rc in zip(a, b, v01b_batch, strict=True):
+        assert dumps(ra["labels"]) == dumps(rc["labels"]), rc["id"]
+        assert ph.without_text(ra) == ph.without_text(rc), rc["id"]
+        assert rc["request"]["state"] == rb["request"]["state"] and rc["meta"]["fact_order"] == rb["meta"]["fact_order"], rc["id"]
+        assert not validate_record(rc), rc["id"]
+        assert rc["meta"]["phrasing"]["version"] == "v01b" and rc["generator"]["phrasing"] == "v01b"
+        qa, qc = ra["request"]["questions"], rc["request"]["questions"]
+        differs["questions"] += len(qa)
+        differs["from_v0b"] += sum(qa[n]["instructions"] != qc[n]["instructions"] for n in qa)
+    assert 0.3 * differs["questions"] < differs["from_v0b"] < 0.65 * differs["questions"], differs
+
+
+def test_v01b_keeps_the_original_wording_on_half_of_the_picks_and_it_is_the_one_v0b_drew(v01b_batch):
+    summary = ph.wording_summary(ph.wording_stats(v01b_batch))
+    assert summary["all"]["uses"] > 1500
+    for lang in ("en", "ko", "all"):
+        assert abs(summary[lang]["original_share"] - ph.V01B_ORIGINAL_SHARE) < 0.08, (lang, summary[lang])
+    for record in v01b_batch:
+        lang = record["meta"]["language"]
+        for name, i_v0b, i_wide in record["meta"]["phrasing"]["picks"]:
+            table, key = ph.pick_table(name)
+            n_v0b = len(ph.base_tables(lang)[table][key]["train"])
+            assert 0 <= i_wide < len(ph.wide(lang, table, key))
+            if i_wide < n_v0b:
+                assert i_wide == i_v0b, (record["id"], name)    # an original pick is exactly the wording v0b used
+
+
+def test_v01b_differs_from_v01_only_in_the_wording_and_rebuilds_from_its_own_fields(cfg, paired_batches, v01b_batch):
+    _, b = paired_batches
+    assert any(dumps(rb["request"]["questions"]) != dumps(rc["request"]["questions"]) for rb, rc in zip(b, v01b_batch))
+    again = list(generate_batch(40, base_seed=21, cfg=cfg, git="fixed", phrasing="v01b", fact_shuffle=0.5))
+    assert [dumps(r) for r in again] == [dumps(r) for r in v01b_batch[:40]]
+    pairs = [r for r in v01b_batch if r["meta"]["pair"]]
+    for record in v01b_batch[:20] + pairs[:4]:
+        assert dumps(rebuild_record(cfg, record)) == dumps(record), record["id"]
+
+
+def test_the_v01b_pick_rule_itself():
+    import numpy as np
+
+    rng = np.random.default_rng(5)
+    picks = [ph.pick_v01b(rng, 2, 3, 10) for _ in range(4000)]
+    original = sum(p == 2 for p in picks) / len(picks)
+    assert abs(original - 0.5) < 0.03 and set(picks) <= {2, *range(3, 10)} and set(range(3, 10)) <= set(picks)
+    with pytest.raises(ValueError):
+        ph.pick_v01b(rng, 3, 3, 10)      # the v0b index must be inside the v0b list
+    with pytest.raises(ValueError):
+        ph.pick_v01b(rng, 0, 3, 3)       # a key without new wordings cannot take v01b
+    assert ph.PHRASINGS == ("v0b", "v01", "v01b") and ph.WIDE_PHRASINGS == ("v01", "v01b") and ph.DEFAULT_PHRASING == "v0b"
+
+
+@pytest.mark.skipif(not V02_TRAIN.exists(), reason="v02 training set not generated yet (scripts/simgen_v0b.py train --phrasing v01b)")
+def test_the_v02_training_set_matches_its_manifest_keeps_half_original_wordings_and_shuffles_about_half():
+    manifest = json.loads(V02_TRAIN.with_suffix(".manifest.json").read_text(encoding="utf-8"))
+    stats = json.loads(V02_TRAIN.with_suffix(".stats.json").read_text(encoding="utf-8"))
+    digest = hashlib.sha256()
+    shuffled = n = 0
+    with V02_TRAIN.open("rb") as handle:
+        for line in handle:
+            digest.update(line)
+            record = json.loads(line)
+            assert record["meta"]["phrasing"]["version"] == "v01b" and record["generator"]["phrasing"] == "v01b"
+            shuffled += record["meta"]["fact_order"]["shuffled"]
+            n += 1
+    assert digest.hexdigest() == manifest["sha256"] and n == manifest["records"] == 50_000
+    assert manifest["phrasing"] == "v01b" and manifest["fact_shuffle"] == 0.5
+    assert abs(shuffled / n - 0.5) < 0.01, shuffled / n
+    for lang in ("en", "ko", "all"):
+        assert abs(stats["wording_summary"][lang]["original_share"] - 0.5) < 0.01, stats["wording_summary"]
+    for name in ("compare-v0b", "compare-v01"):
+        path = V02_TRAIN.with_name(f"train-50k.{name}.json")
+        if path.exists():
+            compare = json.loads(path.read_text(encoding="utf-8"))
+            assert compare["violations"] == 0 and compare["counts"]["records"] == 50_000 and compare["v01"]["sha256"] == manifest["sha256"]
+            assert all(compare["stats_identical"].values()), compare["stats_identical"]

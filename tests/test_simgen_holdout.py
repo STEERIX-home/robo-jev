@@ -26,6 +26,8 @@ TRAIN = ARTIFACTS / "train-50k.jsonl"
 TESTS = ARTIFACTS / "tests"
 #: Task v0.1a — 학습 문구 판 v01 + 사실 순서 섞기로 만든 학습 세트(같은 seed·같은 설정; 시험 세트는 v0b 그대로)
 TRAIN_V01 = ARTIFACTS.parent / "v01" / "train-50k.jsonl"
+#: Task v0.2 — wording balance v01b + fact shuffle (same seeds and settings)
+TRAIN_V02 = ARTIFACTS.parent / "v02" / "train-50k.jsonl"
 
 
 @pytest.fixture(scope="module")
@@ -149,7 +151,7 @@ def _scan(path: Path):
             yield json.loads(line)
 
 
-@pytest.mark.parametrize("train", [TRAIN, TRAIN_V01], ids=["v0b", "v01"])
+@pytest.mark.parametrize("train", [TRAIN, TRAIN_V01, TRAIN_V02], ids=["v0b", "v01", "v02"])
 def test_the_whole_training_set_hits_no_held_out_cell_and_shares_no_request_with_any_test_set(holdout, train):
     if not train.exists():
         pytest.skip(f"training set not generated yet: {train} (scripts/simgen_v0b.py train)")
