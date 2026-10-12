@@ -368,9 +368,14 @@ def cmd_judge(args: argparse.Namespace) -> int:
 
     plan = _plan()
     entries = plan[args.start : args.start + args.count]
-    _, data = _evaluate_range(args.model, entries)
-    pool = [x for x in data["results"] if x[1]["passed"] or args.include_failed]
     rng = random.Random(args.seed)
+    if args.sample_moments:  # evaluate only a random subset of the range (cheaper on a long range)
+        entries = rng.sample(entries, min(args.sample_moments, len(entries)))
+    _, data = _evaluate_range(args.model, entries, args.accepted_by)
+    if args.accepted_by:  # audit the final records: rewrites that passed the checks and the first back-check
+        pool = [x for x in data["results"] if x[1]["passed"] and (x[1].get("verdict") or {}).get("ok")]
+    else:
+        pool = [x for x in data["results"] if x[1]["passed"] or args.include_failed]
     sample = rng.sample(pool, min(args.sample, len(pool)))
     price = _price(args.judge_model)
     jobs = [judge_job(f"judge~{job.job_id}", job.source["request"]["state"], result["state"], args.judge_model, price, job.voice.language,
@@ -421,6 +426,7 @@ def cmd_assemble(args: argparse.Namespace) -> int:
     moments, replies, records, invalid = set(), 0, 0, 0
     results_all = []
     q_status = Counter()
+    ratios: dict[str, list[float]] = defaultdict(list)
     chunk = 2000
     with temp.open("w", encoding="utf-8") as handle:
         for begin in range(0, len(plan), chunk):
@@ -465,6 +471,7 @@ def cmd_assemble(args: argparse.Namespace) -> int:
                 counts["scene"][job.entry["scene"]] += 1
                 counts["language"][job.voice.language] += 1
                 counts["group"][job.entry["group"]] += 1
+                ratios[job.voice.key].append(narration["length_ratio"])
                 for status in result["question_status"].values():
                     q_status[status.split(" ")[0]] += 1
     temp.replace(out_path)
@@ -480,6 +487,8 @@ def cmd_assemble(args: argparse.Namespace) -> int:
         "plan": {"path": str(PLAN.relative_to(REPO)), "sha256": _sha256_file(PLAN), "moments": len(plan)},
         "counts": {k: dict(sorted(v.items())) for k, v in counts.items()},
         "questions": dict(q_status),
+        "length_ratio": {voice: _quantiles(values) for voice, values in sorted(ratios.items())}
+                        | {"all": _quantiles([v for values in ratios.values() for v in values])},
         "check_pass_rates": rates,
         "spend": {"ledger": str(LEDGER.relative_to(REPO)), "totals": ledger.get("totals"), "models": ledger.get("models"),
                   "hard_cap_usd": HARD_CAP_USD},
@@ -492,6 +501,14 @@ def cmd_assemble(args: argparse.Namespace) -> int:
     _write_json(out_path.with_name(out_path.stem + ".manifest.json"), manifest)
     _log(f"{records} records from {len(moments)} moments ({replies} replies checked, pass {rates['pass_rate']}) → {out_path}")
     return 0
+
+
+def _quantiles(values: list[float]) -> dict[str, float] | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    pick = lambda q: ordered[min(len(ordered) - 1, int(q * len(ordered)))]  # noqa: E731
+    return {"n": len(ordered), "p10": pick(0.1), "median": pick(0.5), "p90": pick(0.9), "mean": round(sum(ordered) / len(ordered), 3)}
 
 
 def _audit() -> dict[str, Any]:
@@ -532,7 +549,7 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--tag", default=name)
         command.add_argument("--max-total-usd", type=float, required=True)
         command.add_argument("--concurrency", type=int, default=16)
-        command.add_argument("--timeout", type=float, default=120.0)
+        command.add_argument("--timeout", type=float, default=60.0)
         command.add_argument("--cache-only", action="store_true")
         command.add_argument("--only-language", choices=("en", "ko"))
         if name == "pipeline":
@@ -542,6 +559,8 @@ def build_parser() -> argparse.ArgumentParser:
             command.add_argument("--sample", type=int, default=400)
             command.add_argument("--seed", type=int, default=0)
             command.add_argument("--include-failed", action="store_true")
+            command.add_argument("--accepted-by", help="sample only rewrites this back-check model accepted (audit of the final records)")
+            command.add_argument("--sample-moments", type=int, help="evaluate a random subset of this many plan moments")
             command.add_argument("--out", type=Path, default=OUT / "judge-report.json")
     report = sub.add_parser("report")
     report.add_argument("--model", required=True)
