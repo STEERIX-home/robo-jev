@@ -280,6 +280,9 @@ def cmd_overlap(args: argparse.Namespace) -> int:
             if name in outside_units and units & outside_units[name]:
                 found.append(f"{len(units & outside_units[name])} units")
             for what in found:
+                if part == "d1" and name == "G1" and what.endswith("units"):
+                    tally["info:G1_template_units"] += 1  # same d1 generator templates by construction; the rule is the lineage check
+                    continue
                 tally[f"{name}:{what.split()[-1]}"] += 1
                 if len(report["hits"][part]) < 20:
                     report["hits"][part].append(f"{rid} ↔ {name}: {what}")
@@ -297,7 +300,7 @@ def cmd_overlap(args: argparse.Namespace) -> int:
     if d1_records and "G1" in sealed:
         crossing = overlap(read_records(sealed["G1"]), d1_records)
         lineage = {"origin_groups": len(crossing["origin_groups"]), "source_records": len(crossing["source_records"])}
-    hits = sum(v for tally in per_part.values() for k, v in tally.items() if k != "records")
+    hits = sum(v for tally in per_part.values() for k, v in tally.items() if k != "records" and not k.startswith("info:"))
     hits += duplicates + (sum(lineage.values()) if lineage else 0)
     out = {
         "kind": "v03-sealed-overlap", "script_version": SCRIPT_VERSION, "git": _git(),
@@ -311,7 +314,10 @@ def cmd_overlap(args: argparse.Namespace) -> int:
                             "written outside our engine (G1, G2, T8a, T8b; T1–T7 share the engine's templates, so they are matched on whole "
                             "texts only — the narration task's rule)",
                    "seed_range": f"engine records' generator seeds inside the training range [{train_low}, {train_high}] (holdout-v0b)",
-                   "d1_lineage": "d1 mix vs G1: shared origin groups / source records (single_probe.overlap — the mix command's check)"},
+                   "d1_lineage": "d1 mix vs G1: shared origin groups / source records (single_probe.overlap — the mix command's check). "
+                                 "The d1 mix and G1 come from the same templated d1 generator, so their text units overlap by construction "
+                                 "(counted as info:G1_template_units, not as hits); G1 is partly in-family for the mix since v0.1 and is "
+                                 "read only as a secondary set — G2 is the independent general check"},
         "parts": {part: dict(sorted(tally.items())) for part, tally in sorted(per_part.items())},
         "duplicate_ids": duplicates, "d1_lineage": lineage, "total_hits": hits, "first_hits": dict(report["hits"]),
         "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),

@@ -193,6 +193,16 @@ def test_the_overlap_check_finds_a_sealed_state_request_id_or_outside_text_unit_
     report = json.loads((tmp_path / "dirty.json").read_text(encoding="utf-8"))
     hits = " ".join(sum(report["first_hits"].values(), []))
     assert "T1: state" in hits and "T1: request" in hits and "G2: 1 units" in hits
+    # a d1 mix record shares template text with G1 by construction: reported as info, not a hit (the lineage check is the rule)
+    d1 = copy.deepcopy(records[5])
+    d1["id"], d1["meta"] = "rules-0001-0", {"split": "train", "origin_group": "rules/x/0001", "source_record": "rules-0001"}
+    d1["request"]["state"] = "Context line.\npassage: The quick brown fox jumps over the lazy dog near the river bank today."
+    g1 = copy.deepcopy(outside)
+    g1["id"], g1["meta"] = "rules-0002-0", {"split": "test", "origin_group": "rules/x/0002", "source_record": "rules-0002"}
+    monkeypatch.setattr(script, "SEALED", {"T1": sealed_t1, "G1": _write(tmp_path / "G1.jsonl", [g1])})
+    assert script.main(["overlap", "--input", str(_write(tmp_path / "d1.jsonl", [d1])), "--out", str(tmp_path / "d1.json"), "--allow-missing"]) == 0
+    report = json.loads((tmp_path / "d1.json").read_text(encoding="utf-8"))
+    assert report["parts"]["d1"] == {"records": 1, "info:G1_template_units": 1} and report["d1_lineage"] == {"origin_groups": 0, "source_records": 0}
     with pytest.raises(SystemExit, match="missing"):
         monkeypatch.setattr(script, "SEALED", {"T1": sealed_t1, "T9": tmp_path / "absent.jsonl"})
         script.main(["overlap", "--input", str(clean), "--out", str(tmp_path / "x.json")])
