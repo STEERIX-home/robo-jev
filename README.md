@@ -4,7 +4,7 @@ robo-jev is a research project by **Steerix Robotics**. It builds the decision l
 
 Models of this kind already exist (TypeSafe's Jev, Microsoft-Decision-1 and others), and several are built by post-training a general LLM backbone (Microsoft-Decision-1, for example, is post-trained Qwen3.5-9B). They read the *meaning* of a situation well. What they lack is *physics*: whether a tall glass tips over if the robot brakes hard now, whether the person reaches the robot's path first, whether the plate actually seated in its nest. robo-jev's bet is that this physics can be taught with simulation-generated data, labelled by what physically happens, and that what is learned transfers to situations the model has never seen.
 
-> **Status (2026-10-12):** the first trained version (v0, a 2B LoRA) beats the untrained model on every sealed test set, including unseen styles and wordings (T2) and an unseen combination of phenomena (T4) — the central hypothesis is supported under the rule fixed before the result was seen. v0.1 (wording and fact-order robustness, a general-ability check) is in progress. See [First result](#first-result-v0) and [Status](#status).
+> **Status (2026-10-12):** the first trained version (v0, a 2B LoRA) beats the untrained model on every sealed test set, including unseen styles and wordings (T2) and an unseen combination of phenomena (T4) — the central hypothesis is supported under the rule fixed before the result was seen. v0.1 fixed v0's wording and fact-order weaknesses but did not pass its own rule (a small in-distribution cost), and general reading is still below the untrained model. Against six decision models on OpenRouter, ours lead on our physics sets and trail on public reading. See [First result](#first-result-v0), [v0.1](#v01-result), [Benchmark](#benchmark-decision-models-on-openrouter-bench-v0) and [Status](#status).
 
 ## Where it sits: three layers
 
@@ -110,11 +110,80 @@ The 2B backbone (Qwen3.5-2B) was trained once (LoRA, 50,000 generated requests, 
   - Physics training taught it that stopping is usually safe, and that now overrides what the text says.
 - **Not yet tested outside this generator family.** All seven sets come from the same engine with held-out cells, so outside tests are still to come.
 
-v0.1 runs as two variants:
-- **Data fixes only:** more training wordings and shuffled fact order. Only the data changes, so the difference can be attributed.
-- **Data fixes plus general data:** the same, with about 2.7 % of training examples drawn from the non-robot reading set's training split.
+## v0.1 result
 
-Both variants are scored on the same sealed sets and on the two general-reading checks. The pass rule was written down before any v0.1 data existed.
+v0.1 ran as two variants, each trained once with v0's recipe on the same 50,000 moments with the same labels:
+- **v0.1-main (data fixes only):** 6–10 training wordings per question instead of 3, and fact order shuffled in half of the texts.
+- **v0.1-mix:** the same, plus about 2.7 % of training examples from the non-robot reading set's training split.
+
+The pass rule was written before any v0.1 data existed. It compares each variant with v0 on the same records and hardware, and has three parts:
+- (A) better on T2's held-out wordings;
+- (B) fact-order sensitivity no higher than the untrained model's 0.034;
+- (C) no loss elsewhere beyond small fixed margins.
+
+| | (A) held-out wording, yes/no Brier vs v0 | (B) fact-order shift | (C) no loss elsewhere | verdict |
+|---|---|---|---|---|
+| v0.1-main | −0.013 [−0.017, −0.008] | 0.028 | default-criterion action regret up on T1 (+0.39 [+0.14, +0.72]) and T5 (+0.28 [+0.09, +0.50]) | does not pass |
+| v0.1-mix | −0.017 [−0.023, −0.012] | 0.027 | regret up on T1 (+0.44) and T4 (+0.49); T1 yes/no Brier +0.008 | does not pass |
+
+- **Wording fixed.** The question v0 broke on — "if you shift it to the centre first, does it come off the stack?" in the held-out wording — went from 0.611 (v0) to 0.146 (v0.1-mix); the untrained model scores 0.173.
+- **Fact order fixed.** The shift fell from 0.071 to 0.027.
+- **Small in-distribution cost.** Default-criterion action regret on T1 rose from 0.84 to about 1.2–1.3; the untrained model scores 9.9. A likely cause: T1 and T7 are asked in the original wordings, and those now make up only about a third of the English training wordings instead of all of them.
+- **General reading**, measured on the same hardware against the untrained 2B:
+
+  | | G1 | G2 (public) |
+  |---|---|---|
+  | v0 | −0.057 | −0.088 |
+  | v0.1-main | −0.061 | −0.131 |
+  | v0.1-mix | +0.304* | −0.061 |
+
+  - \* G1 is in the mix's own family, so this gain overstates it.
+  - Broader physics wordings made public sentence inference worse (MultiNLI −0.25).
+  - The 2.7 % general data won back part of it (+0.071 against v0.1-main).
+
+## Benchmark: decision models on OpenRouter (bench-v0)
+
+The same requests went to six decision models on [OpenRouter](https://openrouter.ai/models?output_modalities=decisions) through the Decisions API, and every model was scored with the same tools.
+- **Physics:** a fixed stratified sample of the sealed physics sets (2,390 requests).
+- **General reading:** the two general-reading checks (1,314 requests).
+- **Cost:** $1.64 for all six.
+- **Data collection:** denied, so requests went only to providers that do not store or train on them.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/bench-v0-scatter-dark.svg">
+  <img alt="Physical judgment vs general reading on bench-v0: our trained 2B models lead on the physics sets, the OpenRouter decision models lead on public reading" src="docs/figures/bench-v0-scatter-light.svg">
+</picture>
+
+| Model | Physics skill T2–T4 ↑ | Yes/no Brier T2–T4 ↓ | Score Brier T2–T4 ↓ | Answered T2–T4 | G1 acc ↑ | G2 acc ↑ | $/M input |
+|---|---|---|---|---|---|---|---|
+| **Qwen3.5-2B (untrained)** | -0.148 | 0.177 | 0.186 | 100% | 0.485 | 0.738 | self-hosted |
+| **ours v0 (2B)** | 0.777 | 0.048 | 0.019 | 100% | 0.428 | 0.650 | self-hosted |
+| **ours v0.1-main (2B)** | 0.795 | 0.043 | 0.018 | 100% | 0.424 | 0.607 | self-hosted |
+| **ours v0.1-mix (2B)** | 0.795 | 0.043 | 0.019 | 100% | 0.790 | 0.677 | self-hosted |
+| liquid/d1 | 0.167 | 0.138 | 0.122 | 100% | 0.778 | 0.926 | 0.040 |
+| microsoft/microsoft-decision-1 | 0.044 | 0.162 | 0.136 | 100% | 0.787 | 0.915 | 0.042 |
+| openai/gpt-6-luna-decisions | -0.020 | 0.194 | 0.118 | 76% | 0.768 | 0.863 | 0.100 |
+| ~typesafe/jev-latest | 0.277 | 0.123 | 0.102 | 100% | 0.791 | 0.909 | 0.042 |
+| togethercomputer/tev1-4b-experimental | 0.027 | 0.162 | 0.141 | 100% | 0.684 | 0.903 | 0.042 |
+| upstage/solar-decide | -0.150 | 0.144 | 0.230 | 100% | 0.769 | 0.864 | 0.050 |
+
+- **Physics (T2–T4).** These sets come from our own engine — home ground.
+  - The trained 2B models predict the simulated outcomes far better than any OpenRouter model: physics skill 0.78–0.80, against 0.28 for the best (Jev).
+  - Most OpenRouter models score near "always answer 0.5", like the untrained 2B.
+- **Public reading (G2).** The OpenRouter models lead: 0.86–0.93, against 0.61–0.68 for ours.
+  - The 2B backbone starts lower (0.74).
+  - Physics training has cost part of that so far; see [v0.1](#v01-result).
+- **Refusals.** GPT-6 Luna Decisions declined about a fifth of the physics requests (507 of 2,390, "refused to answer") and none of the reading requests; its scores cover the rest.
+- **How each side was asked.**
+  - OpenRouter models were asked once each, in the stored option order. Ours are averaged over balanced option orders.
+  - Score questions were sent with their two anchors as written. The API accepts at most 10 levels, and an 11-level variant made no difference on the one model that accepted it.
+  - Action-choice metrics depend on our value table, so they are left out here.
+  - Definition: `configs/bench/bench-v0.yaml`; run with `scripts/bench.py`.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/bench-v0-sets-dark.svg">
+  <img alt="Per-set results on bench-v0: yes/no Brier on T1–T7 and reading accuracy on G1 and G2 for every model" src="docs/figures/bench-v0-sets-light.svg">
+</picture>
 
 ## Training
 
@@ -134,7 +203,8 @@ Both variants are scored on the same sealed sets and on the two general-reading 
 | v0d | Trainer (LoRA bf16 + fp32 masters, code-mass term) and `--checkpoint` scoring with the same prompts | merged |
 | cloud1 | RunPod runner: hard spend caps, three deletion fences, ledger | merged; self-delete proven on H100 |
 | **v0** | First trained 2B, evaluated on T1–T7 against the untrained 2B and 4B | **done 2026-10-12 — hypothesis supported** ([First result](#first-result-v0)) |
-| v0.1 | More training wordings, shuffled fact order; a variant with 2.7 % general data; general-reading checks (G1, G2) | running on RunPod |
+| v0.1 | More training wordings, shuffled fact order; a variant with 2.7 % general data; general-reading checks (G1, G2) | done 2026-10-12 — weaknesses fixed, rule not passed ([v0.1](#v01-result)) |
+| bench-v0 | Same requests to six OpenRouter decision models, same scoring, graphs | done 2026-10-12 ([Benchmark](#benchmark-decision-models-on-openrouter-bench-v0)) |
 
 ## Roadmap — coarse to fine
 
@@ -154,11 +224,14 @@ Neutral benchmarks such as **robojev** ([robo-jev.dev](https://robo-jev.dev), a 
 src/robo_jev/simgen/      simulation judgment engine: phenomena, property catalog, observation and text, questions,
                           posterior labels, held-out sets, record format (README inside)
 src/robo_jev/decisions/   decision requests: prompts, zero-shot diagnosis, metrics, training examples, trainer
-src/robo_jev/launch/      run manifests, budget caps, remote runner, backends (local, ssh; RunPod in progress)
+src/robo_jev/launch/      run manifests, budget caps, remote runner, backends (local, ssh, RunPod)
+src/robo_jev/bench/       bench-v0: OpenRouter Decisions client, scoring, figures
 configs/simgen/           property catalog, scenario skins (EN/KO), value tables, held-out definition
+configs/bench/            bench-v0 definition (sampled ids, models, request format)
+configs/cloud/            RunPod job definitions
 configs/train/            decisions-v0-{lora,full}.yaml (older files belong to the archived track)
 scripts/                  simgen_generate · simgen_examples · simgen_v0b · diagnose_decisions · train_decisions ·
-                          slim_checkpoint · launch_run
+                          slim_checkpoint · launch_run · convert_single_probe · bench · plot_bench
 docs/12-…                 the current design (Korean); docs/01–11 are the archived tabletop track
 HANDOFF.md                how to continue on another machine; what lives outside git; box rules
 ```
@@ -182,6 +255,11 @@ uv run python scripts/diagnose_decisions.py --model Qwen/Qwen3.5-2B --mode direc
 # train (GPU) and score the checkpoint with the same reading
 uv run python scripts/train_decisions.py train --config configs/train/decisions-v0-lora.yaml --set train_input=<train.jsonl> --set run_name=<name>
 uv run python scripts/diagnose_decisions.py --model Qwen/Qwen3.5-2B --checkpoint <run dir> --input <test.jsonl> --out <report.json>
+
+# benchmark against OpenRouter decision models (key in ~/.config/robo-jev/openrouter.env; paid calls need --max-cost-usd)
+uv run python scripts/bench.py build && uv run python scripts/bench.py dry-run
+uv run python scripts/bench.py run --max-cost-usd 5 --max-cost-per-model-usd 1 --data-collection deny
+uv run python scripts/bench.py score && uv run python scripts/plot_bench.py --results artifacts/bench/v0/results.json --out-dir docs/figures
 ```
 
 On the DGX Spark, CPU and GPU share one 121 GB memory: every GPU process sets a memory fence before its first CUDA allocation, only one GPU job runs at a time, and heavy CPU jobs run as `systemd-run` units with a memory cap. [HANDOFF.md](HANDOFF.md) §5 has the rules.
