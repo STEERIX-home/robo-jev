@@ -1,8 +1,10 @@
 [project]
 name = "robo-jev"
 version = "0.0.1"
-description = "robojev: a real-time System One judgment model for decisions in the physical world"
+description = "A small, fast decision model for robots, specialized in physical judgment"
 readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 requires-python = ">=3.11"
 dependencies = [
     # 시뮬레이터는 MuJoCo + robosuite 1.5 계열 (docs/05 §2). `sim/`은 1.5의 API
