@@ -314,7 +314,9 @@ def cmd_assemble(args: argparse.Namespace) -> int:
         selection, targets, pair_cap = chosen["selection"], chosen["targets_groups"], None
         factor_rows = list(partners.values())
         factor_report = {"groups": dict(counts), "partner_worker_seconds": round(sum(r["seconds"] for r in factor_rows), 1),
-                         "partners_flagged_unstable": sum(1 for r in factor_rows if r.get("unstable"))}
+                         "partners_flagged_unstable": sum(1 for r in factor_rows if r.get("unstable")),
+                         "partners_repaired": sum(1 for r in factor_rows if r.get("repaired")),
+                         "partner_variants_repaired": sum(len(r["repaired"]["variants"]) for r in factor_rows if r.get("repaired"))}
         for family in fam.FAMILIES:
             worker_seconds[family] += sum(r["seconds"] for r in factor_rows if r["key"][0] == family)
     else:
@@ -372,7 +374,9 @@ def cmd_assemble(args: argparse.Namespace) -> int:
                     "tower": {"fall_deg": ph.TOWER_FALL_DEG, "seconds": ph.TOWER_SECONDS}},
         "xml_examples": examples, "candidates": len(rows), "candidates_file": str(Path(args.candidates).relative_to(REPO)) if Path(args.candidates).is_relative_to(REPO) else str(args.candidates),
         "selection": selection, "targets_groups": targets, "pair_cap": {"still_pair_share": args.still_pair_share, "by_family": pair_cap},
-        "factor_pairs": factor_report, "factors": {f: {k: list(v) for k, v in spec.items()} for f, spec in fam.FACTORS.items()}, "records": len(records), "questions": {"total": sum(q_types.values()), **dict(sorted(q_types.items()))},
+        "factor_pairs": factor_report, "factors": {f: {k: list(v) for k, v in spec.items()} for f, spec in fam.FACTORS.items()},
+        "grip_repair": {"rows": sum(1 for r in rows if r.get("repaired")), "variants": sum(len(r["repaired"]["variants"]) for r in rows if r.get("repaired")),
+                        "what": "grip variants whose move could not reach its stated top speed were re-rolled with the stated acceleration kept"}, "records": len(records), "questions": {"total": sum(q_types.values()), **dict(sorted(q_types.items()))},
         "file": str(out.relative_to(REPO)) if out.is_relative_to(REPO) else str(out), "sha256": file_sha256(out), "ids_sha256": ids_sha256(r["id"] for r in records),
         "stats_file": str(out.with_suffix(".stats.json").name), "cpu": {"worker_seconds_by_family": worker_seconds, "worker_seconds": sum(worker_seconds.values()), "runs": runs},
         "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
