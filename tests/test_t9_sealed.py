@@ -133,3 +133,19 @@ def test_t9_is_never_sent_to_any_api():
         bench.refuse_never_sent({"T2": [record, _t9_like(record)]})
     with pytest.raises(SystemExit, match="never sent"):
         bench.refuse_never_sent({"T9": [record]})
+
+
+@pytest.mark.parametrize("job_path", sorted((REPO / "configs" / "cloud").glob("*.yaml")), ids=lambda p: p.stem)
+def test_no_shipped_job_trains_on_t9(job_path):
+    from test_cloud_jobs_v01 import _script as job_script
+    from test_cloud_jobs_v01 import _steps
+
+    from robo_jev.decisions.train import resolve_config
+
+    for name, argv in _steps(job_path)[1]:
+        if argv[1:2] != ["scripts/train_decisions.py"]:
+            continue
+        script = job_script("train_decisions.py")
+        args = script.build_parser().parse_args(argv[2:])
+        train_input = str(resolve_config(script._read_config(REPO / args.config, args.set))["train_input"])
+        assert "artifacts/t9" not in train_input and "T9" not in Path(train_input).name, f"{job_path.name}:{name}"
