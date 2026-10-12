@@ -418,7 +418,7 @@ def hero_svg(results: dict[str, Any], *, theme_name: str = "light", width: int =
     def sx(value: float) -> float:
         return left + (min(max(value, lo), hi) - lo) / (hi - lo) * (right - left)
 
-    title = "Physical judgment on situations the model never saw"
+    title = "Physical judgment on our simulation benchmark (held-out moments)"
     desc = "Physics skill on bench-v0 T2–T4 (higher is better; 0 = always answering 0.5). " + "; ".join(f"{r['label']} {r['skill']:.2f}" for r in rows)
     out = _frame(width, height, theme, title, desc)
     out.append(f'<text x="24" y="36" font-size="19" font-weight="700" fill="{theme["ink"]}">{_t(title)}</text>')

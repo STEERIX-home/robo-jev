@@ -1,8 +1,8 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="860" height="442" viewBox="0 0 860 442" role="img" aria-labelledby="t d" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif'>
-<title id="t">Physical judgment on situations the model never saw</title>
+<title id="t">Physical judgment on our simulation benchmark (held-out moments)</title>
 <desc id="d">Physics skill on bench-v0 T2–T4 (higher is better; 0 = always answering 0.5). robo-jev v0.1 · 2B (ours) 0.80; TypeSafe Jev 0.28; Liquid d1 0.17; Microsoft-Decision-1 0.04; Together Tev1 4B 0.03; OpenAI GPT-6 Luna Decisions -0.02; Qwen3.5-2B untrained (our base) -0.15; Upstage Solar Decide -0.15</desc>
 <rect x="0.5" y="0.5" width="859" height="441" rx="8" fill="#1a1a19" stroke="rgba(255,255,255,0.10)"/>
-<text x="24" y="36" font-size="19" font-weight="700" fill="#ffffff">Physical judgment on situations the model never saw</text>
+<text x="24" y="36" font-size="19" font-weight="700" fill="#ffffff">Physical judgment on our simulation benchmark (held-out moments)</text>
 <text x="24" y="60" font-size="12.5" fill="#c3c2b7">Will it tip, spill, collide, slip, or sit wrong? Skill vs. always answering 50 %, on 1,100 held-out robot moments:</text>
 <text x="24" y="77" font-size="12.5" fill="#c3c2b7">new wording and settings, out-of-range values, and unseen combinations of phenomena. Higher is better.</text>
 <line x1="274.0" y1="98" x2="274.0" y2="378" stroke="#2c2c2a" stroke-width="1"/>

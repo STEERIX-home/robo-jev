@@ -6,22 +6,29 @@ robo-jev reads a short text of what a robot senses, answers the questions that m
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/bench-v0-physics-dark.svg">
-  <img alt="Physical judgment on situations the model never saw: robo-jev v0.1 (2B) scores 0.80, against 0.28 for TypeSafe Jev, 0.17 for Liquid d1 and near zero for Microsoft-Decision-1, Together Tev1 4B, OpenAI GPT-6 Luna Decisions, Upstage Solar Decide and the untrained Qwen3.5-2B" src="docs/figures/bench-v0-physics-light.svg">
+  <img alt="Physical judgment on our simulation benchmark: robo-jev v0.1 (2B) scores 0.80, against 0.28 for TypeSafe Jev, 0.17 for Liquid d1 and near zero for Microsoft-Decision-1, Together Tev1 4B, OpenAI GPT-6 Luna Decisions, Upstage Solar Decide and the untrained Qwen3.5-2B" src="docs/figures/bench-v0-physics-light.svg">
 </picture>
 
-General decision models read the *meaning* of a situation well. Most of them do not know the *physics*: on robot moments they have never seen, they score close to always answering 50 %. robo-jev learns physics from simulation and carries it to new wording, out-of-range values and unseen combinations of phenomena.
+General decision models read the *meaning* of a situation well, but on our physics benchmark most of them score close to always answering 50 %. robo-jev learns physics from simulation and carries it to new wording, out-of-range values and unseen combinations *within our simulator*.
+
+> **Honest status (2026-10-12).** On an outside test written and simulated independently of our engine ([T8](#outside-test-t8)), v0.1 does **not** yet transfer.
+> - It scores below its own untrained base.
+> - TypeSafe Jev leads that test.
+>
+> Making the physics carry beyond our simulator is the goal of the next version.
 
 ## Highlights
 
-- **Physical judgment, far ahead.** On 1,100 held-out robot moments, robo-jev scores 0.80 physics skill.
+- **Physical judgment on our benchmark, far ahead.** On 1,100 held-out moments from our simulator, robo-jev scores 0.80 physics skill.
   - TypeSafe Jev, the best general decision model, scores 0.28. Liquid d1 scores 0.17.
   - The rest — Microsoft-Decision-1, Together Tev1 4B, OpenAI GPT-6 Luna Decisions, Upstage Solar Decide — score about zero or below.
-- **Learns physics, not phrasing.** The gains hold on:
+- **Generalizes inside the simulator.** The gains hold on:
   - text styles, settings and wordings it never saw;
   - values beyond its training range;
   - combinations of phenomena it never saw together.
 
   Change one fact and the answer moves the right way 90 % of the time (55 % before training).
+- **Not yet outside it.** On independently written, MuJoCo-labelled moments (T8), the same change moves the answer the right way only 57 % of the time.
 - **Calibrated.** Its 70 % means 70 %. Expected calibration error is 0.011 on yes/no questions, against 0.134 for the untrained base.
 - **Judges the advice it gets.** It follows a wrong planner recommendation 11 % of the time (65 % untrained) and still follows right ones (67 %).
 - **Stable.** Reordering the options flips 6–9 % of answers, against 50–65 % for the untrained base.
@@ -89,11 +96,43 @@ robo-jev is a specialist. It leads on physics by a wide margin; on general readi
 
 All numbers, intervals and caveats are in [docs/results.md](docs/results.md).
 
+## Outside test (T8)
+
+Every set above comes from our own engine. T8 was built to check transfer outside it, and changes both the writer and the physics source.
+
+- **T8a — PIQA.** The public physical-commonsense set: 1,838 two-choice questions.
+- **T8b — 480 robot moments, written fresh in a first-person voice.**
+  - Families: a braking deck, a turning deck, a box released over a stack's edge, and a pushed box.
+  - Labels come from MuJoCo rigid-body simulation, not from our formulas: 64 rollouts over hidden friction and weight distribution.
+  - The simulation matches textbook tipping and sliding thresholds.
+
+| Model | T8b physics skill ↑ | Answer moves the right way when one fact changes | PIQA ↑ |
+|---|---|---|---|
+| robo-jev v0.1 · 2B | −0.31 | 57 % | 0.69 |
+| Qwen3.5-2B, untrained | −0.12 | 44 % | 0.66 |
+| TypeSafe Jev | **+0.12** | **86 %** | **0.95** |
+| Liquid d1 | +0.07 | 82 % | 0.94 |
+| Microsoft-Decision-1 | −0.25 | 80 % | 0.92 |
+
+**What it means.** robo-jev learned our engine's way of writing, not physics that carries over.
+- It barely reacts when a number in a new kind of text changes.
+- It leans towards "nothing will happen".
+- The labels are learnable: a textbook calculator scores 0.86 on T8b.
+
+**Next (v0.3).**
+- Varied narration of every moment (other voices and formats, with all facts kept).
+- A second physics source (MuJoCo-labelled training families, not T8's).
+- Many one-fact contrast pairs and balanced outcomes.
+- T8 stays sealed and is joined by another independent test.
+
+Full numbers are in [docs/results.md](docs/results.md#outside-test-t8).
+
 ## Roadmap
 
 | Next | |
 |---|---|
-| General reading | mix broader general data into training to close the reading gap |
+| Transfer beyond the simulator | v0.3: varied narration, a second physics source (MuJoCo), one-fact contrast pairs, balanced outcomes; judged on the sealed outside test |
+| General reading | mix broader general data into training to close the reading gap (v0.2, running) |
 | Contact physics | grasping, dynamic tipping, insertion and unexpected contact, simulated in MuJoCo |
 | People and machines | human intent, device and process state |
 | Outside tests | robot environments on [robojev](https://robo-jev.dev), never used for training |
