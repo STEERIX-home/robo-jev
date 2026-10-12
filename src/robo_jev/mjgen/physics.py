@@ -218,12 +218,36 @@ def _from_velocity(vel: np.ndarray, dt: float = TIMESTEP) -> Path1D:
     return Path1D(q=q, v=vel, a=acc, end=int(vel.size))
 
 
+def leg_reaches_peak(peak: float, accel: float, distance: float, *, jerk_time: float, dt: float = TIMESTEP) -> bool:
+    """Whether a move can reach `peak` at `accel` (with its ramps) within `distance`; if not, :func:`_smooth_leg` lowers the top speed."""
+    up = _speed_up(float(peak), float(accel), jerk_time, dt)
+    return bool(2 * up.sum() * dt <= float(distance) + 1e-12)
+
+
+def _speed_up(peak: float, accel: float, jerk_time: float, dt: float) -> np.ndarray:
+    tj = min(jerk_time, peak / accel)
+    t_hold = max(0.0, peak / accel - tj)
+    n_j, n_h = int(round(tj / dt)), int(round(t_hold / dt))
+    ramp = (np.arange(n_j) + 0.5) / max(n_j, 1)
+    acc = np.concatenate([accel * ramp, accel * np.ones(n_h), accel * ramp[::-1]])
+    up = np.cumsum(acc) * dt
+    return up * (peak / up[-1])
+
+
 def _smooth_leg(peak: float, accel: float, distance: float, *, jerk_time: float, dt: float = TIMESTEP) -> np.ndarray:
     """Velocity samples of one move: acceleration ramps (linearly, over `jerk_time`) to `accel`, holds until `peak` speed, cruises,
-    and comes back down the same way, covering `distance` (the cruise is dropped and the peak lowered if the move is short)."""
+    and comes back down the same way, covering `distance`. If the move is too short to reach `peak`, the **top speed** is lowered
+    (bisection) so the stated acceleration and ramp time are kept — an earlier version scaled the whole profile instead, which lowered
+    the acceleration below the stated one (≈ 15 % of the first grip variants; repaired, see the v0.3b report)."""
     peak, accel, distance = float(peak), float(accel), float(distance)
     if peak <= 0 or accel <= 0 or distance <= 0:
         raise ValueError("a move needs a positive peak speed, acceleration and distance")
+    if not leg_reaches_peak(peak, accel, distance, jerk_time=jerk_time, dt=dt):
+        low, high = 1e-4, peak
+        for _ in range(40):
+            mid = (low + high) / 2
+            low, high = (mid, high) if leg_reaches_peak(mid, accel, distance, jerk_time=jerk_time, dt=dt) else (low, mid)
+        peak = low
     tj = min(jerk_time, peak / accel)
     # speed gained over the ramp-up + hold + ramp-down of the acceleration = accel · (t_hold + tj) = peak
     t_hold = max(0.0, peak / accel - tj)

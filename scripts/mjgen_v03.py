@@ -146,6 +146,70 @@ def cmd_factor(args: argparse.Namespace) -> int:
     return 0
 
 
+def _repair_job(job: tuple[dict[str, Any], dict[str, Any], int]) -> tuple[dict[str, Any], list[list[str]], int, float]:
+    from robo_jev.mjgen.families import grip_variant_short, relabel_variants
+
+    group_payload, members, k = job
+    started = time.perf_counter()
+    updated, changed, rollouts = relabel_variants(group_from_json(group_payload), members, k, grip_variant_short)
+    return updated, changed, rollouts, time.perf_counter() - started
+
+
+def cmd_repair_grip(args: argparse.Namespace) -> int:
+    """Re-roll the grip variants whose move cannot reach its stated top speed (their profile changed: the stated acceleration is now
+    kept and the top speed lowered) in the candidates file and the one-factor partner rows; the originals are kept as *.pre-repair."""
+    import dataclasses
+    import multiprocessing
+    import shutil
+
+    from robo_jev.mjgen.families import grip_variant_short
+
+    total_changed, total_rollouts, total_seconds = 0, 0, 0.0
+    groups = {(r["group"]["family"], r["group"]["index"]): r["group"] for r in _read_rows(Path(args.candidates))}
+    for path, kind in ((Path(args.candidates), "candidates"), (Path(args.factor_rows), "partners")):
+        rows = _read_rows(path)
+        jobs, where = [], []
+        for i, row in enumerate(rows):
+            if kind == "candidates":
+                group = group_from_json(row["group"])
+                members = row["labelled"]["members"]
+            else:
+                if row.get("pair") is None or row["key"][0] != "grip":
+                    continue
+                group = dataclasses.replace(group_from_json(groups[tuple(row["key"])]), pair=row["pair"])
+                members = {"pair": row["member"]}
+            if group.family != "grip" or not any(grip_variant_short(group, m, group.variants[n]) for m in members for n in members[m]["variants"]):
+                continue
+            jobs.append((group_to_json(group), members, args.k))
+            where.append(i)
+        _log(f"{path.name}: {len(jobs)} grip rows to repair")
+        with multiprocessing.get_context("fork").Pool(args.workers) as pool:
+            results = pool.map(_repair_job, jobs, chunksize=4)
+        for i, (updated, changed, rollouts, seconds) in zip(where, results):
+            if kind == "candidates":
+                rows[i]["labelled"]["members"] = updated
+                rows[i]["labelled"]["rollouts"] += rollouts
+            else:
+                rows[i]["member"] = updated["pair"]
+                rows[i]["rollouts"] += rollouts
+            rows[i]["repaired"] = {"what": "grip variants re-rolled with the stated acceleration kept", "variants": changed, "rollouts": rollouts,
+                                   "seconds": round(seconds, 3)}
+            rows[i]["seconds"] = round(rows[i]["seconds"] + seconds, 3)
+            total_changed += len(changed)
+            total_rollouts += rollouts
+            total_seconds += seconds
+        backup = path.with_name(path.name + ".pre-repair")
+        if not backup.exists():
+            shutil.copy2(path, backup)
+        temp = path.with_name(path.name + ".tmp")
+        with temp.open("w", encoding="utf-8") as handle:
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        temp.replace(path)
+    _log(f"repaired {total_changed} grip variants ({total_rollouts} rollouts, {total_seconds:.0f} worker-s)")
+    return 0
+
+
 def cmd_measure(args: argparse.Namespace) -> int:
     from robo_jev.mjgen.families import FAMILIES
     from robo_jev.mjgen.generate import group_records
@@ -344,6 +408,30 @@ def cmd_sanity(args: argparse.Namespace) -> int:
     return 0 if report["verdict"]["passed"] else 2
 
 
+def _sweep_job(job: tuple[str, int, int, int]) -> dict[str, Any]:
+    from robo_jev.mjgen.sanity import factor_sweep
+
+    return factor_sweep(*job)
+
+
+def cmd_sweep(args: argparse.Namespace) -> int:
+    """One-factor sweeps: label sensitivity to each physical factor (a few candidate scenes per family)."""
+    import multiprocessing
+
+    from robo_jev.mjgen.families import FAMILIES
+    from robo_jev.mjgen.sanity import FACTOR_LEVELS, summarize_sweeps
+
+    jobs = [(family, 950_000 + i, args.seed, args.k) for family in FAMILIES for i in range(args.scenes)]
+    with multiprocessing.get_context("fork").Pool(args.workers) as pool:
+        results = pool.map(_sweep_job, jobs, chunksize=1)
+    report = {"kind": "v03b-factor-sweep", "levels": {f: {k: list(v) for k, v in d.items()} for f, d in FACTOR_LEVELS.items()},
+              "summary": summarize_sweeps(results), "scenes": results, "k": args.k, "seed": args.seed, "git": _git_sha(),
+              "created": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
+    _write_json(Path(args.out), report)
+    _log(f"sweep → {args.out}: " + json.dumps({f: {k: round(v["range_mean"], 3) for k, v in d.items()} for f, d in report["summary"].items()}))
+    return 0
+
+
 def cmd_overlap(args: argparse.Namespace) -> int:
     from robo_jev.decisions.records import read_records
     from robo_jev.mjgen.overlap import overlap_report
@@ -398,6 +486,19 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--workers", type=int, default=8)
     check.add_argument("--out", type=Path, default=OUT / "mujoco-sanity.json")
     check.set_defaults(func=cmd_sanity)
+    repair = sub.add_parser("repair-grip", help="re-roll grip variants whose stated acceleration was not kept (after the _smooth_leg fix)")
+    repair.add_argument("--candidates", type=Path, default=OUT / "mujoco-candidates.jsonl")
+    repair.add_argument("--factor-rows", type=Path, default=OUT / "mujoco-factor-partners.jsonl")
+    repair.add_argument("--k", type=int, default=32)
+    repair.add_argument("--workers", type=int, default=18)
+    repair.set_defaults(func=cmd_repair_grip)
+    sweep = sub.add_parser("sweep", help="one-factor sweeps: label sensitivity to each physical factor")
+    sweep.add_argument("--scenes", type=int, default=12, help="candidate scenes per family")
+    sweep.add_argument("--k", type=int, default=16)
+    sweep.add_argument("--seed", type=int, default=MASTER_SEED)
+    sweep.add_argument("--workers", type=int, default=2)
+    sweep.add_argument("--out", type=Path, default=OUT / "mujoco-factor-sweep.json")
+    sweep.set_defaults(func=cmd_sweep)
     over = sub.add_parser("overlap", help="zero-overlap check against T8b (text only)")
     over.add_argument("--input", type=Path, default=OUT / "mujoco-train.jsonl")
     over.add_argument("--t8b", type=Path, default=REPO / "artifacts" / "t8" / "T8b.jsonl")

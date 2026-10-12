@@ -831,6 +831,44 @@ def roll(family: str, visible: dict[str, Any], draw: dict[str, float], rigs: dic
     return ph.run_tower(rigs[key], centres=centres, drop=visible["drop"], mu=draw["mu"], coms=coms)
 
 
+def grip_variant_short(group: Group, member: str, overrides: dict[str, Any]) -> bool:
+    """A grip variant whose move cannot reach its stated top speed within its distance (its profile changed when :func:`physics._smooth_leg`
+    stopped scaling the acceleration down; such variants were re-labelled)."""
+    if group.family != "grip":
+        return False
+    v = _effective(group, member, overrides)
+    return not ph.leg_reaches_peak(v["peak"], v["accel"], v["distance"], jerk_time=v.get("jerk_time", GRIP_JERK))
+
+
+def relabel_variants(group: Group, members: dict[str, Any], k: int, which: Callable[[Group, str, dict[str, Any]], bool],
+                     *, rigs: dict[str, Any] | None = None) -> tuple[dict[str, Any], list[list[str]], int]:
+    """Re-roll, under all three priors and on the group's shared draws, the stored variants for which ``which(group, member, overrides)``
+    holds; returns (updated members, [[member, variant] …], rollouts). Other variants are left as stored."""
+    rigs = {} if rigs is None else rigs
+    draws_seed = group.seed ^ 0xD3A5
+    out = json.loads(json.dumps(members))
+    changed: list[list[str]] = []
+    rollouts = 0
+    for member, entry in out.items():
+        visible_member = group.visible_for(member)
+        hidden = hidden_for(group.family, visible_member)
+        names = sorted(hidden)
+        unit = unit_draws(names, k, draws_seed)
+        for name, stored in entry["variants"].items():
+            overrides = group.variants[name]
+            if not which(group, member, overrides):
+                continue
+            visible = _effective(group, member, overrides)
+            for prior in PRIORS:
+                draws = draw_values(prior_ranges(hidden, prior), unit, names)
+                rolls = [roll(group.family, visible, d, rigs) for d in draws]
+                rollouts += len(rolls)
+                stored["outcomes"][prior] = [r["outcome"] for r in rolls]
+                stored["freq"][prior] = {o: sum(1 for r in rolls if r["outcome"] == o) / len(rolls) for o in OUTCOMES[group.family]}
+            changed.append([member, name])
+    return out, changed, rollouts
+
+
 def label_group(group: Group, k: int = DEFAULT_K, *, rigs: dict[str, Any] | None = None, only: Sequence[str] | None = None) -> dict[str, Any]:
     """Roll out every variant of both members under all three priors on the group's shared unit draws.
 

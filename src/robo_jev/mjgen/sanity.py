@@ -233,3 +233,67 @@ def summarize(job_list: list[tuple[str, dict[str, Any]]], results: list[Any]) ->
     verdict["passed"] = all(verdict.values())
     return {"kind": "v03b-sanity", "verdict": verdict, "monotonicity": {"by_sweep": by_sweep, "moments": mono}, "analytic": analytic, "creep": creep,
             "determinism": determ}
+
+
+# --------------------------------------------------------------------------
+# One-factor sweeps (controller update after E1): label sensitivity to each physical factor
+# --------------------------------------------------------------------------
+
+#: per family: factor → levels (absolute values for words; multipliers or absolute values for numbers, see :func:`factor_sweep`)
+FACTOR_LEVELS = {
+    "tilt": {"surface": ("melamine", "aluminium", "pvc", "tread", "cork", "neoprene"), "wet": (False, True),
+             "mass_distribution": ("low", "level", "high", "unsure"), "footprint": (0.6, 0.8, 1.0, 1.25, 1.5), "ramp_time": (0.3, 0.6, 1.2, 2.4)},
+    "grip": {"pads": ("aluminium", "nylon", "foam", "urethane", "silicone"), "item_surface": ("metal", "plastic", "glossy", "matte", "rubber"),
+             "wet": (False, True), "ramp_time": (0.02, 0.04, 0.08, 1.0)},
+    "tower": {"mass_distribution": ("back", "even", "shifted", "front"), "drop_height": (0.005, 0.02, 0.04, 0.08),
+              "footprint": (0.8, 0.9, 1.0, 1.1, 1.2)},
+}
+
+
+def factor_sweep(family: str, index: int, master: int, k: int) -> dict[str, Any]:
+    """One candidate scene: every factor of :data:`FACTOR_LEVELS` swept on its own (the others as stated), the key-event rate per
+    level on the scene's base-prior draws (re-mapped when a word changes the prior, e.g. a surface or wetness). Footprint levels
+    multiply the length along the force (tilt: the box; tower: the box under the top box); the grip ramp level 1.0 means "as long as
+    the move allows" (peak / accel)."""
+    group = fam.candidate(family, index, master, k=k, pair_share=0.0)
+    rigs: dict[str, Any] = {}
+    out: dict[str, Any] = {"family": family, "index": index, "factors": {}}
+    for factor, levels in FACTOR_LEVELS[family].items():
+        field_spec, _ = fam.FACTORS[family][factor]
+        field = fam._factor_field(group, field_spec)
+        rows = []
+        for level in levels:
+            v = json.loads(json.dumps(group.visible))
+            if factor == "footprint":
+                value = round(fam._get_field(v, field) * level, 3)
+            elif factor == "ramp_time" and family == "grip":
+                value = round(v["peak"] / v["accel"], 3) if level == 1.0 else min(level, v["peak"] / v["accel"])
+            else:
+                value = level
+            fam._set_field(v, field, value)
+            hidden = fam.hidden_for(family, v)
+            names = sorted(hidden)
+            draws = fam.draw_values(fam.prior_ranges(hidden, "base"), fam.unit_draws(names, k, group.seed ^ 0xD3A5), names)
+            events = [fam.roll(family, v, d, rigs)["outcome"] in fam.EVENT[family] for d in draws]
+            rows.append({"level": level, "value": value, "rate": sum(events) / len(events)})
+        rates = [r["rate"] for r in rows]
+        out["factors"][factor] = {"levels": rows, "range": max(rates) - min(rates)}
+    return out
+
+
+def summarize_sweeps(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per family and factor: mean / median label range across the swept levels, share of scenes where the factor moves the key label
+    by ≥ 0.1, and the mean rate per level."""
+    out: dict[str, Any] = {}
+    for family in FACTOR_LEVELS:
+        rows = [r for r in results if r["family"] == family]
+        if not rows:
+            continue
+        out[family] = {}
+        for factor, levels in FACTOR_LEVELS[family].items():
+            ranges = [r["factors"][factor]["range"] for r in rows]
+            per_level = [sum(r["factors"][factor]["levels"][i]["rate"] for r in rows) / len(rows) for i in range(len(levels))]
+            out[family][factor] = {"scenes": len(rows), "range_mean": sum(ranges) / len(ranges), "range_median": sorted(ranges)[len(ranges) // 2],
+                                   "moves_ge_0.1": sum(1 for x in ranges if x >= 0.1) / len(ranges),
+                                   "mean_rate_by_level": {str(level): round(rate, 3) for level, rate in zip(levels, per_level)}}
+    return out

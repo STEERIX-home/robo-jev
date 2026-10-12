@@ -158,7 +158,7 @@ def _grip_move(v: dict[str, Any], person: str) -> str:
     subject = {"third": "The arm", "second": "You", "first": "I"}[person]
     verb = {"lift": "lift it straight up", "lower": "lower it straight down", "swing": "carry it sideways, level"}[v["move"]]
     jerk = v.get("jerk_time", GRIP_JERK)
-    return (f"{subject} will {verb} by {_n(v['distance'])} m with a top speed of {v['peak']:.1f} m/s, speeding up and braking at "
+    return (f"{subject} will {verb} by {_n(v['distance'])} m, never faster than {v['peak']:.1f} m/s, speeding up and braking at "
             f"{v['accel']:.1f} m/s², each time taking {jerk:.2f} s to get to that rate.")
 
 

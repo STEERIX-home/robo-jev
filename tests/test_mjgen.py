@@ -353,3 +353,86 @@ def test_designed_still_pairs_are_capped_by_design_not_by_outcome():
     assert report["tilt"] == {"far": 8, "still_allowed": 2, "still_kept": 2, "stripped": {"near": 1, "free": 3}}
     paired = [g.index for g, lab in kept if g.pair is not None]
     assert paired == list(range(8)) + [10, 11] and all(set(lab["members"]) == {"base"} for g, lab in kept if g.pair is None)
+
+
+# -- one-factor pairs (controller update after E1) -------------------------------------------------------------------------
+
+
+@functools.lru_cache(maxsize=1)
+def factor_groups() -> tuple:
+    import dataclasses
+    import random
+
+    out = []
+    for family in fam.FAMILIES:
+        for index in range(12):
+            group = dataclasses.replace(fam.candidate(family, 810_000 + index, MASTER, k=4, pair_share=0.0), pair=None)
+            pair = fam.factor_pair(group, random.Random(group.seed ^ 0xFAC7))
+            if pair is not None:
+                out.append(dataclasses.replace(group, pair=pair))
+    return tuple(out)
+
+
+def test_factor_pairs_change_exactly_one_physical_factor_and_cover_every_factor_type():
+    number = re.compile(r"-?\d+(?:\.\d+)?")
+    seen = set()
+    for group in factor_groups():
+        pair = group.pair
+        assert pair["closeness"] == "factor" and pair["factor"] in fam.FACTORS[group.family] and pair["from"] != pair["value"]
+        seen.add((group.family, pair["factor"]))
+        a = text_state(group, "base")
+        b = text_state(group, "pair")
+        assert a != b
+        changed = [(x, y) for x, y in zip(number.findall(a), number.findall(b)) if x != y]
+        if pair["fact"] == "number":
+            assert number.split(a) == number.split(b) and len(changed) == 1, (group.family, pair)
+        else:
+            assert number.findall(a) == number.findall(b), (group.family, pair)  # a word fact: the numbers stay, one phrase changes
+    assert len({f for f, _ in seen}) == 3 and len(seen) >= 9
+
+
+def text_state(group, member):
+    from robo_jev.mjgen import text as tx
+
+    return tx.state_text(group.family, group.visible_for(member), group.style, group.wording)
+
+
+def test_a_wet_surface_lowers_the_friction_prior_and_the_stated_grip_ramp_is_honoured():
+    group = fam.candidate("tilt", 3, MASTER)
+    dry, wet = fam.hidden_for("tilt", group.visible), fam.hidden_for("tilt", {**group.visible, "wet": True})
+    assert wet["mu"][1] == pytest.approx(dry["mu"][1] * fam.WET_FACTOR[0], abs=1e-4) and wet["mu"][2] == pytest.approx(dry["mu"][2] * fam.WET_FACTOR[1], abs=1e-4)
+    path, _ = ph.move_profile("lift", 0.8, 0.9, 3.0, jerk_time=0.2)
+    rising = path.a[: int(np.argmax(path.a)) + 1]
+    assert abs(np.argmax(path.a) * ph.TIMESTEP - (ph.GRIP_PRE + 0.2)) < 0.01 and rising[-1] == pytest.approx(3.0, rel=0.02)
+
+
+def test_only_the_new_partner_is_rolled_and_it_matches_a_full_labelling():
+    group = next(g for g in factor_groups() if g.family == "grip")
+    partner = fam.label_group(group, k=4, only=("pair",))
+    full = fam.label_group(group, k=4)
+    assert set(partner["members"]) == {"pair"} and partner["members"]["pair"] == full["members"]["pair"]
+    assert partner["rollouts"] < full["rollouts"]
+
+
+def test_factor_pairs_enter_the_records_with_their_factor():
+    for group in factor_groups()[:6]:
+        labelled = fam.label_group(group, k=4)
+        base, pair = gen.group_records(group, labelled, mujoco_version="test")
+        assert base["meta"]["pair"]["factor"] == group.pair["factor"] and pair["meta"]["pair"]["fact"] == group.pair["fact"]
+        assert validate_record(base) == [] and validate_record(pair) == []
+
+
+def test_a_one_factor_sweep_reports_every_factor():
+    result = sanity.factor_sweep("tower", 950_001, MASTER, 4)
+    assert set(result["factors"]) == set(sanity.FACTOR_LEVELS["tower"])
+    summary = sanity.summarize_sweeps([result])
+    assert 0.0 <= summary["tower"]["footprint"]["range_mean"] <= 1.0
+
+
+def test_a_short_move_keeps_its_stated_acceleration_and_lowers_its_top_speed():
+    """Regression: a move too short to reach its top speed used to be scaled as a whole, so the stated acceleration was not reached."""
+    for move, distance, peak, accel, jerk in (("lift", 0.3, 0.8, 0.6, 0.04), ("lower", 0.25, 1.0, 1.5, 0.3), ("swing", 0.2, 0.9, 0.8, 0.04)):
+        assert not ph.leg_reaches_peak(peak, accel, distance, jerk_time=jerk)
+        path, _ = ph.move_profile(move, distance, peak, accel, jerk_time=jerk)
+        assert float(np.max(np.abs(path.a))) == pytest.approx(accel, rel=0.03)
+        assert abs(abs(float(path.q[path.end])) - distance) < 1e-6 and float(np.max(np.abs(path.v))) < peak
