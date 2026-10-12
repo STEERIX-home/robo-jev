@@ -1,95 +1,167 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="1044" height="244" viewBox="0 0 1044 244" role="img" aria-labelledby="t d" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif'>
+<svg xmlns="http://www.w3.org/2000/svg" width="1044" height="398" viewBox="0 0 1044 398" role="img" aria-labelledby="t d" font-family='system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif'>
 <title id="t">Per-set results — bench-v0</title>
-<desc id="d">Bars per model and set. robojev v0 (2B): T1 0.029, T2 0.062, T3 0.045, T4 0.025, T5 0.033, T6 0.042, T7 0.035, G1 0.429, G2 0.650; Qwen3.5-2B (untrained): T1 0.181, T2 0.171, T3 0.169, T4 0.196, T5 0.190, T6 0.189, T7 0.181, G1 0.484, G2 0.739</desc>
-<rect x="0.5" y="0.5" width="1043" height="243" rx="8" fill="#fcfcfb" stroke="rgba(11,11,11,0.10)"/>
+<desc id="d">Bars per model and set. ours v0 (2B): T1 0.029, T2 0.062, T3 0.045, T4 0.025, T5 0.033, T6 0.042, T7 0.035, G1 0.429, G2 0.650; ours v0.1-mix (2B): T1 0.034, T2 0.043, T3 0.049, T4 0.034, T5 0.035, T6 0.049, T7 0.040, G1 0.790, G2 0.677; Qwen3.5-2B (untrained): T1 0.181, T2 0.171, T3 0.169, T4 0.196, T5 0.190, T6 0.189, T7 0.181, G1 0.484, G2 0.739; ~typesafe/jev-latest: T1 0.133, T2 0.116, T3 0.114, T4 0.143, T5 0.107, T6 0.146, T7 0.122, G1 0.791, G2 0.909; liquid/d1: T1 0.155, T2 0.132, T3 0.132, T4 0.155, T5 0.122, T6 0.155, T7 0.141, G1 0.778, G2 0.926; microsoft/microsoft-decision-1: T1 0.166, T2 0.165, T3 0.142, T4 0.177, T5 0.148, T6 0.175, T7 0.161, G1 0.787, G2 0.915; togethercomputer/tev1-4b-experimental: T1 0.158, T2 0.165, T3 0.155, T4 0.164, T5 0.151, T6 0.183, T7 0.157, G1 0.684, G2 0.903; openai/gpt-6-luna-decisions: T1 0.197, T2 0.192, T3 0.156, T4 0.230, T5 0.179, T6 0.207, T7 0.197, G1 0.768, G2 0.863; upstage/solar-decide: T1 0.154, T2 0.176, T3 0.123, T4 0.111, T5 0.161, T6 0.172, T7 0.152, G1 0.769, G2 0.864</desc>
+<rect x="0.5" y="0.5" width="1043" height="397" rx="8" fill="#fcfcfb" stroke="rgba(11,11,11,0.10)"/>
 <text x="24" y="34" font-size="17" font-weight="600" fill="#0b0b0b">Per-set results — bench-v0</text>
 <text x="24" y="55" font-size="12.5" fill="#52514e">T1–T7: yes/no Brier against the simulated outcome probability (lower is better; thin vertical tick = always answering 0.5) · G1, G2: reading accuracy (higher is better)</text>
 <rect x="24" y="72" width="12" height="12" rx="3" fill="#2a78d6"/>
-<text x="42" y="82" font-size="12.5" fill="#52514e">robojev (ours, 2B)</text>
+<text x="42" y="82" font-size="12.5" fill="#52514e">ours (Steerix, 2B)</text>
 <rect x="194.0" y="72" width="12" height="12" rx="3" fill="#a8a7a0"/>
 <text x="212.0" y="82" font-size="12.5" fill="#52514e">Qwen3.5-2B untrained (reference)</text>
+<rect x="462.0" y="72" width="12" height="12" rx="3" fill="#eb6834"/>
+<text x="480.0" y="82" font-size="12.5" fill="#52514e">OpenRouter decision models</text>
 <text x="290" y="124" font-size="12.5" font-weight="600" fill="#0b0b0b">T1</text>
-<line x1="290" y1="132" x2="290" y2="180" stroke="#c3c2b7" stroke-width="1"/>
-<line x1="323.0" y1="132" x2="323.0" y2="180" stroke="#e1e0d9" stroke-width="1"/>
-<text x="290" y="195" font-size="10.5" fill="#898781">0</text>
-<text x="323.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
-<line x1="323.7" y1="132" x2="323.7" y2="180" stroke="#52514e" stroke-width="1.5"><title>T1: always 0.5 scores 0.153</title></line>
-<path d="M290.0,140.0 h3.1 a3.1,3.1 0 0 1 3.1,3.1 v7.7 a3.1,3.1 0 0 1 -3.1,3.1 h-3.1 z" fill="#2a78d6"><title>robojev v0 (2B) — T1 yes/no Brier 0.029</title></path>
-<text x="299.3" y="151" font-size="10.5" font-weight="600" fill="#0b0b0b" stroke="#fcfcfb" stroke-width="3" paint-order="stroke">0.029</text>
-<path d="M290.0,162.0 h35.8 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-35.8 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — T1 yes/no Brier 0.181</title></path>
+<line x1="290" y1="132" x2="290" y2="334" stroke="#c3c2b7" stroke-width="1"/>
+<line x1="323.0" y1="132" x2="323.0" y2="334" stroke="#e1e0d9" stroke-width="1"/>
+<text x="290" y="349" font-size="10.5" fill="#898781">0</text>
+<text x="323.0" y="349" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
+<line x1="323.7" y1="132" x2="323.7" y2="334" stroke="#52514e" stroke-width="1.5"><title>T1: always 0.5 scores 0.153</title></line>
+<path d="M290.0,140.0 h3.1 a3.1,3.1 0 0 1 3.1,3.1 v7.7 a3.1,3.1 0 0 1 -3.1,3.1 h-3.1 z" fill="#2a78d6"><title>ours v0 (2B) — T1 yes/no Brier 0.029</title></path>
+<text x="299.3" y="151" font-size="10.5" font-weight="600" fill="#0b0b0b">0.029</text>
+<path d="M290.0,162.0 h3.7 a3.7,3.7 0 0 1 3.7,3.7 v6.5 a3.7,3.7 0 0 1 -3.7,3.7 h-3.7 z" fill="#2a78d6"><title>ours v0.1-mix (2B) — T1 yes/no Brier 0.034</title></path>
+<path d="M290.0,184.0 h35.8 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-35.8 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — T1 yes/no Brier 0.181</title></path>
+<path d="M290.0,206.0 h25.3 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-25.3 z" fill="#eb6834"><title>~typesafe/jev-latest — T1 yes/no Brier 0.133</title></path>
+<path d="M290.0,228.0 h30.2 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-30.2 z" fill="#eb6834"><title>liquid/d1 — T1 yes/no Brier 0.155</title></path>
+<path d="M290.0,250.0 h32.5 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-32.5 z" fill="#eb6834"><title>microsoft/microsoft-decision-1 — T1 yes/no Brier 0.166</title></path>
+<path d="M290.0,272.0 h30.7 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-30.7 z" fill="#eb6834"><title>togethercomputer/tev1-4b-experimental — T1 yes/no Brier 0.158</title></path>
+<path d="M290.0,294.0 h39.4 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-39.4 z" fill="#eb6834"><title>openai/gpt-6-luna-decisions — T1 yes/no Brier 0.197</title></path>
+<path d="M290.0,316.0 h29.8 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-29.8 z" fill="#eb6834"><title>upstage/solar-decide — T1 yes/no Brier 0.154</title></path>
 <text x="370" y="124" font-size="12.5" font-weight="600" fill="#0b0b0b">T2</text>
-<line x1="370" y1="132" x2="370" y2="180" stroke="#c3c2b7" stroke-width="1"/>
-<line x1="403.0" y1="132" x2="403.0" y2="180" stroke="#e1e0d9" stroke-width="1"/>
-<text x="370" y="195" font-size="10.5" fill="#898781">0</text>
-<text x="403.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
-<line x1="403.3" y1="132" x2="403.3" y2="180" stroke="#52514e" stroke-width="1.5"><title>T2: always 0.5 scores 0.151</title></line>
-<path d="M370.0,140.0 h9.7 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-9.7 z" fill="#2a78d6"><title>robojev v0 (2B) — T2 yes/no Brier 0.062</title></path>
-<text x="386.7" y="151" font-size="10.5" font-weight="600" fill="#0b0b0b" stroke="#fcfcfb" stroke-width="3" paint-order="stroke">0.062</text>
-<path d="M370.0,162.0 h33.5 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-33.5 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — T2 yes/no Brier 0.171</title></path>
+<line x1="370" y1="132" x2="370" y2="334" stroke="#c3c2b7" stroke-width="1"/>
+<line x1="403.0" y1="132" x2="403.0" y2="334" stroke="#e1e0d9" stroke-width="1"/>
+<text x="370" y="349" font-size="10.5" fill="#898781">0</text>
+<text x="403.0" y="349" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
+<line x1="403.3" y1="132" x2="403.3" y2="334" stroke="#52514e" stroke-width="1.5"><title>T2: always 0.5 scores 0.151</title></line>
+<path d="M370.0,140.0 h9.7 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-9.7 z" fill="#2a78d6"><title>ours v0 (2B) — T2 yes/no Brier 0.062</title></path>
+<path d="M370.0,162.0 h5.5 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-5.5 z" fill="#2a78d6"><title>ours v0.1-mix (2B) — T2 yes/no Brier 0.043</title></path>
+<text x="382.5" y="173" font-size="10.5" font-weight="600" fill="#0b0b0b">0.043</text>
+<path d="M370.0,184.0 h33.5 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-33.5 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — T2 yes/no Brier 0.171</title></path>
+<path d="M370.0,206.0 h21.5 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-21.5 z" fill="#eb6834"><title>~typesafe/jev-latest — T2 yes/no Brier 0.116</title></path>
+<path d="M370.0,228.0 h25.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-25.0 z" fill="#eb6834"><title>liquid/d1 — T2 yes/no Brier 0.132</title></path>
+<path d="M370.0,250.0 h32.2 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-32.2 z" fill="#eb6834"><title>microsoft/microsoft-decision-1 — T2 yes/no Brier 0.165</title></path>
+<path d="M370.0,272.0 h32.3 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-32.3 z" fill="#eb6834"><title>togethercomputer/tev1-4b-experimental — T2 yes/no Brier 0.165</title></path>
+<path d="M370.0,294.0 h38.3 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-38.3 z" fill="#eb6834"><title>openai/gpt-6-luna-decisions — T2 yes/no Brier 0.192</title></path>
+<path d="M370.0,316.0 h34.7 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-34.7 z" fill="#eb6834"><title>upstage/solar-decide — T2 yes/no Brier 0.176</title></path>
 <text x="450" y="124" font-size="12.5" font-weight="600" fill="#0b0b0b">T3</text>
-<line x1="450" y1="132" x2="450" y2="180" stroke="#c3c2b7" stroke-width="1"/>
-<line x1="483.0" y1="132" x2="483.0" y2="180" stroke="#e1e0d9" stroke-width="1"/>
-<text x="450" y="195" font-size="10.5" fill="#898781">0</text>
-<text x="483.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
-<line x1="483.1" y1="132" x2="483.1" y2="180" stroke="#52514e" stroke-width="1.5"><title>T3: always 0.5 scores 0.151</title></line>
-<path d="M450.0,140.0 h6.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-6.0 z" fill="#2a78d6"><title>robojev v0 (2B) — T3 yes/no Brier 0.045</title></path>
-<text x="463.0" y="151" font-size="10.5" font-weight="600" fill="#0b0b0b" stroke="#fcfcfb" stroke-width="3" paint-order="stroke">0.045</text>
-<path d="M450.0,162.0 h33.1 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-33.1 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — T3 yes/no Brier 0.169</title></path>
+<line x1="450" y1="132" x2="450" y2="334" stroke="#c3c2b7" stroke-width="1"/>
+<line x1="483.0" y1="132" x2="483.0" y2="334" stroke="#e1e0d9" stroke-width="1"/>
+<text x="450" y="349" font-size="10.5" fill="#898781">0</text>
+<text x="483.0" y="349" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
+<line x1="483.1" y1="132" x2="483.1" y2="334" stroke="#52514e" stroke-width="1.5"><title>T3: always 0.5 scores 0.151</title></line>
+<path d="M450.0,140.0 h6.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-6.0 z" fill="#2a78d6"><title>ours v0 (2B) — T3 yes/no Brier 0.045</title></path>
+<text x="463.0" y="151" font-size="10.5" font-weight="600" fill="#0b0b0b">0.045</text>
+<path d="M450.0,162.0 h6.9 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-6.9 z" fill="#2a78d6"><title>ours v0.1-mix (2B) — T3 yes/no Brier 0.049</title></path>
+<path d="M450.0,184.0 h33.1 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-33.1 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — T3 yes/no Brier 0.169</title></path>
+<path d="M450.0,206.0 h21.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-21.0 z" fill="#eb6834"><title>~typesafe/jev-latest — T3 yes/no Brier 0.114</title></path>
+<path d="M450.0,228.0 h25.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-25.0 z" fill="#eb6834"><title>liquid/d1 — T3 yes/no Brier 0.132</title></path>
+<path d="M450.0,250.0 h27.3 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-27.3 z" fill="#eb6834"><title>microsoft/microsoft-decision-1 — T3 yes/no Brier 0.142</title></path>
+<path d="M450.0,272.0 h30.1 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-30.1 z" fill="#eb6834"><title>togethercomputer/tev1-4b-experimental — T3 yes/no Brier 0.155</title></path>
+<path d="M450.0,294.0 h30.2 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-30.2 z" fill="#eb6834"><title>openai/gpt-6-luna-decisions — T3 yes/no Brier 0.156</title></path>
+<path d="M450.0,316.0 h23.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-23.0 z" fill="#eb6834"><title>upstage/solar-decide — T3 yes/no Brier 0.123</title></path>
 <text x="530" y="124" font-size="12.5" font-weight="600" fill="#0b0b0b">T4</text>
-<line x1="530" y1="132" x2="530" y2="180" stroke="#c3c2b7" stroke-width="1"/>
-<line x1="563.0" y1="132" x2="563.0" y2="180" stroke="#e1e0d9" stroke-width="1"/>
-<text x="530" y="195" font-size="10.5" fill="#898781">0</text>
-<text x="563.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
-<line x1="572.9" y1="132" x2="572.9" y2="180" stroke="#52514e" stroke-width="1.5"><title>T4: always 0.5 scores 0.195</title></line>
-<path d="M530.0,140.0 h2.7 a2.7,2.7 0 0 1 2.7,2.7 v8.5 a2.7,2.7 0 0 1 -2.7,2.7 h-2.7 z" fill="#2a78d6"><title>robojev v0 (2B) — T4 yes/no Brier 0.025</title></path>
-<text x="538.5" y="151" font-size="10.5" font-weight="600" fill="#0b0b0b" stroke="#fcfcfb" stroke-width="3" paint-order="stroke">0.025</text>
-<path d="M530.0,162.0 h39.2 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-39.2 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — T4 yes/no Brier 0.196</title></path>
+<line x1="530" y1="132" x2="530" y2="334" stroke="#c3c2b7" stroke-width="1"/>
+<line x1="563.0" y1="132" x2="563.0" y2="334" stroke="#e1e0d9" stroke-width="1"/>
+<text x="530" y="349" font-size="10.5" fill="#898781">0</text>
+<text x="563.0" y="349" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
+<line x1="572.9" y1="132" x2="572.9" y2="334" stroke="#52514e" stroke-width="1.5"><title>T4: always 0.5 scores 0.195</title></line>
+<path d="M530.0,140.0 h2.7 a2.7,2.7 0 0 1 2.7,2.7 v8.5 a2.7,2.7 0 0 1 -2.7,2.7 h-2.7 z" fill="#2a78d6"><title>ours v0 (2B) — T4 yes/no Brier 0.025</title></path>
+<text x="538.5" y="151" font-size="10.5" font-weight="600" fill="#0b0b0b">0.025</text>
+<path d="M530.0,162.0 h3.8 a3.8,3.8 0 0 1 3.8,3.8 v6.4 a3.8,3.8 0 0 1 -3.8,3.8 h-3.8 z" fill="#2a78d6"><title>ours v0.1-mix (2B) — T4 yes/no Brier 0.034</title></path>
+<path d="M530.0,184.0 h39.2 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-39.2 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — T4 yes/no Brier 0.196</title></path>
+<path d="M530.0,206.0 h27.5 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-27.5 z" fill="#eb6834"><title>~typesafe/jev-latest — T4 yes/no Brier 0.143</title></path>
+<path d="M530.0,228.0 h30.1 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-30.1 z" fill="#eb6834"><title>liquid/d1 — T4 yes/no Brier 0.155</title></path>
+<path d="M530.0,250.0 h35.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-35.0 z" fill="#eb6834"><title>microsoft/microsoft-decision-1 — T4 yes/no Brier 0.177</title></path>
+<path d="M530.0,272.0 h32.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-32.0 z" fill="#eb6834"><title>togethercomputer/tev1-4b-experimental — T4 yes/no Brier 0.164</title></path>
+<path d="M530.0,294.0 h46.7 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-46.7 z" fill="#eb6834"><title>openai/gpt-6-luna-decisions — T4 yes/no Brier 0.230</title></path>
+<path d="M530.0,316.0 h20.5 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-20.5 z" fill="#eb6834"><title>upstage/solar-decide — T4 yes/no Brier 0.111</title></path>
 <text x="610" y="124" font-size="12.5" font-weight="600" fill="#0b0b0b">T5</text>
-<line x1="610" y1="132" x2="610" y2="180" stroke="#c3c2b7" stroke-width="1"/>
-<line x1="643.0" y1="132" x2="643.0" y2="180" stroke="#e1e0d9" stroke-width="1"/>
-<text x="610" y="195" font-size="10.5" fill="#898781">0</text>
-<text x="643.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
-<line x1="644.2" y1="132" x2="644.2" y2="180" stroke="#52514e" stroke-width="1.5"><title>T5: always 0.5 scores 0.155</title></line>
-<path d="M610.0,140.0 h3.6 a3.6,3.6 0 0 1 3.6,3.6 v6.7 a3.6,3.6 0 0 1 -3.6,3.6 h-3.6 z" fill="#2a78d6"><title>robojev v0 (2B) — T5 yes/no Brier 0.033</title></path>
-<text x="620.3" y="151" font-size="10.5" font-weight="600" fill="#0b0b0b" stroke="#fcfcfb" stroke-width="3" paint-order="stroke">0.033</text>
-<path d="M610.0,162.0 h37.8 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-37.8 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — T5 yes/no Brier 0.190</title></path>
+<line x1="610" y1="132" x2="610" y2="334" stroke="#c3c2b7" stroke-width="1"/>
+<line x1="643.0" y1="132" x2="643.0" y2="334" stroke="#e1e0d9" stroke-width="1"/>
+<text x="610" y="349" font-size="10.5" fill="#898781">0</text>
+<text x="643.0" y="349" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
+<line x1="644.2" y1="132" x2="644.2" y2="334" stroke="#52514e" stroke-width="1.5"><title>T5: always 0.5 scores 0.155</title></line>
+<path d="M610.0,140.0 h3.6 a3.6,3.6 0 0 1 3.6,3.6 v6.7 a3.6,3.6 0 0 1 -3.6,3.6 h-3.6 z" fill="#2a78d6"><title>ours v0 (2B) — T5 yes/no Brier 0.033</title></path>
+<text x="620.3" y="151" font-size="10.5" font-weight="600" fill="#0b0b0b">0.033</text>
+<path d="M610.0,162.0 h3.8 a3.8,3.8 0 0 1 3.8,3.8 v6.3 a3.8,3.8 0 0 1 -3.8,3.8 h-3.8 z" fill="#2a78d6"><title>ours v0.1-mix (2B) — T5 yes/no Brier 0.035</title></path>
+<path d="M610.0,184.0 h37.8 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-37.8 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — T5 yes/no Brier 0.190</title></path>
+<path d="M610.0,206.0 h19.5 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-19.5 z" fill="#eb6834"><title>~typesafe/jev-latest — T5 yes/no Brier 0.107</title></path>
+<path d="M610.0,228.0 h22.9 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-22.9 z" fill="#eb6834"><title>liquid/d1 — T5 yes/no Brier 0.122</title></path>
+<path d="M610.0,250.0 h28.6 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-28.6 z" fill="#eb6834"><title>microsoft/microsoft-decision-1 — T5 yes/no Brier 0.148</title></path>
+<path d="M610.0,272.0 h29.3 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-29.3 z" fill="#eb6834"><title>togethercomputer/tev1-4b-experimental — T5 yes/no Brier 0.151</title></path>
+<path d="M610.0,294.0 h35.4 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-35.4 z" fill="#eb6834"><title>openai/gpt-6-luna-decisions — T5 yes/no Brier 0.179</title></path>
+<path d="M610.0,316.0 h31.3 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-31.3 z" fill="#eb6834"><title>upstage/solar-decide — T5 yes/no Brier 0.161</title></path>
 <text x="690" y="124" font-size="12.5" font-weight="600" fill="#0b0b0b">T6</text>
-<line x1="690" y1="132" x2="690" y2="180" stroke="#c3c2b7" stroke-width="1"/>
-<line x1="723.0" y1="132" x2="723.0" y2="180" stroke="#e1e0d9" stroke-width="1"/>
-<text x="690" y="195" font-size="10.5" fill="#898781">0</text>
-<text x="723.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
-<line x1="729.1" y1="132" x2="729.1" y2="180" stroke="#52514e" stroke-width="1.5"><title>T6: always 0.5 scores 0.178</title></line>
-<path d="M690.0,140.0 h5.3 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-5.3 z" fill="#2a78d6"><title>robojev v0 (2B) — T6 yes/no Brier 0.042</title></path>
-<text x="702.3" y="151" font-size="10.5" font-weight="600" fill="#0b0b0b" stroke="#fcfcfb" stroke-width="3" paint-order="stroke">0.042</text>
-<path d="M690.0,162.0 h37.7 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-37.7 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — T6 yes/no Brier 0.189</title></path>
+<line x1="690" y1="132" x2="690" y2="334" stroke="#c3c2b7" stroke-width="1"/>
+<line x1="723.0" y1="132" x2="723.0" y2="334" stroke="#e1e0d9" stroke-width="1"/>
+<text x="690" y="349" font-size="10.5" fill="#898781">0</text>
+<text x="723.0" y="349" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
+<line x1="729.1" y1="132" x2="729.1" y2="334" stroke="#52514e" stroke-width="1.5"><title>T6: always 0.5 scores 0.178</title></line>
+<path d="M690.0,140.0 h5.3 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-5.3 z" fill="#2a78d6"><title>ours v0 (2B) — T6 yes/no Brier 0.042</title></path>
+<text x="702.3" y="151" font-size="10.5" font-weight="600" fill="#0b0b0b">0.042</text>
+<path d="M690.0,162.0 h6.8 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-6.8 z" fill="#2a78d6"><title>ours v0.1-mix (2B) — T6 yes/no Brier 0.049</title></path>
+<path d="M690.0,184.0 h37.7 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-37.7 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — T6 yes/no Brier 0.189</title></path>
+<path d="M690.0,206.0 h28.2 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-28.2 z" fill="#eb6834"><title>~typesafe/jev-latest — T6 yes/no Brier 0.146</title></path>
+<path d="M690.0,228.0 h30.2 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-30.2 z" fill="#eb6834"><title>liquid/d1 — T6 yes/no Brier 0.155</title></path>
+<path d="M690.0,250.0 h34.6 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-34.6 z" fill="#eb6834"><title>microsoft/microsoft-decision-1 — T6 yes/no Brier 0.175</title></path>
+<path d="M690.0,272.0 h36.4 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-36.4 z" fill="#eb6834"><title>togethercomputer/tev1-4b-experimental — T6 yes/no Brier 0.183</title></path>
+<path d="M690.0,294.0 h41.6 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-41.6 z" fill="#eb6834"><title>openai/gpt-6-luna-decisions — T6 yes/no Brier 0.207</title></path>
+<path d="M690.0,316.0 h33.8 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-33.8 z" fill="#eb6834"><title>upstage/solar-decide — T6 yes/no Brier 0.172</title></path>
 <text x="770" y="124" font-size="12.5" font-weight="600" fill="#0b0b0b">T7</text>
-<line x1="770" y1="132" x2="770" y2="180" stroke="#c3c2b7" stroke-width="1"/>
-<line x1="803.0" y1="132" x2="803.0" y2="180" stroke="#e1e0d9" stroke-width="1"/>
-<text x="770" y="195" font-size="10.5" fill="#898781">0</text>
-<text x="803.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
-<line x1="803.5" y1="132" x2="803.5" y2="180" stroke="#52514e" stroke-width="1.5"><title>T7: always 0.5 scores 0.152</title></line>
-<path d="M770.0,140.0 h3.9 a3.9,3.9 0 0 1 3.9,3.9 v6.2 a3.9,3.9 0 0 1 -3.9,3.9 h-3.9 z" fill="#2a78d6"><title>robojev v0 (2B) — T7 yes/no Brier 0.035</title></path>
-<text x="780.8" y="151" font-size="10.5" font-weight="600" fill="#0b0b0b" stroke="#fcfcfb" stroke-width="3" paint-order="stroke">0.035</text>
-<path d="M770.0,162.0 h35.9 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-35.9 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — T7 yes/no Brier 0.181</title></path>
+<line x1="770" y1="132" x2="770" y2="334" stroke="#c3c2b7" stroke-width="1"/>
+<line x1="803.0" y1="132" x2="803.0" y2="334" stroke="#e1e0d9" stroke-width="1"/>
+<text x="770" y="349" font-size="10.5" fill="#898781">0</text>
+<text x="803.0" y="349" text-anchor="middle" font-size="10.5" fill="#898781">0.15</text>
+<line x1="803.5" y1="132" x2="803.5" y2="334" stroke="#52514e" stroke-width="1.5"><title>T7: always 0.5 scores 0.152</title></line>
+<path d="M770.0,140.0 h3.9 a3.9,3.9 0 0 1 3.9,3.9 v6.2 a3.9,3.9 0 0 1 -3.9,3.9 h-3.9 z" fill="#2a78d6"><title>ours v0 (2B) — T7 yes/no Brier 0.035</title></path>
+<text x="780.8" y="151" font-size="10.5" font-weight="600" fill="#0b0b0b">0.035</text>
+<path d="M770.0,162.0 h4.8 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-4.8 z" fill="#2a78d6"><title>ours v0.1-mix (2B) — T7 yes/no Brier 0.040</title></path>
+<path d="M770.0,184.0 h35.9 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-35.9 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — T7 yes/no Brier 0.181</title></path>
+<path d="M770.0,206.0 h22.9 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-22.9 z" fill="#eb6834"><title>~typesafe/jev-latest — T7 yes/no Brier 0.122</title></path>
+<path d="M770.0,228.0 h27.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-27.0 z" fill="#eb6834"><title>liquid/d1 — T7 yes/no Brier 0.141</title></path>
+<path d="M770.0,250.0 h31.3 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-31.3 z" fill="#eb6834"><title>microsoft/microsoft-decision-1 — T7 yes/no Brier 0.161</title></path>
+<path d="M770.0,272.0 h30.6 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-30.6 z" fill="#eb6834"><title>togethercomputer/tev1-4b-experimental — T7 yes/no Brier 0.157</title></path>
+<path d="M770.0,294.0 h39.4 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-39.4 z" fill="#eb6834"><title>openai/gpt-6-luna-decisions — T7 yes/no Brier 0.197</title></path>
+<path d="M770.0,316.0 h29.5 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-29.5 z" fill="#eb6834"><title>upstage/solar-decide — T7 yes/no Brier 0.152</title></path>
 <text x="868" y="124" font-size="12.5" font-weight="600" fill="#0b0b0b">G1</text>
-<line x1="868" y1="132" x2="868" y2="180" stroke="#c3c2b7" stroke-width="1"/>
-<line x1="901.0" y1="132" x2="901.0" y2="180" stroke="#e1e0d9" stroke-width="1"/>
-<text x="868" y="195" font-size="10.5" fill="#898781">0</text>
-<text x="901.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.5</text>
-<path d="M868.0,140.0 h24.3 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-24.3 z" fill="#2a78d6"><title>robojev v0 (2B) — G1 accuracy 0.429</title></path>
-<path d="M868.0,162.0 h28.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-28.0 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — G1 accuracy 0.484</title></path>
-<text x="896.0" y="173" text-anchor="end" font-size="10.5" font-weight="600" fill="#0b0b0b">0.484</text>
+<line x1="868" y1="132" x2="868" y2="334" stroke="#c3c2b7" stroke-width="1"/>
+<line x1="901.0" y1="132" x2="901.0" y2="334" stroke="#e1e0d9" stroke-width="1"/>
+<text x="868" y="349" font-size="10.5" fill="#898781">0</text>
+<text x="901.0" y="349" text-anchor="middle" font-size="10.5" fill="#898781">0.5</text>
+<path d="M868.0,140.0 h24.3 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-24.3 z" fill="#2a78d6"><title>ours v0 (2B) — G1 accuracy 0.429</title></path>
+<path d="M868.0,162.0 h48.1 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-48.1 z" fill="#2a78d6"><title>ours v0.1-mix (2B) — G1 accuracy 0.790</title></path>
+<path d="M868.0,184.0 h28.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-28.0 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — G1 accuracy 0.484</title></path>
+<path d="M868.0,206.0 h48.2 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-48.2 z" fill="#eb6834"><title>~typesafe/jev-latest — G1 accuracy 0.791</title></path>
+<text x="916.2" y="217" text-anchor="end" font-size="10.5" font-weight="600" fill="#0b0b0b">0.791</text>
+<path d="M868.0,228.0 h47.4 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-47.4 z" fill="#eb6834"><title>liquid/d1 — G1 accuracy 0.778</title></path>
+<path d="M868.0,250.0 h47.9 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-47.9 z" fill="#eb6834"><title>microsoft/microsoft-decision-1 — G1 accuracy 0.787</title></path>
+<path d="M868.0,272.0 h41.2 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-41.2 z" fill="#eb6834"><title>togethercomputer/tev1-4b-experimental — G1 accuracy 0.684</title></path>
+<path d="M868.0,294.0 h46.7 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-46.7 z" fill="#eb6834"><title>openai/gpt-6-luna-decisions — G1 accuracy 0.768</title></path>
+<path d="M868.0,316.0 h46.8 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-46.8 z" fill="#eb6834"><title>upstage/solar-decide — G1 accuracy 0.769</title></path>
 <text x="948" y="124" font-size="12.5" font-weight="600" fill="#0b0b0b">G2</text>
-<line x1="948" y1="132" x2="948" y2="180" stroke="#c3c2b7" stroke-width="1"/>
-<line x1="981.0" y1="132" x2="981.0" y2="180" stroke="#e1e0d9" stroke-width="1"/>
-<text x="948" y="195" font-size="10.5" fill="#898781">0</text>
-<text x="981.0" y="195" text-anchor="middle" font-size="10.5" fill="#898781">0.5</text>
-<path d="M948.0,140.0 h38.9 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-38.9 z" fill="#2a78d6"><title>robojev v0 (2B) — G2 accuracy 0.650</title></path>
-<path d="M948.0,162.0 h44.8 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-44.8 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — G2 accuracy 0.739</title></path>
-<text x="992.8" y="173" text-anchor="end" font-size="10.5" font-weight="600" fill="#0b0b0b">0.739</text>
-<text x="276" y="151" text-anchor="end" font-size="12" fill="#0b0b0b" font-weight="600">robojev v0 (2B)</text>
-<text x="276" y="173" text-anchor="end" font-size="12" fill="#52514e">Qwen3.5-2B (untrained)</text>
+<line x1="948" y1="132" x2="948" y2="334" stroke="#c3c2b7" stroke-width="1"/>
+<line x1="981.0" y1="132" x2="981.0" y2="334" stroke="#e1e0d9" stroke-width="1"/>
+<text x="948" y="349" font-size="10.5" fill="#898781">0</text>
+<text x="981.0" y="349" text-anchor="middle" font-size="10.5" fill="#898781">0.5</text>
+<path d="M948.0,140.0 h38.9 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-38.9 z" fill="#2a78d6"><title>ours v0 (2B) — G2 accuracy 0.650</title></path>
+<path d="M948.0,162.0 h40.7 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-40.7 z" fill="#2a78d6"><title>ours v0.1-mix (2B) — G2 accuracy 0.677</title></path>
+<path d="M948.0,184.0 h44.8 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-44.8 z" fill="#a8a7a0"><title>Qwen3.5-2B (untrained) — G2 accuracy 0.739</title></path>
+<path d="M948.0,206.0 h56.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-56.0 z" fill="#eb6834"><title>~typesafe/jev-latest — G2 accuracy 0.909</title></path>
+<path d="M948.0,228.0 h57.1 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-57.1 z" fill="#eb6834"><title>liquid/d1 — G2 accuracy 0.926</title></path>
+<text x="1005.1" y="239" text-anchor="end" font-size="10.5" font-weight="600" fill="#0b0b0b">0.926</text>
+<path d="M948.0,250.0 h56.4 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-56.4 z" fill="#eb6834"><title>microsoft/microsoft-decision-1 — G2 accuracy 0.915</title></path>
+<path d="M948.0,272.0 h55.6 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-55.6 z" fill="#eb6834"><title>togethercomputer/tev1-4b-experimental — G2 accuracy 0.903</title></path>
+<path d="M948.0,294.0 h53.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-53.0 z" fill="#eb6834"><title>openai/gpt-6-luna-decisions — G2 accuracy 0.863</title></path>
+<path d="M948.0,316.0 h53.0 a4.0,4.0 0 0 1 4.0,4.0 v6.0 a4.0,4.0 0 0 1 -4.0,4.0 h-53.0 z" fill="#eb6834"><title>upstage/solar-decide — G2 accuracy 0.864</title></path>
+<text x="276" y="151" text-anchor="end" font-size="12" fill="#0b0b0b" font-weight="600">ours v0 (2B)</text>
+<text x="276" y="173" text-anchor="end" font-size="12" fill="#0b0b0b" font-weight="600">ours v0.1-mix (2B)</text>
+<text x="276" y="195" text-anchor="end" font-size="12" fill="#52514e">Qwen3.5-2B (untrained)</text>
+<text x="276" y="217" text-anchor="end" font-size="12" fill="#52514e">~typesafe/jev-latest</text>
+<text x="276" y="239" text-anchor="end" font-size="12" fill="#52514e">liquid/d1</text>
+<text x="276" y="261" text-anchor="end" font-size="12" fill="#52514e">microsoft/microsoft-decision-1</text>
+<text x="276" y="283" text-anchor="end" font-size="12" fill="#52514e">togethercomputer/tev1-4b-experimental</text>
+<text x="276" y="305" text-anchor="end" font-size="12" fill="#52514e">openai/gpt-6-luna-decisions</text>
+<text x="276" y="327" text-anchor="end" font-size="12" fill="#52514e">upstage/solar-decide</text>
 <text x="290" y="104" font-size="11.5" fill="#898781">yes/no Brier ↓ (lower is better) · the number marks the best model in each column</text>
 <text x="868" y="104" font-size="11.5" fill="#898781">accuracy ↑</text>
-<text x="24" y="228" font-size="11" fill="#898781">bench-v0 · 2026-10-12 · single-order reading · T1–T7 are home ground (our generator)</text>
+<text x="24" y="382" font-size="11" fill="#898781">bench-v0 · 2026-10-12 · single-order reading · T1–T7 are home ground (our generator)</text>
 </svg>

@@ -116,17 +116,17 @@ ours:
     T: ["artifacts/cloud/runs/v0-base-01-fetched/reports/base-2b-{set}.predictions.jsonl"]
     G: ["artifacts/cloud/runs/v01-main-01-fetched/reports/base-2b-{set}.predictions.jsonl", "artifacts/reports/v01b/{set}-base-2b.predictions.jsonl"]
   - tag: robojev-v0
-    label: robojev v0 (2B)
+    label: ours v0 (2B)
     role: ours
     T: ["artifacts/cloud/runs/v0-main-01-fetched/reports/after-2b-{set}.predictions.jsonl"]
     G: ["artifacts/cloud/runs/v01-main-01-fetched/reports/v0-2b-{set}.predictions.jsonl", "artifacts/reports/v01b/{set}-v0-2b.predictions.jsonl"]
   - tag: robojev-v0.1-main
-    label: robojev v0.1-main (2B)
+    label: ours v0.1-main (2B)
     role: ours
     T: ["artifacts/cloud/runs/v01-main-01-fetched/reports/after-v01-2b-{set}.predictions.jsonl"]
     G: ["artifacts/cloud/runs/v01-main-01-fetched/reports/after-v01-2b-{set}.predictions.jsonl"]
   - tag: robojev-v0.1-mix
-    label: robojev v0.1-mix (2B)
+    label: ours v0.1-mix (2B)
     role: ours
     T: ["artifacts/cloud/runs/v01-mix-01-fetched/reports/after-v01mix-2b-{set}.predictions.jsonl"]
     G: ["artifacts/cloud/runs/v01-mix-01-fetched/reports/after-v01mix-2b-{set}.predictions.jsonl"]

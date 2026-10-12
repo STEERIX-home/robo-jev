@@ -25,7 +25,7 @@ THEMES: dict[str, dict[str, str]] = {
     "dark": {"surface": "#1a1a19", "ink": "#ffffff", "ink2": "#c3c2b7", "muted": "#898781", "grid": "#2c2c2a", "axis": "#383835",
              "ours": "#3987e5", "api": "#d95926", "base": "#c3c2b7", "border": "rgba(255,255,255,0.10)", "mark": "#6b6a65"},
 }
-ROLE_NAMES = {"ours": "robojev (ours, 2B)", "api": "OpenRouter decision models", "baseline": "Qwen3.5-2B untrained (reference)"}
+ROLE_NAMES = {"ours": "ours (Steerix, 2B)", "api": "OpenRouter decision models", "baseline": "Qwen3.5-2B untrained (reference)"}
 
 
 def _t(text: Any) -> str:
@@ -327,8 +327,7 @@ def bars_svg(results: dict[str, Any], *, theme_name: str = "light", top: int | N
                 text = _f(value, 3)
                 room = inner - length
                 if room >= _text_width(text, 10.5) + 5:
-                    out.append(f'<text x="{x + 4 + length + 3:.1f}" y="{y + 11}" font-size="10.5" font-weight="600" fill="{theme["ink"]}" '
-                               f'stroke="{theme["surface"]}" stroke-width="3" paint-order="stroke">{text}</text>')
+                    out.append(f'<text x="{x + 4 + length + 3:.1f}" y="{y + 11}" font-size="10.5" font-weight="600" fill="{theme["ink"]}">{text}</text>')
                 else:
                     out.append(f'<text x="{x + 4 + length - 4:.1f}" y="{y + 11}" text-anchor="end" font-size="10.5" font-weight="600" '
                                f'fill="{_on(color)}">{text}</text>')
