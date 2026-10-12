@@ -189,12 +189,23 @@ def _robust(question: dict[str, Any], by_prior: dict[str, dict[str, Any]]) -> di
     return out
 
 
-def _record_id(group: fam.Group, member: str) -> str:
-    return f"v03b-{group.family}-{group.index:06d}" + ("p" if member == "pair" else "")
+#: Record bookkeeping of the v0.3b training set (the defaults of :func:`group_records`).
+SET_NAME = "v03b-mujoco-train"
+SPLIT = "train"
+ID_PREFIX = "v03b"
 
 
-def group_records(group: fam.Group, labelled: dict[str, Any], *, mujoco_version: str, git: str | None = None) -> list[dict[str, Any]]:
-    """One labelled group → its records (the base, and the paired record when there is one)."""
+def _record_id(group: fam.Group, member: str, prefix: str = ID_PREFIX) -> str:
+    return f"{prefix}-{group.family}-{group.index:06d}" + ("p" if member == "pair" else "")
+
+
+def group_records(group: fam.Group, labelled: dict[str, Any], *, mujoco_version: str, git: str | None = None, set_name: str = SET_NAME,
+                  split: str = SPLIT, id_prefix: str = ID_PREFIX) -> list[dict[str, Any]]:
+    """One labelled group → its records (the base, and the paired record when there is one).
+
+    `set_name`, `split` and `id_prefix` are bookkeeping only (``meta.set``, ``meta.split``, the record id and the pair's ``of``): a fresh
+    evaluation set built by the same code (task B1) is labelled as such; the request (all the model reads) and the labels do not
+    depend on them."""
     if group.visible.get("robot") in fam.ROBOT_RENAMES:
         group = dataclasses.replace(group, visible={**group.visible, "robot": fam.ROBOT_RENAMES[group.visible["robot"]]})
     family = group.family
@@ -215,11 +226,11 @@ def group_records(group: fam.Group, labelled: dict[str, Any], *, mujoco_version:
         kinds = {qname: kind for kind, qname in names.items() if qname in questions}
         record = {
             "schema": SCHEMA,
-            "id": _record_id(group, member),
+            "id": _record_id(group, member, id_prefix),
             "generator": {"name": fam.GENERATOR, "family": family, "group": group.index, "seed": group.seed, "draws_seed": labelled["draws_seed"],
                           "k": labelled["k"], "priors": list(fam.PRIORS), "mujoco": mujoco_version, "git": git, "member": member},
             "meta": {
-                "set": "v03b-mujoco-train", "split": "train", "scene": family, "group": family, "phenomena": [family], "language": "en",
+                "set": set_name, "split": split, "scene": family, "group": family, "phenomena": [family], "language": "en",
                 "domain": visible.get("domain"), "style": group.style, "key_question": key, "question_kind": kinds,
                 "visible": visible, "hidden_prior": {p: _jsonable(r) for p, r in labelled["members"][member]["hidden"].items()},
                 "prior_settings": {p: fam.PRIOR_SETTINGS[p]["what"] for p in fam.PRIORS},
