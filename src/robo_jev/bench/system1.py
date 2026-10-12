@@ -789,7 +789,9 @@ def render_markdown(results: Mapping[str, Any], *, title: str = "System-1 scorec
              "over balanced option orders; OpenRouter models were asked once in the stored order. Intervals are cluster-bootstrap 95 % "
              f"({results['n_boot']} draws; cluster = record, a T5 pair is one cluster). Definitions at the end.", ""]
     lines += ["## Label profile (yes/no and score questions)", "",
-              "Base rates behind band accuracy: answering \"low\" every time scores the low share.", "",
+              "Base rates behind band accuracy. A constant answer scores: always \"low\" — band accuracy = the low share, severe errors = the "
+              "high share; always 0.5 — band accuracy = the middle share, no severe error; balanced band accuracy = 1/3 for any constant "
+              "answer. Direction and comparison count an unchanged answer as a miss, so a constant answer scores 0 there.", "",
               "| group | questions | low | middle | high | clear |", "|---|---|---|---|---|---|"]
     for group, profile in results["label_profile"].items():
         if profile["questions"]:
