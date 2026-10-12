@@ -48,6 +48,8 @@ General decision models read the *meaning* of a situation well, but on our physi
 
 Each answer is a probability, so the robot's planner can weigh risk, time and cost instead of trusting a yes/no.
 
+robo-jev is a **System 1**: a fast, integrated judgment about which way the risk moves, roughly how big it is, which action is safer, and when to look again or call a person. Computing the exact physical numbers is the job of the control layer below it, **System 0**. robo-jev's training and scoring are moving to these judgments (risk level, comparison, direction, safer action) and away from exact probabilities.
+
 ## How it works
 
 1. **Simulate phenomena, not whole scenes.** An engine samples decision moments across ten domains (warehouses, cafés, hospitals, homes, sidewalks …) and writes them as text in several styles, in English and Korean.
