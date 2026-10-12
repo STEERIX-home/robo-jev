@@ -140,9 +140,8 @@ def _export(args: argparse.Namespace) -> int:
     common = {"tokenizer_json": tokenizer_file, "tokenizer_config": args.base_files / "tokenizer_config.json",
               "chat_template": args.base_files / "chat_template.jinja", "figures": files}
     listing = {}
-    example = args.example.read_text(encoding="utf-8") if args.example is not None else ""
     for variant, folder, weights in (("adapter", adapter_dir, {"kind": "peft-lora", **adapter}), ("merged", merged_dir, {"kind": "merged", **merged})):
-        card = render_card(variant, example_output=example)
+        card = render_card(variant)  # the example's real output goes in with `cards --equivalence` after the GPU check
         metadata = build_metadata(state, variant=variant, checkpoint_path=args.checkpoint, checkpoint_sha256=checkpoint_sha, tokenizer=tokenizer,
                                   tokenizer_sha256=tokenizer_info["sha256"], repo=REPO, weights=weights, data_manifests=data_manifests)
         write_common_files(folder, metadata=metadata, card=card, **common)
@@ -158,14 +157,31 @@ def _export(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 
+def example_markdown(answers: dict[str, Any], *, variant: str) -> str:
+    """The model card's example output: the real answers of this repo's weights (``equivalence --example``), rounded for reading."""
+
+    def short(value: Any) -> Any:
+        if isinstance(value, float):
+            return round(value, 3)
+        if isinstance(value, dict):
+            return {k: short(v) for k, v in value.items()}
+        return value
+
+    lines = [json.dumps({name: short(answer)}, ensure_ascii=False)[1:-1] for name, answer in answers.items()]
+    weights = "the merged weights" if variant == "merged" else "Qwen/Qwen3.5-2B + this adapter"
+    return (f"The answers for this example ({weights}, bfloat16, one GPU, `orders=\"single\"`; rounded to three decimals here):\n\n"
+            "```json\n{\n " + ",\n ".join(lines) + "\n}\n```")
+
+
 def _cards(args: argparse.Namespace) -> int:
     from robo_jev.hf.export import check_no_pickle, render_card
 
-    example = args.example.read_text(encoding="utf-8") if args.example is not None else ""
+    examples = json.loads(args.equivalence.read_text(encoding="utf-8")).get("examples", {}) if args.equivalence is not None else {}
     for variant, folder in (("adapter", args.root / ADAPTER_DIR), ("merged", args.root / MERGED_DIR)):
+        example = example_markdown(examples[variant]["single"], variant=variant) if variant in examples else ""
         (folder / "README.md").write_text(render_card(variant, example_output=example), encoding="utf-8")
         check_no_pickle(folder)
-        _log(f"{folder}/README.md written")
+        _log(f"{folder}/README.md written ({'with' if example else 'without'} the example output)")
     return 0
 
 
@@ -276,6 +292,11 @@ def _equivalence(args: argparse.Namespace) -> int:
         _log(f"{label}: {result['by_type']['all']} byte-identical {result['byte_identical']} ({seconds:.0f} s)")
         if args.save_predictions:
             _write_json(args.out.with_suffix(f".{label}.scored.json"), scored)
+        if args.example is not None:  # the model card's example, called as a user would (default key and seed)
+            example = json.loads(args.example.read_text(encoding="utf-8"))
+            report.setdefault("examples", {})[label] = {
+                orders: model.decide(example["state"], example["questions"], orders=orders) for orders in ("single", "balanced")
+            }
         del model
         torch.cuda.empty_cache()
     report["gpu"] = {"guard": guard, "memory_at_end": memory_report(), "peak_allocated_bytes": int(torch.cuda.max_memory_allocated())}
@@ -422,10 +443,9 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--data-manifest", type=Path, default=REPO / "artifacts/simgen/v01/train-50k.manifest.json")
     p.add_argument("--data-stats", type=Path, default=REPO / "artifacts/simgen/v01/train-50k.stats.json")
     p.add_argument("--probe-manifest", type=Path, default=REPO / "artifacts/simgen/probes/G1-train-mix.manifest.json")
-    p.add_argument("--example", type=Path, default=None, help="markdown with the example's real output for the model cards")
     p = sub.add_parser("cards", help="re-render README.md (model cards) in an existing export")
     p.add_argument("--root", type=Path, required=True)
-    p.add_argument("--example", type=Path, default=None)
+    p.add_argument("--equivalence", type=Path, default=None, help="the equivalence report with the example's answers per variant")
     p = sub.add_parser("sample", help="the equivalence records (50 T1, 25 T2, 25 G2)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--seed", type=int, default=0)
@@ -441,6 +461,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--model", action="append", required=True, help="label=folder (repeatable)")
     p.add_argument("--shuffle-seed", type=int, default=1)
     p.add_argument("--save-predictions", action="store_true")
+    p.add_argument("--example", type=Path, default=None, help="a {state, questions} JSON to answer with each model (the model card's example)")
     p = sub.choices["verify-hub"]
     p.add_argument("--root", type=Path, required=True)
     p.add_argument("--limit", type=int, default=5)
