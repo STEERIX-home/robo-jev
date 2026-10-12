@@ -9,6 +9,11 @@
     # 섞기용 학습 파일 (CPU) — 학습 파일 뒤에 G1-train-mix를 그대로 이어 붙이고 섞인 몫(예 기준)을 manifest에 적는다
     uv run python scripts/convert_single_probe.py mix --base artifacts/simgen/v01/train-50k.jsonl --probe artifacts/simgen/probes/G1-train-mix.jsonl \
         --sealed artifacts/simgen/probes/G1.jsonl --train-config configs/train/decisions-v0-lora-h100.yaml --out <mix>.jsonl
+    # Task v0.3c — the same with extra training parts after the base file (``--extra NAME=PATH``, e.g. the MuJoCo set), counted in the
+    # shares and the token estimate; the general prefix is sized against base + extras + probe
+    uv run python scripts/convert_single_probe.py mix --base artifacts/simgen/v03/engine-s1.jsonl --extra mujoco=artifacts/simgen/v03/mujoco-train.jsonl \
+        --probe artifacts/simgen/probes/G1-train-mix.jsonl --sealed artifacts/simgen/probes/G1.jsonl --general artifacts/simgen/v02/general-train.jsonl \
+        --general-share 0.25 --train-config configs/train/decisions-v0-lora-h100.yaml --token-sample 3000 --out artifacts/simgen/v03/train-v03.jsonl
     # Task v0.2 — the same, plus the shortest prefix of the general-reading file that makes ~10 % (v02-a) or ~25 % (v02-b) of the
     # train examples per epoch (counted with the trainer's own dev split and q), and a sampled token estimate
     uv run python scripts/convert_single_probe.py mix --base artifacts/simgen/v02/train-50k.jsonl --probe artifacts/simgen/probes/G1-train-mix.jsonl \
@@ -40,7 +45,7 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-SCRIPT_VERSION = "v02-mix-1"
+SCRIPT_VERSION = "v03-mix-1"
 #: 변환본이 기대는 코드 — manifest의 ``git_dirty``는 이 파일들이 HEAD와 다른지다.
 CODE_PATHS = ("src/robo_jev/decisions/single_probe.py", "src/robo_jev/decisions/records.py", "scripts/convert_single_probe.py",
               "src/robo_jev/data/general_sets.py")
@@ -238,10 +243,11 @@ def _examples(records: list[dict[str, Any]], q: int) -> int:
     return examples_per_epoch(records, q=q)
 
 
-def _general_prefix(general: list[dict[str, Any]], *, target: float, fixed: int, config: dict[str, Any], q: int) -> int:
+def _general_prefix(general: list[dict[str, Any]], *, target: float, fixed: int, config: dict[str, Any], q: int, allow_short: bool = False) -> int:
     """The shortest prefix length of the general file whose **train** examples (after the trainer's own dev split) reach `target` of
     all train examples per epoch, `fixed` being the examples of the other parts (Task v0.2 §1-3). The general file interleaves its
-    sources, so a prefix stays balanced."""
+    sources, so a prefix stays balanced. If the whole file cannot reach the target: refuse, or with `allow_short` take the whole file
+    (Task v0.3c — the manifest then records the share reached)."""
     from fractions import Fraction
 
     from robo_jev.decisions.examples import is_dev
@@ -255,7 +261,65 @@ def _general_prefix(general: list[dict[str, Any]], *, target: float, fixed: int,
             examples += min(q, len(record["request"]["questions"]))
         if examples * (1 - share) >= share * fixed:
             return index + 1
+    if allow_short:
+        return len(general)
     raise SystemExit(f"the general file has too few records for a share of {target} (reached {examples} of {float(share / (1 - share) * fixed):.0f} examples)")
+
+
+def _reaches(general: int, others: int, target: float) -> bool:
+    """general / (others + general) >= target, exactly (the prefix rule's comparison)."""
+    from fractions import Fraction
+
+    share = Fraction(str(target))
+    return general * (1 - share) >= share * others
+
+
+def _repeated(record: dict[str, Any]) -> dict[str, Any]:
+    """A second-pass copy of a general record (``--general-repeat-if-short``): new id ``<id>~r2`` (the trainer refuses repeated ids;
+    the new id also gives it its own dev-split draw and option-order seed), ``meta.repeat_of`` = the original id; same request and label."""
+    import copy
+
+    out = copy.deepcopy(record)
+    out["id"] = f"{record['id']}~r2"
+    out["meta"]["repeat_of"] = str(record["id"])
+    return out
+
+
+def _load_extras(specs: list[str], *, taken: set[str]) -> list[dict[str, Any]]:
+    """``--extra NAME=PATH`` parts (Task v0.3c): every record must pass the trainer's validation and be a train-split record; ids must not
+    clash with the other parts; a sibling ``<stem>.manifest.json`` that records a sha256 must match the file."""
+    from robo_jev.decisions.records import file_sha256
+    from robo_jev.decisions.train import load_training_records
+
+    out: list[dict[str, Any]] = []
+    for spec in specs:
+        name, sep, raw = str(spec).partition("=")
+        if not sep or not name or not raw:
+            raise SystemExit(f"--extra takes NAME=PATH (got {spec!r})")
+        if name in ("base", "probe", "general", "total") or any(name == extra["name"] for extra in out):
+            raise SystemExit(f"--extra name {name!r} is reserved or repeated")
+        path = Path(raw)
+        records, check = load_training_records(path)
+        if check["invalid"] or not records:
+            raise SystemExit(f"{path}: {check['invalid']} invalid records of {check['read']} — every extra record must pass the trainer's validation")
+        wrong = sorted({str((r.get("meta") or {}).get("split")) for r in records} - {"train"})
+        if wrong:
+            raise SystemExit(f"{path}: records from splits {wrong} — an extra part holds train-split records only")
+        ids = {str(r["id"]) for r in records}
+        clash = ids & taken
+        if clash:
+            raise SystemExit(f"{len(clash)} record ids of {path} appear in another part (first {sorted(clash)[:3]})")
+        taken |= ids
+        manifest_path = path.with_name(path.stem + ".manifest.json")
+        recorded_manifest = None
+        if manifest_path.is_file():
+            recorded = json.loads(manifest_path.read_text(encoding="utf-8"))
+            sha = recorded.get("sha256") or (recorded.get("file") or {}).get("sha256") or (recorded.get("out") or {}).get("sha256")
+            if sha is not None and sha != file_sha256(path):
+                raise SystemExit(f"{path}: its manifest records sha256 {str(sha)[:12]}… but the file differs — rebuild or regenerate the manifest")
+            recorded_manifest = {"path": str(manifest_path), "sha256": file_sha256(manifest_path), "file_sha256_recorded": sha}
+        out.append({"name": name, "path": path, "records": records, "validation": check, "manifest": recorded_manifest})
+    return out
 
 
 def _token_estimate(parts: dict[str, list[dict[str, Any]]], examples: dict[str, int], *, sample: int, config: dict[str, Any]) -> dict[str, Any]:
@@ -303,6 +367,7 @@ def cmd_mix(args: argparse.Namespace) -> int:
     clash = {str(r["id"]) for r in base} & {str(r["id"]) for r in probe}
     if clash:
         raise SystemExit(f"{len(clash)} record ids appear in both files (first {sorted(clash)[:3]})")
+    extras = _load_extras(args.extra or [], taken={str(r["id"]) for r in base} | {str(r["id"]) for r in probe})
     sealed = None
     if args.sealed is not None:
         g1, _ = load_training_records(args.sealed)
@@ -311,6 +376,9 @@ def cmd_mix(args: argparse.Namespace) -> int:
             raise SystemExit(f"{args.probe} shares origin groups / records with the sealed {args.sealed}: {crossing}")
         if {str(r["id"]) for r in g1} & {str(r["id"]) for r in base}:
             raise SystemExit(f"{args.base} contains sealed G1 record ids")
+        for extra in extras:
+            if {str(r["id"]) for r in g1} & {str(r["id"]) for r in extra["records"]}:
+                raise SystemExit(f"{extra['path']} contains sealed G1 record ids")
         sealed = {"path": str(args.sealed), "sha256": file_sha256(args.sealed), "overlap": {"origin_groups": 0, "source_records": 0, "base_ids": 0}}
     config = resolve_config(_read_yaml(args.train_config)) if args.train_config else resolve_config({})
     q = int(config["questions_per_request"])
@@ -318,6 +386,9 @@ def cmd_mix(args: argparse.Namespace) -> int:
     train_probe, dev_probe = split_dev(probe, fraction=config["dev_fraction"], salt=config["dev_salt"])
     cap = config["dev_max_records"]
     examples = {"base": _examples(train_base, q), "probe": _examples(train_probe, q)}
+    for extra in extras:
+        extra["train"], extra["dev"] = split_dev(extra["records"], fraction=config["dev_fraction"], salt=config["dev_salt"])
+        examples[extra["name"]] = _examples(extra["train"], q)
     general_block, general_lines, train_general, dev_general = None, [], [], []
     if args.general is not None:
         from robo_jev.data.general_sets import SOURCES
@@ -336,20 +407,32 @@ def cmd_mix(args: argparse.Namespace) -> int:
             raise SystemExit(f"{args.general}: its manifest is missing or does not match the file (sha256) — rebuild with scripts/convert_general_sets.py")
         if any((general_manifest.get("overlap_check") or {}).get("overlap_after_build", {"missing": 1}).values()):
             raise SystemExit(f"{args.general}: the manifest does not record a zero overlap with the sealed sets")
-        n = _general_prefix(general, target=float(args.general_share), fixed=examples["base"] + examples["probe"], config=config, q=q)
-        used = general[:n]
-        clash = {str(r["id"]) for r in used} & ({str(r["id"]) for r in base} | {str(r["id"]) for r in probe})
+        if args.general_take_all_if_short and args.general_repeat_if_short:
+            raise SystemExit("--general-take-all-if-short and --general-repeat-if-short exclude each other")
+        pool = general + ([_repeated(r) for r in general] if args.general_repeat_if_short else [])
+        n = _general_prefix(pool, target=float(args.general_share), fixed=sum(examples.values()), config=config, q=q,
+                            allow_short=bool(args.general_take_all_if_short))
+        used = pool[:n]
+        clash = {str(r["id"]) for r in used} & ({str(r["id"]) for r in base} | {str(r["id"]) for r in probe}
+                                                | {str(r["id"]) for extra in extras for r in extra["records"]})
         if clash:
             raise SystemExit(f"{len(clash)} general record ids clash with the other files (first {sorted(clash)[:3]})")
         with args.general.open("rb") as handle:
             general_lines = [line for line in handle if line.strip()][:n]
+        general_lines += [(json.dumps(r, ensure_ascii=False) + "\n").encode("utf-8") for r in used[len(general):]]
         train_general, dev_general = split_dev(used, fraction=config["dev_fraction"], salt=config["dev_salt"])
         examples["general"] = _examples(train_general, q)
         from collections import Counter
 
         general_block = {
             "path": str(args.general), "sha256": file_sha256(args.general), "records_in_file": len(general), "records_used": n,
-            "prefix": f"first {n} of {len(general)} records (the file interleaves its sources)", "target_share": float(args.general_share),
+            "prefix": (f"first {n} of {len(general)} records (the file interleaves its sources)" if n <= len(general) else
+                       f"all {len(general)} records, then a second pass over the first {n - len(general)} (the file interleaves its sources)"),
+            "target_share": float(args.general_share),
+            "target_reached": _reaches(examples["general"], sum(v for k, v in examples.items() if k != "general"), float(args.general_share)),
+            "second_pass": {"records": max(0, n - len(general)), "ids": "<id>~r2 (meta.repeat_of = the original id)",
+                            "why": "the whole file could not reach the target share; a prefix of the file is used a second time"}
+                           if n > len(general) else None,
             "manifest": {"path": str(manifest_path), "sha256": file_sha256(manifest_path), "licenses": general_manifest.get("licenses"),
                          "overlap_after_build": general_manifest["overlap_check"]["overlap_after_build"]},
             "records_by_source": dict(sorted(Counter(r["meta"]["source"]["set"] for r in used).items())),
@@ -357,7 +440,7 @@ def cmd_mix(args: argparse.Namespace) -> int:
         }  # fmt: skip
     dev_used = {}
     room = (cap - len(dev_base)) if cap else None
-    for name, dev in (("probe", dev_probe), ("general", dev_general)):
+    for name, dev in ([(extra["name"], extra["dev"]) for extra in extras] + [("probe", dev_probe), ("general", dev_general)]):
         used_now = len(dev) if room is None else max(0, min(len(dev), room))
         dev_used[name] = used_now
         if room is not None:
@@ -365,7 +448,7 @@ def cmd_mix(args: argparse.Namespace) -> int:
     args.out.parent.mkdir(parents=True, exist_ok=True)
     temp = args.out.with_name(args.out.name + ".tmp")
     with temp.open("wb") as out:
-        for source in (args.base, args.probe):
+        for source in (args.base, *(extra["path"] for extra in extras), args.probe):
             data = source.read_bytes()
             out.write(data)
             if data and not data.endswith(b"\n"):
@@ -376,13 +459,16 @@ def cmd_mix(args: argparse.Namespace) -> int:
     total = sum(examples.values())
     batch = int(config["batch_examples"])
     epoch = {**examples, "total": total, "probe_share": examples["probe"] / total if total else None}
+    for extra in extras:
+        epoch[f"{extra['name']}_share"] = examples[extra["name"]] / total if total else None
     if general_block is not None:
         epoch["general_share"] = examples["general"] / total if total else None
     manifest = {
         "kind": "decisions-train-mix-v0", "script_version": SCRIPT_VERSION, "git": _git(),
         "out": {"path": str(args.out), "sha256": file_sha256(args.out), "bytes": args.out.stat().st_size,
-                "records": len(base) + len(probe) + len(general_lines)},
-        "order": "base file first, then the probe file (byte-for-byte)" + (", then a prefix of the general file (whole lines)" if general_block else "")
+                "records": len(base) + sum(len(extra["records"]) for extra in extras) + len(probe) + len(general_lines)},
+        "order": "base file first, " + "".join(f"then the extra part {extra['name']!r}, " for extra in extras)
+                 + "then the probe file (byte-for-byte)" + (", then a prefix of the general file (whole lines)" if general_block else "")
                  + " — the trainer's dev set is the first dev_max_records dev records in file order, so a mixed run keeps the unmixed run's dev records",
         "base": {"path": str(args.base), "sha256": file_sha256(args.base), "records": len(base), "validation": base_check},
         "probe": {"path": str(args.probe), "sha256": file_sha256(args.probe), "records": len(probe), "validation": probe_check},
@@ -396,14 +482,22 @@ def cmd_mix(args: argparse.Namespace) -> int:
         "steps_per_epoch": {"base_only": -(-examples["base"] // batch), "mixed": -(-total // batch)},
         "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
     }  # fmt: skip
+    if extras:
+        manifest["extra"] = [{k: extra[k] for k in ("name", "manifest", "validation")} | {"path": str(extra["path"]), "sha256": file_sha256(extra["path"]),
+                              "records": len(extra["records"]), "train": len(extra["train"]), "dev": len(extra["dev"]),
+                              "dev_used": dev_used[extra["name"]]} for extra in extras]  # fmt: skip
+        manifest["shares"] = {"examples": {name: value / total for name, value in examples.items()} if total else None}
     if general_block is not None:
         manifest["general"] = general_block
         manifest["split"].update(general_train=len(train_general), general_dev=len(dev_general), general_dev_used=dev_used["general"],
                                  general_dev_unused=len(dev_general) - dev_used["general"])  # fmt: skip
         manifest["steps_per_epoch"]["base_and_probe"] = -(-(examples["base"] + examples["probe"]) // batch)
     if args.token_sample:
-        parts = {"base": train_base, "probe": train_probe, **({"general": train_general} if general_block is not None else {})}
+        parts = {"base": train_base, **{extra["name"]: extra["train"] for extra in extras}, "probe": train_probe,
+                 **({"general": train_general} if general_block is not None else {})}
         manifest["tokens"] = _token_estimate(parts, examples, sample=int(args.token_sample), config=config)
+        if "shares" in manifest:
+            manifest["shares"]["tokens_est"] = {name: manifest["tokens"][name]["est_token_share"] for name in parts}
     _write_json(args.out.with_name(args.out.stem + ".manifest.json"), manifest)
     shares = f"probe share {epoch['probe_share']:.4f}" + (f", general share {epoch['general_share']:.4f}" if general_block else "")
     _log(f"mix: {len(base)} + {len(probe)} + {len(general_lines)} records → {args.out} · {shares} of examples/epoch")
@@ -455,6 +549,13 @@ def build_parser() -> argparse.ArgumentParser:
                      help="general-reading training file (scripts/convert_general_sets.py, Task v0.2) — a prefix of it goes after the probe file")
     mix.add_argument("--general-share", type=float, default=None,
                      help="target share of train examples per epoch for the general data (e.g. 0.10, 0.25) — the shortest prefix that reaches it")
+    mix.add_argument("--extra", action="append", default=[], metavar="NAME=PATH",
+                     help="an extra training part placed after the base file (Task v0.3c, e.g. mujoco=artifacts/simgen/v03/mujoco-train.jsonl); repeatable")
+    mix.add_argument("--general-take-all-if-short", action="store_true",
+                     help="if the whole general file cannot reach --general-share, use all of it (the manifest records the share reached)")
+    mix.add_argument("--general-repeat-if-short", action="store_true",
+                     help="if the whole general file cannot reach --general-share, append a second pass over the shortest prefix that does "
+                          "(ids <id>~r2; the manifest records it)")
     mix.add_argument("--token-sample", type=int, default=0,
                      help="estimate prompt tokens per example from this many train records per part (0 = off; needs the tokenizer)")
     mix.add_argument("--out", type=Path, required=True)
