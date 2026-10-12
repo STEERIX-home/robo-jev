@@ -10,6 +10,14 @@
     # physics sanity (monotonicity, analytic thresholds, determinism) and the T8b overlap check
     python scripts/mjgen_v03.py sanity --workers 8
     python scripts/mjgen_v03.py overlap
+    # a fresh evaluation set from the same code (task B1): a new master seed and new group indices, its own files, labelled as such,
+    # then the zero-overlap check against the training records (written into its manifest)
+    python scripts/mjgen_v03.py label --groups-per-family 264 --start 100000 --seed 202610131 --pair-share 0.6 --candidates artifacts/b1/b1-candidates.jsonl
+    python scripts/mjgen_v03.py factor --candidates artifacts/b1/b1-candidates.jsonl --records-per-family 400 \\
+        --selection artifacts/b1/b1-selection.json --factor-rows artifacts/b1/b1-factor-partners.jsonl
+    python scripts/mjgen_v03.py assemble --candidates artifacts/b1/b1-candidates.jsonl --selection artifacts/b1/b1-selection.json \\
+        --factor-rows artifacts/b1/b1-factor-partners.jsonl --out artifacts/b1/b1-infamily.jsonl --set-name b1-infamily --split test --id-prefix b1
+    python scripts/mjgen_v03.py train-overlap --input artifacts/b1/b1-infamily.jsonl --out artifacts/b1/b1-infamily.overlap.json
 
 Records are ``simgen-request/0`` (the trainer and ``scripts/diagnose_decisions.py`` read them). T8 stays sealed: nothing here
 reads T8 files except the overlap check, which only compares text.
@@ -32,9 +40,13 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-SCRIPT_VERSION = "v03b-1"
+SCRIPT_VERSION = "v03b-2"
 OUT = REPO / "artifacts" / "simgen" / "v03"
 MASTER_SEED = 20261013
+#: bookkeeping defaults of `assemble` (the v0.3b training set; robo_jev.mjgen.generate.SET_NAME / SPLIT / ID_PREFIX)
+SET_NAME, SPLIT, ID_PREFIX = "v03b-mujoco-train", "train", "v03b"
+WHAT = ("MuJoCo-labelled training families (tilt, grip, tower); labels = outcome frequencies over K hidden draws under three prior settings; "
+        "one-fact pairs; balanced key labels")
 
 
 def _log(message: str) -> None:
@@ -330,7 +342,8 @@ def cmd_assemble(args: argparse.Namespace) -> int:
     git = _git_sha()
     records = []
     for group, labelled in kept:
-        records.extend(group_records(group, labelled, mujoco_version=mujoco.__version__, git=git))
+        records.extend(group_records(group, labelled, mujoco_version=mujoco.__version__, git=git, set_name=args.set_name, split=args.split,
+                                     id_prefix=args.id_prefix))
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     temp = out.with_name(out.name + ".tmp")
@@ -358,10 +371,12 @@ def cmd_assemble(args: argparse.Namespace) -> int:
         runs = [json.loads(line) for line in runs_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     q_types = collections.Counter(q["type"] for r in records for q in r["request"]["questions"].values())
     manifest = {
-        "set": "v03b-mujoco-train", "what": "MuJoCo-labelled training families (tilt, grip, tower); labels = outcome frequencies over K hidden draws "
-        "under three prior settings; one-fact pairs; balanced key labels", "split": "train", "sealed": False,
+        "set": args.set_name, "what": args.what, "split": args.split, "id_prefix": args.id_prefix, "sealed": False,
         "generator": fam.GENERATOR, "script_version": SCRIPT_VERSION, "git": git, "mujoco": mujoco.__version__, "k_per_prior": fam.DEFAULT_K if not rows else rows[0]["labelled"]["k"],
         "priors": fam.PRIOR_SETTINGS, "master_seed": runs[-1]["seed"] if runs else None,
+        "label_runs": [{k: run.get(k) for k in ("seed", "start", "groups_per_family", "k", "families", "groups", "git")} for run in runs],
+        "group_indices": {family: [min(g.index for g, _ in kept if g.family == family), max(g.index for g, _ in kept if g.family == family)]
+                          for family in fam.FAMILIES if any(g.family == family for g, _ in kept)},
         "group_seed_rule": "sha256('v03b|master|family|index')[:8]; hidden-draw points: scrambled Latin hypercube seeded by group seed ^ 0xD3A5",
         "catalogs": {
             "tilt": {"surfaces": fam.TILT_SURFACES, "loads": fam.TILT_LOADS, "fills": fam.TILT_FILLS, "robots": fam.TILT_ROBOTS},
@@ -447,6 +462,29 @@ def cmd_overlap(args: argparse.Namespace) -> int:
     return 0 if report["verdict"]["passed"] else 2
 
 
+def cmd_train_overlap(args: argparse.Namespace) -> int:
+    """A fresh set from this generator (task B1) against the training records: no shared seeds, scenes, ids, state texts or requests.
+    The summary is also written into the set's manifest (``overlap_with_train``) when it exists."""
+    from robo_jev.decisions.records import file_sha256, read_records
+    from robo_jev.mjgen.overlap import train_overlap_report
+
+    report = train_overlap_report(read_records(args.input), read_records(args.train))
+    report.update({"input": str(args.input), "input_sha256": file_sha256(args.input), "train": str(args.train), "train_sha256": file_sha256(args.train),
+                   "git": _git_sha(), "created": dt.datetime.now().astimezone().isoformat(timespec="seconds")})
+    _write_json(Path(args.out), report)
+    manifest = Path(args.input).with_suffix(".manifest.json")
+    if manifest.is_file():
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+        if payload.get("sha256") != report["input_sha256"]:
+            raise SystemExit(f"{manifest}: its sha256 does not match {args.input} — re-assemble first")
+        payload["overlap_with_train"] = {"file": str(args.out), "train": report["train"], "train_sha256": report["train_sha256"],
+                                         "verdict": report["verdict"], "shared": {k: v["shared"] for k, v in report["shared"].items()},
+                                         "information": report["information"]}
+        _write_json(manifest, payload)
+    _log(f"train overlap → {args.out}: " + json.dumps(report["verdict"]))
+    return 0 if report["verdict"]["passed"] else 2
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0], formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -473,6 +511,10 @@ def build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("--still-pair-share", type=float, default=0.2, help="max share of near/free (designed-still) pairs kept")
     assemble.add_argument("--factor-rows", type=Path, default=None, help="one-factor partners from `factor` (with --selection)")
     assemble.add_argument("--selection", type=Path, default=OUT / "mujoco-selection.json")
+    assemble.add_argument("--set-name", default=SET_NAME, help=f"meta.set of every record and the manifest's set (default {SET_NAME})")
+    assemble.add_argument("--split", default=SPLIT, help=f"meta.split of every record (default {SPLIT})")
+    assemble.add_argument("--id-prefix", default=ID_PREFIX, help=f"record ids <prefix>-<family>-<index>[p] (default {ID_PREFIX})")
+    assemble.add_argument("--what", default=WHAT, help="the manifest's description of the set")
     factor = sub.add_parser("factor", help="balanced selection + one-factor partners for the kept groups (CPU unit; resumable)")
     factor.add_argument("--candidates", type=Path, default=OUT / "mujoco-candidates.jsonl")
     factor.add_argument("--records-per-family", type=int, default=5000)
@@ -508,6 +550,11 @@ def build_parser() -> argparse.ArgumentParser:
     over.add_argument("--t8b", type=Path, default=REPO / "artifacts" / "t8" / "T8b.jsonl")
     over.add_argument("--out", type=Path, default=OUT / "mujoco-overlap.json")
     over.set_defaults(func=cmd_overlap)
+    trov = sub.add_parser("train-overlap", help="a fresh set from this generator vs the training records (seeds, scenes, ids, texts)")
+    trov.add_argument("--input", type=Path, required=True)
+    trov.add_argument("--train", type=Path, default=OUT / "mujoco-train.jsonl")
+    trov.add_argument("--out", type=Path, required=True)
+    trov.set_defaults(func=cmd_train_overlap)
     return parser
 
 

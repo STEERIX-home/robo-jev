@@ -22,7 +22,7 @@ import json
 import re
 from typing import Any, Iterable, Sequence
 
-__all__ = ["NGRAM_SIZES", "ngrams", "overlap_report", "sentences"]
+__all__ = ["NARRATIVE_FIELDS", "NGRAM_SIZES", "ngrams", "overlap_report", "scene_parameters", "sentences", "train_overlap_report"]
 
 NGRAM_SIZES = (4, 5, 6, 8)
 VERDICT_MIN_N = 5
@@ -159,3 +159,66 @@ def iter_text(records: Iterable[dict[str, Any]]) -> Iterable[str]:
     states, instructions = _texts(list(records))
     yield from states
     yield from instructions
+
+
+# --------------------------------------------------------------------------
+# A fresh set from the same generator vs the training set (task B1)
+# --------------------------------------------------------------------------
+
+#: Stated facts that only name or place things in the story (robot, domain, storyline, object names); every other stated fact enters
+#: the physics or the prior behind the words.
+NARRATIVE_FIELDS = frozenset({"robot", "domain", "storyline", "load_name", "item_name", "name"})
+
+
+def _strip(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {k: _strip(v) for k, v in value.items() if k not in NARRATIVE_FIELDS}
+    if isinstance(value, list):
+        return [_strip(v) for v in value]
+    return value
+
+
+def scene_parameters(record: dict[str, Any]) -> str:
+    """sha256 of a record's physical scene: the family, the stated facts without the narrative ones (:data:`NARRATIVE_FIELDS`) and the
+    overrides of every variant it is labelled on (planned, counterfactual, action options) — two records with the same hash pose the
+    same physics question under the same priors."""
+    meta = record["meta"]
+    payload = {"family": meta["scene"], "visible": _strip(meta["visible"]), "variants": meta.get("variants")}
+    return _sha(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
+
+
+def train_overlap_report(records: Sequence[dict[str, Any]], train: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Overlap of a fresh set from the v0.3b generator (`records`, e.g. B1-infamily) with the training records (`train`): shared group
+    seeds, hidden-draw seeds and (family, group index) pairs, shared physical scenes (:func:`scene_parameters`) and full stated facts,
+    shared record ids, state texts and requests. The verdict requires none of them shared; question instructions (templated wording with
+    the scene's numbers) are counted for information only."""
+
+    def gen(record: dict[str, Any], key: str) -> Any:
+        return (record.get("generator") or {}).get(key)
+
+    def visible(record: dict[str, Any]) -> str:
+        return _sha(json.dumps(record["meta"]["visible"], ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str))
+
+    probes = {
+        "group_seeds": lambda r: gen(r, "seed"),
+        "draws_seeds": lambda r: gen(r, "draws_seed"),
+        "family_group_index": lambda r: f"{gen(r, 'family')}:{gen(r, 'group')}",
+        "scene_parameters": scene_parameters,
+        "stated_facts": visible,
+        "ids": lambda r: str(r["id"]),
+        "state_texts": lambda r: _sha(r["request"]["state"]),
+        "requests": _request_hash,
+    }
+    shared: dict[str, Any] = {}
+    for name, probe in probes.items():
+        ours, theirs = {probe(r) for r in records}, {probe(r) for r in train}
+        common = ours & theirs
+        shared[name] = {"ours": len(ours), "train": len(theirs), "shared": len(common), "examples": sorted(map(str, common))[:10]}
+    ours_instr = {_sha(text) for text in _texts(records)[1]}
+    train_instr = {_sha(text) for text in _texts(train)[1]}
+    information = {"instructions": {"ours": len(ours_instr), "train": len(train_instr), "shared": len(ours_instr & train_instr),
+                                    "share_of_ours": len(ours_instr & train_instr) / len(ours_instr) if ours_instr else 0.0}}
+    verdict = {f"no_shared_{name}": entry["shared"] == 0 for name, entry in shared.items()}
+    verdict["passed"] = all(verdict.values())
+    return {"kind": "mjgen-train-overlap", "records": len(records), "train_records": len(train), "verdict": verdict, "shared": shared,
+            "information": information}
