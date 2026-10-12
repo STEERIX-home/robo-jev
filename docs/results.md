@@ -117,3 +117,65 @@ The same requests went to six decision models on [OpenRouter](https://openrouter
   <source media="(prefers-color-scheme: dark)" srcset="figures/bench-v0-sets-dark.svg">
   <img alt="Per-set results on bench-v0: yes/no Brier on T1–T7 and reading accuracy on G1 and G2 for every model" src="figures/bench-v0-sets-light.svg">
 </picture>
+
+## Outside test (T8)
+
+T8a is PIQA validation (1,838 two-choice questions). T8b has 480 robot moments in four families: braking deck, turning deck, release over a stack edge, and push. Each moment is written independently of our engine, and its labels come from 64 MuJoCo rollouts over hidden friction and weight distribution. The OpenRouter models were asked once each with data collection denied (cost $0.29). The test was built and scored on 2026-10-12.
+
+Single-order reading (deployment condition) unless noted: our models' numbers are expectations over balanced option orders; OpenRouter models were asked once in the stored order (data collection denied). Intervals are record-bootstrap 95 %.
+
+### T8b composition
+
+| family | moments | questions | majority outcome of the planned action |
+|---|---|---|---|
+| deck_brake | 150 | 600 | slide 50, stay 50, tip 50 |
+| deck_turn | 90 | 360 | slide 30, stay 30, tip 30 |
+| stack | 120 | 360 | fall 60, stay 60 |
+| push | 120 | 360 | tip 60, upright 60 |
+
+### Scores
+
+| model | T8a PIQA acc ↑ | T8a acc (order-avg) | T8a first-option share | T8b physics skill ↑ | T8b skill (order-avg) | T8b yes/no Brier ↓ | T8b score Brier ↓ | T8b outcome acc ↑ | T8b answered | bench-v0 skill T2–T4 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **Qwen3.5-2B (untrained)** | 0.662 [0.649, 0.675] | 0.789 | 0.77 | -0.115 [-0.147, -0.084] | 0.026 | 0.217 | 0.207 | 0.347 | 1.00 | -0.148 |
+| **ours v0 (2B)** | 0.700 [0.685, 0.717] | 0.736 | 0.49 | -0.431 [-0.549, -0.318] | -0.428 | 0.241 | 0.340 | 0.335 | 1.00 | 0.777 |
+| **ours v0.1-mix (2B)** | 0.686 [0.670, 0.702] | 0.743 | 0.61 | -0.307 [-0.412, -0.213] | -0.296 | 0.232 | 0.286 | 0.335 | 1.00 | 0.795 |
+| ~typesafe/jev-latest | 0.946 [0.936, 0.955] | 0.946 | 0.51 | 0.124 [+0.069, +0.179] | 0.124 | 0.181 | 0.142 | 0.492 | 1.00 | 0.277 |
+| microsoft/microsoft-decision-1 | 0.915 [0.902, 0.928] | 0.915 | 0.51 | -0.253 [-0.337, -0.168] | -0.253 | 0.259 | 0.201 | 0.450 | 1.00 | 0.044 |
+| togethercomputer/tev1-4b-experimental | 0.848 [0.831, 0.864] | 0.848 | 0.48 | -0.043 [-0.086, +0.001] | -0.043 | 0.203 | 0.193 | 0.362 | 1.00 | 0.027 |
+| openai/gpt-6-luna-decisions | 0.920 [0.908, 0.932] | 0.920 | 0.54 | -0.086 [-0.169, -0.004] | -0.086 | 0.249 | 0.121 | 0.371 | 0.83 | -0.020 |
+| liquid/d1 | 0.936 [0.925, 0.947] | 0.936 | 0.49 | 0.065 [+0.005, +0.127] | 0.065 | 0.190 | 0.158 | 0.425 | 1.00 | 0.167 |
+| upstage/solar-decide | 0.899 [0.886, 0.913] | 0.899 | 0.53 | -0.042 [-0.096, +0.010] | -0.042 | 0.169 | 0.261 | 0.546 | 1.00 | -0.150 |
+| _static calculator (reference)_ | — | — | — | 0.856 [+0.817, +0.888] | 0.856 | 0.027 | 0.028 | 0.958 | 1.00 | — |
+
+### T8b skill by family and question kind (single order)
+
+| model | deck_brake | deck_turn | stack | push | planned | counterfactual | yes/no only | score only |
+|---|---|---|---|---|---|---|---|---|
+| Qwen3.5-2B (untrained) | -0.058 | -0.041 | -0.184 | -0.205 | -0.146 | -0.082 | -0.136 | -0.073 |
+| ours v0 (2B) | -0.178 | -0.054 | -1.214 | -0.563 | -0.246 | -0.630 | -0.262 | -0.766 |
+| ours v0.1-mix (2B) | -0.108 | -0.008 | -0.502 | -0.685 | -0.156 | -0.469 | -0.217 | -0.485 |
+| ~typesafe/jev-latest | 0.167 | 0.137 | 0.371 | -0.100 | 0.022 | 0.235 | 0.053 | 0.265 |
+| microsoft/microsoft-decision-1 | -0.058 | -0.669 | 0.018 | -0.321 | -0.335 | -0.164 | -0.359 | -0.042 |
+| togethercomputer/tev1-4b-experimental | 0.020 | -0.005 | -0.029 | -0.161 | -0.108 | 0.027 | -0.062 | -0.004 |
+| openai/gpt-6-luna-decisions | -0.046 | -0.287 | 0.029 | 0.065 | -0.409 | 0.321 | -0.324 | 0.375 |
+| liquid/d1 | 0.151 | 0.000 | 0.393 | -0.200 | -0.044 | 0.182 | 0.006 | 0.182 |
+| upstage/solar-decide | -0.233 | 0.081 | 0.258 | -0.097 | 0.119 | -0.215 | 0.115 | -0.354 |
+| static calculator (reference) | 0.810 | 0.975 | 0.776 | 0.864 | 0.863 | 0.849 | 0.857 | 0.854 |
+
+### Ours vs the untrained base (paired, same questions)
+
+| model | T8a Δacc (single) | T8a Δacc (order-avg) | T8b Δskill (single) | T8b Δskill (order-avg) | Δskill deck_brake | Δskill deck_turn | Δskill stack | Δskill push |
+|---|---|---|---|---|---|---|---|---|
+| ours v0 (2B) | +0.039 [+0.023, +0.056] | -0.053 [-0.075, -0.032] | -0.316 [-0.412, -0.225] | -0.454 [-0.550, -0.362] | -0.120 [-0.261, +0.012] | -0.013 [-0.206, +0.160] | -1.030 [-1.254, -0.805] | -0.357 [-0.551, -0.174] |
+| ours v0.1-mix (2B) | +0.024 [+0.008, +0.041] | -0.047 [-0.069, -0.024] | -0.192 [-0.274, -0.115] | -0.322 [-0.405, -0.244] | -0.050 [-0.170, +0.062] | +0.033 [-0.123, +0.175] | -0.318 [-0.458, -0.173] | -0.480 [-0.699, -0.273] |
+
+### Ours vs the best OpenRouter model of each set (paired, questions both answered, single order)
+
+| model | T8a Δacc vs best | T8b Δskill vs best |
+|---|---|---|
+| Qwen3.5-2B (untrained) | -0.284 [-0.298, -0.269] (~typesafe/jev-latest) | -0.239 [-0.279, -0.200] (~typesafe/jev-latest) |
+| ours v0 (2B) | -0.245 [-0.262, -0.227] (~typesafe/jev-latest) | -0.555 [-0.651, -0.467] (~typesafe/jev-latest) |
+| ours v0.1-mix (2B) | -0.260 [-0.276, -0.243] (~typesafe/jev-latest) | -0.431 [-0.518, -0.349] (~typesafe/jev-latest) |
+
+OpenRouter spend (T8 ledger): $0.2854 over 14704 calls (uncertain $0.0001).
