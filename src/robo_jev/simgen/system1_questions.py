@@ -68,6 +68,7 @@ __all__ = [
     "plan_derived",
     "summarize",
     "transform_record",
+    "with_pick_rule",
 ]
 
 VERSION = "s1q-v1"
@@ -359,17 +360,33 @@ def summarize(records: Iterable[Mapping[str, Any]]) -> dict[str, Any]:
     return out
 
 
-def exposure(records: Iterable[Mapping[str, Any]], *, q: int, seed: int = 0, epoch: int = 0) -> dict[str, int]:
-    """Examples of one training epoch by question category under the trainer's own pick (:func:`robo_jev.decisions.examples.select_questions`
-    with the trainer's seed stream) — what the derived questions displace (they share the choice slot)."""
-    import random
+def with_pick_rule(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Task v0.4b — the action repair as a data layout: a copy of a transformed record whose derived questions are recorded as the
+    secondary questions of the trainer's pick (``meta.question_pick``, :func:`robo_jev.decisions.examples.record_pick`). The trainer then
+    picks the record's q examples from the original questions exactly as for the untransformed record, and trains each derived question
+    in addition in the epochs where the plain pick (the v0.3 pick) chooses it: the original questions get their v0.2 / v0.1-mix exposure
+    back and the derived questions keep their v0.3 exposure. Nothing else changes (the field goes last in ``meta``)."""
+    from robo_jev.decisions.examples import QUESTION_PICK_VERSION
 
-    from robo_jev.decisions.examples import derive_seed, select_questions
+    derived = list(((record.get("meta") or {}).get("system1") or {}).get("derived") or {})
+    if not derived:
+        raise ValueError(f"{record.get('id')}: no derived System-1 questions (meta.system1.derived) — nothing to record")
+    if (record.get("meta") or {}).get("question_pick") is not None:
+        raise ValueError(f"{record.get('id')}: already carries meta.question_pick")
+    out = copy.deepcopy(dict(record))
+    out["meta"]["question_pick"] = {"version": QUESTION_PICK_VERSION, "secondary": derived}
+    return out
+
+
+def exposure(records: Iterable[Mapping[str, Any]], *, q: int, seed: int = 0, epoch: int = 0) -> dict[str, int]:
+    """Examples of one training epoch by question category under the trainer's own pick (:func:`robo_jev.decisions.examples.record_pick`
+    with the trainer's seed stream — :func:`~robo_jev.decisions.examples.select_questions`, or the recorded pick rule when a record carries
+    one) — what the derived questions displace when they share the choice slot."""
+    from robo_jev.decisions.examples import record_pick
 
     counts: Counter = Counter()
     for record in records:
-        rid = str(record.get("id") or "")
-        names = select_questions(record["request"]["questions"], q=q, rng=random.Random(derive_seed(seed, epoch, rid, "questions")))
+        names = record_pick(dict(record), q=q, seed=seed, epoch=epoch)
         basis = (record.get("meta") or {}).get("basis") or {}
         families = (record.get("meta") or {}).get("question_families") or {}
         for name in names:
