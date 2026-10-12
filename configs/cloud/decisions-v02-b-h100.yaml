@@ -9,7 +9,8 @@
 # MIT / CC-BY-4.0; no BoolQ, no NLI, no PIQA). Measured with the trainer's own counting (manifest train-v02-b.manifest.json):
 # 85,740 records, 134,366 train examples per epoch (general 33,592 = 25 %), 4,199 steps per epoch (v0.1-mix 3,150),
 # prompt tokens ≈ 48.9 M (+17 % vs v0.1-mix); sha256 at build 3aa9afb54a4d5ebe20c66dfe8e3bfe3be70b068bde6de06f3d77158a5744c4c5.
-# Diagnoses on its own checkpoint (after-v02b-2b-*): G1 → G2 → T1–T7 (the pre-declared v0.2 rule reads G2, T1–T5, T7), then the outside test T8
+# Diagnoses on its own checkpoint (after-v02b-2b-*), the sets the pre-declared v0.2 rule reads first — G2, T1–T5, T7 — then the
+# secondary ones — G1, T6 — so a slow pod can only cut secondary readings; then the outside test T8
 # **if its files exist when the job is prepared** (Task T8 builds them in parallel): artifacts/simgen/t8/T8a.jsonl and T8b.jsonl are
 # optional_inputs, and the after-T8a / after-T8b steps `require` them — absent files are not uploaded and the runner skips those steps
 # (status skipped, reason missing-inputs); the job goes on. T8 runs last, so it never delays the gating sets.
@@ -66,11 +67,6 @@ job:
       wall_set: max_wall_hours
       max_minutes: 300
       est_minutes: 90
-    - name: after-G1
-      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-b-2b/checkpoint.pt", "--input", "artifacts/simgen/probes/G1.jsonl", "--out", "{reports}/after-v02b-2b-G1.json", "--gpu-memory-fraction", "0.92"]
-      max_minutes: 45
-      est_minutes: 10
-      optional: true
     - name: after-G2
       argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-b-2b/checkpoint.pt", "--input", "artifacts/simgen/probes/G2.jsonl", "--out", "{reports}/after-v02b-2b-G2.json", "--gpu-memory-fraction", "0.92"]
       max_minutes: 20
@@ -101,15 +97,20 @@ job:
       max_minutes: 60
       est_minutes: 14
       optional: true
-    - name: after-T6
-      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-b-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T6.jsonl", "--out", "{reports}/after-v02b-2b-T6.json", "--gpu-memory-fraction", "0.92"]
-      max_minutes: 90
-      est_minutes: 54
-      optional: true
     - name: after-T7
       argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-b-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T7.jsonl", "--out", "{reports}/after-v02b-2b-T7.json", "--gpu-memory-fraction", "0.92"]
       max_minutes: 60
       est_minutes: 27
+      optional: true
+    - name: after-G1
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-b-2b/checkpoint.pt", "--input", "artifacts/simgen/probes/G1.jsonl", "--out", "{reports}/after-v02b-2b-G1.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 45
+      est_minutes: 10
+      optional: true
+    - name: after-T6
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-b-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T6.jsonl", "--out", "{reports}/after-v02b-2b-T6.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 90
+      est_minutes: 54
       optional: true
     - name: after-T8a
       argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-b-2b/checkpoint.pt", "--input", "artifacts/simgen/t8/T8a.jsonl", "--out", "{reports}/after-v02b-2b-T8a.json", "--gpu-memory-fraction", "0.92"]

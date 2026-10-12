@@ -72,9 +72,11 @@ def test_each_v02_job_trains_once_with_the_v01_mix_recipe(dose):
 
 
 @pytest.mark.parametrize("dose", sorted(JOBS))
-def test_each_v02_job_diagnoses_its_own_checkpoint_on_g1_g2_t1_t7_then_t8_only_if_present(dose):
+def test_each_v02_job_diagnoses_its_own_checkpoint_gating_sets_first_then_g1_t6_then_t8_only_if_present(dose):
     diagnoses = _diagnoses(JOBS[dose])
-    assert [str(args.input) for _, args in diagnoses] == [G1, G2, *TESTS, *T8.values()], "G1, G2, T1–T7, then T8a, T8b — once each"
+    gating = [G2, *TESTS[:5], TESTS[6]]  # the pre-declared v0.2 rule reads G2 (G), T2+T3+T4 (P) and T1, T3, T4, T5, T7 (C)
+    assert [str(args.input) for _, args in diagnoses] == [*gating, G1, TESTS[5], *T8.values()], (
+        "the gating sets first, then the secondary G1 and T6, then T8a, T8b — each once, so a slow pod only cuts secondary readings")
     checkpoint = f"/r/run/runs/{RUN_NAME[dose]}/checkpoint.pt"
     for name, args in diagnoses:
         assert str(args.checkpoint) == checkpoint, f"{name}: the v0.2 model's own checkpoint"
