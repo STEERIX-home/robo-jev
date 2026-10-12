@@ -191,14 +191,14 @@ ROLL_SURFACES: dict[str, dict[str, Any]] = {
     "melamine": {"text": "smooth white melamine", "mu_roll": (0.0003, 0.0010), "mu": (0.30, 0.45)},
     "cork": {"text": "a cork sheet", "mu_roll": (0.0010, 0.0025), "mu": (0.45, 0.65)},
     "silicone": {"text": "a silicone baking sheet", "mu_roll": (0.0012, 0.0030), "mu": (0.60, 0.90)},
-    "rubber_mat": {"text": "a ribbed rubber mat", "mu_roll": (0.0015, 0.0040), "mu": (0.70, 1.00)},
+    "rubber_mat": {"text": "a dimpled rubber liner", "mu_roll": (0.0015, 0.0040), "mu": (0.70, 1.00)},
     "cardboard": {"text": "a flattened piece of cardboard", "mu_roll": (0.0020, 0.0050), "mu": (0.40, 0.55)},
     "felt": {"text": "a thin felt liner", "mu_roll": (0.0030, 0.0070), "mu": (0.40, 0.60)},
 }
 ROLL_CONTEXTS = ("ramp", "tray")
-#: Share of the plastic-pivot impact energy a soft rim impact keeps (fitted once against MuJoCo: 599 draws, 98.5 % agreement on
-#: over / caught; the ideal formula with 1.0 agrees on 96 %).
-ROLL_IMPACT_KEEP = 0.68
+#: Share of the plastic-pivot impact energy the rim impact keeps: 1.0, the textbook formula (checked against MuJoCo on 599 draws: 99.3 %
+#: agreement on over / caught; the best constant, 0.97, gains 0.4 points).
+ROLL_IMPACT_KEEP = 1.0
 
 
 class Roll(Family):
@@ -300,7 +300,7 @@ SWING_LOADS: dict[str, dict[str, Any]] = {
     # dims: depth along the motion, width, height; com: centre-of-mass depth below the top, fraction of the height
     "bolts": {"name": "plastic crate of loose bolts", "dims": (0.40, 0.30, 0.22), "mass": (8.0, 14.0), "com": (0.60, 0.78)},
     "paint": {"name": "lidded bucket of wall paint", "dims": (0.29, 0.29, 0.33), "mass": (10.0, 14.0), "com": (0.52, 0.66)},
-    "toolbox": {"name": "steel toolbox", "dims": (0.50, 0.22, 0.24), "mass": (6.0, 12.0), "com": (0.48, 0.68)},
+    "toolbox": {"name": "cantilever tool chest", "dims": (0.50, 0.22, 0.24), "mass": (6.0, 12.0), "com": (0.48, 0.68)},
     "soil": {"name": "sack of potting soil", "dims": (0.45, 0.30, 0.15), "mass": (15.0, 22.0), "com": (0.45, 0.60)},
     "tote": {"name": "tote of mixed spare parts", "dims": (0.40, 0.30, 0.25), "mass": (4.0, 9.0), "com": (0.40, 0.78)},
     "drum": {"name": "small drum of floor cleaner", "dims": (0.27, 0.27, 0.36), "mass": (11.0, 13.0), "com": (0.50, 0.58)},
@@ -432,6 +432,9 @@ KNOCK_SURFACES: dict[str, dict[str, Any]] = {
     "linen": {"text": "a linen tablecloth", "mu": (0.40, 0.60)},
 }
 KNOCK_CONTEXTS = ("forearm", "gripper", "elbow")
+#: Share of the bare impulse energy needed to topple: the arm keeps pressing through its stop distance, so less than the impulse
+#: energy is enough (fitted once against the T9 knock labels: Brier 0.117 against 0.201 for the plain impulse rule).
+KNOCK_ENERGY = 0.6
 
 
 class Knock(Family):
@@ -490,11 +493,13 @@ class Knock(Family):
         return {"speed": vis["speed"], "height": vis["height"], "stop": vis["stop"]}
 
     def calc(self, vis: dict[str, Any], draws: Sequence[dict[str, float]]) -> list[str]:
-        """Impulsive strike: the struck point takes the arm's speed; pivoting about the far bottom edge needs ω = v/h, and the pivot's
-        impulsive reaction must stay inside the friction cone (else the base slides); topple if ½·I_P·ω² lifts the centre of mass over
-        the edge, else slide if v²/(2μg) ≥ 1 cm, else stay."""
+        """Impulsive strike: the struck point takes the arm's speed, so pivoting about the far bottom edge starts at ω = v/h with energy
+        ½·I_P·ω². Below the no-slip height h* = 2(b² + H²)/(3(H + μb)) the pivot's impulsive reaction leaves the friction cone and the
+        base slides; only a share (h/h*)² of that energy goes into the rotation. Topple if the rotation energy beats
+        :data:`KNOCK_ENERGY` × the lift of the centre of mass over the edge, or (no slip) if the arm's stop distance alone pushes the
+        face past the tipping angle (stop/h ≥ atan(d/h_c)); else slide if the base slips and v²/(2μg) ≥ 1 cm; else stay."""
         b, w, H = KNOCK_OBJECTS[vis["object"]]["dims"]
-        m, v, h = vis["mass"], vis["speed"], vis["height"]
+        m, v, h, stop = vis["mass"], vis["speed"], vis["height"], vis["stop"]
         out = []
         for d in draws:
             dx, dz = b / 2 - d["cx"] * b, d["hc"] * H
@@ -505,9 +510,11 @@ class Knock(Family):
             jx = ip * omega / h
             rx, rz = m * omega * dz - jx, m * omega * dx
             slips = abs(rx) > d["mu"] * rz
-            if (not slips and ke > barrier) or (slips and ke > 2.0 * barrier):
+            h_star = 2 * (b * b + H * H) / (3 * (H + d["mu"] * b))
+            rotating = ke if not slips else ke * min(1.0, h / h_star) ** 2
+            if rotating > KNOCK_ENERGY * barrier or (not slips and stop / h >= math.atan2(dx, dz)):
                 out.append("topple")
-            elif v * v / (2 * d["mu"] * G) >= 0.01 and slips:
+            elif slips and v * v / (2 * d["mu"] * G) >= 0.01:
                 out.append("slide")
             else:
                 out.append("stay")
@@ -525,7 +532,7 @@ CONVEYOR_ITEMS: dict[str, dict[str, Any]] = {
     "basil": {"name": "potted basil plant", "contents": "freshly watered", "dims": (0.11, 0.11, 0.24), "mass": (0.6, 0.9), "hc": (0.22, 0.34), "cx": (-0.03, 0.03)},
     "tins": {"name": "stack of four tins taped together", "contents": "all full", "dims": (0.075, 0.075, 0.42), "mass": (1.6, 1.8), "hc": (0.48, 0.52), "cx": (-0.01, 0.01)},
     "lampbox": {"name": "boxed floor lamp", "contents": "packed in a way I cannot see", "dims": (0.12, 0.16, 0.50), "mass": (2.0, 3.2), "hc": (0.25, 0.60), "cx": (-0.06, 0.06)},
-    "kettlebox": {"name": "boxed kettle", "contents": "with its paperwork on top", "dims": (0.17, 0.20, 0.25), "mass": (1.1, 1.4), "hc": (0.38, 0.50), "cx": (-0.04, 0.04)},
+    "kettlebox": {"name": "boxed rice cooker", "contents": "with its paperwork on top", "dims": (0.17, 0.20, 0.25), "mass": (1.1, 1.4), "hc": (0.38, 0.50), "cx": (-0.04, 0.04)},
     "vasebox": {"name": "tall gift box holding a vase", "contents": "padded with paper", "dims": (0.10, 0.10, 0.36), "mass": (0.9, 1.3), "hc": (0.32, 0.46), "cx": (-0.03, 0.03)},
 }
 CONVEYOR_BELTS: dict[str, dict[str, Any]] = {

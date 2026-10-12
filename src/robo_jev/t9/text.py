@@ -129,7 +129,7 @@ def _roll(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], rng:
     gentle = (f"take the long back ramp, which tips my deck only {_num(alt_tilt, 1)} degrees" if vis["context"] == "ramp"
               else f"tip the tray only {_num(alt_tilt, 1)} degrees and ease it through more slowly")
     q[names["alt"]] = {"type": "noul", "instructions": f"Suppose instead I {gentle}. Will {thing} end up over the lip then?"}
-    q[names["dir"]] = _dir_question(_roll_dir_text(ch["dirv"], vis, thing), f"{thing} ending up over the lip")
+    q[names["dir"]] = _dir_question(_roll_dir_text(ch["dirv"], vis, thing), f"{thing} ends up over the lip")
     q[names["act"]] = _act_question(
         f"Which do I do? Losing {thing} over the lip would cost me as much as {_num(costs['fail'], 0)} s of delay.",
         "roll", ["Tilt as planned (no extra time)", f"{gentle[0].upper() + gentle[1:]} (adds {_num(costs['alt'], 0)} s)",
@@ -167,7 +167,7 @@ def _swing(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], rng
     body = (f"The load is a {load['name']}, {_cm(b)} cm long in the direction I travel, {_cm(w)} cm wide and {_cm(h)} cm tall, "
             f"weighing about {_num(vis['mass'], 1)} kg.")
     hang = _pick(rng, f"It hangs on {strap}; from hook to the top of the load is {_cm(vis['strap_len'])} cm when it is not moving.",
-                 f"It is slung on {strap}, with {_cm(vis['strap_len'])} cm between the hook and the top of the load at rest.")
+                 f"The strap is {strap}, and at rest {_cm(vis['strap_len'])} cm of it runs between the hook and the top of the load.")
     plan = (f"I am travelling at {_num(vis['speed'])} m/s and will brake to a stop at {_num(vis['decel'], 1)} m/s², building up to that "
             f"braking within a tenth of a second.")
     gap = (f"Right where I stop stands the {vis['obstacle']}: hanging straight down, the front face of {thing} would be "
@@ -180,7 +180,7 @@ def _swing(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], rng
                                                              f"Stopping this way, does {thing} make contact with {obstacle} as it swings?")}
     cf = ch["cf"]
     if cf.field == "speed":
-        what = f"I were travelling at {_num(cf.value)} m/s instead of {_num(vis['speed'])} m/s before braking the same way"
+        what = f"my travel speed were {_num(cf.value)} m/s, not {_num(vis['speed'])} m/s, braking just as planned"
     elif cf.field == "strap_len":
         what = f"the hook-to-load length were {_cm(cf.value)} cm instead of {_cm(vis['strap_len'])} cm"
     else:
@@ -189,7 +189,7 @@ def _swing(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], rng
                       "criteria": _scale(f"it surely never touches {obstacle}", f"it surely makes contact")}
     q[names["alt"]] = {"type": "noul", "instructions": (f"If I slowed to {_num(ch['alt'])} m/s before braking the same way, would {thing} still make "
                                                         f"contact with {obstacle}?")}
-    q[names["dir"]] = _dir_question(_swing_dir_text(ch["dirv"], vis, thing, obstacle), f"{thing} making contact")
+    q[names["dir"]] = _dir_question(_swing_dir_text(ch["dirv"], vis, thing, obstacle), f"{thing} makes contact with {obstacle}")
     q[names["act"]] = _act_question(
         f"Which do I do? A knock against {obstacle} would cost me as much as {_num(costs['fail'], 0)} s of delay.",
         "swing", ["Carry on and stop as planned (no extra time)", f"Slow to {_num(ch['alt'])} m/s first, then brake the same way (adds {_num(costs['alt'], 0)} s)",
@@ -206,7 +206,7 @@ def _swing_dir_text(change: F.Change, vis: dict[str, Any], thing: str, obstacle:
     if change.field == "strap_len":
         return f"Picture {_cm(change.value)} cm between hook and load instead of {_cm(vis['strap_len'])} cm, with nothing else changed."
     if change.field == "speed":
-        return f"Picture me travelling at {_num(change.value)} m/s instead of {_num(vis['speed'])} m/s and braking the same way, nothing else changed."
+        return f"Picture my travel speed being {_num(change.value)} m/s, not {_num(vis['speed'])} m/s, braking just as planned and nothing else changed."
     return f"Picture the hanging load stopping {_cm(change.value)} cm short of {obstacle} instead of {_cm(vis['gap'])} cm, nothing else changed."
 
 
@@ -224,7 +224,7 @@ def _knock(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], rng
     opener = _pick(rng, f"I am clearing a shelf, and on my next motion {limb} will clip something on the way past.",
                    f"Shelf work: my planned path brings {limb} into light contact with an item standing in the way.")
     body = (f"It is a {obj['name']}, {obj['contents']}, standing on {surface}. Its footprint is {_cm(b)} cm in the direction I move by "
-            f"{_cm(w)} cm across, it is {_cm(h)} cm tall, and it weighs about {_num(vis['mass'])} kg.")
+            f"{_cm(w)} cm across; it rises {_cm(h)} cm, with a weight of roughly {_num(vis['mass'])} kg.")
     plan = (f"{limb[0].upper() + limb[1:]} moves at {_num(vis['speed'])} m/s and meets its face {_cm(vis['height'])} cm above the shelf. "
             f"The moment I feel the touch I brake, coming to rest within {_cm(vis['stop'])} cm, then pull back 10 cm.")
     state = " ".join([opener, body, plan])
@@ -233,12 +233,12 @@ def _knock(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], rng
     q[names["key"]] = {"type": "noul", "instructions": _pick(rng, f"Once this is over, is {thing} lying knocked over?",
                                                              f"After the touch and my pull-back, has {thing} fallen over?")}
     cf = ch["cf"]
-    what = (f"the touch came {_cm(cf.value)} cm above the shelf instead of {_cm(vis['height'])} cm" if cf.field == "height"
+    what = (f"the point of touch sat {_cm(cf.value)} cm high on its face, not {_cm(vis['height'])} cm" if cf.field == "height"
             else f"after the touch I came to rest within {_cm(cf.value)} cm instead of {_cm(vis['stop'])} cm")
     q[names["cf"]] = {"type": "score", "instructions": f"Change only one thing: say {what}. How likely would {thing} be to fall over?",
                       "criteria": _scale(f"{thing} surely stays on its base", f"{thing} surely falls over")}
-    q[names["alt"]] = {"type": "noul", "instructions": f"If I made the same pass at only {_num(ch['alt'])} m/s, would {thing} fall over?"}
-    q[names["dir"]] = _dir_question(_knock_dir_text(ch["dirv"], vis, thing), f"{thing} falling over")
+    q[names["alt"]] = {"type": "noul", "instructions": f"If I made the same pass slowed to {_num(ch['alt'])} m/s, would {thing} fall over?"}
+    q[names["dir"]] = _dir_question(_knock_dir_text(ch["dirv"], vis, thing), f"{thing} falls over")
     q[names["act"]] = _act_question(
         f"Which do I do? {thing[0].upper() + thing[1:]} falling over would cost me as much as {_num(costs['fail'], 0)} s of delay.",
         "knock", ["Make the pass as planned (no extra time)", f"Make the pass at {_num(ch['alt'])} m/s (adds {_num(costs['alt'], 0)} s)",
@@ -252,9 +252,9 @@ def _knock_dir_text(change: F.Change, vis: dict[str, Any], thing: str) -> str:
     if change.field == "mass":
         return f"Picture {thing} weighing {_num(change.value)} kg instead of {_num(vis['mass'])} kg, same size and weight layout, everything else unchanged."
     if change.field == "height":
-        return f"Picture the touch landing {_cm(change.value)} cm above the shelf instead of {_cm(vis['height'])} cm, nothing else changed."
+        return f"Picture the point of touch sitting {_cm(change.value)} cm high on its face, not {_cm(vis['height'])} cm, nothing else changed."
     if change.field == "speed":
-        return f"Picture me moving at {_num(change.value)} m/s instead of {_num(vis['speed'])} m/s, nothing else changed."
+        return f"Picture my pass running {_num(change.value)} m/s, not {_num(vis['speed'])} m/s, nothing else changed."
     if change.field == "stop":
         return f"Picture me coming to rest within {_cm(change.value)} cm of the touch instead of {_cm(vis['stop'])} cm, nothing else changed."
     return f"Picture it standing on {F.KNOCK_SURFACES[change.value]['text']} instead, nothing else changed."
@@ -273,13 +273,13 @@ def _conveyor(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], 
     opener = {"packing": "I run the infeed conveyor of my packing cell and decide how it starts and stops.",
               "sorting": "Sorting station robot: the takeaway belt in front of me answers to my commands."}[vis["context"]]
     body = (f"Standing upright on it is a {item['name']}, {item['contents']}: {_cm(b)} cm deep along the belt, {_cm(w)} cm across and "
-            f"{_cm(h)} cm tall, about {_num(vis['mass'])} kg. The belt is {belt}.")
+            f"{_cm(h)} cm high, roughly {_num(vis['mass'])} kg in weight. The belt is {belt}.")
     if vis["event"] == "stop":
         plan = (f"The belt now runs at {_num(vis['speed'])} m/s, and I am about to halt it at {_num(vis['rate'], 1)} m/s², reaching that rate "
                 f"within {_num(vis['ramp'])} s.")
     else:
-        plan = (f"The belt is standing still, and I am about to start it, speeding up at {_num(vis['rate'], 1)} m/s² (reached within "
-                f"{_num(vis['ramp'])} s) to {_num(vis['speed'])} m/s.")
+        plan = (f"The belt is standing still, and I am about to start it, speeding up at {_num(vis['rate'], 1)} m/s² — I get to that rate in "
+                f"{_num(vis['ramp'])} s — until it runs at {_num(vis['speed'])} m/s.")
     state = " ".join([opener, body, plan])
     names = NAMES["conveyor"]
     verb = "halt" if vis["event"] == "stop" else "start"
@@ -292,8 +292,8 @@ def _conveyor(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], 
     q[names["cf"]] = {"type": "score", "instructions": f"Alter just one thing: suppose {what}. How likely would {thing} be to tip over?",
                       "criteria": _scale(f"{thing} surely stays on its base", f"{thing} surely tips over")}
     past = "halted" if verb == "halt" else "started"
-    q[names["alt"]] = {"type": "noul", "instructions": f"If I {past} the belt at only {_num(ch['alt'], 1)} m/s² instead, would {thing} tip over?"}
-    q[names["dir"]] = _dir_question(_conveyor_dir_text(ch["dirv"], vis, thing), f"{thing} tipping over")
+    q[names["alt"]] = {"type": "noul", "instructions": f"If I {past} the belt more softly, with {_num(ch['alt'], 1)} m/s², would {thing} tip over?"}
+    q[names["dir"]] = _dir_question(_conveyor_dir_text(ch["dirv"], vis, thing), f"{thing} tips over")
     q[names["act"]] = _act_question(
         f"Which do I do? {thing[0].upper() + thing[1:]} tipping over would cost me as much as {_num(costs['fail'], 0)} s of delay.",
         "conveyor", [f"{verb.capitalize()} the belt as planned (no extra time)", f"{verb.capitalize()} it at {_num(ch['alt'], 1)} m/s² (adds {_num(costs['alt'], 0)} s)",
@@ -328,11 +328,11 @@ def _overhang(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], 
     d, w, _ = item["dims"]
     opener = {"pantry": "I am putting the shopping away on the pantry shelves.", "workshop": "I am tidying the workshop shelving."}[vis["context"]]
     board_s = (f"A loose {board} lies on a shelf, {_cm(vis['board_len'])} cm long, {_cm(vis['board_w'])} cm wide and {_cm(vis['board_t'])} cm "
-               f"thick, with {_cm(vis['over'])} cm of it sticking out past the shelf's front edge. Nothing fixes it down.")
+               f"thick, with {_cm(vis['over'])} cm of it reaching beyond the shelf's front lip. Nothing fixes it down.")
     contents = f", {item['contents']}" if item["contents"] else ""
     weight = (f"about {_num(item['mass'], 1)} kg" if item["stated"] else f"about {_num(item['mass'], 1)} kg when full")
-    item_s = (f"In my gripper is a {item['name']}{contents}, {_cm(d)} cm along the board by {_cm(w)} cm and {_cm(vis['item_height'])} cm tall, "
-              f"{weight}.")
+    item_s = (f"In my gripper is a {item['name']}{contents}, {_cm(d)} cm along the board by {_cm(w)} cm and {_cm(vis['item_height'])} cm high; "
+              f"it should weigh {weight}.")
     inset = vis["inset"]
     where = (f"its middle {_cm(inset)} cm in from the board's outer end" if inset > 0.0005 else
              ("its middle right at the board's outer end" if inset > -0.0005 else f"its middle {_cm(-inset)} cm beyond the board's outer end"))
@@ -345,7 +345,7 @@ def _overhang(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], 
                                                              f"Placing it as planned, does anything (the board or {thing}) come down off the shelf?")}
     cf = ch["cf"]
     if cf.field == "over":
-        what = f"the board stuck out {_cm(cf.value)} cm past the edge instead of {_cm(vis['over'])} cm"
+        what = f"the board reached {_cm(cf.value)} cm beyond the shelf's lip, not {_cm(vis['over'])} cm"
     else:
         what = f"I set {thing} with its middle {_cm(cf.value)} cm in from the board's end instead of {_cm(inset)} cm" if cf.value > 0 else \
             f"I set {thing} with its middle {_cm(-cf.value)} cm beyond the board's end instead"
@@ -353,7 +353,7 @@ def _overhang(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], 
                       "criteria": _scale("everything surely stays up", "something surely comes down")}
     q[names["alt"]] = {"type": "noul", "instructions": (f"If I set {thing} with its middle {_cm(ch['alt'])} cm in from the board's outer end instead, "
                                                         "would the board or it fall off?")}
-    q[names["dir"]] = _dir_question(_overhang_dir_text(ch["dirv"], vis, thing), "something falling off")
+    q[names["dir"]] = _dir_question(_overhang_dir_text(ch["dirv"], vis, thing), "the board or the item comes down")
     q[names["act"]] = _act_question(
         f"Which do I do? Anything landing on the floor would cost me as much as {_num(costs['fail'], 0)} s of delay.",
         "overhang", ["Place it as planned (no extra time)", f"Place it with its middle {_cm(ch['alt'])} cm in from the end (adds {_num(costs['alt'], 0)} s to clear room)",
@@ -367,15 +367,15 @@ def _overhang_dir_text(change: F.Change, vis: dict[str, Any], thing: str) -> str
     if change.field == "item_height":
         return f"Picture {thing} {_cm(change.value)} cm tall instead of {_cm(vis['item_height'])} cm, same weight and footprint, nothing else changed."
     if change.field == "over":
-        return f"Picture the board sticking out {_cm(change.value)} cm instead of {_cm(vis['over'])} cm, nothing else changed."
+        return f"Picture the board reaching {_cm(change.value)} cm beyond the lip, not {_cm(vis['over'])} cm, nothing else changed."
     if change.field == "inset":
         return (f"Picture {thing} set with its middle {_cm(change.value)} cm in from the board's end instead of {_cm(vis['inset'])} cm, nothing else changed."
                 if change.value > 0 else f"Picture {thing} set with its middle {_cm(-change.value)} cm beyond the board's end, nothing else changed.")
     if change.field == "board_t":
         return f"Picture the board {_cm(change.value)} cm thick instead of {_cm(vis['board_t'])} cm, same material and outline, nothing else changed."
     if change.field == "board_len":
-        return (f"Picture the board {_cm(change.value)} cm long instead of {_cm(vis['board_len'])} cm, still sticking out {_cm(vis['over'])} cm, "
-                "nothing else changed.")
+        return (f"Picture the board {_cm(change.value)} cm long instead of {_cm(vis['board_len'])} cm, still reaching {_cm(vis['over'])} cm beyond "
+                "the lip, nothing else changed.")
     return f"Picture the board being a {F.OVERHANG_BOARDS[change.value]['text']} of the same size instead, nothing else changed."
 
 
@@ -393,8 +393,8 @@ def _suction(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], r
             f"about {_num(panel['mass'], 1)} kg. Its upper face is {F.SUCTION_FACES[vis['face']]['text']}, and "
             f"{F.SUCTION_PUMPS[vis['pump']]['text']}.")
     off = (f"I gripped it {_cm(vis['offset'])} cm off its centre, toward the front." if vis["offset"] >= 0.0005 else "I gripped it at its centre.")
-    plan = (f"Next I carry it {_num(vis['carry'], 0)} m sideways: up to {_num(vis['speed'])} m/s at {_num(vis['rate'], 1)} m/s², a steady run, then "
-            f"down to rest at the same {_num(vis['rate'], 1)} m/s².")
+    plan = (f"Next I carry it {_num(vis['carry'], 0)} m sideways: I accelerate by {_num(vis['rate'], 1)} m/s² to a pace of {_num(vis['speed'])} m/s, "
+            f"keep that pace, then slow by the same {_num(vis['rate'], 1)} m/s².")
     state = " ".join([opener, body, off, plan])
     names = NAMES["suction"]
     q: dict[str, Any] = {}
@@ -409,8 +409,8 @@ def _suction(vis: dict[str, Any], ch: dict[str, Any], costs: dict[str, float], r
         what = (f"I had gripped it {_cm(cf.value)} cm off its centre instead" if cf.value >= 0.0005 else "I had gripped it right at its centre instead")
     q[names["cf"]] = {"type": "score", "instructions": f"With the rest unchanged, suppose {what}. How likely would {thing} be to come off?",
                       "criteria": _scale(f"{thing} surely stays on the cup", f"{thing} surely comes off")}
-    q[names["alt"]] = {"type": "noul", "instructions": f"If I sped up and slowed down at only {_num(ch['alt'], 1)} m/s² instead, would {thing} come off?"}
-    q[names["dir"]] = _dir_question(_suction_dir_text(ch["dirv"], vis, thing), f"{thing} coming off")
+    q[names["alt"]] = {"type": "noul", "instructions": f"If I sped up and slowed down more gently, by {_num(ch['alt'], 1)} m/s², would {thing} come off?"}
+    q[names["dir"]] = _dir_question(_suction_dir_text(ch["dirv"], vis, thing), f"{thing} comes off the cup")
     q[names["act"]] = _act_question(
         f"Which do I do? {thing[0].upper() + thing[1:]} coming off would cost me as much as {_num(costs['fail'], 0)} s of delay.",
         "suction", ["Carry it as planned (no extra time)", f"Speed up and slow down at {_num(ch['alt'], 1)} m/s² (adds {_num(costs['alt'], 0)} s)",
@@ -435,9 +435,9 @@ def _suction_dir_text(change: F.Change, vis: dict[str, Any], thing: str) -> str:
 # ==========================================================================================================================
 
 
-def _dir_question(change_text: str, event: str) -> dict[str, Any]:
-    return {"type": "choice", "instructions": f"{change_text} Compared with the moment as it is, how does the chance of {event} change?",
-            "criteria": dict(DIR_OPTIONS)}
+def _dir_question(change_text: str, clause: str) -> dict[str, Any]:
+    return {"type": "choice", "instructions": f"{change_text} With that change, do the odds rise, fall, or hold within ten points of the moment as it "
+                                              f"stands, for this outcome: {clause}?", "criteria": dict(DIR_OPTIONS)}
 
 
 def _act_question(head: str, family_name: str, texts: list[str]) -> dict[str, Any]:

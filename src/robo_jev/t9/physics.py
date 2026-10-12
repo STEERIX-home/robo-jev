@@ -73,6 +73,10 @@ STRIKE_SPEED = 0.25
 TOPPLE_DEG = 45.0
 #: roll: rolling resistance of the hard lip (m).
 LIP_ROLL = 0.00001
+#: Compile-time inertial offset (m): a body compiled with its centre of mass on its frame origin is marked "same frame" by MuJoCo, which
+#: then ignores runtime changes of ``body_ipos``. Every body is compiled with this offset and its real centre of mass (the hidden one, or
+#: the geometric centre) is written before each rollout — never left at the nominal value (a 1 mm offset is an eccentric weight that
+#: starts a round item rolling).
 NOMINAL_IPOS = 0.001
 
 
@@ -196,7 +200,7 @@ class RollScene(_Scene):
             inertia = (across, spin, across)  # capsule axis along y
         item = self.body("item")
         self.model.body_inertia[item] = inertia
-        self.model.body_ipos[item] = (NOMINAL_IPOS, 0.0, 0.0)
+        self.model.body_ipos[item] = (0.0, 0.0, 0.0)  # on the axis: the compile-time offset would act as an eccentric weight
         # the hidden rolling resistance belongs to the tray's lining; the lip is a hard rim (negligible rolling resistance)
         self.model.geom_friction[self.geom("floor")] = (float(draw["mu"]), 0.005, float(draw["mu_roll"]))
         self.model.geom_friction[self.geom("lip")] = (float(draw["mu"]), 0.005, LIP_ROLL)
@@ -279,7 +283,7 @@ class SwingScene(_Scene):
         length = self.length(draw)
         load = self.body("load")
         self.model.geom_pos[self.geom("load")] = (0.0, 0.0, -(length + h / 2))
-        self.model.body_ipos[load] = (NOMINAL_IPOS, 0.0, -(length + float(draw["com"]) * h))
+        self.model.body_ipos[load] = (0.0, 0.0, -(length + float(draw["com"]) * h))
         self._refresh()
 
     def run(self, action: dict[str, Any], draw: dict[str, float]) -> dict[str, Any]:
@@ -565,7 +569,7 @@ class OverhangScene(_Scene):
         self.model.body_inertia[board] = box_inertia((bl, bw, bt), mb)
         self.model.body_mass[item] = mi
         self.model.body_inertia[item] = box_inertia((d, w, h), mi)
-        self.model.body_ipos[board] = (NOMINAL_IPOS, 0.0, 0.0)
+        self.model.body_ipos[board] = (0.0, 0.0, 0.0)
         self.model.body_ipos[item] = (float(draw["icx"]) * d, 0.0, 0.0)
         # board: outer end at x = over (the shelf's edge is x = 0); item centre `inset` in from the outer end, plus the placement error
         # free bodies start from qpos0 (compiled from the body positions), so the placement is written there
@@ -651,7 +655,7 @@ class SuctionScene(_Scene):
         m = float(draw["mass"])
         self.model.body_mass[panel] = m
         self.model.body_inertia[panel] = box_inertia((pl, pw, pt), m)
-        self.model.body_ipos[panel] = (NOMINAL_IPOS, 0.0, 0.0)
+        self.model.body_ipos[panel] = (0.0, 0.0, 0.0)
         self.model.geom_friction[self.geom("pad")] = (float(draw["mu"]), 0.005, 0.0001)
         self._refresh()
 

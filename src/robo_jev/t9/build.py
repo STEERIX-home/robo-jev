@@ -11,8 +11,8 @@ the same hidden draws. :func:`candidate` builds it with the family's textbook ca
 3. ``cf``: another stated number, aimed at a fresh uniform target; ``alt``: the gentler action (a ratio of the plan's number, or the
    item set further in); ``dirv``: by group index the intended answer cycles through about-the-same (a fact that should not matter,
    ×2 or ×½), likelier and less likely (a number moved 0.2–0.5 in that direction, or the word that moves it most);
-4. costs, drawn independently of every label: a failure costs log-uniform 15–150 s of delay, the gentler action 2–12 s, the safe step
-   10–45 s.
+4. costs, drawn from their own seeded stream (:func:`draw_costs`), independent of every label: a failure costs log-uniform 10–300 s
+   of delay, the gentler action adds 5–30 s, the safe step 5–40 s.
 
 **Labels** (:func:`label_group`): every variant (plan, cf, alt, dirv) of both moments under every prior (base, low_reader,
 high_reader; :mod:`robo_jev.t9.priors`) on the group's K shared draws → outcome frequencies. A group with any unstable rollout is
@@ -142,6 +142,20 @@ def _move_word(fam: Family, vis: dict[str, Any], factor: Factor, direction: int,
     return None if best is None else (best[0], best[2])
 
 
+#: Action costs (seconds of delay), drawn per group from their own seeded stream — independent of every label: a failure costs
+#: log-uniform 10–300 s, the gentler action adds 5–30 s, the safe step 5–40 s (whole seconds). The ranges were chosen once so the
+#: cheapest option splits about 42 / 26 / 32 % between plan, gentler action and safe step on T9's shares.
+COST_FAIL = (10.0, 300.0)
+COST_ALT = (5, 30)
+COST_SECURE = (5, 40)
+
+
+def draw_costs(seed: int) -> dict[str, float]:
+    rng = random.Random(int(seed) ^ 0xC057)
+    return {"fail": float(round(math.exp(rng.uniform(math.log(COST_FAIL[0]), math.log(COST_FAIL[1]))))), "alt": float(rng.randint(*COST_ALT)),
+            "secure": float(rng.randint(*COST_SECURE))}
+
+
 def candidate(family_name: str, index: int, master: int, k: int = DEFAULT_K, tries: int = 40, reasons: Counter | None = None) -> dict[str, Any]:
     """One candidate group (module docstring), built with the calculator only (no MuJoCo). `reasons` counts why tries failed."""
     reasons = reasons if reasons is not None else Counter()
@@ -252,8 +266,7 @@ def candidate(family_name: str, index: int, master: int, k: int = DEFAULT_K, tri
         except (ValueError, KeyError, TypeError):
             reasons["invalid variant"] += 1
             continue
-        costs = {"fail": float(round(math.exp(rng.uniform(math.log(15), math.log(150))))), "alt": float(rng.randint(2, 12)),
-                 "secure": float(rng.randint(10, 45))}
+        costs = draw_costs(seed)
         return {
             "family": family_name, "index": index, "seed": seed, "draws_seed": draws_seed, "k": k, "target": round(target, 4),
             "attempt": attempt, "base": vis, "partner": _change_json(partner), "cf": _change_json(cf), "alt": spec["alt"], "alt_param": alt_param,
@@ -521,7 +534,8 @@ def records_of(group: dict[str, Any], labelled: dict[str, Any], *, mujoco_versio
     spec = spec_of(group)
     moments = moments_of(group)
     ids = {m: f"t9-{fam.name}-{int(group['index']):04d}{m}" for m in moments}
-    by_prior_all = {m: {p: _labels_for(fam, labelled["labels"][m], p, group["costs"]) for p in P.PRIORS} for m in moments}
+    costs = draw_costs(int(group["seed"]))
+    by_prior_all = {m: {p: _labels_for(fam, labelled["labels"][m], p, costs) for p in P.PRIORS} for m in moments}
     key = names["key"]
     shares = {m: {p: by_prior_all[m][p][key]["p_yes"] for p in P.PRIORS} for m in moments}
     moves = {p: shares["b"][p] - shares["a"][p] for p in P.PRIORS}
@@ -529,7 +543,7 @@ def records_of(group: dict[str, Any], labelled: dict[str, Any], *, mujoco_versio
     partner = _change_from(group["partner"])
     out = []
     for m, vis in moments.items():
-        state, questions = T.render(fam.name, vis, {"cf": spec["cf"], "alt": spec["alt"], "dirv": spec["dirv"]}, group["costs"], int(group["seed"]))
+        state, questions = T.render(fam.name, vis, {"cf": spec["cf"], "alt": spec["alt"], "dirv": spec["dirv"]}, costs, int(group["seed"]))
         by_prior = by_prior_all[m]
         units_ranges = {p: P.prior_ranges(fam.words(vis), p) for p in P.PRIORS}
         meta = {
@@ -540,7 +554,7 @@ def records_of(group: dict[str, Any], labelled: dict[str, Any], *, mujoco_versio
                                  names["outcome"]: "plan"},
             "visible": vis, "changes": {"cf": _change_json(spec["cf"]), "alt": {"field": fam.alt_field, "value": spec["alt"]},
                                         "dirv": _change_json(spec["dirv"]), "dir_intent": group["dir_intent"]},
-            "costs": group["costs"], "hidden_prior": units_ranges, "fixed_hidden": fam.fixed(vis), "hidden_names": list(fam.hidden_names()),
+            "costs": costs, "hidden_prior": units_ranges, "fixed_hidden": fam.fixed(vis), "hidden_names": list(fam.hidden_names()),
             "outcome_names": list(ph.OUTCOMES[fam.name]), "key_outcomes": list(fam.key),
             "outcomes": {variant: {p: labelled["labels"][m][variant][p]["freq"] for p in P.PRIORS} for variant in VARIANTS},
             "labels_by_prior": by_prior, "robustness": _robustness(by_prior),

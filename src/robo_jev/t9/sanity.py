@@ -368,6 +368,6 @@ def run_all(*, workers: int, k: int, moments: int, master: int) -> dict[str, Any
         "determinism": all(r["same_process"] and r["other_process"] for r in results["determinism"]),
     }
     verdict["passed"] = all(verdict.values())
-    return {"kind": "t9-sanity", "k": k, "moments_per_sweep": moments, "master": master, "sweeps": {n: dict(SWEEPS[n][:2]) | {"required": SWEEPS[n][5]} for n in SWEEPS},
+    return {"kind": "t9-sanity", "k": k, "moments_per_sweep": moments, "master": master, "sweeps": {n: {"family": SWEEPS[n][0], "field": SWEEPS[n][1], "steps": list(SWEEPS[n][3]), "required": SWEEPS[n][5]} for n in SWEEPS},
             "monotone": by_sweep, "monotone_rows": sorted(results["monotone"], key=lambda r: (r["sweep"], r["index"])),
             "analytic": results["analytic"], "determinism": results["determinism"], "verdict": verdict}
