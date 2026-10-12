@@ -287,6 +287,30 @@ def cmd_score(args: argparse.Namespace) -> int:
                                                                    [x for x in skill_rows(sets["T8b"], base["predictions"]["T8b"], reading="single_order") if x["family"] == f],
                                                                    n_boot=args.n_boot) for f in FAMILY_ORDER}
         results["models"].append(entry)
+    # ours vs the best OpenRouter model of each set (paired, on the questions both answered)
+    api = [(m, e) for m, e in zip(models, results["models"]) if m["role"] == "api"]
+    best: dict[str, Any] = {}
+    if "T8a" in sets:
+        scored = [(m, e) for m, e in api if "T8a" in e]
+        if scored:
+            best["T8a"] = max(scored, key=lambda me: me[1]["T8a"]["single_order"]["accuracy"] or 0.0)
+    if "T8b" in sets:
+        scored = [(m, e) for m, e in api if "T8b" in e and (e["T8b"]["single_order"]["pooled"] or {}).get("skill") is not None]
+        if scored:
+            best["T8b"] = max(scored, key=lambda me: me[1]["T8b"]["single_order"]["pooled"]["skill"])
+    for model, entry in zip(models, results["models"]):
+        if model["role"] not in ("ours", "baseline"):
+            continue
+        if "T8a" in best and "T8a" in model["predictions"]:
+            rival = best["T8a"][0]
+            entry["T8a_vs_best_api"] = {"rival": rival["label"],
+                                        **piqa_paired(sets["T8a"], model["predictions"]["T8a"], rival["predictions"]["T8a"], n_boot=args.n_boot)}
+        if "T8b" in best and "T8b" in model["predictions"]:
+            rival = best["T8b"][0]
+            entry["T8b_vs_best_api"] = {"rival": rival["label"],
+                                        "single_order": paired_skill(skill_rows(sets["T8b"], model["predictions"]["T8b"], reading="single_order"),
+                                                                     skill_rows(sets["T8b"], rival["predictions"]["T8b"], reading="single_order"),
+                                                                     n_boot=args.n_boot)}
     ledger = Path(args.ledger)
     if ledger.is_file():
         data = json.loads(ledger.read_text(encoding="utf-8"))
@@ -351,6 +375,17 @@ def _render(results: dict[str, Any], fmt: Any, fmt_ci: Any, families: Sequence[s
         fam = m.get("T8b_vs_base_by_family") or {}
         lines.append(f"| {m['label']} | {acc('single_order')} | {acc('order_averaged')} | {sk(pb.get('single_order'))} | {sk(pb.get('order_averaged'))} | "
                      + " | ".join(sk(fam.get(f)) for f in families) + " |")
+    rows = [m for m in results["models"] if m.get("T8a_vs_best_api") or m.get("T8b_vs_best_api")]
+    if rows:
+        lines += ["", "## Ours vs the best OpenRouter model of each set (paired, questions both answered, single order)", "",
+                  "| model | T8a Δacc vs best | T8b Δskill vs best |", "|---|---|---|"]
+        for m in rows:
+            a = ((m.get("T8a_vs_best_api") or {}).get("single_order") or {}).get("accuracy") or {}
+            b = (m.get("T8b_vs_best_api") or {}).get("single_order") or {}
+            ra, rb = (m.get("T8a_vs_best_api") or {}).get("rival"), (m.get("T8b_vs_best_api") or {}).get("rival")
+            cell_a = f"{fmt(a.get('diff'), signed=True)}{fmt_ci((a.get('low'), a.get('high')), signed=True)} ({ra})" if a else "—"
+            cell_b = f"{fmt(b.get('value'), signed=True)}{fmt_ci((b.get('low'), b.get('high')), signed=True)} ({rb})" if b else "—"
+            lines.append(f"| {m['label']} | {cell_a} | {cell_b} |")
     spend = results.get("openrouter")
     if spend:
         lines += ["", f"OpenRouter spend (T8 ledger): ${spend['totals'].get('spent_usd', 0):.4f} over {spend['totals'].get('calls')} calls "

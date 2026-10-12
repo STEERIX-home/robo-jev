@@ -67,10 +67,11 @@ __all__ = [
 TIMESTEP = 0.001
 GRAVITY = 9.81
 SOLREF = "0.004 1"
-#: Deck: a heavy body (it follows its trajectory regardless of the load) with a 2.4 m × 2.0 m top at this height.
+#: Deck: a heavy body (it follows its trajectory regardless of the load) with a 20 m × 20 m top at this height — wide enough that a
+#: sliding load never reaches an edge (a long slide is a slide, not a fall; ``off_deck`` stays as a guard and is counted).
 DECK_MASS = 5000.0
 DECK_IZZ = 4000.0
-DECK_HALF = (1.2, 1.0, 0.02)
+DECK_HALF = (10.0, 10.0, 0.02)
 DECK_Z = 0.30
 DECK_TOP = DECK_Z + DECK_HALF[2]
 PUSHER_MASS = 800.0

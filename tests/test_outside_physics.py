@@ -84,3 +84,10 @@ def test_harder_braking_never_makes_tipping_less_likely():
 def test_labels_are_deterministic():
     moment = candidate("push", 1, 20261012)
     assert sanity.label_hash(label_moment(moment, k=4)) == sanity.label_hash(label_moment(moment, k=4))
+
+
+def test_a_long_slide_stays_on_the_deck():
+    """Low friction and a fast tight curve: the load slides a long way but never reaches an edge (a slide is not a fall)."""
+    scene = ph.Scene(ph.deck_xml("box", (0.40, 0.40, 0.15), 3.0))
+    result = ph.run_deck(scene, ph.turn_profile(2.0, 0.5, direction=1), mu=0.15, com=(0.0, 0.0, 0.0))
+    assert result["outcome"] == "slide" and not result["off_deck"] and result["slide_m"] > 0.5

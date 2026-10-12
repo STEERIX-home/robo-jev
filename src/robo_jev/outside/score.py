@@ -180,9 +180,20 @@ def t8b_metrics(records: Sequence[dict[str, Any]], predictions: Sequence[dict[st
             "by_family": {f: pooled_skill(r for r in srows if r["family"] == f) for f in FAMILY_ORDER},
             "by_kind": {k: pooled_skill(r for r in srows if r["variant"] == k) for k in ("planned", "counterfactual")},
             "by_block": {b: pooled_skill(r for r in srows if r["block"] == b) for b in ("noul", "score")},
+            "by_question": {q: pooled_skill(r for r in srows if r["question"] == q) for q in sorted({r["question"] for r in srows})},
+            "mean_answer": {q: _mean_answer(scored, q) for q in sorted({r["question"] for r in srows})},
         }
         out[reading] = entry
     return out
+
+
+def _mean_answer(rows: Sequence[dict[str, Any]], question: str) -> dict[str, float] | None:
+    """Mean model value and mean label of one yes/no or score question name (weighted rows) — shows a yes / danger lean."""
+    sel = [r for r in rows if r["question"] == question and r["block"] in ("noul", "score")]
+    if not sel:
+        return None
+    w = sum(r["w"] for r in sel)
+    return {"p": sum(r["w"] * r["m"]["p"] for r in sel) / w, "y": sum(r["w"] * r["m"]["y"] for r in sel) / w}
 
 
 def composition(records: Sequence[dict[str, Any]]) -> dict[str, Any]:

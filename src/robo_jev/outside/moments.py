@@ -430,7 +430,9 @@ def label_moment(moment: Moment, k: int = DEFAULT_K) -> dict[str, Any]:
     planned = variants["planned"]["freq"]
     majority = max(outcomes, key=lambda o: (planned[o], -outcomes.index(o)))
     unstable = sum(entry["unstable"] for entry in variants.values())
-    return {"k": int(k), "draws_seed": int(draws_seed), "variants": variants, "majority": majority, "unstable": int(unstable)}
+    off_deck = sum(entry.get("off_deck", 0) for entry in variants.values())
+    return {"k": int(k), "draws_seed": int(draws_seed), "variants": variants, "majority": majority, "unstable": int(unstable),
+            "off_deck": int(off_deck)}
 
 
 # --------------------------------------------------------------------------
@@ -460,7 +462,7 @@ def _deck_state(moment: Moment, rng: random.Random) -> str:
     fill = rng.choice(FILLS[v["fill"]]["text"])
     surface = rng.choice((f"Under it, my deck is {DECK_SURFACES[v['surface']]['text']}.",
                           f"The deck surface it stands on is {DECK_SURFACES[v['surface']]['text']}."))
-    room = "There is at least 0.8 m of free deck around it on every side, and nothing it could lean against."
+    room = "The deck around it is clear and wide enough on every side that it cannot slide off an edge, and there is nothing it could lean against."
     if moment.family == "deck_brake":
         stop_time = v["speed"] / v["decel"]
         plan = rng.choice((
@@ -640,8 +642,9 @@ def select_balanced(labelled: Iterable[tuple[Moment, dict[str, Any]]], targets: 
     by_family: dict[str, list[tuple[Moment, dict[str, Any]]]] = {}
     unstable: dict[str, int] = {}
     for moment, label in labelled:
-        if label.get("unstable"):
-            unstable[moment.family] = unstable.get(moment.family, 0) + 1  # a rollout left the physically possible range — drop the moment
+        if label.get("unstable") or label.get("off_deck"):
+            # a rollout left the physically possible range, or a load left the deck the text calls edge-free — drop the moment
+            unstable[moment.family] = unstable.get(moment.family, 0) + 1
             continue
         by_family.setdefault(moment.family, []).append((moment, label))
     kept: list[tuple[Moment, dict[str, Any]]] = []
