@@ -14,6 +14,9 @@
     # 점수 (CPU): 우리 모델의 이미 있는 예측에서 벤치 부분집합을 골라(artifacts/bench/v0/ours/) API 결과와 같은 지표로
     #   → results.json, results.md(README 표), results-detail.md(모든 지표)
     uv run python scripts/bench.py score
+    # System-1 metrics (CPU, no calls): risk bands, direction, comparison, action choice, outcome category on the existing bench-v0
+    #   and T8 predictions (definition configs/bench/system1.yaml) → artifacts/bench/system1/results.json + results.md
+    uv run python scripts/bench.py system1
     # 그래프·점수 장치 시험용 가짜 API 예측 (실제 결과로 쓰지 않는다) → 점수 → 미리보기 그래프
     uv run python scripts/bench.py fake-api && uv run python scripts/bench.py score --api-dir artifacts/bench/v0/fake-api --results artifacts/bench/v0/results-fake.json
 
@@ -451,6 +454,81 @@ def cmd_score(args: argparse.Namespace) -> int:
     return 0
 
 
+def _system1_models(args: argparse.Namespace, spec: dict[str, Any], bench_config: dict[str, Any], t8_config: dict[str, Any],
+                    sets: dict[str, list[dict[str, Any]]]) -> list[dict[str, Any]]:
+    """System-1 models in report order: ours (the untrained base first), the OpenRouter models of the two configs, the T8b reference."""
+    from robo_jev.bench.openrouter import safe_name
+    from robo_jev.bench.score import describe_source, resolve_ours, subset_predictions
+    from robo_jev.decisions.records import read_records
+
+    bench_ours = {entry["tag"]: entry for entry in bench_config.get("ours") or []}
+    models: list[dict[str, Any]] = []
+    for item in spec.get("ours") or []:
+        entry = {**bench_ours.get(item["tag"], {}), **{k: v for k, v in item.items() if k != "T8"}}
+        model = {"tag": entry["tag"], "label": entry.get("label") or entry["tag"], "role": entry.get("role", "ours"), "predictions": {}, "sources": {}}
+        for set_name, records in sets.items():
+            if set_name in bench_config["sets"]:
+                source = resolve_ours(entry, set_name, root=args.root)
+                predictions = subset_predictions(source, [r["id"] for r in records]) if source else None
+            else:
+                source = next((args.root / t.format(set=set_name) for t in item.get("T8") or [] if (args.root / t.format(set=set_name)).is_file()), None)
+                predictions = read_records(source) if source else None
+            if predictions:
+                model["predictions"][set_name] = predictions
+                model["sources"][set_name] = {**describe_source(source), "records": len(predictions)}
+        if model["predictions"]:
+            models.append(model)
+            _log(f"system1 · {model['tag']}: {', '.join(f'{s} {len(p)}' for s, p in model['predictions'].items())}")
+        else:
+            _log(f"system1 · {model['tag']}: no predictions yet — skipped")
+    api_ids = [m["id"] for m in (bench_config.get("models") or {}).get("default") or []]
+    api_ids += [m["id"] for m in (t8_config.get("models") or {}).get("default") or [] if m["id"] not in api_ids]
+    for model_id in api_ids:
+        model = {"tag": safe_name(model_id), "label": model_id, "role": "api", "predictions": {}, "sources": {}}
+        for set_name in sets:
+            directory = args.bench_out if set_name in bench_config["sets"] else args.t8_out
+            path = directory / "api" / safe_name(model_id) / f"{set_name}.predictions.jsonl"
+            if path.is_file():
+                model["predictions"][set_name] = read_records(path)
+                model["sources"][set_name] = {**describe_source(path), "records": len(model["predictions"][set_name])}
+        if model["predictions"]:
+            models.append(model)
+    if spec.get("reference") and "T8b" in sets:
+        from robo_jev.outside.reference import static_prediction
+
+        models.append({"tag": "static-reference", "label": "static calculator (reference)", "role": "reference",
+                       "predictions": {"T8b": [static_prediction(r) for r in sets["T8b"]]}, "sources": {"T8b": {"path": "robo_jev.outside.reference"}}})
+    return models
+
+
+def cmd_system1(args: argparse.Namespace) -> int:
+    """System-1 metrics on the existing bench-v0 and T8 predictions (no model or API call) → results.json + results.md."""
+    import yaml
+
+    from robo_jev.bench import system1
+    from robo_jev.bench.define import ids_sha256, load_config
+
+    spec = yaml.safe_load(Path(args.spec).read_text(encoding="utf-8"))
+    bench_config = load_config(args.root / spec["bench"])
+    t8_config = load_config(args.root / spec["t8"])
+    wanted = list(spec.get("sets") or [])
+    sets = {**_load_bench(bench_config, args.bench_out, [s for s in wanted if s in bench_config["sets"]]),
+            **_load_bench(t8_config, args.t8_out, [s for s in wanted if s in t8_config["sets"]])}
+    models = _system1_models(args, spec, bench_config, t8_config, sets)
+    groups = {name: [s for s in members if s in sets] for name, members in (spec.get("groups") or {}).items()}
+    results = system1.score(sets, models, groups, n_boot=args.n_boot, seed=args.seed)
+    results.update({
+        "kind": "system1-results", "version": spec.get("version"), "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "script_version": SCRIPT_VERSION, "spec": str(args.spec), "bench": bench_config["version"], "t8": t8_config["version"],
+        "set_ids_sha256": {name: ids_sha256(str(r["id"]) for r in records) for name, records in sets.items()},
+        "sources": {m["tag"]: m["sources"] for m in models},
+    })
+    _write_json(args.results, results)
+    args.results.with_suffix(".md").write_text(system1.render_markdown(results), encoding="utf-8")
+    _log(f"system1: {len(models)} models on {list(sets)} → {args.results} (+ .md)")
+    return 0
+
+
 def cmd_fake_api(args: argparse.Namespace) -> int:
     """그래프·점수 장치 시험용 **가짜** API 예측 — 정의의 기본 모델마다 다른 세기의 잡음 답. 실제 결과로 쓰지 않는다."""
     from robo_jev.bench.define import load_config
@@ -517,6 +595,14 @@ def build_parser() -> argparse.ArgumentParser:
     score.add_argument("--sets", nargs="+", default=None)
     score.add_argument("--n-boot", type=int, default=1000)
     score.set_defaults(func=cmd_score)
+    system1 = sub.add_parser("system1", help="System-1 metrics on the existing bench-v0 and T8 predictions → results.json·.md (no calls)")
+    system1.add_argument("--spec", type=Path, default=REPO / "configs" / "bench" / "system1.yaml", help="system1 definition (sets, groups, models)")
+    system1.add_argument("--bench-out", type=Path, default=DEFAULT_OUT, help="bench-v0 directory (sets + api/ predictions)")
+    system1.add_argument("--t8-out", type=Path, default=REPO / "artifacts" / "bench" / "t8", help="T8 bench directory (sets + api/ predictions)")
+    system1.add_argument("--results", type=Path, default=REPO / "artifacts" / "bench" / "system1" / "results.json")
+    system1.add_argument("--n-boot", type=int, default=2000)
+    system1.add_argument("--seed", type=int, default=0)
+    system1.set_defaults(func=cmd_system1)
     fake = sub.add_parser("fake-api", help="그래프·점수 장치 시험용 가짜 API 예측")
     fake.add_argument("--out", type=Path, default=DEFAULT_OUT)
     fake.add_argument("--fake-dir", type=Path, default=DEFAULT_OUT / "fake-api")

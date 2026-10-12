@@ -1,0 +1,36 @@
+# System-1 re-scoring (Task s1score, 2026-10-12) — the existing bench-v0 and T8 predictions scored with metrics that fit a fast,
+# integrated judgment layer: risk bands, direction, comparison, action choice, outcome category (src/robo_jev/bench/system1.py).
+# No model or API call: only prediction files that already exist are read.
+#   python scripts/bench.py system1            # → artifacts/bench/system1/results.json + results.md
+version: system1-v1
+bench: configs/bench/bench-v0.yaml   # sets T1–T7 (artifacts/bench/v0/<set>.jsonl), OpenRouter predictions in artifacts/bench/v0/api/
+t8: configs/bench/t8.yaml            # sets T8a/T8b (artifacts/bench/t8/<set>.jsonl), OpenRouter predictions in artifacts/bench/t8/api/
+sets: [T1, T2, T3, T4, T5, T6, T7, T8a, T8b]
+# Set groups of the scorecard and the paired intervals (per-set values are in the JSON for every set above).
+groups:
+  home_T2-T4: [T2, T3, T4]
+  home_T5: [T5]
+  outside_T8b: [T8b]
+  outside_T8a: [T8a]
+# Our models in report order. An entry whose tag is in bench-v0's `ours` list takes its label, role and T1–T7 prediction candidates
+# from there (the same bench subsets as `bench.py score`); `T` / `label` / `role` here add or override. `T8` = candidate paths of
+# the T8 diagnosis predictions ({set} = T8a / T8b). Missing files are skipped (a model without any file is left out).
+ours:
+  - tag: qwen3.5-2b
+    T8: ["artifacts/reports/t8/{set}-base-2b.predictions.jsonl"]
+  - tag: robojev-v0
+    T8: ["artifacts/reports/t8/{set}-v0-2b.predictions.jsonl"]
+  - tag: robojev-v0.1-main
+  - tag: robojev-v0.1-mix
+    T8: ["artifacts/reports/t8/{set}-v01mix-2b.predictions.jsonl"]
+  # v0.2 (Task v02 cloud runs): scored when their predictions have been fetched.
+  - tag: robojev-v0.2-a
+    label: ours v0.2-a (2B)
+    role: ours
+    T: ["artifacts/cloud/runs/v02-a-01-fetched/reports/after-v02a-2b-{set}.predictions.jsonl"]
+  - tag: robojev-v0.2-b
+    label: ours v0.2-b (2B)
+    role: ours
+    T: ["artifacts/cloud/runs/v02-b-01-fetched/reports/after-v02b-2b-{set}.predictions.jsonl"]
+# T8b analysis reference: the static textbook calculator on the same hidden draws (privileged priors — not a competitor).
+reference: true
