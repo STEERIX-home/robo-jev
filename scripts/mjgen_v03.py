@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import dataclasses
 import datetime as dt
 import json
 import math
@@ -74,6 +75,75 @@ def _label_job(job: tuple[str, int, int, int, float]) -> dict[str, Any]:
     group = candidate(family, index, master, k=k, pair_share=pair_share)
     labelled = label_group(group, k=k)
     return {"group": group_to_json(group), "labelled": json.loads(json.dumps(labelled)), "seconds": round(time.perf_counter() - started, 3)}
+
+
+def _factor_job(job: tuple[dict[str, Any], int]) -> dict[str, Any]:
+    import dataclasses
+    import random
+
+    from robo_jev.mjgen.families import factor_pair, label_group
+
+    payload, k = job
+    started = time.perf_counter()
+    group = dataclasses.replace(group_from_json(payload), pair=None)
+    pair = factor_pair(group, random.Random(group.seed ^ 0xFAC7))
+    row: dict[str, Any] = {"key": [group.family, group.index], "pair": pair}
+    if pair is not None:
+        labelled = label_group(dataclasses.replace(group, pair=pair), k=k, only=("pair",))
+        row.update({"member": json.loads(json.dumps(labelled["members"]["pair"])), "rollouts": labelled["rollouts"], "unstable": labelled["flags"]["unstable"]})
+    row["seconds"] = round(time.perf_counter() - started, 3)
+    return row
+
+
+def _read_rows(path: Path) -> list[dict[str, Any]]:
+    out = []
+    if path.is_file():
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    try:
+                        out.append(json.loads(line))
+                    except json.JSONDecodeError:  # a line cut by a stopped unit
+                        pass
+    return out
+
+
+def cmd_factor(args: argparse.Namespace) -> int:
+    """Balanced selection of base groups (two records per kept group), then a one-factor partner for every kept group that has no
+    far-aimed number pair: the partner changes exactly one physical factor and only its rollouts are new."""
+    import multiprocessing
+
+    from robo_jev.mjgen.families import FAMILIES
+    from robo_jev.mjgen.generate import select_balanced
+
+    rows = _read_rows(Path(args.candidates))
+    items = [(group_from_json(r["group"]), r["labelled"]) for r in rows]
+    targets = {family: int(math.ceil(args.records_per_family / 2)) for family in FAMILIES}
+    kept, selection = select_balanced(items, targets)
+    _write_json(Path(args.selection), {"targets_groups": targets, "selection": selection, "kept": [[g.family, g.index] for g, _ in kept],
+                                       "candidates": str(args.candidates), "git": _git_sha()})
+    out = Path(args.factor_rows)
+    done = {tuple(r["key"]) for r in _read_rows(out)}
+    jobs = [(group_to_json(g), args.k) for g, _ in kept
+            if not (g.pair is not None and g.pair["closeness"] == "far") and (g.family, g.index) not in done]
+    _log(f"kept {len(kept)} groups ({ {f: s['kept'] for f, s in selection.items()} }); labelling {len(jobs)} one-factor partners "
+         f"({len(done)} done) on {args.workers} workers")
+    started, cpu, count = time.perf_counter(), 0.0, 0
+    with out.open("a", encoding="utf-8") as handle, multiprocessing.get_context("fork").Pool(args.workers) as pool:
+        for row in pool.imap_unordered(_factor_job, jobs, chunksize=1):
+            handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+            handle.flush()
+            cpu += row["seconds"]
+            count += 1
+            if count % 300 == 0:
+                wall = time.perf_counter() - started
+                _log(f"{count}/{len(jobs)} partners · wall {wall:.0f} s · worker cpu {cpu:.0f} s · ETA {wall / count * (len(jobs) - count):.0f} s")
+    wall = time.perf_counter() - started
+    _log(f"labelled {count} partners in {wall:.0f} s wall, {cpu:.0f} s worker time")
+    with out.with_suffix(".runs.jsonl").open("a", encoding="utf-8") as handle:
+        handle.write(json.dumps({"partners": count, "wall_s": round(wall, 1), "worker_s": round(cpu, 1), "workers": args.workers, "k": args.k,
+                                 "git": _git_sha(), "finished": dt.datetime.now().astimezone().isoformat(timespec="seconds")}) + "\n")
+    return 0
 
 
 def cmd_measure(args: argparse.Namespace) -> int:
@@ -151,14 +221,46 @@ def cmd_assemble(args: argparse.Namespace) -> int:
             if line.strip():
                 rows.append(json.loads(line))
     items = [(group_from_json(r["group"]), r["labelled"]) for r in rows]
-    items, pair_cap = cap_still_pairs(items, share=args.still_pair_share)
     worker_seconds = {f: sum(r["seconds"] for r in rows if r["group"]["family"] == f) for f in fam.FAMILIES}
-    targets = {}
-    for family in fam.FAMILIES:
-        pool = [(g, lab) for g, lab in items if g.family == family]
-        per_group = sum(len(lab["members"]) for _, lab in pool) / max(1, len(pool))
-        targets[family] = int(math.ceil(args.records_per_family / per_group)) if pool else 0
-    kept, selection = select_balanced(items, targets)
+    factor_report = None
+    if args.factor_rows is not None:
+        # the selection and the one-factor partners come from `factor`; far-aimed number pairs are kept as they are
+        chosen = json.loads(Path(args.selection).read_text(encoding="utf-8"))
+        keys = {tuple(k) for k in chosen["kept"]}
+        partners = {tuple(r["key"]): r for r in _read_rows(Path(args.factor_rows))}
+        kept, counts = [], collections.Counter()
+        for group, labelled in items:
+            key = (group.family, group.index)
+            if key not in keys:
+                continue
+            row = partners.get(key)
+            if row is not None and row["pair"] is not None and not row["unstable"]:
+                group = dataclasses.replace(group, pair=row["pair"])
+                labelled = {**labelled, "members": {"base": labelled["members"]["base"], "pair": row["member"]},
+                            "rollouts": labelled["rollouts"] + row["rollouts"]}
+                counts["factor"] += 1
+            elif row is not None:
+                group = dataclasses.replace(group, pair=None)  # no valid factor (or a flagged partner): the base record stays alone
+                labelled = {**labelled, "members": {"base": labelled["members"]["base"]}}
+                counts["unpaired"] += 1
+            else:
+                counts["far_number_pair" if group.pair is not None else "unpaired"] += 1
+            kept.append((group, labelled))
+        kept.sort(key=lambda gl: (fam.FAMILIES.index(gl[0].family), gl[0].index))
+        selection, targets, pair_cap = chosen["selection"], chosen["targets_groups"], None
+        factor_rows = list(partners.values())
+        factor_report = {"groups": dict(counts), "partner_worker_seconds": round(sum(r["seconds"] for r in factor_rows), 1),
+                         "partners_flagged_unstable": sum(1 for r in factor_rows if r.get("unstable"))}
+        for family in fam.FAMILIES:
+            worker_seconds[family] += sum(r["seconds"] for r in factor_rows if r["key"][0] == family)
+    else:
+        items, pair_cap = cap_still_pairs(items, share=args.still_pair_share)
+        targets = {}
+        for family in fam.FAMILIES:
+            pool = [(g, lab) for g, lab in items if g.family == family]
+            per_group = sum(len(lab["members"]) for _, lab in pool) / max(1, len(pool))
+            targets[family] = int(math.ceil(args.records_per_family / per_group)) if pool else 0
+        kept, selection = select_balanced(items, targets)
     git = _git_sha()
     records = []
     for group, labelled in kept:
@@ -205,7 +307,8 @@ def cmd_assemble(args: argparse.Namespace) -> int:
                     "grip": {"slip_m": ph.GRIP_SLIP_M, "pad_half": ph.PAD_HALF, "pre_s": ph.GRIP_PRE, "post_s": ph.GRIP_POST},
                     "tower": {"fall_deg": ph.TOWER_FALL_DEG, "seconds": ph.TOWER_SECONDS}},
         "xml_examples": examples, "candidates": len(rows), "candidates_file": str(Path(args.candidates).relative_to(REPO)) if Path(args.candidates).is_relative_to(REPO) else str(args.candidates),
-        "selection": selection, "targets_groups": targets, "pair_cap": {"still_pair_share": args.still_pair_share, "by_family": pair_cap}, "records": len(records), "questions": {"total": sum(q_types.values()), **dict(sorted(q_types.items()))},
+        "selection": selection, "targets_groups": targets, "pair_cap": {"still_pair_share": args.still_pair_share, "by_family": pair_cap},
+        "factor_pairs": factor_report, "factors": {f: {k: list(v) for k, v in spec.items()} for f, spec in fam.FACTORS.items()}, "records": len(records), "questions": {"total": sum(q_types.values()), **dict(sorted(q_types.items()))},
         "file": str(out.relative_to(REPO)) if out.is_relative_to(REPO) else str(out), "sha256": file_sha256(out), "ids_sha256": ids_sha256(r["id"] for r in records),
         "stats_file": str(out.with_suffix(".stats.json").name), "cpu": {"worker_seconds_by_family": worker_seconds, "worker_seconds": sum(worker_seconds.values()), "runs": runs},
         "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -276,6 +379,16 @@ def build_parser() -> argparse.ArgumentParser:
     assemble.add_argument("--candidates", type=Path, default=OUT / "mujoco-candidates.jsonl")
     assemble.add_argument("--records-per-family", type=int, default=5000)
     assemble.add_argument("--still-pair-share", type=float, default=0.2, help="max share of near/free (designed-still) pairs kept")
+    assemble.add_argument("--factor-rows", type=Path, default=None, help="one-factor partners from `factor` (with --selection)")
+    assemble.add_argument("--selection", type=Path, default=OUT / "mujoco-selection.json")
+    factor = sub.add_parser("factor", help="balanced selection + one-factor partners for the kept groups (CPU unit; resumable)")
+    factor.add_argument("--candidates", type=Path, default=OUT / "mujoco-candidates.jsonl")
+    factor.add_argument("--records-per-family", type=int, default=5000)
+    factor.add_argument("--k", type=int, default=32)
+    factor.add_argument("--workers", type=int, default=8)
+    factor.add_argument("--selection", type=Path, default=OUT / "mujoco-selection.json")
+    factor.add_argument("--factor-rows", type=Path, default=OUT / "mujoco-factor-partners.jsonl")
+    factor.set_defaults(func=cmd_factor)
     assemble.add_argument("--out", type=Path, default=OUT / "mujoco-train.jsonl")
     assemble.set_defaults(func=cmd_assemble)
     check = sub.add_parser("sanity", help="physics sanity report")

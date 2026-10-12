@@ -23,7 +23,7 @@ from __future__ import annotations
 import random
 from typing import Any
 
-from robo_jev.mjgen.families import GRIP_PADS, GRIP_SURFACES, TILT_SURFACES
+from robo_jev.mjgen.families import GRIP_JERK, GRIP_PADS, GRIP_SURFACES, TILT_SURFACES
 
 __all__ = ["DIRECTION_KEYS", "OPTION_TEXT", "questions", "state_text"]
 
@@ -87,7 +87,7 @@ def _tilt_size(v: dict[str, Any]) -> str:
 def _tilt_state(v: dict[str, Any], style: str, rng: random.Random) -> str:
     length, width, height = v["dims"]
     fill = rng.choice(TILT_FILL_TEXT[v["fill"]])
-    surface = TILT_SURFACES[v["surface"]]["text"]
+    surface = TILT_SURFACES[v["surface"]]["text"] + (", still wet from mopping" if v.get("wet") else "")
     size = _tilt_size(v)
     if style == "log":
         return (f"Log, {v['domain']} floor. Unit: {_a(v['robot'])}. Cargo: one {v['load_name']} standing upright and unstrapped at the centre of "
@@ -157,8 +157,9 @@ def _mass_text(v: dict[str, Any]) -> str:
 def _grip_move(v: dict[str, Any], person: str) -> str:
     subject = {"third": "The arm", "second": "You", "first": "I"}[person]
     verb = {"lift": "lift it straight up", "lower": "lower it straight down", "swing": "carry it sideways, level"}[v["move"]]
+    jerk = v.get("jerk_time", GRIP_JERK)
     return (f"{subject} will {verb} by {_n(v['distance'])} m with a top speed of {v['peak']:.1f} m/s, speeding up and braking at "
-            f"{v['accel']:.1f} m/s².")
+            f"{v['accel']:.1f} m/s², each time taking {jerk:.2f} s to get to that rate.")
 
 
 def _grip_size(v: dict[str, Any]) -> str:
@@ -169,7 +170,7 @@ def _grip_size(v: dict[str, Any]) -> str:
 def _grip_state(v: dict[str, Any], style: str, rng: random.Random) -> str:
     length, width, height = v["dims"]
     pads = GRIP_PADS[v["pads"]]["text"]
-    surface = GRIP_SURFACES[v["surface"]]["text"]
+    surface = GRIP_SURFACES[v["surface"]]["text"] + (", damp to the touch" if v.get("wet") else "")
     size = _grip_size(v)
     force = f"{v['squeeze']:.1f} N"
     if style == "log":

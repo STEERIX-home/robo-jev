@@ -21,6 +21,7 @@ from the first (so the label moves) and sometimes close (so "about the same" is 
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -41,8 +42,10 @@ __all__ = [
     "PRIORS",
     "PRIOR_SETTINGS",
     "Group",
+    "FACTORS",
     "candidate",
     "draw_values",
+    "factor_pair",
     "group_seed",
     "label_group",
     "prior_ranges",
@@ -67,6 +70,10 @@ PRIOR_SETTINGS = {
               "what": "friction ranges x 1.3; centre-of-mass and mass ranges half as wide (same centre); placement errors x 0.75"},
 }
 G = ph.GRAVITY
+#: a wet surface (deck, or the held item's outside): friction × a value in this range (hidden), on top of the material's range
+WET_FACTOR = (0.55, 0.75)
+#: grip: time for the hand's acceleration to build up to its stated value (and to fall back), unless a record states another
+GRIP_JERK = 0.04
 DOMAINS = ("warehouse", "hospital", "lab", "retail", "office", "home", "factory", "kitchen")
 
 # --------------------------------------------------------------------------
@@ -310,11 +317,15 @@ def hidden_for(family: str, visible: dict[str, Any]) -> dict[str, Any]:
     """Base hidden specs implied by the stated facts (the words → ranges)."""
     if family == "tilt":
         fill = TILT_FILLS[visible["fill"]]
-        return {"mu": ("mu",) + TILT_SURFACES[visible["surface"]]["mu"], "kh": ("u",) + fill["kh"] + (0.08, 0.92),
-                "cx": ("u",) + fill["cx"] + (-0.40, 0.40)}
+        mu = TILT_SURFACES[visible["surface"]]["mu"]
+        if visible.get("wet"):
+            mu = (round(mu[0] * WET_FACTOR[0], 4), round(mu[1] * WET_FACTOR[1], 4))
+        return {"mu": ("mu",) + tuple(mu), "kh": ("u",) + fill["kh"] + (0.08, 0.92), "cx": ("u",) + fill["cx"] + (-0.40, 0.40)}
     if family == "grip":
         pad = GRIP_PADS[visible["pads"]]["mu"]
         factor = GRIP_SURFACES[visible["surface"]]["factor"]
+        if visible.get("wet"):
+            factor = (factor[0] * WET_FACTOR[0], factor[1] * WET_FACTOR[1])
         mass = (visible["mass"] * 0.95, visible["mass"] * 1.05) if visible["mass_kind"] == "about" else (visible["mass_lo"], visible["mass_hi"])
         return {"mu": ("mu", round(pad[0] * factor[0], 4), round(pad[1] * factor[1], 4)), "mass": ("u",) + tuple(mass) + (0.05, 50.0)}
     out: dict[str, Any] = {"mu": ("mu",) + TOWER_MU}
@@ -660,6 +671,114 @@ def _pair(group: Group, rng: random.Random, rate_at: Callable[..., float], decis
 
 
 # --------------------------------------------------------------------------
+# Factor pairs (controller update 2026-10-12, after E1): one physical factor changed
+# --------------------------------------------------------------------------
+
+#: the physical factor types each family varies in a one-factor pair (field, fact kind): friction as a named material or wet
+#: surface, mass distribution, ramp-up time of the motion, drop height, footprint in the direction of the force
+FACTORS = {
+    "tilt": {"surface": ("surface", "word"), "wet": ("wet", "word"), "mass_distribution": ("fill", "word"), "footprint": ("dims.0", "number"),
+             "ramp_time": ("duration", "number")},
+    "grip": {"pads": ("pads", "word"), "item_surface": ("surface", "word"), "wet": ("wet", "word"), "ramp_time": ("jerk_time", "number")},
+    "tower": {"mass_distribution": ("top.contents", "word"), "drop_height": ("drop", "number"), "footprint": ("below.dims_0", "number")},
+}
+
+
+def _factor_field(group: Group, field: str) -> str:
+    n = len(group.visible["boxes"]) if group.family == "tower" else 0
+    if field == "top.contents":
+        return f"boxes.{n - 1}.contents"
+    if field == "below.dims_0":
+        return f"boxes.{n - 2}.dims_0"
+    return field
+
+
+def _static_rate_for(group: Group, visible: dict[str, Any]) -> float:
+    """Static key-event rate of a stated scene under its own base prior, on the group's shared unit draws."""
+    hidden = hidden_for(group.family, visible)
+    names = sorted(hidden)
+    draws = draw_values(prior_ranges(hidden, "base"), unit_draws(names, DEFAULT_K, group.seed ^ 0xD3A5), names)
+    return static_event_rate(group.family, visible, draws)
+
+
+def factor_pair(group: Group, rng: random.Random) -> dict[str, Any] | None:
+    """A paired record that changes exactly one physical factor of the base scene (:data:`FACTORS`). Word factors (a material,
+    wetness, a contents description) take the alternative whose static key rate moves furthest (a random one among those moving ≥ 0.25
+    when there are several); number factors in the static model (footprint) are aimed at a far target; number factors outside it
+    (ramp-up time, drop height) take a large change and MuJoCo decides how much it matters. None when the family offers no valid change."""
+    family, v = group.family, group.visible
+    names = list(FACTORS[family])
+    rng.shuffle(names)
+    base_rate = _static_rate_for(group, v)
+    for factor in names:
+        field_spec, fact = FACTORS[family][factor]
+        field = _factor_field(group, field_spec)
+        current = bool(v.get("wet")) if field == "wet" else (v.get("jerk_time", GRIP_JERK) if field == "jerk_time" else _get_field(v, field))
+        candidates: list[Any] = []
+        if field == "surface" and family == "tilt":
+            candidates = [k for k in sorted(TILT_SURFACES) if k != current]
+        elif field == "surface":
+            item = next(i for i in GRIP_ITEMS if i["key"] == v["item"])
+            candidates = [k for k in sorted(GRIP_SURFACES) if k != current and k in item["surfaces"] + ("rubber", "glossy", "plastic")]
+        elif field == "pads":
+            candidates = [k for k in sorted(GRIP_PADS) if k != current]
+        elif field == "wet":
+            candidates = [not current]
+        elif field == "fill":
+            load = next(item for item in TILT_LOADS if item["key"] == v["load"])
+            candidates = [k for k in load["fills"] if k != current]
+        elif field.endswith(".contents"):
+            candidates = [k for k in sorted(TOWER_CONTENTS) if k != current]
+        if candidates:
+            scored = []
+            for value in candidates:
+                trial = copy.deepcopy(v)
+                _set_field(trial, field, value)
+                scored.append((abs(_static_rate_for(group, trial) - base_rate), value))
+            movers = [value for delta, value in scored if delta >= 0.25]
+            value = rng.choice(movers) if movers else max(scored, key=lambda dv: dv[0])[1]
+        elif field == "dims.0":  # tilt footprint along the slope: aim the static rate at a far target
+            aim, _ = _second_target(rng, base_rate, near_share=0.0)
+
+            def rate(length: float) -> float:
+                trial = copy.deepcopy(v)
+                _set_field(trial, field, length)
+                return _static_rate_for(group, trial)
+
+            lo, hi = max(0.06, current * 0.4), current * 2.5
+            increasing = rate(lo) <= rate(hi)
+            value = _round(solve_value(rate, lo, hi, max(aim, 1e-3), increasing=increasing), 0.01)
+            if abs(value - current) < 0.015:
+                continue
+        elif field.endswith(".dims_0"):  # tower: length of the box under the top box (its edge carries the top box)
+            def rate(length: float) -> float:
+                trial = copy.deepcopy(v)
+                _set_field(trial, field, length)
+                return _static_rate_for(group, trial)
+
+            aim, _ = _second_target(rng, base_rate, near_share=0.0)
+            lo, hi = max(0.12, current * 0.6), current * 1.6
+            value = _round(solve_value(rate, lo, hi, max(aim, 1e-3), increasing=False), 0.01)
+            if abs(value - current) < 0.015:
+                continue
+        elif field == "duration":  # tilt: how fast the pitch is reached
+            value = _round(min(6.0, max(0.3, current * rng.choice((0.3, 0.4, 2.5, 3.0)))), 0.1)
+        elif field == "jerk_time":  # grip: how fast the acceleration builds up (the profile honours it up to peak / accel)
+            longest = v["peak"] / v["accel"]
+            if longest < 0.1:
+                continue
+            value = _round(longest * rng.uniform(0.6, 1.0), 0.01)
+        elif field == "drop":
+            value = rng.choice([d for d in (0.04, 0.06, 0.08) if d != current])
+        else:
+            continue
+        if value == current:
+            continue
+        return {"field": field, "from": current, "value": value, "aim": None, "closeness": "factor", "factor": factor, "fact": fact}
+    return None
+
+
+# --------------------------------------------------------------------------
 # MuJoCo labels
 # --------------------------------------------------------------------------
 
@@ -678,9 +797,9 @@ def _effective(group: Group, member: str, overrides: dict[str, Any]) -> dict[str
 
 def _physics_key(family: str, visible: dict[str, Any]) -> str:
     keys = {"tilt": ("dims", "mass", "orientation", "angle", "duration", "direction"),
-            "grip": ("dims", "move", "distance", "peak", "accel", "squeeze"),
+            "grip": ("dims", "move", "distance", "peak", "accel", "squeeze", "jerk_time"),
             "tower": ("boxes", "drop")}[family]
-    payload = {k: visible[k] for k in keys}
+    payload = {k: visible.get(k) for k in keys}
     if family == "tower":
         payload["boxes"] = [{k: b.get(k) for k in ("dims", "mass", "offset", "turned")} for b in visible["boxes"]]
     return json.dumps(payload, sort_keys=True)
@@ -701,7 +820,7 @@ def roll(family: str, visible: dict[str, Any], draw: dict[str, float], rigs: dic
         key = json.dumps(["grip", visible["dims"]])
         if key not in rigs:
             rigs[key] = ph.grip_rig(visible["dims"], 1.0)
-        path, axis = ph.move_profile(visible["move"], visible["distance"], visible["peak"], visible["accel"])
+        path, axis = ph.move_profile(visible["move"], visible["distance"], visible["peak"], visible["accel"], jerk_time=visible.get("jerk_time", GRIP_JERK))
         return ph.run_grip(rigs[key], path, axis, mu=draw["mu"], mass=draw["mass"], squeeze=visible["squeeze"])
     boxes = visible["boxes"]
     key = json.dumps(["tower", [(b["dims"], b["mass"]) for b in boxes]])
@@ -712,7 +831,7 @@ def roll(family: str, visible: dict[str, Any], draw: dict[str, float], rigs: dic
     return ph.run_tower(rigs[key], centres=centres, drop=visible["drop"], mu=draw["mu"], coms=coms)
 
 
-def label_group(group: Group, k: int = DEFAULT_K, *, rigs: dict[str, Any] | None = None) -> dict[str, Any]:
+def label_group(group: Group, k: int = DEFAULT_K, *, rigs: dict[str, Any] | None = None, only: Sequence[str] | None = None) -> dict[str, Any]:
     """Roll out every variant of both members under all three priors on the group's shared unit draws.
 
     Returns ``{"k", "draws_seed", "members": {member: {"variants": {name: {"outcomes": {prior: [outcome per draw]}, "freq": {prior:
@@ -724,6 +843,8 @@ def label_group(group: Group, k: int = DEFAULT_K, *, rigs: dict[str, Any] | None
     outcomes_list = OUTCOMES[family]
     cache: dict[str, list[dict[str, Any]]] = {}
     members = ("base", "pair") if group.pair is not None else ("base",)
+    if only is not None:  # e.g. only the new factor partner (the base member's rollouts are already labelled)
+        members = tuple(m for m in members if m in only)
     out: dict[str, Any] = {"k": int(k), "draws_seed": int(draws_seed), "members": {}, "rollouts": 0, "flags": {"unstable": 0}}
     for member in members:
         visible_member = group.visible_for(member)

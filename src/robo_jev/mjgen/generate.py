@@ -246,7 +246,8 @@ def group_records(group: fam.Group, labelled: dict[str, Any], *, mujoco_version:
         by_prior = {p: (base["meta"]["labels_by_prior"][p][key]["p_yes"], pair["meta"]["labels_by_prior"][p][key]["p_yes"]) for p in fam.PRIORS}
         directions = {p: direction(b - a) for p, (a, b) in by_prior.items()}
         common = {"kind": "numeric", "field": group.pair["field"], "from": group.pair["from"], "to": group.pair["value"],
-                  "closeness": group.pair["closeness"], "key_by_prior": by_prior, "key_delta": by_prior["base"][1] - by_prior["base"][0],
+                  "closeness": group.pair["closeness"], "factor": group.pair.get("factor"), "fact": group.pair.get("fact", "number"),
+                  "key_by_prior": by_prior, "key_delta": by_prior["base"][1] - by_prior["base"][0],
                   "direction_by_prior": directions, "direction_same": len(set(directions.values())) == 1,
                   "no_reversal": not {"up", "down"} <= set(directions.values())}
         base["meta"]["pair"] = {"of": pair["id"], "role": "base", **common}
@@ -348,6 +349,18 @@ def select_balanced(items: Iterable[tuple[fam.Group, dict[str, Any]]], targets: 
 # --------------------------------------------------------------------------
 
 
+def _factor_summary(pairs: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """Label sensitivity to one factor, from its one-factor pairs: how far the key label moves (base prior), which way, and whether
+    the direction holds under the alternative priors."""
+    deltas = [p["key_delta"] for p in pairs]
+    absd = [abs(d) for d in deltas]
+    return {"pairs": len(pairs), "abs_delta_mean": statistics.fmean(absd), "abs_delta_median": statistics.median(absd),
+            "abs_delta_ge_0.1": sum(1 for d in absd if d >= 0.1) / len(absd), "up": sum(1 for d in deltas if d > 0.05),
+            "down": sum(1 for d in deltas if d < -0.05), "flat": sum(1 for d in deltas if abs(d) <= 0.05),
+            "direction_same_all_priors": sum(1 for p in pairs if p["direction_same"]) / len(pairs),
+            "no_reversal_all_priors": sum(1 for p in pairs if p["no_reversal"]) / len(pairs)}
+
+
 def _hist(values: Sequence[float], bins: int = 10) -> list[int]:
     out = [0] * bins
     for v in values:
@@ -395,9 +408,12 @@ def stats(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
         deltas = [abs(r["meta"]["pair"]["key_delta"]) for r in pairs]
         by_field: dict[str, list[float]] = collections.defaultdict(list)
         by_design: dict[str, list[float]] = collections.defaultdict(list)
+        by_factor: dict[str, list[dict[str, Any]]] = collections.defaultdict(list)
         for r in pairs:
             by_field[r["meta"]["pair"]["field"].replace(".", "_")].append(abs(r["meta"]["pair"]["key_delta"]))
             by_design[r["meta"]["pair"]["closeness"]].append(abs(r["meta"]["pair"]["key_delta"]))
+            if r["meta"]["pair"].get("factor"):
+                by_factor[f'{r["meta"]["scene"]}/{r["meta"]["pair"]["factor"]}'].append(r["meta"]["pair"])
         in_pairs = sum(1 for r in rows if r["meta"]["pair"])
         out["by_family"][family] = {
             "records": len(rows), "groups": len({(r["meta"]["scene"], r["generator"]["group"]) for r in rows}),
@@ -417,6 +433,7 @@ def stats(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
                                    for f, v in sorted(by_field.items())},
                       "by_design": {f: {"pairs": len(v), "abs_delta_ge_0.1": sum(1 for d in v if d >= 0.1) / len(v), "median": statistics.median(v)}
                                     for f, v in sorted(by_design.items())},
+                      "by_factor": {f: _factor_summary(v) for f, v in sorted(by_factor.items())},
                       "direction_same_all_priors": (sum(1 for r in pairs if r["meta"]["pair"]["direction_same"]) / len(pairs)) if pairs else None,
                       "no_reversal_all_priors": (sum(1 for r in pairs if r["meta"]["pair"]["no_reversal"]) / len(pairs)) if pairs else None},
             "robust": {"questions": robust_total[1], "robust": robust_total[0], "share": robust_total[0] / robust_total[1] if robust_total[1] else None,
