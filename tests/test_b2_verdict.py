@@ -161,6 +161,9 @@ def test_the_verdict_script_applies_the_rule_end_to_end(tmp_path):
     assert out.with_suffix(".md").is_file()
     # the robust middle band holds 40 planned questions + 40 further-out ones (≥ 50): three bands
     assert not result["verdict"]["two_band"]
+    sens = result["readings"]["sensitivity"]
+    assert sens["other_band_choice"]["two_band"] and sens["other_band_choice"]["outcome_if_applied"] in ("P1", "P2", "P3")
+    assert sens["without_flagged_moments"]["flagged_moments"] == [] and sens["without_flagged_moments"]["questions"] == result["readings"]["models"]["v03"]["primary"]["n"]
     # a prediction file scored on another T8b file is refused
     _write_predictions(paths["base"], constant, "0" * 64)
     with pytest.raises(SystemExit):

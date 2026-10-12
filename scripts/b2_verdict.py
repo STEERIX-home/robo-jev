@@ -214,6 +214,25 @@ def readings(records: Sequence[dict[str, Any]], predictions: Mapping[str, Sequen
     return out
 
 
+def sensitivity(records: Sequence[dict[str, Any]], predictions: Mapping[str, Sequence[dict[str, Any]]], robust: set[tuple[str, str]], *,
+                two_band: bool, flagged: set[str], n_boot: int = 2000, seed: int = 0) -> dict[str, Any]:
+    """Not deciding: the primary and the rule under the other band choice (two-band ↔ three-band), and with the questions of moments that
+    had a rollout flagged by the instability guard under some prior (`flagged` record ids) left out."""
+    from robo_jev.bench import system1
+
+    items = {tag: system1.question_items(SET, records, preds).get("band_balanced") or {} for tag, preds in predictions.items()}
+    out: dict[str, Any] = {}
+    for name, keys, bands in (("other_band_choice", robust, not two_band),
+                              ("without_flagged_moments", {k for k in robust if k[0] not in flagged}, two_band)):
+        prim = {tag: primary_items(found, keys, two_band=bands) for tag, found in items.items()}
+        delta = _paired(prim["v03"], prim["base"], n_boot=n_boot, seed=seed, stratified=True)
+        values = {tag: _summary(found, n_boot=n_boot, seed=seed, stratified=True) for tag, found in prim.items()}
+        out[name] = {"two_band": bands, "questions": len(prim["v03"]), "models": values, "delta_v03_base": delta,
+                     "outcome_if_applied": rule_outcome(delta["low"], delta["high"], values["v03"]["value"], two_band=bands)}
+    out["without_flagged_moments"]["flagged_moments"] = sorted(flagged)
+    return out
+
+
 def composition(records: Sequence[dict[str, Any]], robustness: Mapping[tuple[str, str], Mapping[str, Any]]) -> dict[str, Any]:
     """Robust share by family and by kind (T8b's question names, :data:`robo_jev.outside.robustness.KINDS`), and the robust label bands."""
     from collections import Counter
@@ -380,6 +399,18 @@ def render_markdown(result: Mapping[str, Any]) -> str:
                      f"{_ci(entry['band_balanced_ambiguous'], signed=True)} | {_ci(entry['band_balanced_all'], signed=True)} |")
     primary = r["paired"]["v03-base"]["primary"]
     lines += ["", f"Rule inputs: Δ(v0.3 − base) = {_ci(primary, signed=True)}; v0.3 = {_f(r['models']['v03']['primary']['value'])}.", ""]
+    sens = r.get("sensitivity") or {}
+    if sens:
+        lines += ["## Sensitivity (not deciding)", "",
+                  "The primary and the rule's outcome computed another way: with the other band choice, and without the moments that had a rollout "
+                  "flagged by the instability guard under some prior.", "",
+                  "| reading | bands | questions | base | v0.1-mix | v0.3 | Δ v0.3 − base [95 %] | outcome if it decided |", "|---|---|---|---|---|---|---|---|"]
+        for name, entry in sens.items():
+            m = entry["models"]
+            lines.append(f"| {name.replace('_', ' ')} | {'low + high' if entry['two_band'] else 'three'} | {entry['questions']} | {_f(m['base']['value'])} | "
+                         f"{_f(m['v01mix']['value'])} | {_f(m['v03']['value'])} | {_ci(entry['delta_v03_base'], signed=True)} | {entry['outcome_if_applied']} |")
+        flagged = sens.get("without_flagged_moments", {}).get("flagged_moments") or []
+        lines += ["", f"Flagged moments left out: {len(flagged)}.", ""]
     lines += ["## Severe errors and other readings", "",
               "| model | severe, robust [95 %] | miss | false alarm | balanced band (3 bands), robust | balanced band, prior-dependent [95 %] | "
               "balanced band, all | severe, all | coverage |", "|---|---|---|---|---|---|---|---|---|"]
@@ -484,6 +515,8 @@ def main(argv: list[str] | None = None) -> int:
          f"reproduction {repro['share']:.4f}; two-band {two_band}")
     found = readings(records, predictions, robust, ambiguous, two_band=two_band, n_boot=args.n_boot, seed=args.seed)
     verdict = decide(instrument, found["paired"]["v03-base"]["primary"], found["models"]["v03"]["primary"], two_band=two_band)
+    flagged = {rid for prior in PRIORS for rid, row in rows[prior].items() if row.get("unstable") or row.get("off_deck")}
+    found["sensitivity"] = sensitivity(records, predictions, robust, two_band=two_band, flagged=flagged, n_boot=args.n_boot, seed=args.seed)
     result = {
         "kind": "b2-verdict", "rule": RULE, "verdict": verdict, "readings": found, "composition": composition(stored, robustness),
         "shifts": shifts(stored, robustness), "instrument": {"reproduction": repro, "robust_bands": bands, "two_band": two_band},
