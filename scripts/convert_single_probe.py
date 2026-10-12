@@ -602,7 +602,10 @@ def cmd_mix(args: argparse.Namespace) -> int:
             manifest["shares"]["tokens_est"] = {name: manifest["tokens"][name]["est_token_share"] for name in parts}
     _write_json(args.out.with_name(args.out.stem + ".manifest.json"), manifest)
     shares = f"probe share {epoch['probe_share']:.4f}" + (f", general share {epoch['general_share']:.4f}" if general_block else "")
-    _log(f"mix: {len(base)} + {len(probe)} + {len(general_lines)} records → {args.out} · {shares} of examples/epoch")
+    parts = " + ".join([str(len(base)), *(f"{len(extra['records']) + len(extra['copies'])} ({extra['name']})" for extra in extras), str(len(probe)),
+                        str(len(general_lines))])
+    _log(f"mix: {parts} records → {args.out} · {shares}" + "".join(f", {e['name']} share {examples[e['name']] / total:.4f}" for e in extras)
+         + " of examples/epoch")
     return 0
 
 

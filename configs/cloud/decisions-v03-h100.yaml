@@ -3,7 +3,7 @@
 # Training input artifacts/simgen/v03/train-v03.jsonl, built on this box (manifest train-v03.manifest.json; recipe in the v0.3c report):
 #   python scripts/system1_v03.py transform --input artifacts/simgen/v02/train-50k.jsonl --out artifacts/simgen/v03/engine-s1.jsonl
 #   python scripts/convert_single_probe.py mix --base artifacts/simgen/v03/engine-s1.jsonl --extra mujoco=artifacts/simgen/v03/mujoco-train.jsonl \
-#       --probe artifacts/simgen/probes/G1-train-mix.jsonl --sealed artifacts/simgen/probes/G1.jsonl --general artifacts/simgen/v02/general-train.jsonl \
+#       --extra-share mujoco=0.20 --probe artifacts/simgen/probes/G1-train-mix.jsonl --sealed artifacts/simgen/probes/G1.jsonl --general artifacts/simgen/v02/general-train.jsonl \
 #       --general-share 0.25 --general-repeat-if-short --train-config configs/train/decisions-v0-lora-h100.yaml --token-sample 3000 \
 #       --out artifacts/simgen/v03/train-v03.jsonl
 #   python scripts/system1_v03.py overlap --input artifacts/simgen/v03/train-v03.jsonl --out artifacts/simgen/v03/train-v03.overlap.json
@@ -15,10 +15,11 @@
 # our own) and go up as regular inputs. No base step: the rule's untrained base on T8b is the T8 task's Spark run
 # (artifacts/reports/t8/T8b-base-2b, same prompt / format / orders / seed, GB10 hardware — scripts/verdict_v03.py notes it) and the base on
 # G2 is the v0.1 main pod's (base-2b-G2, H100). Apply the rule with scripts/verdict_v03.py on the fetched reports.
-# Built (2026-10-12, code a7f7613): 110,736 records = engine 50,000 + MuJoCo 14,998 + d1 1,439 + general 44,299 (all 35,000 + a recorded
-# second pass over the first 9,299, ids <id>~r2 — the file alone cannot reach 25 % next to the MuJoCo set); examples per epoch 173,539 =
-# engine 98,050 (56.5 %) · MuJoCo 29,380 (16.9 %) · d1 2,724 (1.6 %) · general 43,385 (25.0 %); 5,424 steps; sampled tokens ≈ 60.8 M
-# (engine 65 % · MuJoCo 16 % · d1 4 % · general 15 %); sha256 ca869e0a8601f98ec2d7eb422cf9ab31cadb6646f958a0f46c8bff939b408699.
+# Built (2026-10-12, code 56eec1e): 116,912 records = engine 50,000 + MuJoCo 14,998 + a recorded MuJoCo second pass of 3,704 (1,852 whole
+# pairs, round-robin over tilt / grip / tower — 14,998 records give 16.9 % of examples, short of the 20–30 % target) + d1 1,439 + general
+# 46,771 (all 35,000 + a recorded second pass over the first 11,771 — the file alone cannot reach 25 %); examples per epoch 183,230 =
+# engine 98,050 (53.5 %) · MuJoCo 36,648 (20.0 %) · d1 2,724 (1.5 %) · general 45,808 (25.0 %); 5,726 steps; sampled tokens ≈ 63.7 M
+# (engine 62 % · MuJoCo 19 % · d1 4 % · general 15 %); sha256 bd37b76b4da70e2ac6a1cad03651dfcd91299ab71da123eb45d1430caa992659.
 kind: robojev-cloud-job-v0
 name: decisions-v03-h100
 job:
@@ -68,7 +69,7 @@ job:
              "--gpu-memory-fraction", "0.92"]
       wall_set: max_wall_hours
       max_minutes: 300
-      est_minutes: 115
+      est_minutes: 125
     - name: after-T8b
       argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v03-2b/checkpoint.pt", "--input", "artifacts/t8/T8b.jsonl", "--out", "{reports}/after-v03-2b-T8b.json", "--gpu-memory-fraction", "0.92"]
       max_minutes: 30
@@ -152,4 +153,4 @@ estimate:
   boot_minutes: 3
   uplink_mbps: 40
   fetch_minutes: 3
-  assumption: "Train from v0.2-b's pod (H100, same recipe): 4,199 steps in 87.8 min (1.13 s/step steady, ≈ 48.9 M prompt tokens). This input has 5,424 steps and ≈ 60.8 M sampled prompt tokens (+24 %), and its 300 dev records carry the derived questions (≈ +65 % dev prompts, 12 dev passes), so train ≈ 115 min (scaled by steps, the larger of the two, plus the longer dev passes). Diagnoses = the slower measured pods (v0.1 / v0.2-b): G2 3, T1 27, T2 27, T3 26, T4 15, T5 14, T7 27, G1 10, T6 54 min; T8b ≈ 8 and T8a ≈ 5 min (3,600 / 3,676 prompts — G2's 2,500 took 2.0–2.7 min). The wall cap is 6.5 h (v0.2: 6 h) so the plan keeps ≥ 30 min of slack with every diagnosis; at 6 h the last, secondary T6 could be cut on a slow pod."
+  assumption: "Train from v0.2-b's pod (H100, same recipe): 4,199 steps in 87.8 min (1.13 s/step steady, ≈ 48.9 M prompt tokens). This input has 5,726 steps (+36 %) and ≈ 63.7 M sampled prompt tokens (+30 %), and its 300 dev records carry the derived questions (≈ +65 % dev prompts over 13 dev passes), so train ≈ 120 min scaled by steps (the larger of the two) + ≈ 5 min of longer dev passes = 125 min. Diagnoses = the slower measured pods (v0.1 / v0.2-b): G2 3, T1 27, T2 27, T3 26, T4 15, T5 14, T7 27, G1 10, T6 54 min; T8b ≈ 8 and T8a ≈ 5 min (3,600 / 3,676 prompts — G2's 2,500 took 2.0–2.7 min). The wall cap is 6.5 h (v0.2: 6 h) so the plan keeps ≥ 30 min of slack with every diagnosis; at 6 h the last, secondary T6 could be cut on a slow pod."
