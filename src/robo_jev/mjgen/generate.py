@@ -71,7 +71,6 @@ QUESTION_NAMES = {
 OUTCOME_KEYS = {"tilt": {"stays": "stay", "slides": "slide", "topples": "tip"}, "grip": {"held": "hold", "slipped": "slip", "dropped": "drop"},
                 "tower": {"all_stay": "stands", "top_falls": "top", "more_fall": "more"}}
 PLANNED_KEY = {"tilt": "as_it_stands", "grip": "as_planned", "tower": "as_planned"}
-TILT_OPTION_KEY = {"upright": "upright", "lengthwise": "lengthwise", "crosswise": "crosswise"}
 
 
 def band(value: float) -> str:
