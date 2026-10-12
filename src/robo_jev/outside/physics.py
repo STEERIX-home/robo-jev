@@ -88,26 +88,23 @@ NOMINAL_IPOS = 0.001
 
 
 def inertia(shape: str, dims: Sequence[float], mass: float) -> tuple[float, float, float]:
-    """Principal inertia of a uniform solid: box ``dims = (L, W, H)`` (x, y, z), cylinder ``dims = (D, H)`` (axis z)."""
-    if shape == "box":
-        length, width, height = (float(v) for v in dims)
-        return (mass * (width**2 + height**2) / 12, mass * (length**2 + height**2) / 12, mass * (length**2 + width**2) / 12)
-    if shape == "cylinder":
-        diameter, height = (float(v) for v in dims)
-        radius = diameter / 2
-        side = mass * (3 * radius**2 + height**2) / 12
-        return (side, side, mass * radius**2 / 2)
-    raise ValueError(f"shape: box or cylinder (got {shape!r})")
+    """Principal inertia of a uniform solid box ``dims = (L, W, H)`` (x, y, z). Loads are boxes only (module docstring)."""
+    if shape != "box":
+        raise ValueError(f"loads are boxes only (got {shape!r})")
+    length, width, height = (float(v) for v in dims)
+    return (mass * (width**2 + height**2) / 12, mass * (length**2 + height**2) / 12, mass * (length**2 + width**2) / 12)
 
 
 def _height(shape: str, dims: Sequence[float]) -> float:
-    return float(dims[2] if shape == "box" else dims[1])
+    if shape != "box":
+        raise ValueError(f"loads are boxes only (got {shape!r})")
+    return float(dims[2])
 
 
 def _geom(shape: str, dims: Sequence[float], name: str = "load_geom") -> str:
-    if shape == "box":
-        return f'<geom name="{name}" type="box" size="{dims[0] / 2:.6f} {dims[1] / 2:.6f} {dims[2] / 2:.6f}"/>'
-    return f'<geom name="{name}" type="cylinder" size="{dims[0] / 2:.6f} {dims[1] / 2:.6f}"/>'
+    if shape != "box":
+        raise ValueError(f"loads are boxes only (got {shape!r})")
+    return f'<geom name="{name}" type="box" size="{dims[0] / 2:.6f} {dims[1] / 2:.6f} {dims[2] / 2:.6f}"/>'
 
 
 def _header(name: str) -> str:
