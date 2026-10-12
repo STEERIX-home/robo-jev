@@ -13,6 +13,13 @@
     # v0b 학습 세트와 레코드마다 맞대기(정답·참 세계·계산 과정·장부가 바이트 단위로 같고 요청 글만 다른가) + 비교 표
     uv run python scripts/simgen_v0b.py compare --v0b artifacts/simgen/v0b/train-50k.jsonl --v01 artifacts/simgen/v01/train-50k.jsonl \
         --out artifacts/simgen/v01/train-50k.compare.json
+    # Task v0.2 — training set v02: wording balance v01b (original v0b wordings on ~half of the picks) + fact shuffle 0.5, same seeds
+    uv run python scripts/simgen_v0b.py train --out artifacts/simgen/v02/train-50k.jsonl --phrasing v01b --workers 12
+    # ... compared with v0b (labels byte-identical, only the request text differs) and with v01 (same fact shuffle: identical state text)
+    uv run python scripts/simgen_v0b.py compare --v0b artifacts/simgen/v0b/train-50k.jsonl --v01 artifacts/simgen/v02/train-50k.jsonl \
+        --out artifacts/simgen/v02/train-50k.compare-v0b.json
+    uv run python scripts/simgen_v0b.py compare --v0b artifacts/simgen/v01/train-50k.jsonl --v01 artifacts/simgen/v02/train-50k.jsonl \
+        --same-facts --out artifacts/simgen/v02/train-50k.compare-v01.json
 
 지시서 §9대로 systemd-run 유닛(MemoryMax, choom -n 1000, CUDA 숨김)으로 띄운다. GPU·모델을 쓰지 않는다.
 """
@@ -72,7 +79,7 @@ def cmd_train(args) -> int:
     tmp = args.out.parent / f".{args.out.name}.parts"
     tmp.mkdir(exist_ok=True)
     size = (len(units) + args.workers * 4 - 1) // (args.workers * 4)
-    fact_shuffle = args.fact_shuffle if args.fact_shuffle is not None else (0.5 if args.phrasing == "v01" else 0.0)
+    fact_shuffle = args.fact_shuffle if args.fact_shuffle is not None else (0.5 if args.phrasing in ("v01", "v01b") else 0.0)
     tasks = [(str(args.values.resolve()), units[i : i + size], str(tmp / f"part-{i // size:04d}.jsonl"), git, args.phrasing, fact_shuffle)
              for i in range(0, len(units), size)]  # fmt: skip
     start = time.perf_counter()
@@ -101,11 +108,12 @@ def cmd_train(args) -> int:
         "group_shares": _shares(r["meta"]["group"] for r in records),
     }
     if args.phrasing != "v0b" or fact_shuffle:
-        from robo_jev.simgen.phrasing import fact_order_stats, wording_stats
+        from robo_jev.simgen.phrasing import fact_order_stats, wording_stats, wording_summary
 
         stats["phrasing"] = {"version": args.phrasing, "fact_shuffle": fact_shuffle}
         stats["fact_order"] = fact_order_stats(records)
         stats["wording"] = wording_stats(records)
+        stats["wording_summary"] = wording_summary(stats["wording"])
     stats_path = args.out.with_suffix(".stats.json")
     stats_path.write_text(json.dumps(stats, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     manifest_path = args.out.with_suffix(".manifest.json")
@@ -139,7 +147,10 @@ def _train_manifest(args, git: str | None, start_seed: int, fact_shuffle: float,
 
 
 def cmd_compare(args) -> int:
-    """v0b 학습 세트와 v01 학습 세트를 레코드마다 맞댄다: 요청 글 말고는 모두 같은가(정답은 바이트 단위로), 상태 글은 같은 줄을 담나."""
+    """v0b 학습 세트와 v01 학습 세트를 레코드마다 맞댄다: 요청 글 말고는 모두 같은가(정답은 바이트 단위로), 상태 글은 같은 줄을 담나.
+
+    ``--same-facts`` (Task v0.2): the two files share the fact shuffle (e.g. v01 vs v01b, both 0.5 on the ``train-facts`` stream), so the
+    state text must be byte-identical and ``meta.fact_order`` equal; only question instructions and option texts may differ."""
     from collections import Counter
 
     from robo_jev.simgen.phrasing import without_text
@@ -155,7 +166,10 @@ def cmd_compare(args) -> int:
             if without_text(a) != without_text(b):
                 bad.append(f"record differs beyond the request text: {a['id']}")
             state_a, state_b = a["request"]["state"], b["request"]["state"]
-            if state_a != state_b:
+            if args.same_facts:
+                if state_a != state_b or a["meta"].get("fact_order") != b["meta"].get("fact_order"):
+                    bad.append(f"state text or fact order differs although both files share the fact shuffle: {a['id']}")
+            elif state_a != state_b:
                 counts["state_differs"] += 1
                 if not b["meta"].get("fact_order", {}).get("shuffled"):
                     bad.append(f"state differs without a fact shuffle: {a['id']}")
@@ -266,13 +280,17 @@ def main(argv: list[str] | None = None) -> int:
     train.add_argument("--n", type=int, default=TRAIN_N)
     train.add_argument("--workers", type=int, default=12)
     train.add_argument("--values", type=Path, default=VALUES_PATH, help="가치표(기본 values-v0; v0.1이면 configs/simgen/values-v0.1.yaml)")
-    train.add_argument("--phrasing", choices=("v0b", "v01"), default="v0b", help="학습 문구 판(기본 v0b; v01 = 학습 묶음을 넓힌 판 — Task v0.1a)")
-    train.add_argument("--fact-shuffle", type=float, default=None, help="사실 순서 섞기 확률(기본: v01이면 0.5, v0b면 0)")
+    train.add_argument("--phrasing", choices=("v0b", "v01", "v01b"), default="v0b",
+                       help="학습 문구 판(기본 v0b; v01 = 학습 묶음을 넓힌 판 — Task v0.1a; v01b = the same pool with the original v0b wording on half "
+                            "of the picks — Task v0.2)")
+    train.add_argument("--fact-shuffle", type=float, default=None, help="사실 순서 섞기 확률(기본: v01·v01b이면 0.5, v0b면 0)")
     compare = sub.add_parser("compare")
     compare.add_argument("--v0b", type=Path, required=True)
     compare.add_argument("--v01", type=Path, required=True)
     compare.add_argument("--v0b-stats", type=Path)
     compare.add_argument("--v01-stats", type=Path)
+    compare.add_argument("--same-facts", action="store_true",
+                         help="both files share the fact shuffle (v01 vs v01b): the state text must be byte-identical (Task v0.2)")
     compare.add_argument("--out", type=Path, required=True)
     tests = sub.add_parser("tests")
     tests.add_argument("--out-dir", type=Path, required=True)

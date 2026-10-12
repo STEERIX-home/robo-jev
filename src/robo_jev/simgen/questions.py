@@ -19,6 +19,10 @@
 고르기만 넓은 묶음(``train_v01`` = v0b 학습 묶음 + 새 문구)에서 한다: 주 흐름에서 v0b 묶음 크기로 뽑던 수는 그대로 뽑고(소비가 같다 — 질문
 이름·조리법·선택지·순서가 v0b와 같다), 실제 문구는 레코드 seed와 열쇠 이름의 별도 흐름(:func:`~robo_jev.simgen.phrasing.pick_stream`)에서
 고른다. 고른 것은 ``QuestionSet.picks``([열쇠, v0b 번호, v01 번호])에 남는다.
+
+**v01b** (Task v0.2 §1-2): the same wide pool, but each use keeps the main stream's v0b wording with probability 0.5 and otherwise
+takes one of the key's new wordings; the coin and the new index come from the separate ``phrasing-v01b`` stream
+(:func:`~robo_jev.simgen.phrasing.pick_v01b`). Picks are logged in the same ``[key, v0b index, wide index]`` form.
 """
 
 from __future__ import annotations
@@ -54,7 +58,7 @@ class Surface:
     desc_shift: int = 0     # 선택지 설명 묶음에서
     key_style: str | None = None
     mirror: bool = False    # 좌우 거울상 변형(T6): 왼쪽·오른쪽 후보를 거꾸로 돌아 기준 레코드와 같은 자리에 거울상 질문이 오게
-    phrasing: str = "v0b"   # 문구 판(v0b / v01 — v01은 학습 묶음만 넓힌다, Task v0.1a)
+    phrasing: str = "v0b"   # 문구 판(v0b / v01 / v01b — v01·v01b는 학습 묶음만 넓힌다, Task v0.1a·v0.2)
 
 
 @dataclass
@@ -78,7 +82,7 @@ class QuestionSet:
     key_style: str
     primary_action: str              # 계획기 권고가 겨누는 행동 질문의 이름
     key_question: str                # 핵심 noul의 이름
-    picks: list | None = None        # 문구 판 v01: 고른 문구 [열쇠, v0b 번호, v01 번호] (v0b면 None)
+    picks: list | None = None        # 문구 판 v01·v01b: 고른 문구 [열쇠, v0b 번호, 넓은 묶음 번호] (v0b면 None)
 
 
 def identity(recipe: dict) -> tuple:
@@ -165,11 +169,13 @@ class _Ctx:
         self.lang, self.pool = surface.lang, surface.pool
         self.names: set[str] = set()
         # 문구 판 v01: 학습 묶음만 넓힌다(빼 둔 묶음·교란 옮김은 v0b 그대로) — 고르기는 별도 흐름(레코드 seed + 열쇠 이름)
-        if surface.phrasing not in ("v0b", "v01"):
+        from robo_jev.simgen.phrasing import PHRASINGS, WIDE_PHRASINGS
+
+        if surface.phrasing not in PHRASINGS:
             raise ValueError(f"unknown phrasing {surface.phrasing!r}")
-        self.wide = surface.phrasing == "v01" and surface.pool == "train"
+        self.wide = surface.phrasing in WIDE_PHRASINGS and surface.pool == "train"
         if self.wide and (phrase_seed is None or surface.shift or surface.desc_shift):
-            raise ValueError("phrasing v01 needs the record seed and takes no paraphrase shift")
+            raise ValueError(f"phrasing {surface.phrasing} needs the record seed and takes no paraphrase shift")
         self.phrase_seed = phrase_seed
         self.picks: list = []
         self._streams: dict[str, np.random.Generator] = {}
@@ -180,14 +186,22 @@ class _Ctx:
         else:
             self.values = _en_values(obs)
 
-    def _wide_pick(self, name: str, index: int, size: int) -> int:
-        """v01: 넓은 묶음(크기 ``size``)에서 별도 흐름으로 고른 번호 — 주 흐름의 번호 ``index``(v0b 고르기)는 기록만 한다."""
+    def _wide_pick(self, name: str, index: int, size: int, n_v0b: int) -> int:
+        """v01: 넓은 묶음(크기 ``size``)에서 별도 흐름으로 고른 번호 — 주 흐름의 번호 ``index``(v0b 고르기)는 기록만 한다.
+        v01b: with probability 0.5 the v0b index ``index`` itself, otherwise one of the new wordings (``n_v0b`` … ``size − 1``) —
+        :func:`robo_jev.simgen.phrasing.pick_v01b`, on its own stream."""
         rng = self._streams.get(name)
         if rng is None:
-            from robo_jev.simgen.phrasing import pick_stream
+            from robo_jev.simgen.phrasing import pick_stream, pick_stream_v01b
 
-            rng = self._streams[name] = pick_stream(self.phrase_seed, name)
-        pick = int(rng.integers(size))
+            opener = pick_stream_v01b if self.surface.phrasing == "v01b" else pick_stream
+            rng = self._streams[name] = opener(self.phrase_seed, name)
+        if self.surface.phrasing == "v01b":
+            from robo_jev.simgen.phrasing import pick_v01b
+
+            pick = pick_v01b(rng, index, n_v0b, size)
+        else:
+            pick = int(rng.integers(size))
         self.picks.append([name, index, pick])
         return pick
 
@@ -197,7 +211,7 @@ class _Ctx:
         index = (int(self.rng.integers(len(templates))) + self.surface.shift) % len(templates)
         if self.wide:
             wide = bank(key, self.lang, "train_v01")
-            return self.fill(wide[self._wide_pick(key, index, len(wide))], **extra)
+            return self.fill(wide[self._wide_pick(key, index, len(wide), len(templates))], **extra)
         return self.fill(templates[index], **extra)
 
     def fill(self, template: str, **extra) -> str:
@@ -229,7 +243,7 @@ class _Ctx:
             wide = describe(canon, self.obs, "train_v01")
             table, key = description_table(canon, self.obs.scene, self.obs.body)
             name = f"{table}.{key}" if key == canon else f"{table}.{canon}"
-            return wide[self._wide_pick(name, index, len(wide))]
+            return wide[self._wide_pick(name, index, len(wide), len(variants))]
         return variants[index]
 
     def anchors(self, key: str, **extra) -> list[str]:
