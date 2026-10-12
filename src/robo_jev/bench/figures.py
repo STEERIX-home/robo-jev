@@ -16,7 +16,7 @@ import math
 from typing import Any, Iterable
 from xml.sax.saxutils import escape
 
-__all__ = ["THEMES", "bars_svg", "figure_rows", "readme_snippet", "scatter_points", "scatter_svg"]
+__all__ = ["DISPLAY_NAMES", "THEMES", "bars_svg", "figure_rows", "hero_rows", "hero_svg", "readme_snippet", "scatter_points", "scatter_svg"]
 
 FONT = 'system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif'
 THEMES: dict[str, dict[str, str]] = {
@@ -367,3 +367,95 @@ def readme_snippet(names: Iterable[str], *, folder: str = "docs/figures") -> str
             "</picture>"
         )
     return "\n\n".join(parts) + "\n"
+
+
+# --------------------------------------------------------------------------
+# Hero figure — physical judgment on unseen situations (one bar per model)
+# --------------------------------------------------------------------------
+
+#: Display names for the hero figure (provider ids → product names).
+DISPLAY_NAMES = {
+    "~typesafe/jev-latest": "TypeSafe Jev",
+    "liquid/d1": "Liquid d1",
+    "microsoft/microsoft-decision-1": "Microsoft-Decision-1",
+    "togethercomputer/tev1-4b-experimental": "Together Tev1 4B",
+    "openai/gpt-6-luna-decisions": "OpenAI GPT-6 Luna Decisions",
+    "upstage/solar-decide": "Upstage Solar Decide",
+}
+
+
+def hero_rows(results: dict[str, Any], *, ours_tag: str = "robojev-v0.1-mix", ours_label: str = "robo-jev v0.1 · 2B (ours)",
+              base_label: str = "Qwen3.5-2B untrained (our base)") -> list[dict[str, Any]]:
+    """One row per model: our chosen version, every API model and the untrained base, sorted by physics skill on T2–T4."""
+    rows = []
+    for model in results["models"]:
+        role = model.get("role", "api")
+        if role == "ours" and model.get("tag") != ours_tag:
+            continue
+        unseen = (model.get("pooled") or {}).get("unseen") or {}
+        if unseen.get("skill") is None:
+            continue
+        if role == "ours":
+            label = ours_label
+        elif role == "baseline":
+            label = base_label
+        else:
+            label = DISPLAY_NAMES.get(str(model.get("model_id") or model["label"]), str(model["label"]))
+        rows.append({"label": label, "role": role, "skill": float(unseen["skill"]), "coverage": unseen.get("coverage")})
+    rows.sort(key=lambda r: -r["skill"])
+    return rows
+
+
+def hero_svg(results: dict[str, Any], *, theme_name: str = "light", width: int = 860, **names: Any) -> str:
+    """Horizontal bars of physics skill (1 − Brier / Brier of always 0.5) on the unseen sets T2–T4, ours highlighted."""
+    theme = THEMES[theme_name]
+    rows = hero_rows(results, **names)
+    label_w, row_h, head, foot = 250, 34, 112, 58
+    left, right = 24 + label_w, width - 64
+    lo, hi = -0.2, 1.0
+    height = head + row_h * max(len(rows), 1) + foot
+
+    def sx(value: float) -> float:
+        return left + (min(max(value, lo), hi) - lo) / (hi - lo) * (right - left)
+
+    title = "Physical judgment on situations the model never saw"
+    desc = "Physics skill on bench-v0 T2–T4 (higher is better; 0 = always answering 0.5). " + "; ".join(f"{r['label']} {r['skill']:.2f}" for r in rows)
+    out = _frame(width, height, theme, title, desc)
+    out.append(f'<text x="24" y="36" font-size="19" font-weight="700" fill="{theme["ink"]}">{_t(title)}</text>')
+    out.append(f'<text x="24" y="60" font-size="12.5" fill="{theme["ink2"]}">Will it tip, spill, collide, slip, or sit wrong? Skill vs. always answering 50 %, '
+               f'on 1,100 held-out robot moments:</text>')
+    out.append(f'<text x="24" y="77" font-size="12.5" fill="{theme["ink2"]}">new wording and settings, out-of-range values, and unseen combinations of phenomena. '
+               f'Higher is better.</text>')
+    top = head - 14
+    bottom = head + row_h * len(rows) - 6
+    for tick in _ticks(lo, hi, 0.2):
+        x = sx(tick)
+        strong = abs(tick) < 1e-9
+        out.append(f'<line x1="{x:.1f}" y1="{top}" x2="{x:.1f}" y2="{bottom}" stroke="{theme["axis"] if strong else theme["grid"]}" stroke-width="{1.4 if strong else 1}"/>')
+        out.append(f'<text x="{x:.1f}" y="{bottom + 18}" text-anchor="middle" font-size="11.5" fill="{theme["muted"]}">{f"{tick:.1f}".replace("-", "−")}</text>')
+    out.append(f'<text x="{sx(0) + 5:.1f}" y="{top + 2}" font-size="11" fill="{theme["muted"]}">always 50 %</text>')
+    for index, row in enumerate(rows):
+        y = head + index * row_h
+        color = theme["mark"] if row["role"] == "baseline" else theme[row["role"]]
+        x0, x1 = sx(0), sx(row["skill"])
+        bar_x, bar_w = min(x0, x1), max(abs(x1 - x0), 1.5)
+        weight = ' font-weight="700"' if row["role"] == "ours" else ""
+        ink = theme["ink"] if row["role"] == "ours" else theme["ink2"]
+        out.append(f'<text x="{left - 12}" y="{y + 15}" text-anchor="end" font-size="13"{weight} fill="{ink}">{_t(row["label"])}</text>')
+        out.append(f'<rect x="{bar_x:.1f}" y="{y + 2}" width="{bar_w:.1f}" height="{row_h - 12}" rx="4" fill="{color}">'
+                   f'<title>{_t(row["label"])}: {row["skill"]:.3f}</title></rect>')
+        value = f"{row['skill']:.2f}".replace("-", "−")
+        if row.get("coverage") is not None and row["coverage"] < 0.995:
+            value += f"  ({row['coverage']:.0%} answered)"
+        if row["skill"] >= 0:
+            out.append(f'<text x="{x1 + 6:.1f}" y="{y + 15}" font-size="12.5"{weight} fill="{ink}">{value}</text>')
+        else:
+            out.append(f'<text x="{x0 + 6:.1f}" y="{y + 15}" font-size="12.5"{weight} fill="{ink}">{value}</text>')
+    out.append(f'<text x="24" y="{height - 26}" font-size="11" fill="{theme["muted"]}">bench-v0 · 2026-10-12 · outcome probabilities from our physics simulator '
+               f'(home ground) · OpenRouter models via the Decisions API, one call per request</text>')
+    out.append(f'<text x="24" y="{height - 11}" font-size="11" fill="{theme["muted"]}">skill = 1 − Brier / Brier(always 0.5) over the yes/no and score questions '
+               f'of T2–T4 · details: docs/results.md</text>')
+    if results.get("fake"):
+        out.append(_watermark(width, height, theme))
+    out.append("</svg>")
+    return "\n".join(out)
