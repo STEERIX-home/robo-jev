@@ -32,6 +32,12 @@ _DIRECTION = {"more_likely": "more likely than with the plan", "less_likely": "l
               "about_same": "about the same (the chance changes by less than 0.1)"}
 
 
+def _only(options: dict[str, str], plan: dict[str, Any]) -> dict[str, str]:
+    """The options the record's safest-action question offers (``plan["action_keys"]``; all of them when absent)."""
+    keys = plan.get("action_keys")
+    return dict(options) if keys is None else {k: v for k, v in options.items() if k in keys}
+
+
 def _n(value: float, digits: int = 2) -> str:
     return f"{value:.{digits}f}"
 
@@ -122,7 +128,7 @@ def _tilt_questions(v: dict[str, Any], mix: list[str], plan: dict[str, Any], per
                                                "topples": "tips onto a side"}}
     if "action" in mix:
         out["safest_way_to_carry"] = {"type": "choice", "instructions": f"For this {angle} pitch, which way of carrying the {load} is safest?",
-                                      "criteria": dict(OPTION_TEXT["tilt"])}
+                                      "criteria": _only(OPTION_TEXT["tilt"], plan)}
     if "compare" in mix:
         laid = OPTION_TEXT["tilt"][cf_option].replace("lay it", "laid")
         out["riskier_orientation"] = {"type": "choice", "instructions": f"At {angle}, which is more likely to slide or topple: the {load} as it stands now, "
@@ -208,7 +214,8 @@ def _grip_questions(v: dict[str, Any], mix: list[str], plan: dict[str, Any], per
                                   "criteria": {"held": "still held, shifted under 1 cm", "slipped": "slipped 1 cm or more but still held",
                                                "dropped": "fell out of the grip"}}
     if "action" in mix:
-        out["safest_grip_plan"] = {"type": "choice", "instructions": f"Which of these plans is safest for the {item}?", "criteria": _grip_options(v, plan)}
+        out["safest_grip_plan"] = {"type": "choice", "instructions": f"Which of these plans is safest for the {item}?",
+                                   "criteria": _only(_grip_options(v, plan), plan)}
     if "compare" in mix:
         options = _grip_options(v, plan)
         out["riskier_grip_plan"] = {"type": "choice", "instructions": f"Which is more likely to make the {item} slip or drop: the plan as it stands "
@@ -316,7 +323,7 @@ def _tower_questions(v: dict[str, Any], mix: list[str], plan: dict[str, Any], pe
                                                    "more_fall": "a lower box goes over as well"}}
     options = _tower_options(v, plan)
     if "action" in mix:
-        out["safest_stacking"] = {"type": "choice", "instructions": "Which of these ways to finish the stack is safest?", "criteria": options}
+        out["safest_stacking"] = {"type": "choice", "instructions": "Which of these ways to finish the stack is safest?", "criteria": _only(options, plan)}
     if "compare" in mix:
         out["riskier_stacking"] = {"type": "choice", "instructions": f"Which is more likely to end with a box on the floor: the plan as it stands, or "
                                    f"to {options[cf_option]}?",

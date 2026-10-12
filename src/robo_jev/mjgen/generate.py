@@ -14,7 +14,8 @@ comparisons from them).
   P(more) = P(Δ > 0.1), P(less) = P(Δ < −0.1), the rest "about the same", with Δ ~ Normal(mean d, sd d / √K) (sd floored at
   1/(2K)) — K-sample uncertainty, not opinion;
 * safest action (``choice``, ``kind: action``) — expected cost of each option = P(key event) + 0.5 · P(severe outcome) under that
-  option, probabilities = softmax(−(cost − min cost) / 0.05), ``expected_cost`` stored;
+  option, probabilities = softmax(−(cost − min cost) / 0.05), ``expected_cost`` stored; in a seeded half of the grip and tower
+  records the option that is safest by construction is left out (:data:`DOMINANT_OPTION`);
 * score — the key-event share at the counterfactual value, with both anchors written out.
 
 **Robustness** (``meta.robustness``, per question): yes/no and score → min/max over the three priors and whether the risk band
@@ -111,6 +112,21 @@ def _events(family: str, outcomes: Sequence[str]) -> list[bool]:
     return [o in fam.EVENT[family] for o in outcomes]
 
 
+#: options that are safest in most groups by construction (pulling the top box back; a much firmer grip with a faster move): in a
+#: seeded half of the records the safest-action question leaves them out, so the question is not answerable by a fixed choice
+#: (interim check: tower "top_back" safest in 93 %, grip "firmer_faster" in 85 % of the 3-option questions)
+DOMINANT_OPTION = {"grip": "firmer_faster", "tower": "top_back"}
+
+
+def _action_keys(group: fam.Group) -> list[str]:
+    """Option keys of the record's safest-action question (seeded by the wording seed, so a pair shows the same options)."""
+    keys = list(group.plan["options"])
+    dominant = DOMINANT_OPTION.get(group.family)
+    if dominant and random.Random(group.wording ^ 0xAC71).random() < 0.5:
+        keys = [k for k in keys if k != dominant]
+    return keys
+
+
 def _cf_option(group: fam.Group) -> str:
     """The alternative action the comparison question is about (seeded by the wording seed, so a pair asks about the same one)."""
     keys = [k for k, v in group.plan["options"].items() if v != "planned"]
@@ -149,7 +165,8 @@ def _labels(group: fam.Group, variants: dict[str, Any], prior: str, questions: d
             out[qname] = {"type": "choice", "kind": "state", "probabilities": {PLANNED_KEY[family]: c["less"], cf_option: c["more"], "about_same": c["same"]}}
         elif kind == "action":
             costs = {}
-            for key, vname in group.plan["options"].items():
+            for key in questions[qname]["criteria"]:
+                vname = group.plan["options"][key]
                 costs[key] = round(float(np.mean(ev(vname))) + SEVERE_WEIGHT * float(freq(vname)[fam.SEVERE[family]]), 6)
             out[qname] = {"type": "choice", "kind": "action", "probabilities": _softmax_costs(costs), "expected_cost": costs}
     return out
@@ -179,12 +196,13 @@ def group_records(group: fam.Group, labelled: dict[str, Any], *, mujoco_version:
     family = group.family
     names = QUESTION_NAMES[family]
     cf_option = _cf_option(group)
+    action_keys = _action_keys(group)
     members = ("base", "pair") if group.pair is not None else ("base",)
     built: dict[str, dict[str, Any]] = {}
     for member in members:
         visible = group.visible_for(member)
         state = tx.state_text(family, visible, group.style, group.wording)
-        questions = tx.questions(family, visible, group.style, group.wording, group.mix, group.plan, cf_option)
+        questions = tx.questions(family, visible, group.style, group.wording, group.mix, {**group.plan, "action_keys": action_keys}, cf_option)
         variants = labelled["members"][member]["variants"]
         by_prior = {p: _labels(group, variants, p, questions, cf_option) for p in fam.PRIORS}
         robustness = {q: _robust(questions[q], {p: by_prior[p][q] for p in fam.PRIORS}) for q in questions}
@@ -206,6 +224,7 @@ def group_records(group: fam.Group, labelled: dict[str, Any], *, mujoco_version:
                 "labels_by_prior": by_prior, "robustness": robustness,
                 "contrast_direction_by_prior": contrast, "contrast_direction_same": len(set(contrast.values())) == 1,
                 "compare_option": cf_option if names["compare"] in questions else None,
+                "action_options": action_keys if names["action"] in questions else None,
                 "static_aim": {"key": group.plan.get("aim_key"), "cf": group.plan.get("aim_cf"), "cf_kind": group.plan.get("cf_kind")},
                 "pair": None,
             },
