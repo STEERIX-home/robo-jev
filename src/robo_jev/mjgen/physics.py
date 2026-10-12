@@ -72,6 +72,9 @@ TILT_TIP_DEG = 45.0
 #: a box that has slid this far while still upright is sliding for good (it keeps going on a held slope; a sliding box only tips
 #: when μ·h_c > b, and then it tips at once): stop reading early. After the hold, rollouts continue until the box is at rest.
 TILT_SLIDE_STOP = 0.10
+#: … but only while the box is within this many degrees of upright: a box that starts to tip moves its centre by rotation
+#: (≈ (H/2)·sin φ — 0.10 m at 19.5° for a 0.6 m box), which is not a slide.
+TILT_SLIDE_UPRIGHT = 5.0
 TILT_HOLD = 0.8
 
 #: grip: the hand (heavy, two slide joints x/z, gravity compensated), finger pads (half sizes: along x, thickness y, height z).
@@ -290,7 +293,7 @@ def run_tilt(rig: Rig, path: Path1D, *, mu: float, com: Sequence[float], orienta
         if tilt > TILT_TIP_DEG:
             outcome = "tip"
             break
-        if slide > TILT_SLIDE_STOP and tilt < 20.0:
+        if slide > TILT_SLIDE_STOP and tilt < TILT_SLIDE_UPRIGHT:
             outcome = "slide"
             break
         if i >= total and i % 100 == 0:
