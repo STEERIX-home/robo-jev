@@ -338,3 +338,27 @@ python scripts/narrate_v03.py report --model google/gemma-4-31b-it --judge-model
 python scripts/narrate_v03.py assemble --model google/gemma-4-31b-it --judge-model anthropic/claude-haiku-5.5
 python scripts/narrate_v03.py audit
 ```
+
+## 10. Task v0.3c — System-1 derived questions (`engine-s1`)
+
+robo-jev is a System 1 (docs/12 §16): its training questions centre on risk levels, comparisons, direction and action choice. The
+transform `system1_questions.transform_record` adds **derived choice questions** to a training record; nothing else changes (ids,
+state, original questions and labels, `generator`, `truth`, `rationale`, other meta — checked per record).
+
+* **Risk band** `s1_band_<i>` — one per event question (every yes/no question and every score whose `meta.basis` source is not
+  `quantity`): the original instruction plus a fixed frame, options `low` / `medium` / `high` (< 1/3, 1/3–2/3, > 2/3). Label: the band of
+  the label probability p, one-hot outside ±0.05 of an edge and a linear ramp inside (50/50 at the edge).
+* **Comparison** `s1_cmp_<i>_<j>` — two event questions about the same event under different actions (`bench.system1.basis_event_pairs`,
+  same polarity), quoted as the first and second case (order by a seeded coin); options `first` / `second` / `same`. Label: "same" at
+  |Δp| ≤ 0.05, the larger side at |Δp| ≥ 0.15, linear between.
+* **Budget**: at most 12 questions — the key question's band, then the comparisons, then the other bands.
+* **Record fields**: derived labels are `{"type": "choice", "kind": "state", "probabilities"}`; `meta.question_families[name]` =
+  `s1:band` / `s1:comparison` (the diagnosis tool groups by it); `meta.system1` = `{version: s1q-v1, original_questions, derived:
+  {name: {kind, of: [source questions], p: [their label probabilities]}}, dropped: {kind: count}, smooth, same_below[, max_derived]}`.
+* **Only training-split records** are accepted (`meta.split` = `generator.split.name` = `train`); sealed sets never carry derived
+  questions. The fixed frames add no word or 3-gram reserved for T2's held-out wordings (checked on every derived question).
+
+```bash
+python scripts/system1_v03.py transform --input artifacts/simgen/v02/train-50k.jsonl --out artifacts/simgen/v03/engine-s1.jsonl
+python scripts/system1_v03.py overlap --input artifacts/simgen/v03/train-v03.jsonl --out artifacts/simgen/v03/train-v03.overlap.json
+```
