@@ -416,7 +416,7 @@ def prepare_job(
     if optional:
         missing = job_block["optional_inputs_missing"]
         manifest["notes"].append(f"optional inputs: {len(optional) - len(missing)} of {len(optional)} found"
-                                 + (f" — steps that require {missing} will be skipped" if missing else ""))
+                                 + (f" (missing: {missing}) — optional steps that require a missing one are skipped" if missing else ""))
     note_state(manifest, "prepared", note=f"{Path(job_path).name} · job decisions · 입력 {len(inputs)}개 · 마감 {deadline} h")
     (bundle / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     save_manifest(manifest_path, manifest)

@@ -11,7 +11,8 @@
 # prompt tokens ≈ 44.2 M (+5.7 % vs v0.1-mix); sha256 at build 1ab9a020417e9fe7cbf118d4d49ca905b24aaa013df9d0c9e326b9ca68549098.
 # Diagnoses on its own checkpoint (after-v02a-2b-*), the sets the pre-declared v0.2 rule reads first — G2, T1–T5, T7 — then the
 # secondary ones — G1, T6 — so a slow pod can only cut secondary readings; then the outside test T8
-# **if its files exist when the job is prepared** (Task T8 builds them in parallel): artifacts/simgen/t8/T8a.jsonl and T8b.jsonl are
+# **if its files exist when the job is prepared** (Task T8 builds them in parallel, in artifacts/t8/ — the brief said artifacts/simgen/t8/,
+# the T8 task writes artifacts/t8/): artifacts/t8/T8a.jsonl and T8b.jsonl are
 # optional_inputs, and the after-T8a / after-T8b steps `require` them — absent files are not uploaded and the runner skips those steps
 # (status skipped, reason missing-inputs); the job goes on. T8 runs last, so it never delays the gating sets.
 # Same-hardware baselines are not repeated: the untrained 2B on G1/G2 was measured on the v0.1 main pod (base-2b-G1/G2); v0.1-mix's own
@@ -36,10 +37,10 @@ job:
     - artifacts/simgen/probes/G2.jsonl
     - artifacts/simgen/probes/G2.manifest.json
   optional_inputs:
-    - artifacts/simgen/t8/T8a.jsonl
-    - artifacts/simgen/t8/T8a.manifest.json
-    - artifacts/simgen/t8/T8b.jsonl
-    - artifacts/simgen/t8/T8b.manifest.json
+    - artifacts/t8/T8a.jsonl
+    - artifacts/t8/T8a.manifest.json
+    - artifacts/t8/T8b.jsonl
+    - artifacts/t8/T8b.manifest.json
   runtime:
     env:
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
@@ -113,17 +114,17 @@ job:
       est_minutes: 54
       optional: true
     - name: after-T8a
-      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/simgen/t8/T8a.jsonl", "--out", "{reports}/after-v02a-2b-T8a.json", "--gpu-memory-fraction", "0.92"]
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/t8/T8a.jsonl", "--out", "{reports}/after-v02a-2b-T8a.json", "--gpu-memory-fraction", "0.92"]
       max_minutes: 30
       est_minutes: 3
       optional: true
-      requires: [artifacts/simgen/t8/T8a.jsonl]
+      requires: [artifacts/t8/T8a.jsonl]
     - name: after-T8b
-      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/simgen/t8/T8b.jsonl", "--out", "{reports}/after-v02a-2b-T8b.json", "--gpu-memory-fraction", "0.92"]
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v02-a-2b/checkpoint.pt", "--input", "artifacts/t8/T8b.jsonl", "--out", "{reports}/after-v02a-2b-T8b.json", "--gpu-memory-fraction", "0.92"]
       max_minutes: 45
       est_minutes: 12
       optional: true
-      requires: [artifacts/simgen/t8/T8b.jsonl]
+      requires: [artifacts/t8/T8b.jsonl]
   fetch:
     - runs/*/metrics.json
     - runs/*/config.yaml
@@ -152,4 +153,4 @@ estimate:
   boot_minutes: 3
   uplink_mbps: 40
   fetch_minutes: 3
-  assumption: "Step times from the v0.1 pods (H100): v0.1-mix trained 3,150 steps in 65.7 min; this input has 3,500 steps and ≈ 44.2 M (+5.7 % vs v0.1-mix) prompt tokens, so train ≈ 75 min (scaled by steps, the larger of the two). Diagnoses = the slower of the two v0.1 pods: G1 9.3, G2 2.7, T1 26.4, T2 26.9, T3 25.8, T4 14.5, T5 13.6, T6 53.5, T7 26.6 min. T8 (if present): T8a ≈ 3 min (PIQA validation, 1,838 two-option questions), T8b ≈ 12 min (≤ 600 moments)."
+  assumption: "Step times from the v0.1 pods (H100): v0.1-mix trained 3,150 steps in 65.7 min; this input has 3,500 steps and ≈ 44.2 M (+5.7 % vs v0.1-mix) prompt tokens, so train ≈ 75 min (scaled by steps, the larger of the two). Diagnoses = the slower of the two v0.1 pods: G1 9.3, G2 2.7, T1 26.4, T2 26.9, T3 25.8, T4 14.5, T5 13.6, T6 53.5, T7 26.6 min. T8 (if present): T8a ≈ 3 min (PIQA validation, 1,838 two-option questions), T8b ≈ 12 min (480 moments, about 4 questions each)."

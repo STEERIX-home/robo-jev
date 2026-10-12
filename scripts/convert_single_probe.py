@@ -268,7 +268,8 @@ def _token_estimate(parts: dict[str, list[dict[str, Any]]], examples: dict[str, 
     from robo_jev.model.tokenizer import available_tokenizer, load_tokenizer
 
     tokenizer = load_tokenizer(available_tokenizer()[0])
-    out: dict[str, Any] = {"sample_records_per_part": sample, "seed": 0, "format": config["format"], "prompt_version": config["prompt_version"]}
+    out: dict[str, Any] = {"sample_records_per_part": sample, "sample_seed": "random.Random('tokens|<part>')", "format": config["format"],
+                           "prompt_version": config["prompt_version"]}
     totals = {}
     for name, records in parts.items():
         chosen = random.Random(f"tokens|{name}").sample(records, min(sample, len(records))) if records else []

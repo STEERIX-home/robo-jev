@@ -27,7 +27,8 @@ TRAIN_INPUT = {d: f"artifacts/simgen/v02/train-v02-{d}.jsonl" for d in JOBS}
 RUN_NAME = {d: f"v02-{d}-2b" for d in JOBS}
 TESTS = [f"artifacts/simgen/v0b/tests/T{i}.jsonl" for i in range(1, 8)]
 G1, G2 = "artifacts/simgen/probes/G1.jsonl", "artifacts/simgen/probes/G2.jsonl"
-T8 = {"after-T8a": "artifacts/simgen/t8/T8a.jsonl", "after-T8b": "artifacts/simgen/t8/T8b.jsonl"}
+#: where the T8 task writes its sets (the brief said artifacts/simgen/t8/; the T8 task's scripts/t8.py writes artifacts/t8/)
+T8 = {"after-T8a": "artifacts/t8/T8a.jsonl", "after-T8b": "artifacts/t8/T8b.jsonl"}
 SEALED = (*TESTS, G1, G2, *T8.values())
 CONTEXT = {"python": "python", "uv": "uv", "repo": "/r", "run_dir": "/r/run", "runs": "/r/run/runs", "reports": "/r/run/reports", "run_id": "x"}
 
