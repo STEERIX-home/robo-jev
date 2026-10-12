@@ -8,8 +8,8 @@ T8 stays an outside test, so the training families must not share anything with 
 * **sentences** — every state and instruction split into sentences, compared after lower-casing and collapsing whitespace, and
   again with every number replaced by ``<n>`` (so the same template with other numbers counts as shared): none in common;
 * **word n-grams** — lower-cased word n-grams (numbers → ``<n>``) for n = 4 … 8: the number of distinct shared n-grams and the
-  share of our n-grams that occur in T8b. The verdict requires none shared for n ≥ 6 (n = 4, 5 are reported: short function-word
-  runs such as "how likely is the" are not wording);
+  share of our n-grams that occur in T8b. The verdict requires none shared for n ≥ 5 (4-grams are reported: short runs such as
+  "at <n> m s" or "<n> kg its contents" are not wording);
 * **catalog names** — object, surface, robot and option names of the two generators: none in common.
 
 Only text and names are compared; nothing from T8b is copied into the training data.
@@ -25,7 +25,7 @@ from typing import Any, Iterable, Sequence
 __all__ = ["NGRAM_SIZES", "ngrams", "overlap_report", "sentences"]
 
 NGRAM_SIZES = (4, 5, 6, 8)
-VERDICT_MIN_N = 6
+VERDICT_MIN_N = 5
 _NUM = re.compile(r"[-+]?\d+(?:[.,]\d+)?")
 _WORD = re.compile(r"<n>|[a-z]+(?:['’-][a-z]+)*")
 _SPLIT = re.compile(r"(?<=[.!?;:])\s+|\n+")

@@ -1,7 +1,7 @@
 """v0.3b text — four narration styles and the question wording (Task v0.3b §1.2), written for this task.
 
 Nothing here is taken from T8b's wording or from :mod:`robo_jev.simgen` phrase banks (a test parses the imports; the overlap check
-in :mod:`robo_jev.mjgen.overlap` compares sentences and word n-grams with T8b and finds none shared at six words or more). Styles:
+in :mod:`robo_jev.mjgen.overlap` compares sentences and word n-grams with T8b and finds none shared at five words or more). Styles:
 
 * ``log`` — an operations log in the third person ("Unit: …; Cargo: …; Packing note: …");
 * ``brief`` — a second-person task briefing ("You are …; your deck …");
@@ -52,7 +52,7 @@ def _a(word: str) -> str:
 TILT_FILL_TEXT = {
     "level": ("its contents are spread evenly", "its contents fill it uniformly"),
     "low": ("its heavy contents sit at the bottom", "its weight is concentrated low down"),
-    "high": ("most of its weight is up near the top", "its heaviest contents ride near the top"),
+    "high": ("the bulk of its load rides up near the top", "its heaviest contents ride near the top"),
     "unsure": ("its packing is unknown", "no one has recorded how it was packed"),
     "fore": ("its heavier end faces the front of the deck", "its weight is biased toward the deck's front"),
     "aft": ("its heavier end faces the rear of the deck", "its weight is biased toward the deck's rear"),
