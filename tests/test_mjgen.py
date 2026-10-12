@@ -337,3 +337,17 @@ def test_the_diagnosis_script_reads_the_records(tmp_path):
         assert module.main(["--model", "tiny", "--input", str(path), "--out", str(out), "--n-boot", "10", "--batch", "8", "--format", "plain"]) == 0
     summary = json.loads(out.read_text(encoding="utf-8"))
     assert summary["validation"] == {"read": 4, "invalid": 0, "problems": {}} and summary["config"]["records"] == 4
+
+
+def test_designed_still_pairs_are_capped_by_design_not_by_outcome():
+    def fake(index, closeness):
+        pair = None if closeness is None else {"field": "angle", "from": 1.0, "value": 2.0, "aim": None, "closeness": closeness}
+        group = fam.Group("tilt", index, index, {}, {}, {}, {}, "log", 0, [], pair=pair)
+        members = {"base": {"variants": {}}} if pair is None else {"base": {"variants": {}}, "pair": {"variants": {}}}
+        return group, {"flags": {"unstable": 0}, "members": members}
+
+    items = [fake(i, "far") for i in range(8)] + [fake(10 + i, "near") for i in range(3)] + [fake(20 + i, "free") for i in range(3)] + [fake(30, None)]
+    kept, report = gen.cap_still_pairs(items, share=0.2)
+    assert report["tilt"] == {"far": 8, "still_allowed": 2, "still_kept": 2, "stripped": {"near": 1, "free": 3}}
+    paired = [g.index for g, lab in kept if g.pair is not None]
+    assert paired == list(range(8)) + [10, 11] and all(set(lab["members"]) == {"base"} for g, lab in kept if g.pair is None)

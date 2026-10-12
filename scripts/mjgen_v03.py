@@ -143,7 +143,7 @@ def cmd_assemble(args: argparse.Namespace) -> int:
     from robo_jev.decisions.records import file_sha256
     from robo_jev.mjgen import families as fam
     from robo_jev.mjgen import physics as ph
-    from robo_jev.mjgen.generate import group_records, select_balanced, stats
+    from robo_jev.mjgen.generate import cap_still_pairs, group_records, select_balanced, stats
 
     rows = []
     with Path(args.candidates).open(encoding="utf-8") as handle:
@@ -151,6 +151,7 @@ def cmd_assemble(args: argparse.Namespace) -> int:
             if line.strip():
                 rows.append(json.loads(line))
     items = [(group_from_json(r["group"]), r["labelled"]) for r in rows]
+    items, pair_cap = cap_still_pairs(items, share=args.still_pair_share)
     worker_seconds = {f: sum(r["seconds"] for r in rows if r["group"]["family"] == f) for f in fam.FAMILIES}
     targets = {}
     for family in fam.FAMILIES:
@@ -204,7 +205,7 @@ def cmd_assemble(args: argparse.Namespace) -> int:
                     "grip": {"slip_m": ph.GRIP_SLIP_M, "pad_half": ph.PAD_HALF, "pre_s": ph.GRIP_PRE, "post_s": ph.GRIP_POST},
                     "tower": {"fall_deg": ph.TOWER_FALL_DEG, "seconds": ph.TOWER_SECONDS}},
         "xml_examples": examples, "candidates": len(rows), "candidates_file": str(Path(args.candidates).relative_to(REPO)) if Path(args.candidates).is_relative_to(REPO) else str(args.candidates),
-        "selection": selection, "targets_groups": targets, "records": len(records), "questions": {"total": sum(q_types.values()), **dict(sorted(q_types.items()))},
+        "selection": selection, "targets_groups": targets, "pair_cap": {"still_pair_share": args.still_pair_share, "by_family": pair_cap}, "records": len(records), "questions": {"total": sum(q_types.values()), **dict(sorted(q_types.items()))},
         "file": str(out.relative_to(REPO)) if out.is_relative_to(REPO) else str(out), "sha256": file_sha256(out), "ids_sha256": ids_sha256(r["id"] for r in records),
         "stats_file": str(out.with_suffix(".stats.json").name), "cpu": {"worker_seconds_by_family": worker_seconds, "worker_seconds": sum(worker_seconds.values()), "runs": runs},
         "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -274,6 +275,7 @@ def build_parser() -> argparse.ArgumentParser:
     assemble = sub.add_parser("assemble", help="balanced selection → records + manifest + stats")
     assemble.add_argument("--candidates", type=Path, default=OUT / "mujoco-candidates.jsonl")
     assemble.add_argument("--records-per-family", type=int, default=5000)
+    assemble.add_argument("--still-pair-share", type=float, default=0.2, help="max share of near/free (designed-still) pairs kept")
     assemble.add_argument("--out", type=Path, default=OUT / "mujoco-train.jsonl")
     assemble.set_defaults(func=cmd_assemble)
     check = sub.add_parser("sanity", help="physics sanity report")

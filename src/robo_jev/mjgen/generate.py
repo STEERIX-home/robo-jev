@@ -45,6 +45,7 @@ __all__ = [
     "DELTA",
     "QUESTION_NAMES",
     "band",
+    "cap_still_pairs",
     "contrast_probs",
     "direction",
     "group_records",
@@ -244,6 +245,39 @@ def _jsonable(value: Any) -> Any:
 # Balanced selection
 # --------------------------------------------------------------------------
 
+#: at most this share of the kept pairs may be "designed still" — aimed at a small change (``near``) or changing a number the
+#: outcome barely depends on (``free``: mass on a slope, the travel distance of a lift, a box's mass in a two-box stack …). The
+#: rest are aimed far, so the label moves in most pairs (T8: the trained model barely reacted to changed numbers).
+STILL_PAIR_SHARE = 0.2
+
+
+def cap_still_pairs(items: Sequence[tuple[fam.Group, dict[str, Any]]], *, share: float = STILL_PAIR_SHARE) -> tuple[list[tuple[fam.Group, dict[str, Any]]], dict[str, Any]]:
+    """Per family keep every far-aimed pair and the first (candidate order) near/free pairs up to `share` of the kept pairs; the
+    other near/free groups lose their paired record (the base record stays, unpaired). A rule on the pair's design, not its outcome."""
+    out: list[tuple[fam.Group, dict[str, Any]]] = []
+    report: dict[str, Any] = {}
+    by_family: dict[str, list[tuple[fam.Group, dict[str, Any]]]] = collections.defaultdict(list)
+    for group, labelled in items:
+        by_family[group.family].append((group, labelled))
+    for family, rows in by_family.items():
+        rows = sorted(rows, key=lambda gl: gl[0].index)
+        far = sum(1 for g, _ in rows if g.pair is not None and g.pair["closeness"] == "far")
+        allowed = int(math.floor(share / (1.0 - share) * far))
+        kept_still = 0
+        stripped = collections.Counter()
+        for group, labelled in rows:
+            if group.pair is not None and group.pair["closeness"] != "far":
+                if kept_still >= allowed:
+                    stripped[group.pair["closeness"]] += 1
+                    group = dataclasses.replace(group, pair=None)
+                    labelled = {**labelled, "members": {"base": labelled["members"]["base"]}}
+                else:
+                    kept_still += 1
+            out.append((group, labelled))
+        report[family] = {"far": far, "still_allowed": allowed, "still_kept": kept_still, "stripped": dict(stripped)}
+    return out, report
+
+
 
 def select_balanced(items: Iterable[tuple[fam.Group, dict[str, Any]]], targets: dict[str, int], *, bins: int = 10) -> tuple[list[tuple[fam.Group, dict[str, Any]]], dict[str, Any]]:
     """Per family keep `targets[family]` groups so the base record's key label (base prior) is spread evenly over `bins` equal bins of
@@ -331,8 +365,10 @@ def stats(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
         pairs = [r for r in rows if r["meta"]["pair"] and r["meta"]["pair"]["role"] == "base"]
         deltas = [abs(r["meta"]["pair"]["key_delta"]) for r in pairs]
         by_field: dict[str, list[float]] = collections.defaultdict(list)
+        by_design: dict[str, list[float]] = collections.defaultdict(list)
         for r in pairs:
             by_field[r["meta"]["pair"]["field"].replace(".", "_")].append(abs(r["meta"]["pair"]["key_delta"]))
+            by_design[r["meta"]["pair"]["closeness"]].append(abs(r["meta"]["pair"]["key_delta"]))
         in_pairs = sum(1 for r in rows if r["meta"]["pair"])
         out["by_family"][family] = {
             "records": len(rows), "groups": len({(r["meta"]["scene"], r["generator"]["group"]) for r in rows}),
@@ -349,6 +385,8 @@ def stats(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
                       "abs_delta_hist10": _hist(deltas), "abs_delta_median": statistics.median(deltas) if deltas else None,
                       "by_field": {f: {"pairs": len(v), "abs_delta_ge_0.1": sum(1 for d in v if d >= 0.1) / len(v), "median": statistics.median(v)}
                                    for f, v in sorted(by_field.items())},
+                      "by_design": {f: {"pairs": len(v), "abs_delta_ge_0.1": sum(1 for d in v if d >= 0.1) / len(v), "median": statistics.median(v)}
+                                    for f, v in sorted(by_design.items())},
                       "direction_same_all_priors": (sum(1 for r in pairs if r["meta"]["pair"]["direction_same"]) / len(pairs)) if pairs else None},
             "robust": {"questions": robust_total[1], "robust": robust_total[0], "share": robust_total[0] / robust_total[1] if robust_total[1] else None,
                        "by_kind": {k: {"questions": v[1], "robust": v[0], "share": v[0] / v[1]} for k, v in sorted(robust_by_kind.items())}},
