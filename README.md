@@ -130,3 +130,7 @@ robo-jev is built by **[Steerix Robotics](https://github.com/STEERIX-home)**.
 
 - **Request format:** follows the public decision-model APIs — TypeSafe Jev, the OpenRouter Decisions API, Microsoft-Decision-1. The perturbation tests extend Microsoft-Decision-1's.
 - **Backbone:** Qwen3.5 (Apache-2.0).
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE). Copyright 2026 Steerix Robotics.
