@@ -130,6 +130,17 @@ def test_the_band_confusion_and_answer_profile_weigh_each_question_once():
     assert profile["in_prior_range"] == pytest.approx(1.0)
 
 
+def test_the_plan_and_counterfactual_questions_of_a_record_form_t8b_style_pairs():
+    records = [synthetic("b1-tilt-000010", 10, key=0.2, score=0.8), synthetic("b1-tilt-000011", 11, key=0.5, score=0.55)]
+    del records[1]["request"]["questions"]["risk_at_other_pitch"]  # a record without the counterfactual score question has no pair
+    pairs = infamily.plan_counterfactual_pairs(records)
+    assert pairs == [("b1-tilt-000010", ("b1-tilt-000010", "moves_at_plan", False), ("b1-tilt-000010", "risk_at_other_pitch", False))]
+    predictions = [answer("b1-tilt-000010", {"moves_at_plan": [0.3, 0.4], "risk_at_other_pitch": [0.9, 0.2]})]
+    items = infamily.regroup(system1.order_items("B1", records, predictions, pairs, min_move=system1.COMPARISON_MIN), records)
+    # a yes/no and a score question show different option orders: every combination of listings, weight 1/4 each; up moves in 2 of 4
+    assert list(items.values()) == [("tilt:10", pytest.approx(0.5))]
+
+
 def test_items_split_by_family_follow_their_record():
     records = [synthetic("b1-tilt-000008", 8), synthetic("b1-tilt-000009", 9)]
     records[1]["meta"]["scene"] = "grip"
@@ -195,6 +206,9 @@ def test_the_verdict_script_scores_three_models_and_applies_the_rule(tmp_path):
     assert result["verdict"]["outcome"] == "R1" and result["verdict"]["positive_control"]["pass"] and result["verdict"]["b2_runs"]
     assert r["oracle"]["primary"] == 1.0 and all(c["band"] == 1.0 for c in r["coverage"].values())
     assert r["paired"]["v03-base"]["primary"]["value"] == pytest.approx(2 / 3)
+    checks = r["checks"]
+    assert checks["primary_by_kind"]["v03"]["key"]["value"] == pytest.approx(1.0) and checks["primary_clear"]["v03"]["value"] == pytest.approx(1.0)
+    assert checks["plan_vs_counterfactual"]["base"]["value"] == 0.0 and checks["robust_label_bands_by_kind"]["key"] == {"low": 20, "middle": 20, "high": 20}
     assert out.with_suffix(".md").read_text(encoding="utf-8").count("R1") >= 1
     # a prediction file scored on another set, or under other conditions, is refused
     _write_predictions(files["base"], constant, "f" * 64)

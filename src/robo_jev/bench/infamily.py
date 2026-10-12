@@ -24,7 +24,8 @@ they are computed on, and how the bootstrap clusters are formed.
 
 **Descriptive readings** (secondary): the 3×3 band confusion (:func:`band_confusion`) and the answer profile of a question set — mean,
 spread, band shares, the hedge share (answers in the middle band) and the share whose band is one the label takes under some prior
-(:func:`answer_profile`).
+(:func:`answer_profile`). **Instrument check** (secondary): T8b's within-record structure — the plan's key question against the score
+question at the counterfactual value — read with system1's comparison threshold (:func:`plan_counterfactual_pairs`).
 """
 
 from __future__ import annotations
@@ -50,6 +51,7 @@ __all__ = [
     "family_of",
     "group_of",
     "keep",
+    "plan_counterfactual_pairs",
     "regroup",
     "robust_keys",
 ]
@@ -154,6 +156,21 @@ def comparison_items(set_name: str, records: Sequence[Mapping[str, Any]], predic
                 if order != 0 and (order > 0) == (moved > 0):
                     value += weight
             out[(set_name, rid, name)] = (group_of(record), value)
+    return out
+
+
+def plan_counterfactual_pairs(records: Sequence[Mapping[str, Any]]) -> list[system1.Pair]:
+    """T8b's within-record structure on mjgen records (an instrument check, not the comparison metric): the key yes/no question under the
+    plan and the score question about the same event at the counterfactual value of the decisive number (``meta.question_kind`` ``key`` →
+    ``score_cf``), one pair per record that asks both, clustered by group (system1 pairs carry the record id; :func:`regroup` maps it)."""
+    out: list[system1.Pair] = []
+    for record in records:
+        kinds = (record.get("meta") or {}).get("question_kind") or {}
+        key = next((q for q, k in kinds.items() if k == "key"), None)
+        score = next((q for q, k in kinds.items() if k == "score_cf"), None)
+        if key and score and key in record["request"]["questions"] and score in record["request"]["questions"]:
+            rid = str(record["id"])
+            out.append((rid, (rid, key, False), (rid, score, False)))
     return out
 
 

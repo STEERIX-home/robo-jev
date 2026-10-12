@@ -175,6 +175,34 @@ def _native(records: Sequence[dict[str, Any]], predictions: Sequence[dict[str, A
     return {kind: {"match": (hit / n if n else None), "questions": int(n)} for kind, (hit, n) in totals.items()}
 
 
+KINDS = ("key", "severe", "score_cf")
+
+
+def instrument_checks(records: Sequence[dict[str, Any]], predictions: Mapping[str, Sequence[dict[str, Any]]], *, n_boot: int, seed: int) -> dict[str, Any]:
+    """Non-gating checks of the instrument: the primary reading per question kind (key / severe / score_cf) and on clear labels only (more
+    than 0.05 from a band edge), and T8b's within-record comparison structure (plan key question vs the counterfactual score question,
+    labels ≥ 0.15 apart, :func:`robo_jev.bench.infamily.plan_counterfactual_pairs`)."""
+    from robo_jev.bench import infamily, system1
+
+    robust = infamily.robust_keys(records)
+    kind_of = {(str(r["id"]), q): r["meta"]["question_kind"][q] for r in records for q in r["request"]["questions"]}
+    labels = {(str(r["id"]), q): float(r["labels"][q].get("p_yes", r["labels"][q].get("value"))) for r in records for q in r["request"]["questions"]
+              if r["request"]["questions"][q]["type"] in ("noul", "score")}
+    clear = {k for k in robust if system1.is_clear(labels[k])}
+    pairs = infamily.plan_counterfactual_pairs(records)
+    out: dict[str, Any] = {"primary_by_kind": {}, "primary_clear": {}, "plan_vs_counterfactual": {}}
+    for tag, preds in predictions.items():
+        items = infamily.regroup(system1.question_items(SET, records, preds).get("band_balanced") or {}, records)
+        out["primary_by_kind"][tag] = {kind: _summary(infamily.keep(items, {k for k in robust if kind_of[k] == kind}), n_boot=n_boot, seed=seed, stratified=True)
+                                       for kind in KINDS}
+        out["primary_clear"][tag] = _summary(infamily.keep(items, clear), n_boot=n_boot, seed=seed, stratified=True)
+        ordered = infamily.regroup(system1.order_items(SET, records, preds, pairs, min_move=system1.COMPARISON_MIN), records)
+        out["plan_vs_counterfactual"][tag] = _summary(ordered, n_boot=n_boot, seed=seed)
+    out["robust_label_bands_by_kind"] = {kind: {b: sum(1 for k in robust if kind_of[k] == kind and system1.band(labels[k]) == b) for b in infamily.BANDS}
+                                         for kind in KINDS}
+    return out
+
+
 def readings(records: Sequence[dict[str, Any]], predictions: Mapping[str, Sequence[dict[str, Any]]], *, n_boot: int = 2000, seed: int = 0) -> dict[str, Any]:
     """Every reading of the verdict for the models in `predictions` (tags of :data:`MODELS`)."""
     from robo_jev.bench import infamily, system1
@@ -201,6 +229,7 @@ def readings(records: Sequence[dict[str, Any]], predictions: Mapping[str, Sequen
         out["coverage"][tag] = {"band": len(found["all"].get("band_accuracy") or {}) / max(1, len(oracle["all"]["band_accuracy"])),
                                 "direction": len(found["direction"]) / max(1, len(oracle["direction"])),
                                 "comparison": len(found["comparison"]) / max(1, len(oracle["comparison"]))}
+    out["checks"] = instrument_checks(records, predictions, n_boot=n_boot, seed=seed)
     out["oracle"] = {"primary": _summary(oracle["robust"]["band_balanced"], n_boot=0, seed=seed, stratified=True)["value"],
                      "direction": _summary(oracle["direction"], n_boot=0, seed=seed)["value"],
                      "comparison": _summary(oracle["comparison"], n_boot=0, seed=seed)["value"],
@@ -403,6 +432,20 @@ def render_markdown(result: Mapping[str, Any]) -> str:
             shares = conf["rows"][row] or {}
             lines.append(f"| {row} | {_f(shares.get('low'), 2)} | {_f(shares.get('middle'), 2)} | {_f(shares.get('high'), 2)} | {sum(conf['counts'][row].values()):.0f} |")
         lines.append("")
+    checks = r.get("checks") or {}
+    if checks:
+        bands = checks["robust_label_bands_by_kind"]
+        lines += ["## Instrument checks (not deciding)", "",
+                  "The primary reading per question kind and on clear labels (more than 0.05 from a band edge); and T8b's within-record "
+                  "structure — the plan's key question against the score question at the counterfactual value, labels ≥ 0.15 apart, answers "
+                  "ordered like the labels.", "",
+                  "| model | key [95 %] | severe [95 %] | score_cf [95 %] | clear labels [95 %] | plan vs counterfactual [95 %] |", "|---|---|---|---|---|---|"]
+        for tag in tags:
+            by_kind = checks["primary_by_kind"][tag]
+            lines.append(f"| {labels[tag]} | {_ci(by_kind['key'])} | {_ci(by_kind['severe'])} | {_ci(by_kind['score_cf'])} | {_ci(checks['primary_clear'][tag])} | "
+                         f"{_ci(checks['plan_vs_counterfactual'][tag])} |")
+        lines += ["", "Robust label bands per kind (low / middle / high): " + "; ".join(
+            f"{kind} {b['low']} / {b['middle']} / {b['high']}" for kind, b in bands.items()) + ".", ""]
     lines += ["## Native choice questions (not System-1 metrics)", "",
               "Share of listings whose argmax is in the label's argmax set (single order), per kind of the records' own choice questions.", "",
               "| model | direction (in-record) | comparison (3-way) | outcome |", "|---|---|---|---|"]
