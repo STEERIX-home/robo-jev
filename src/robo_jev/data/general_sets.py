@@ -29,8 +29,8 @@ CosmosQA (CC-BY-4.0). Candidates left out and why are in :data:`EXCLUDED` (the m
 
 **Overlap with sealed sets** (:func:`text_units`): every record is reduced to normalised text units — the whole state, every state
 line value and list item with ≥ 5 words, every option with ≥ 5 words (instructions are fixed templates and are not units). A row is
-dropped if any of its units occurs in G1, G2, T1–T7, T8 (every ``*.jsonl`` under ``artifacts/simgen/t8/`` when it exists) or the
-PIQA validation strings (T8a's source, read only for this check). The manifest records the counts and the digests.
+dropped if any of its units occurs in G1, G2, T1–T7, T8 (every ``*.jsonl`` under ``artifacts/simgen/t8/`` or ``artifacts/t8/`` when it
+exists) or the PIQA validation strings (T8a's source, read only for this check). The manifest records the counts and the digests.
 
 **Sampling and order.** Per source, a seeded random sample of ``per_source`` eligible rows (the sample order is random, not file
 order). The file interleaves the sources round by round, each round in a seeded source order, so **any prefix is balanced across
@@ -38,7 +38,8 @@ sources** — the two training doses (v02-a ≈ 10 %, v02-b ≈ 25 % of examples
 (``scripts/convert_single_probe.py mix --general``).
 
 Entry point: ``scripts/convert_general_sets.py`` (downloads parquet with ``huggingface_hub``; reading parquet needs ``pyarrow``:
-``uv run --with pyarrow``). This module imports neither ``pyarrow`` nor the network at import time.
+``uv run --with "pyarrow<20"`` — newer pyarrow wants NumPy 2, the lock pins 1.26). This module imports neither ``pyarrow`` nor the
+network at import time.
 """
 
 from __future__ import annotations

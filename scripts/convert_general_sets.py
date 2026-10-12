@@ -7,7 +7,8 @@
 
 Downloads the train parquet of each source in :data:`robo_jev.data.general_sets.SOURCES` at its pinned revision with
 ``huggingface_hub`` (cache under ``--cache``), converts the rows (rules: :mod:`robo_jev.data.general_sets`), drops every row that
-shares a text unit with a sealed set (G1, G2, T1–T7, every ``*.jsonl`` under ``--t8-dir`` when present, and the PIQA validation
+shares a text unit with a sealed set (G1, G2, T1–T7, every ``*.jsonl`` under ``--t8-dir`` — default ``artifacts/simgen/t8`` and
+``artifacts/t8`` — when present, and the PIQA validation
 strings, T8a's source, downloaded only for this check), samples ``--per-source`` rows per source with ``--seed`` and interleaves them.
 
 The manifest records, per source: dataset, revision, file sha256, licence and where the card states it, counts (rows, converted,
@@ -82,7 +83,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cache", type=Path, default=REPO / "artifacts" / "datasets" / "public-train" / "hf-cache")
     parser.add_argument("--per-source", type=int, default=7000)
     parser.add_argument("--seed", type=int, default=20261012)
-    parser.add_argument("--t8-dir", type=Path, default=REPO / "artifacts" / "simgen" / "t8")
+    parser.add_argument("--t8-dir", type=Path, nargs="+", default=[REPO / "artifacts" / "simgen" / "t8", REPO / "artifacts" / "t8"],
+                        help="directories whose *.jsonl are the outside test T8 (the brief's artifacts/simgen/t8 and the T8 task's artifacts/t8)")
     parser.add_argument("--sources", default=",".join(SOURCES))
     args = parser.parse_args(argv)
 
@@ -102,14 +104,14 @@ def main(argv: list[str] | None = None) -> int:
     missing = [str(p) for p in sealed_paths.values() if not p.is_file()]
     if missing:
         raise SystemExit(f"sealed sets missing — the overlap check needs them: {missing}")
-    t8_files = sorted(args.t8_dir.glob("*.jsonl")) if args.t8_dir.is_dir() else []
+    t8_files = sorted(path for directory in args.t8_dir if directory.is_dir() for path in directory.glob("*.jsonl"))
     for path in t8_files:
-        sealed_paths[f"T8:{path.name}"] = path
+        sealed_paths[f"T8:{path.parent.name}/{path.name}"] = path
     piqa_path = _download(PIQA["repo"], PIQA["revision"], PIQA["file"], args.cache)
     piqa_rows = _rows(piqa_path)
     piqa_units = raw_units(text for row in piqa_rows for text in (row.get("goal"), row.get("sol1"), row.get("sol2")) if text)
     sealed = sealed_unit_sets(sealed_paths, extra={"PIQA-validation": piqa_units})
-    _log(f"sealed units: " + ", ".join(f"{k} {len(v)}" for k, v in sealed.items()) + (f" (no T8 files under {args.t8_dir})" if not t8_files else ""))
+    _log(f"sealed units: " + ", ".join(f"{k} {len(v)}" for k, v in sealed.items()) + (f" (no T8 files under {[str(d) for d in args.t8_dir]})" if not t8_files else ""))
 
     records, report = build_general(rows, per_source=args.per_source, seed=args.seed, sealed=sealed, log=_log)
     problems = [(r["id"], p) for r in records for p in validate_record(r)]

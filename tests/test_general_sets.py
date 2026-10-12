@@ -28,7 +28,7 @@ GENERAL = REPO / "artifacts" / "simgen" / "v02" / "general-train.jsonl"
 MANIFEST = GENERAL.with_name("general-train.manifest.json")
 PROBES = REPO / "artifacts" / "simgen" / "probes"
 TESTS = REPO / "artifacts" / "simgen" / "v0b" / "tests"
-T8_DIR = REPO / "artifacts" / "simgen" / "t8"
+T8_DIRS = (REPO / "artifacts" / "simgen" / "t8", REPO / "artifacts" / "t8")  # the brief's location and the T8 task's
 PERMISSIVE = {"MIT", "Apache-2.0", "CC-BY-4.0"}
 G2_INSTRUCTIONS = {"Given the passage, is the answer to the question yes?", "What is the relation of the hypothesis to the premise?"}
 
@@ -225,7 +225,7 @@ def test_the_built_file_shares_no_text_unit_with_g1_g2_t1_t7_or_t8(built):
     records, manifest = built
     mine = _hashes(records)
     sealed = {"G1": PROBES / "G1.jsonl", "G2": PROBES / "G2.jsonl", **{f"T{i}": TESTS / f"T{i}.jsonl" for i in range(1, 8)}}
-    sealed.update({f"T8:{p.name}": p for p in sorted(T8_DIR.glob("*.jsonl"))} if T8_DIR.is_dir() else {})
+    sealed.update({f"T8:{p.parent.name}/{p.name}": p for d in T8_DIRS if d.is_dir() for p in sorted(d.glob("*.jsonl"))})
     checked = 0
     for name, path in sealed.items():
         if not path.is_file():
