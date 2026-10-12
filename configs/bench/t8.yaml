@@ -19,7 +19,7 @@ sets:
     what: robot moments labelled by MuJoCo rollouts (deck braking/turning, release over an edge, push height) — outside our engine
     source: artifacts/t8/T8b.jsonl
     unit: all
-    expect: {source_sha256: 6ffec6ee2dadb283720c9e046136c119cd25f2af1deaa559c2d84889cbdca92b, records: 480, questions: 1680,
+    expect: {source_sha256: 9c2339e021d924fe0ff31343035d70f8a80ec9faa668b8980a86fddd58397ad2, records: 480, questions: 1680,
              ids_sha256: 50af2fc68e89e21a87903a9e56f70512e073e5c446738efd006fc5531e6353e7}
 
 # Same request conversion as bench-v0: choice criteria as stored, noul instructions as is, score with its two anchors as written
