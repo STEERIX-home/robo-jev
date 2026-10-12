@@ -57,6 +57,9 @@ H_SEVERE_SLACK = 0.01
 G_POINT = -0.02
 G_LOW = -0.045
 HOME = ("T2", "T3", "T4")
+#: T8b split by physical law (controller, 2026-10-12): the MuJoCo training families tilt and tower share their laws with T8b's deck and
+#: stack families, so push is the only family whose law training never shows. Reported next to the gate; the gate is unchanged.
+T8B_GROUPS = {"seen_law (deck_brake, deck_turn, stack)": ("deck_brake", "deck_turn", "stack"), "unseen_law (push)": ("push",)}
 SCORING_KEYS = ("mode", "format", "prompt_version", "orders", "shuffle_seed")
 
 TESTS = REPO / "artifacts" / "simgen" / "v0b" / "tests"
@@ -109,6 +112,25 @@ def outside_reading(t8b: Sequence[dict[str, Any]], v03: Sequence[dict[str, Any]]
     return {"band_balanced": band, "severe_error": severe, "direction": direction,
             "band_low": (band or {}).get("low"), "severe": (severe or {}).get("a"), "severe_base": (severe or {}).get("b"),
             "direction_value": direction.get("value")}
+
+
+def outside_by_group(t8b: Sequence[dict[str, Any]], v03: Sequence[dict[str, Any]], base: Sequence[dict[str, Any]], *, n_boot: int = 2000,
+                     seed: int = 0) -> dict[str, Any]:
+    """T8b System-1 metrics per family group (:data:`T8B_GROUPS`) — reported next to the gate, never gating: v0.3 and the base, the paired
+    Δ with its interval for balanced band accuracy, severe errors, direction, comparison and outcome (all families)."""
+    from robo_jev.bench import system1
+
+    out = {}
+    for group, scenes in T8B_GROUPS.items():
+        records = [r for r in t8b if (r.get("meta") or {}).get("scene") in scenes]
+        a = system1.set_items("T8b", records, v03, reading="single_order")
+        b = system1.set_items("T8b", records, base, reading="single_order")
+        entry = {"records": len(records)}
+        for metric in ("band_balanced", "severe_error", "severe_miss", "direction", "comparison", "outcome:all_families"):
+            if metric in a and metric in b:
+                entry[metric] = system1.paired_difference(a[metric], b[metric], n_boot=n_boot, seed=seed, stratified=metric in system1.STRATIFIED)
+        out[group] = entry
+    return out
 
 
 def home_reading(sets: Mapping[str, Sequence[dict[str, Any]]], v03: Mapping[str, Sequence[dict[str, Any]]], mix: Mapping[str, Sequence[dict[str, Any]]],
@@ -227,6 +249,19 @@ def render(result: Mapping[str, Any]) -> str:
              f"(v0.3 {_fmt(acc.get('a'))}, base {_fmt(acc.get('b'))}) | ≥ −0.02 and lower bound > −0.045 | "
              f"{r['G']['checks']['point_ge_-0.02'] and r['G']['checks']['low_gt_-0.045']} |", "",
              f"O {'PASS' if r['O']['pass'] else 'FAIL'} · H {'PASS' if r['H']['pass'] else 'FAIL'} · G {'PASS' if r['G']['pass'] else 'FAIL'} → **{r['verdict']}**", ""]
+    groups = o.get("by_family_group") or {}
+    if groups:
+        lines += ["T8b by family group (reported next to the gate, not gating — tilt and tower share laws with deck and stack; push is the "
+                  "only unseen law). v0.3 vs base, Δ [95 %]:", "",
+                  "| group | records | balanced band | severe errors ↓ | direction | comparison | outcome (all families) |", "|---|---|---|---|---|---|---|"]
+        for group, entry in groups.items():
+            cells = []
+            for metric in ("band_balanced", "severe_error", "direction", "comparison", "outcome:all_families"):
+                d = entry.get(metric)
+                cells.append("—" if not d else f"{_fmt(d.get('a'))} vs {_fmt(d.get('b'))}, {_fmt(d.get('value'), signed=True)} "
+                                                f"[{_fmt(d.get('low'), signed=True)}, {_fmt(d.get('high'), signed=True)}]")
+            lines.append(f"| {group} | {entry['records']} | " + " | ".join(cells) + " |")
+        lines.append("")
     lines += ["## Notes", ""] + [f"- {note}" for note in result["notes"]] + [""]
     lines += ["## Sources", "", "| reading | predictions | same set file | coverage | conditions |", "|---|---|---|---|---|"]
     for name, source in result["sources"].items():
@@ -275,6 +310,7 @@ def main(argv: list[str] | None = None) -> int:
     o = outside_reading(sets["T8b"], loaded["O:v03 T8b"], loaded["O:base T8b (Spark)"], n_boot=args.n_boot, seed=args.seed)
     h = home_reading(sets, {s: loaded[f"H:v03 {s}"] for s in HOME}, {s: loaded[f"H:v0.1-mix {s}"] for s in HOME}, n_boot=args.n_boot, seed=args.seed)
     g = general_reading(sets["G2"], loaded["G:v03 G2"], loaded["G:base G2 (pod)"], n_boot=args.n_boot, seed=args.seed)
+    o["by_family_group"] = outside_by_group(sets["T8b"], loaded["O:v03 T8b"], loaded["O:base T8b (Spark)"], n_boot=args.n_boot, seed=args.seed)
     rule = rule_checks({"band_low": o["band_low"], "severe": o["severe"], "severe_base": o["severe_base"], "direction": o["direction_value"]},
                        {"band_low": h["band_low"], "severe": h["severe"], "severe_mix": h["severe_mix"]}, {"diff": g["diff"], "low": g["low"]})
     models: dict[str, dict[str, list[dict[str, Any]]]] = {

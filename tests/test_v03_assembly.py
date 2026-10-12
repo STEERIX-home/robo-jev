@@ -166,6 +166,70 @@ def test_a_short_general_file_is_refused_or_taken_whole_or_given_a_recorded_seco
     assert [r["meta"]["repeat_of"] for r in repeated] == [r["id"] for r in read_records(general_big)][: len(repeated)], "the second pass is a prefix"
 
 
+def _paired_families(tmp_path: Path, pairs_per_family: int = 10) -> Path:
+    """Pairs (base + variant) in two families, file-ordered by family like the MuJoCo set, with a matching manifest."""
+    base = read_records(REQUESTS)
+    out = []
+    for family in ("tilt", "grip"):
+        for i in range(pairs_per_family):
+            a, b = f"v03b-{family}-{i:06d}", f"v03b-{family}-{i:06d}p"
+            for rid, partner, role in ((a, b, "base"), (b, a, "variant")):
+                record = copy.deepcopy(base[(i + len(out)) % len(base)])
+                record["id"] = rid
+                record["meta"] = {"set": "v03b-mujoco-train", "split": "train", "scene": family, "language": "en",
+                                  "pair": {"of": partner, "kind": "numeric", "role": role}}
+                out.append(record)
+    path = _write(tmp_path / "mujoco-train.jsonl", out)
+    (tmp_path / "mujoco-train.manifest.json").write_text(json.dumps({"sha256": file_sha256(path)}), encoding="utf-8")
+    return path
+
+
+def test_an_extra_part_short_of_its_share_gets_a_recorded_family_balanced_second_pass_of_whole_pairs(tmp_path):
+    probe, sealed = _probe_and_sealed(tmp_path)
+    general = _general(tmp_path)
+    mujoco = _paired_families(tmp_path, pairs_per_family=6)  # 24 records, small next to an 80-record base
+    big = []
+    for i in range(10):
+        for record in read_records(REQUESTS):
+            big.append(dict(copy.deepcopy(record), id=f"{record['id']}-{i}"))
+    base = _write(tmp_path / "base.jsonl", big)
+    out = tmp_path / "train.jsonl"
+    common = ["mix", "--base", str(base), "--probe", str(probe), "--sealed", str(sealed), "--train-config", str(TRAIN_CONFIG), "--out", str(out),
+              "--extra", f"mujoco={mujoco}", "--general", str(general), "--general-share", "0.25", "--general-repeat-if-short"]  # fmt: skip
+    script = _load("convert_single_probe.py")
+    assert script.main([*common, "--extra-share", "mujoco=0.25"]) == 0
+    manifest = json.loads((tmp_path / "train.manifest.json").read_text(encoding="utf-8"))
+    (extra,) = manifest["extra"]
+    second = extra["second_pass"]
+    epoch = manifest["examples_per_epoch"]
+    assert second and extra["target_reached"] is True and epoch["mujoco_share"] >= 0.25 and epoch["general_share"] >= 0.25
+    assert extra["first_pass_examples"] < epoch["mujoco"] and second["train_examples"] == epoch["mujoco"] - extra["first_pass_examples"]
+    loaded, check = load_training_records(out)
+    assert check["invalid"] == 0
+    copies = [r for r in loaded if str(r["id"]).endswith("~r2") and r["meta"].get("set") == "v03b-mujoco-train"]
+    assert len(copies) == second["records"] and len(copies) % 2 == 0
+    by_id = {r["id"]: r for r in loaded}
+    for twin in copies:
+        source = by_id[twin["meta"]["repeat_of"]]
+        assert twin["request"] == source["request"] and twin["labels"] == source["labels"] and twin["id"] == f"{source['id']}~r2"
+        assert twin["meta"]["pair"]["of"] == f"{source['meta']['pair']['of']}~r2" and by_id[twin["meta"]["pair"]["of"]]["meta"]["pair"]["of"] == twin["id"]
+    families = [r["meta"]["scene"] for r in copies]
+    assert families[:4] == ["tilt", "tilt", "grip", "grip"], "whole pairs, round-robin over the families"
+    assert abs(second["records_by_family"].get("tilt", 0) - second["records_by_family"].get("grip", 0)) <= 2
+    data = out.read_bytes()
+    assert data.startswith(base.read_bytes() + mujoco.read_bytes()) and probe.read_bytes() in data
+    assert data.index(probe.read_bytes()) > data.index(f'"id": "{copies[-1]["id"]}"'.encode("utf-8")), "copies follow their part, before the probe"
+    assert script.main([*common, "--extra-share", "mujoco=0.05"]) == 0
+    reached = json.loads((tmp_path / "train.manifest.json").read_text(encoding="utf-8"))["extra"][0]
+    assert reached["second_pass"] is None and reached["target_reached"] is True
+    with pytest.raises(SystemExit, match="below 1"):
+        script.main([*common, "--extra-share", "mujoco=0.8"])
+    with pytest.raises(SystemExit, match="even a whole second pass"):
+        script.main([*common, "--extra-share", "mujoco=0.6"])
+    with pytest.raises(SystemExit, match="NAME=SHARE"):
+        script.main([*common, "--extra-share", "other=0.2"])
+
+
 # --------------------------------------------------------------------------
 # the unified sealed-overlap check
 # --------------------------------------------------------------------------
@@ -229,6 +293,7 @@ def test_the_built_v03_input_holds_engine_then_mujoco_then_d1_then_general_at_it
     assert manifest["general"]["sha256"] == general["file"]["sha256"] and manifest["general"]["target_reached"] is True
     epoch = manifest["examples_per_epoch"]
     assert 0.25 <= epoch["general_share"] < 0.251, epoch
+    assert extra["target_share"] == 0.2 and extra["target_reached"] is True and 0.2 <= epoch["mujoco_share"] < 0.201, epoch
     assert manifest["split"]["base_dev"] >= manifest["train_config"]["dev_max_records"], "the dev set must come from the engine file only"
     assert extra["dev_used"] == 0 and manifest["split"]["probe_dev_used"] == 0 and manifest["split"]["general_dev_used"] == 0
     with path.open("rb") as out, (V03 / "engine-s1.jsonl").open("rb") as base:

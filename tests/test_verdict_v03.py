@@ -87,6 +87,10 @@ def test_v01_mix_in_the_v03_slot_reproduces_the_published_system1_numbers_and_fa
     assert result["rule"]["O"]["pass"] is False and result["rule"]["H"]["pass"] is True and result["rule"]["G"]["pass"] is False
     assert result["rule"]["verdict"] == "DOES NOT PASS" and all(src["same_set"] for src in result["sources"].values())
     assert all(src["coverage"] == 1.0 for src in result["sources"].values())
+    groups = o["by_family_group"]  # reported next to the gate (controller): deck + stack (laws the MuJoCo set shares) vs push (unseen law)
+    assert [g["records"] for g in groups.values()] == [360, 120]
+    assert sum(g["direction"]["n"] for g in groups.values()) == o["direction"]["n"]
+    assert "T8b by family group" in out.with_suffix(".md").read_text(encoding="utf-8")
     assert out.with_suffix(".md").read_text(encoding="utf-8").startswith("# v0.3 pre-declared rule — DOES NOT PASS")
 
 
