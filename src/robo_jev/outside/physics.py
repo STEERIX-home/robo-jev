@@ -7,10 +7,10 @@ distribution, placement error) are written into the compiled model before every 
   slide joints and a yaw hinge that follows a planned trajectory exactly (feed-forward of the planned acceleration plus a
   stiff PD correction, :func:`_track`): straight braking with a jerk-limited deceleration (:func:`brake_profile`) or a
   constant-speed curve whose curvature ramps in and out (:func:`turn_profile`). The load starts at rest on the deck at
-  the deck's centre (on the yaw axis). Outcome after the manoeuvre and a settle time: ``tip`` (final tilt > 45°),
+  the deck's centre (on the yaw axis). Outcome after the manoeuvre, a fixed settle time and until the load is at rest: ``tip`` (final tilt > 45°),
   ``slide`` (upright, moved more than 2 cm relative to the deck) or ``stay``.
 * **stack** (:func:`stack_xml`, :func:`run_stack`) — a box released by a gripper on top of a fixed support with part of it
-  sticking out past the support's edge. Outcome after 2 s: ``fall`` (its centre ended below the support's top, or tilt
+  sticking out past the support's edge. Outcome after 2 s (and settling): ``fall`` (its centre ended below the support's top, or tilt
   > 30°) or ``stay``.
 * **push** (:func:`push_xml`, :func:`run_push`) — a box on the floor pushed by a horizontal bumper bar at a chosen height
   (a heavy body on a slide joint following a smooth velocity profile). Outcome: ``tip`` (final tilt > 45°) or ``slide``.
@@ -28,7 +28,9 @@ than geometry allows (``unstable``, :func:`max_rise`); moments with a flagged ro
 The load's inertial frame is compiled with a small non-zero offset (:data:`NOMINAL_IPOS`): MuJoCo treats a body whose inertial
 frame coincides with its body frame as "same frame" and then ignores later changes of ``body_ipos``.
 
-Everything is deterministic: the same model, hidden values and profile give bit-identical rollouts.
+Every rollout continues after its planned motion until the load is at rest relative to its support (|v| < 2 cm/s, |ω| < 0.05 rad/s,
+checked every 0.1 s, at most :data:`SETTLE_MAX` s more), so no outcome is read mid-pivot. Everything is deterministic: the same model,
+hidden values and profile give bit-identical rollouts.
 """
 
 from __future__ import annotations
@@ -326,6 +328,30 @@ def _track(data: Any, profile: Profile, i: int, dofs: Sequence[int], masses: Seq
 # Rollouts
 # --------------------------------------------------------------------------
 
+#: After the planned motion, keep simulating until the load is at rest (checked every 0.1 s), at most this long.
+SETTLE_MAX = 4.0
+SETTLE_LIN = 0.02
+SETTLE_ANG = 0.05
+
+
+def _settled(scene: "Scene", frame_velocity: Sequence[float] = (0.0, 0.0, 0.0)) -> bool:
+    """Load at rest relative to its support: linear speed (minus the support's) < 2 cm/s and angular speed < 0.05 rad/s."""
+    v = np.asarray(scene.data.qvel[scene.load_qvel : scene.load_qvel + 6], dtype=float)
+    return bool(np.linalg.norm(v[:3] - np.asarray(frame_velocity)) < SETTLE_LIN and np.linalg.norm(v[3:]) < SETTLE_ANG)
+
+
+def _settle(scene: "Scene", step: Any, frame_velocity: Any = lambda: (0.0, 0.0, 0.0)) -> tuple[int, float]:
+    """Step (``step()`` applies any drive and advances one step) until :func:`_settled` or :data:`SETTLE_MAX`; returns the extra steps and the
+    highest load centre seen."""
+    top = float(scene.data.xpos[scene.load][2])
+    for i in range(int(round(SETTLE_MAX / TIMESTEP))):
+        if i % 100 == 0 and _settled(scene, frame_velocity()):
+            return i, top
+        step()
+        if i % 10 == 0:
+            top = max(top, float(scene.data.xpos[scene.load][2]))
+    return int(round(SETTLE_MAX / TIMESTEP)), top
+
 
 def max_rise(dims: Sequence[float]) -> float:
     """Largest physically possible rise of a box's centre when it rotates onto an edge, plus 5 cm — anything above it is a numerical
@@ -350,6 +376,18 @@ def run_deck(scene: Scene, profile: Profile, *, mu: float, com: Sequence[float])
         if i % 10 == 0:
             max_tilt = max(max_tilt, scene.tilt_deg())
             top_z = max(top_z, float(data.xpos[scene.load][2]))
+    last_q, last_v, n = profile.q[-1] + profile.v[-1] * TIMESTEP, profile.v[-1].copy(), [0]
+    last_v[2] = 0.0 if abs(last_v[2]) < 1e-9 else last_v[2]
+
+    def hold() -> None:
+        n[0] += 1
+        for column in range(3):
+            error = last_q[column] + last_v[column] * TIMESTEP * (n[0] - 1) - data.qpos[column]
+            data.qfrc_applied[column] = (DECK_IZZ if column == 2 else DECK_MASS) * (KP * error + KD * (last_v[column] - data.qvel[column]))
+        mujoco.mj_step(model, data)
+
+    extra, top = _settle(scene, hold, lambda: (float(data.qvel[0]), float(data.qvel[1]), 0.0))
+    top_z = max(top_z, top)
     tilt = scene.tilt_deg()
     max_tilt = max(max_tilt, tilt)
     yaw = float(data.qpos[2])
@@ -360,7 +398,8 @@ def run_deck(scene: Scene, profile: Profile, *, mu: float, com: Sequence[float])
     off_deck = bool(data.xpos[scene.load][2] < DECK_TOP - 0.05)
     outcome = "tip" if (tilt > TIP_DEG or off_deck) else ("slide" if slide > SLIDE_M else "stay")
     unstable = bool(top_z - z0 > max_rise(scene.dims))
-    return {"outcome": outcome, "slide_m": slide, "final_tilt": tilt, "max_tilt": max_tilt, "off_deck": off_deck, "unstable": unstable}
+    return {"outcome": outcome, "slide_m": slide, "final_tilt": tilt, "max_tilt": max_tilt, "off_deck": off_deck, "unstable": unstable,
+            "settle_steps": extra}
 
 
 def run_stack(scene: Scene, *, x_centre: float, drop: float, tilt0_deg: float, mu: float, com: Sequence[float], support_height: float,
@@ -381,11 +420,15 @@ def run_stack(scene: Scene, *, x_centre: float, drop: float, tilt0_deg: float, m
         if i % 10 == 0:
             max_tilt = max(max_tilt, scene.tilt_deg())
             top_z = max(top_z, float(data.xpos[scene.load][2]))
+    extra, top = _settle(scene, lambda: mujoco.mj_step(model, data))
+    top_z = max(top_z, top)
     tilt = scene.tilt_deg()
     z = float(data.xpos[scene.load][2])
     fell = z < support_height - 0.01 or tilt > FALL_TILT_DEG
+    # pivoting on the support's edge can lift the box's centre by up to its half-diagonal minus half-height (more when the weight sits at
+    # the outer end); anything above that bound is a numerical artefact
     return {"outcome": "fall" if fell else "stay", "final_tilt": tilt, "final_z": z, "max_tilt": max(max_tilt, tilt),
-            "unstable": bool(top_z - z0 > 0.05)}
+            "unstable": bool(top_z - z0 > max_rise(scene.dims)), "settle_steps": extra}
 
 
 def run_push(scene: Scene, profile: Profile, *, mu: float, com: Sequence[float]) -> dict[str, Any]:
@@ -402,6 +445,14 @@ def run_push(scene: Scene, profile: Profile, *, mu: float, com: Sequence[float])
         if i % 10 == 0:
             max_tilt = max(max_tilt, scene.tilt_deg())
             top_z = max(top_z, float(data.xpos[scene.load][2]))
+    last = float(profile.q[-1, 0] + profile.v[-1, 0] * TIMESTEP)
+
+    def hold() -> None:
+        data.qfrc_applied[0] = PUSHER_MASS * (KP * (last - data.qpos[0]) - KD * data.qvel[0])
+        mujoco.mj_step(model, data)
+
+    extra, top = _settle(scene, hold)
+    top_z = max(top_z, top)
     tilt = scene.tilt_deg()
     return {"outcome": "tip" if tilt > TIP_DEG else "slide", "final_tilt": tilt, "max_tilt": max(max_tilt, tilt),
-            "moved_m": float(data.xpos[scene.load][0]) - x0, "unstable": bool(top_z - z0 > max_rise(scene.dims))}
+            "moved_m": float(data.xpos[scene.load][0]) - x0, "unstable": bool(top_z - z0 > max_rise(scene.dims)), "settle_steps": extra}

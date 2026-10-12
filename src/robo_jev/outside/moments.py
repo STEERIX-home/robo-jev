@@ -284,7 +284,7 @@ def _stack_candidate(index: int, seed: int, target: str, rng: random.Random) -> 
     top = _uniform(rng, support["top"])
     support_height = _uniform(rng, support["height"])
     # nominal position of the centre of mass beyond the edge: e = overhang − L/2 + cx·L
-    e = rng.uniform(-0.12, 0.0) * length if target == "stay" else rng.uniform(0.0, 0.12) * length
+    e = rng.uniform(-0.18, -0.01) * length if target == "stay" else rng.uniform(0.0, 0.12) * length
     overhang = round(e + length / 2 - _mid(spread["cx"]) * length, 3)
     if overhang > length - 0.04 or overhang < -0.05 or overhang < length - top + 0.02:
         return None
