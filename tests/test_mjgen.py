@@ -156,6 +156,8 @@ def test_records_are_valid_and_carry_labels_under_three_priors():
         for prior in fam.PRIORS:
             assert set(meta["labels_by_prior"][prior]) == set(record["request"]["questions"])
         assert set(meta["robustness"]) == set(record["request"]["questions"]) and all("robust" in r for r in meta["robustness"].values())
+        direction = gen.QUESTION_NAMES[meta["scene"]]["direction"]
+        assert isinstance(meta["robustness"][direction]["no_reversal"], bool) and isinstance(meta["contrast_no_reversal"], bool)
         assert set(meta["outcomes"]["planned"]) == set(fam.PRIORS)
         assert meta["key_question"] in record["request"]["questions"]
         kinds = set(meta["question_kind"].values())

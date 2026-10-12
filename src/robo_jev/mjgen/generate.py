@@ -20,7 +20,8 @@ comparisons from them).
 
 **Robustness** (``meta.robustness``, per question): yes/no and score → min/max over the three priors and whether the risk band
 (low < 1/3 ≤ middle ≤ 2/3 < high) is the same under all; choices → the argmax under each prior and whether it is the same under all
-(min/max per option kept). Counterfactual contrasts: the direction of the key-event change (up / down / flat within ±0.05) from the
+(min/max per option kept); direction and comparison questions also carry ``no_reversal`` (no prior picks the opposite side — one
+may say "about the same" when both values saturate). Counterfactual contrasts: the direction of the key-event change (up / down / flat within ±0.05) from the
 plan to the counterfactual value, and for paired records from one partner to the other (``meta.pair.direction_by_prior``), and
 whether it is the same under all priors.
 """
@@ -181,8 +182,12 @@ def _robust(question: dict[str, Any], by_prior: dict[str, dict[str, Any]]) -> di
                 "band_same": len(set(bands)) == 1, "robust": len(set(bands)) == 1}
     argmax = {p: max(l["probabilities"], key=lambda k: (l["probabilities"][k], k)) for p, l in zip(fam.PRIORS, labels)}
     keys = list(labels[0]["probabilities"])
-    return {"type": "choice", "argmax": argmax, "argmax_same": len(set(argmax.values())) == 1, "robust": len(set(argmax.values())) == 1,
-            "min": {k: min(l["probabilities"][k] for l in labels) for k in keys}, "max": {k: max(l["probabilities"][k] for l in labels) for k in keys}}
+    out = {"type": "choice", "argmax": argmax, "argmax_same": len(set(argmax.values())) == 1, "robust": len(set(argmax.values())) == 1,
+           "min": {k: min(l["probabilities"][k] for l in labels) for k in keys}, "max": {k: max(l["probabilities"][k] for l in labels) for k in keys}}
+    if "about_same" in keys and len(keys) == 3:
+        # direction / comparison: the two sides never both win (one prior may say "about the same" when both values saturate)
+        out["no_reversal"] = len(set(argmax.values()) - {"about_same"}) <= 1
+    return out
 
 
 def _record_id(group: fam.Group, member: str) -> str:
@@ -223,6 +228,7 @@ def group_records(group: fam.Group, labelled: dict[str, Any], *, mujoco_version:
                 "outcomes": {name: entry["freq"] for name, entry in variants.items()},
                 "labels_by_prior": by_prior, "robustness": robustness,
                 "contrast_direction_by_prior": contrast, "contrast_direction_same": len(set(contrast.values())) == 1,
+                "contrast_no_reversal": not {"up", "down"} <= set(contrast.values()),
                 "compare_option": cf_option if names["compare"] in questions else None,
                 "action_options": action_keys if names["action"] in questions else None,
                 "static_aim": {"key": group.plan.get("aim_key"), "cf": group.plan.get("aim_cf"), "cf_kind": group.plan.get("cf_kind")},
@@ -242,7 +248,8 @@ def group_records(group: fam.Group, labelled: dict[str, Any], *, mujoco_version:
         directions = {p: direction(b - a) for p, (a, b) in by_prior.items()}
         common = {"kind": "numeric", "field": group.pair["field"], "from": group.pair["from"], "to": group.pair["value"],
                   "closeness": group.pair["closeness"], "key_by_prior": by_prior, "key_delta": by_prior["base"][1] - by_prior["base"][0],
-                  "direction_by_prior": directions, "direction_same": len(set(directions.values())) == 1}
+                  "direction_by_prior": directions, "direction_same": len(set(directions.values())) == 1,
+                  "no_reversal": not {"up", "down"} <= set(directions.values())}
         base["meta"]["pair"] = {"of": pair["id"], "role": "base", **common}
         pair["meta"]["pair"] = {"of": base["id"], "role": "variant", **common}
     return [built[m] for m in members]
@@ -361,11 +368,15 @@ def stats(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
         q_types = collections.Counter(q["type"] for r in rows for q in r["request"]["questions"].values())
         q_kinds = collections.Counter(r["meta"]["question_kind"][q] for r in rows for q in r["request"]["questions"])
         robust_by_kind: dict[str, list[int]] = collections.defaultdict(lambda: [0, 0])
+        no_reversal: dict[str, list[int]] = collections.defaultdict(lambda: [0, 0])
         for r in rows:
             for q, entry in r["meta"]["robustness"].items():
                 kind = r["meta"]["question_kind"][q]
                 robust_by_kind[kind][0] += int(entry["robust"])
                 robust_by_kind[kind][1] += 1
+                if "no_reversal" in entry:
+                    no_reversal[kind][0] += int(entry["no_reversal"])
+                    no_reversal[kind][1] += 1
         robust_total = [sum(v[0] for v in robust_by_kind.values()), sum(v[1] for v in robust_by_kind.values())]
         # (a) counterfactual inside the record: the key event at the plan vs at the counterfactual value (base prior)
         inside = []
@@ -398,7 +409,8 @@ def stats(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
             "contrast_inside": {"records": len(inside), "share_with": 1.0 if rows else None,
                                 "abs_delta_ge_0.1": (sum(1 for d in inside if abs(d) >= 0.1) / len(inside)) if inside else None,
                                 "abs_delta_hist10": _hist([abs(d) for d in inside]), "direction_label_argmax": dict(direction_argmax),
-                                "direction_same_all_priors": (sum(1 for r in rows if r["meta"]["contrast_direction_same"]) / len(rows)) if rows else None},
+                                "direction_same_all_priors": (sum(1 for r in rows if r["meta"]["contrast_direction_same"]) / len(rows)) if rows else None,
+                                "no_reversal_all_priors": (sum(1 for r in rows if r["meta"]["contrast_no_reversal"]) / len(rows)) if rows else None},
             "pairs": {"pairs": len(pairs), "records_in_pairs": in_pairs, "share_of_records": in_pairs / len(rows) if rows else None,
                       "abs_delta_ge_0.1": (sum(1 for d in deltas if d >= 0.1) / len(deltas)) if deltas else None,
                       "abs_delta_hist10": _hist(deltas), "abs_delta_median": statistics.median(deltas) if deltas else None,
@@ -406,9 +418,11 @@ def stats(records: Sequence[dict[str, Any]]) -> dict[str, Any]:
                                    for f, v in sorted(by_field.items())},
                       "by_design": {f: {"pairs": len(v), "abs_delta_ge_0.1": sum(1 for d in v if d >= 0.1) / len(v), "median": statistics.median(v)}
                                     for f, v in sorted(by_design.items())},
-                      "direction_same_all_priors": (sum(1 for r in pairs if r["meta"]["pair"]["direction_same"]) / len(pairs)) if pairs else None},
+                      "direction_same_all_priors": (sum(1 for r in pairs if r["meta"]["pair"]["direction_same"]) / len(pairs)) if pairs else None,
+                      "no_reversal_all_priors": (sum(1 for r in pairs if r["meta"]["pair"]["no_reversal"]) / len(pairs)) if pairs else None},
             "robust": {"questions": robust_total[1], "robust": robust_total[0], "share": robust_total[0] / robust_total[1] if robust_total[1] else None,
-                       "by_kind": {k: {"questions": v[1], "robust": v[0], "share": v[0] / v[1]} for k, v in sorted(robust_by_kind.items())}},
+                       "by_kind": {k: {"questions": v[1], "robust": v[0], "share": v[0] / v[1]} for k, v in sorted(robust_by_kind.items())},
+                       "no_reversal_by_kind": {k: {"questions": v[1], "no_reversal": v[0], "share": v[0] / v[1]} for k, v in sorted(no_reversal.items())}},
         }
         if names is None:
             out["by_family"][family].pop("contrast_inside", None) if not rows else None
