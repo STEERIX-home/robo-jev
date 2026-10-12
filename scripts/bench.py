@@ -442,7 +442,7 @@ def cmd_score(args: argparse.Namespace) -> int:
     date = dt.date.today().isoformat()
     results = {"kind": "bench-v0-results", "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"), "script_version": SCRIPT_VERSION,
                "bench": config["version"], "date": date, "catalog": str(snapshot) if snapshot else None, "n_boot": args.n_boot,
-               "fake": any(m.get("fake") for m in models), "models": models}
+               "fake": any(m.get("fake") for m in models), "score_levels": (config.get("request") or {}).get("score_levels"), "models": models}
     path = args.results or (args.out / "results.json")
     _write_json(path, results)
     path.with_suffix(".md").write_text(readme_table(results, date=date), encoding="utf-8")

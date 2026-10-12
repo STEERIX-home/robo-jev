@@ -260,12 +260,15 @@ def pooled_brier(per_set: dict[str, Any], sets: Iterable[str] = UNSEEN_SETS, *, 
     """세트들의 noul·score 질문을 한데 모은 Brier(질문마다 같은 무게)와 "언제나 0.5"의 Brier, skill = 1 − Brier / Brier(0.5).
     세트 하나라도 없으면 None."""
     total = uniform = n = 0.0
+    asked = scored = 0
     used = []
     for name in sets:
         entry = per_set.get(name)
         if not entry:
             return None
         metrics = entry["readings"][reading]
+        asked += metrics.get("questions") or 0
+        scored += metrics.get("scored") or 0
         for block in blocks:
             count = metrics.get(f"{block}_n") or 0
             if not count or metrics.get(f"{block}_brier") is None:
@@ -276,7 +279,8 @@ def pooled_brier(per_set: dict[str, Any], sets: Iterable[str] = UNSEEN_SETS, *, 
         used.append(name)
     if not n:
         return None
-    return {"sets": used, "blocks": list(blocks), "questions": int(n), "brier": total / n, "uniform_brier": uniform / n, "skill": 1.0 - total / uniform}
+    return {"sets": used, "blocks": list(blocks), "questions": int(n), "brier": total / n, "uniform_brier": uniform / n, "skill": 1.0 - total / uniform,
+            "coverage": (scored / asked) if asked else None}
 
 
 def _fmt(value: Any, digits: int = 3) -> str:
@@ -286,8 +290,8 @@ def _fmt(value: Any, digits: int = 3) -> str:
 def readme_table(results: dict[str, Any], *, date: str) -> str:
     """README용 Markdown 표 — 모델, 처음 보는 물리(T2+T3+T4)의 결과 예측, 일반 읽기, $/M 입력 토큰. 사실과 주의만."""
     lines = [
-        "| Model | Physics skill T2–T4 ↑ | Yes/no Brier T2–T4 ↓ | Score Brier T2–T4 ↓ | G1 acc ↑ | G2 acc ↑ | $/M input |",
-        "|---|---|---|---|---|---|---|",
+        "| Model | Physics skill T2–T4 ↑ | Yes/no Brier T2–T4 ↓ | Score Brier T2–T4 ↓ | Answered T2–T4 | G1 acc ↑ | G2 acc ↑ | $/M input |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for model in results["models"]:
         per_set = model["sets"]
@@ -298,14 +302,19 @@ def readme_table(results: dict[str, Any], *, date: str) -> str:
         g2 = _get(per_set, "G2", "readings", "single_order", "accuracy")
         price = model.get("price_per_m_input")
         name = f"**{model['label']}**" if model.get("role") in ("ours", "baseline") else model["label"]
+        answered = both and both.get("coverage")
         lines.append(f"| {name} | {_fmt(both and both['skill'])} | {_fmt(noul and noul['brier'])} | {_fmt(score and score['brier'])} | "
-                     f"{_fmt(g1)} | {_fmt(g2)} | {'self-hosted' if price is None else f'{price:.3f}'} |")
+                     f"{'—' if answered is None else f'{answered:.0%}'} | {_fmt(g1)} | {_fmt(g2)} | {'self-hosted' if price is None else f'{price:.3f}'} |")
     lines += [
         "",
         f"Evaluated {date} on bench-v0 (`configs/bench/bench-v0.yaml`): T1–T7 are sealed test sets from our own physics-judgment generator "
         "(home ground — every set shares that generator), G1 is the old non-robot reading probe, G2 is public BoolQ + MultiNLI (1,000 questions). "
         "Physics skill = 1 − Brier / Brier(always 0.5) over the yes/no and score questions of T2–T4 (new style, out-of-range, unseen combination). "
-        "OpenRouter models were asked once, in the stored option order, through the Decisions API (score questions as an 11-level 0.0–1.0 scale); "
+        "OpenRouter models were asked once, in the stored option order, through the Decisions API ("
+        + ("score questions with their two anchors as written — the API's own rubric format; " if results.get("score_levels") == 2
+           else f"score questions as a {results.get('score_levels')}-level 0.0–1.0 scale; " if results.get("score_levels")
+           else "")
+        + "a request the provider refused or failed to answer is left out — see the Answered column); "
         "our models' numbers are the expectation over balanced option orders (single-order reading). Action metrics use our value table and are not shown here.",
     ]
     return "\n".join(lines) + "\n"
