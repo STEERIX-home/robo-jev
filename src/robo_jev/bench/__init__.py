@@ -6,6 +6,8 @@
   형식(질문마다 listing 하나), 재시도·디스크 캐시·돈 상한(장부)·dry-run 견적. 키는 파일에서만 읽고 절대 찍지 않는다.
 * :mod:`~robo_jev.bench.score` — 같은 진단 지표(:mod:`robo_jev.decisions.metrics`)로 세트·모델마다 점수표, T6 불변성, README 표.
 * :mod:`~robo_jev.bench.figures` — 의존성 없는 SVG 그래프(산점도·세트별 막대), 밝은·어두운 판.
+* :mod:`~robo_jev.bench.system1` — System-1 metrics on the existing predictions (Task s1score): risk bands, severe errors, direction,
+  comparison, action choice, outcome category, with cluster-bootstrap and paired intervals (`scripts/bench.py system1`).
 
 이 꾸러미는 학습을 하지 않는다. 유료 호출은 :mod:`~robo_jev.bench.openrouter` 의 실행 경로뿐이고 돈 상한 인자 없이는 돌지 않는다.
 """
