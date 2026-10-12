@@ -1,0 +1,34 @@
+# T8 — outside physics tests (Task T8, 2026-10-12): the same OpenRouter decision models as bench-v0, asked the same way, on data our
+# simulation engine did not make. Run with scripts/bench.py and this config (its own output directory and its own ledger):
+#   python scripts/bench.py --config configs/bench/t8.yaml build --out artifacts/bench/t8
+#   python scripts/bench.py --config configs/bench/t8.yaml run --out artifacts/bench/t8 --ledger artifacts/bench/t8/openrouter-ledger.json \
+#       --calls-log artifacts/bench/t8/openrouter-calls.jsonl --max-cost-usd 1.00 --max-cost-per-model-usd 0.30 --data-collection deny
+# The sets are built by scripts/t8.py (T8a: `piqa`, T8b: `moments`) into artifacts/t8/ (not committed); `build` copies them byte for
+# byte into the bench directory and checks them against `expect`. Scoring is `python scripts/t8.py score` (not bench.py score).
+version: t8-v1
+seed: 20261012
+strata: [group, language]
+sets:
+  T8a:
+    what: PIQA validation (public; goal + two solutions, pick the one that works) — never used for training
+    source: artifacts/t8/T8a.jsonl
+    unit: all
+    expect: {source_sha256: 33b0bae6c7b1ef9afb7fea8dec92df988a74a486b1679259f2e9b34697f1473e, records: 1838, questions: 1838,
+             ids_sha256: b05b2b099d35998f62b163adc175d5479c54db47357afcefc6bc6ba8604c43c3}
+
+# Same request conversion as bench-v0: choice criteria as stored, noul instructions as is, score with its two anchors as written
+# (the API accepts at most 10 levels — see configs/bench/bench-v0.yaml).
+request:
+  score_levels: 2
+  endpoint: https://openrouter.ai/api/alpha/decisions
+
+# The six bench-v0 models (user decision 2026-10-12), nothing else.
+models:
+  default:
+    - id: "~typesafe/jev-latest"
+    - id: microsoft/microsoft-decision-1
+    - id: togethercomputer/tev1-4b-experimental
+    - id: openai/gpt-6-luna-decisions
+    - id: liquid/d1
+    - id: upstage/solar-decide
+  exclude_suffixes: [":free"]
