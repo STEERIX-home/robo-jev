@@ -11,7 +11,7 @@ import xml.etree.ElementTree as ET
 import pytest
 from helpers import REPO
 
-from robo_jev.bench.figures import THEMES, bars_svg, figure_rows, readme_snippet, scatter_points, scatter_svg
+from robo_jev.bench.figures import THEMES, bars_svg, figure_rows, hero_rows, hero_svg, readme_snippet, scatter_points, scatter_svg
 
 NS = {"s": "http://www.w3.org/2000/svg"}
 SETS = ("T1", "T2", "T3", "T4", "T5", "T6", "T7")
@@ -107,7 +107,7 @@ def test_the_set_bars_start_at_zero_and_fit_their_columns(theme):
 
 
 def test_fake_results_carry_a_watermark_and_never_land_in_docs(tmp_path, capsys):
-    assert "FAKE API VALUES" in scatter_svg(_results(fake=True)) and "FAKE API VALUES" in bars_svg(_results(fake=True))
+    assert all("FAKE API VALUES" in render(_results(fake=True)) for render in (scatter_svg, bars_svg, hero_svg))
     spec = importlib.util.spec_from_file_location("plot_bench", REPO / "scripts" / "plot_bench.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -122,8 +122,9 @@ def test_fake_results_carry_a_watermark_and_never_land_in_docs(tmp_path, capsys)
     real.write_text(json.dumps(_results()), encoding="utf-8")
     assert module.main(["--results", str(real), "--out-dir", str(tmp_path / "figs")]) == 0
     written = sorted(p.name for p in (tmp_path / "figs").iterdir())
-    assert written == ["bench-v0-scatter-dark.svg", "bench-v0-scatter-light.svg", "bench-v0-sets-dark.svg", "bench-v0-sets-light.svg"]
-    assert capsys.readouterr().out.count("<picture>") == 2
+    assert written == ["bench-v0-physics-dark.svg", "bench-v0-physics-light.svg", "bench-v0-scatter-dark.svg", "bench-v0-scatter-light.svg",
+                       "bench-v0-sets-dark.svg", "bench-v0-sets-light.svg"]
+    assert capsys.readouterr().out.count("<picture>") == 3
     assert 'media="(prefers-color-scheme: dark)"' in readme_snippet(["x"])
 
 
@@ -132,3 +133,22 @@ def test_models_without_the_axes_values_are_listed_not_drawn():
     points, missing = scatter_points(_results(extra=[incomplete]))
     assert "vendor/partial" in missing and all(p["label"] != "vendor/partial" for p in points)
     assert "not shown (no T2–T4 or G2 result): vendor/partial" in scatter_svg(_results(extra=[incomplete]))
+
+
+@pytest.mark.parametrize("theme", sorted(THEMES))
+def test_the_hero_chart_shows_one_bar_per_model_with_only_our_chosen_version(theme):
+    results = _results()
+    rows = hero_rows(results)
+    assert [r["role"] for r in rows].count("ours") == 1 and rows[[r["role"] for r in rows].index("ours")]["label"].startswith("robo-jev v0.1")
+    assert [r["skill"] for r in rows] == sorted((r["skill"] for r in rows), reverse=True)
+    assert len(rows) == 5  # chosen ours + baseline + three API models
+    root = _parse(hero_svg(results, theme_name=theme))
+    width = float(root.get("width"))
+    bars = [e for e in root.iter("{http://www.w3.org/2000/svg}rect") if e.find("s:title", NS) is not None]
+    assert len(bars) == len(rows)
+    for bar in bars:
+        x, w = float(bar.get("x")), float(bar.get("width"))
+        assert 0 <= x and x + w <= width
+    texts = " ".join(t.text or "" for t in root.iter("{http://www.w3.org/2000/svg}text"))
+    assert "Together Tev1 4B" in texts and "OpenAI GPT-6 Luna Decisions" in texts and "−0.35" in texts  # display names, true minus
+

@@ -21,7 +21,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 
 def main(argv: list[str] | None = None) -> int:
-    from robo_jev.bench.figures import bars_svg, readme_snippet, scatter_svg
+    from robo_jev.bench.figures import bars_svg, hero_svg, readme_snippet, scatter_svg
 
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--results", type=Path, required=True, help="scripts/bench.py score의 results.json")
@@ -36,7 +36,8 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("results hold FAKE API values — not writing them under docs/ (use another --out-dir)")
     args.out_dir.mkdir(parents=True, exist_ok=True)
     names = []
-    for kind, render in (("scatter", lambda t: scatter_svg(results, theme_name=t)), ("sets", lambda t: bars_svg(results, theme_name=t, top=args.top))):
+    for kind, render in (("physics", lambda t: hero_svg(results, theme_name=t)), ("scatter", lambda t: scatter_svg(results, theme_name=t)),
+                         ("sets", lambda t: bars_svg(results, theme_name=t, top=args.top))):
         name = f"{args.prefix}-{kind}"
         names.append(name)
         for theme in ("light", "dark"):
