@@ -78,6 +78,16 @@ def cmd_build(args: argparse.Namespace) -> int:
     return 0
 
 
+def refuse_never_sent(bench: dict[str, list[dict[str, Any]]]) -> None:
+    """Task T9: a sealed outside test that is never sent to any API (T9) must not be in a paid run — refuse before any request."""
+    from robo_jev.data.sealed import NEVER_SENT_SETS, sealed_record_set
+
+    for name, records in bench.items():
+        hits = [str(r.get("id")) for r in records if sealed_record_set(r) in NEVER_SENT_SETS or name in NEVER_SENT_SETS]
+        if hits:
+            raise SystemExit(f"set {name!r} holds {len(hits)} record(s) of a sealed test that is never sent to any API (first {hits[:3]})")
+
+
 def _load_bench(config: dict[str, Any], out: Path, sets: list[str] | None = None) -> dict[str, list[dict[str, Any]]]:
     """벤치 파일(build가 쓴 것)을 읽고 id sha256을 정의의 expect와 대조한다 — 다르면 거절(다른 레코드로 돈을 쓰지 않게)."""
     from robo_jev.bench.define import ids_sha256
@@ -295,6 +305,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     config = load_config(args.config)
     bench = _load_bench(config, args.out, args.sets)
+    refuse_never_sent(bench)
     client, ledger, cache, models, source, _ = _paid_setup(args, config)
     tokenizer, _ = _tokenizer()
     provider = {"data_collection": args.data_collection} if args.data_collection else None
@@ -341,6 +352,8 @@ def cmd_pilot(args: argparse.Namespace) -> int:
     config = load_config(args.config)
     records = _load_pilot(config, args.out)
     bench = _load_bench(config, args.out)
+    refuse_never_sent(bench)
+    refuse_never_sent({"pilot": records})
     client, ledger, cache, models, source, _ = _paid_setup(args, config)
     tokenizer, counter = _tokenizer()
     provider = {"data_collection": args.data_collection} if args.data_collection else None

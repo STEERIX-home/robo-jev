@@ -42,6 +42,16 @@ priors, so these metrics ask coarser questions of the **same predictions**. Noth
   tips vs upright: the answer's side of 0.5 against the label's; an answer of exactly 0.5 is a miss, and a label of exactly 0.5
   accepts every answer).
 * **Choice accuracy** (``choice_accuracy``) — T8a (PIQA): the argmax is the right solution.
+* **T9** (Task T9) — the second outside test follows T8b's conventions, but declares its questions in the record instead of a table
+  keyed by scene: ``meta.events`` (the questions about the key event, planned first — direction and comparison exactly as for
+  T8b), ``meta.outcome_question`` (``outcome``, as T8b's deck question) and ``meta.direction_question`` — a more / less / about-the-
+  same choice about one changed fact, scored like the outcome category (``direction_choice``: the answer's argmax is in the label's
+  argmax set). Its action question carries ``expected_cost`` (``safe_choice`` / ``catastrophic_choice``, criterion class from
+  ``meta.criteria`` — stated).
+* **Robust reading** (records with ``meta.robustness`` / ``meta.labels_by_prior``, T9 and the MuJoCo sets): ``band_balanced_robust``
+  and ``severe_error_robust`` over the yes/no and score questions whose band is the same under every prior
+  (``meta.robustness[q].robust``); ``direction_robust`` over the direction pairs whose label moves the same way by at least 0.1 under
+  every prior (``meta.labels_by_prior``).
 
 **Readings.** ``single_order`` (deployment condition): a question answered under several balanced listings counts each listing
 with weight 1/L — the expected value when asked in one order. A pair is read in one *fixed format*: listing pairs matched by
@@ -79,6 +89,8 @@ __all__ = [
     "SAFE_REGRET",
     "T8B_EVENTS",
     "band",
+    "event_names",
+    "outcome_name",
     "basis_event_pairs",
     "basis_quantity_pairs",
     "group_items",
@@ -89,6 +101,7 @@ __all__ = [
     "paired_difference",
     "question_items",
     "render_markdown",
+    "robust_pairs",
     "score",
     "set_items",
     "summarize",
@@ -124,10 +137,14 @@ T8B_EVENTS: dict[str, tuple[str, ...]] = {
 }
 #: T8b's outcome-category choice question (deck families).
 T8B_OUTCOME = "what_happens"
+#: Sets that declare their event, outcome and direction questions in ``meta`` (``events``, ``outcome_question``,
+#: ``direction_question``) — T8b's conventions without the table.
+DECLARED_SETS = ("T9",)
 
 #: Metrics where lower is better (the rest: higher is better).
 LOWER_IS_BETTER = frozenset({
     "severe_error", "severe_error_clear", "severe_miss", "severe_false_alarm", "severe_miss_clear", "severe_error:event", "catastrophic_choice",
+    "severe_error_robust",
     "catastrophic_choice:default", "catastrophic_choice:stated", "catastrophic_choice:look_again",
 })
 
@@ -160,6 +177,11 @@ DEFINITIONS = {
     "outcome:all_families": "outcome plus the release and push families through their planned yes/no question (event vs no event by the side of 0.5; "
                             "an answer of exactly 0.5 is a miss unless the label is exactly 0.5, when every answer is right)",
     "choice_accuracy": "T8a (PIQA): the answer's argmax is the right solution",
+    "direction_choice": "T9: the more / less / about-the-same question about one changed fact (meta.direction_question): the answer's argmax is "
+                        "in the label's argmax set",
+    "robust": "band_balanced_robust / severe_error_robust: the yes/no and score questions whose band is the same under every prior "
+              "(meta.robustness[q].robust); direction_robust: the direction pairs whose label moves the same way by >= 0.1 under every prior "
+              "(meta.labels_by_prior)",
     "physics_skill": "reference (the Brier metric these metrics replace): 1 - sum Brier / sum Brier(always 0.5) over yes/no and score questions",
     "intervals": "cluster bootstrap 95 % percentile intervals (cluster = record; a T5 pair is one cluster); paired differences on the items both "
                  "models answered, same draws",
@@ -267,6 +289,8 @@ def question_items(set_name: str, records: Sequence[Mapping[str, Any]], predicti
         questions = ((predicted.get(rid) or {}).get("questions")) or {}
         labels = record.get("labels") or {}
         t8b = meta.get("set") == "T8b"
+        declared = meta.get("set") in DECLARED_SETS
+        robustness = meta.get("robustness") if isinstance(meta.get("robustness"), Mapping) else {}
         for name, question in record["request"]["questions"].items():
             label, answer = labels.get(name), questions.get(name)
             if not isinstance(label, Mapping) or not isinstance(answer, Mapping):
@@ -299,6 +323,10 @@ def question_items(set_name: str, records: Sequence[Mapping[str, Any]], predicti
                     out["band_accuracy_clear"][key] = (rid, correct)
                     out["severe_error_clear"][key] = (rid, miss + alarm)
                     out["severe_miss_clear"][key] = (rid, miss)
+                if isinstance(robustness.get(name), Mapping) and robustness[name].get("robust") is True:
+                    out["band_balanced_robust"][(label_band, *key)] = (rid, correct)
+                    out["band_accuracy_robust"][key] = (rid, correct)
+                    out["severe_error_robust"][key] = (rid, miss + alarm)
                 if t8b and name == T8B_EVENTS.get(str(meta.get("scene")), ("",))[0] and meta.get("scene") in ("stack", "push"):
                     if y == 0.5:  # both outcomes equally likely: any answer is in the label's argmax set
                         value = 1.0
@@ -325,10 +353,12 @@ def question_items(set_name: str, records: Sequence[Mapping[str, Any]], predicti
                 for metric, value in (("safe_choice", safe), ("catastrophic_choice", bad)):
                     out[metric][key] = (rid, value)
                     out[f"{metric}:{cls}"][key] = (rid, value)
-            elif t8b and name == T8B_OUTCOME:
+            elif (t8b or declared) and name == outcome_name(record):
                 value = sum(w for m, w in metrics if m["match"])
                 out["outcome"][key] = (rid, value)
                 out["outcome:all_families"][key] = (rid, value)
+            elif declared and name == meta.get("direction_question"):
+                out["direction_choice"][key] = (rid, sum(w for m, w in metrics if m["match"]))
             elif kind == "probe":
                 out["choice_accuracy"][key] = (rid, sum(w for m, w in metrics if m["match"]))
     return dict(out)
@@ -408,21 +438,42 @@ def basis_quantity_pairs(records: Sequence[Mapping[str, Any]]) -> list[Pair]:
     return [pair for record in records for pair in _within_pairs(record, _basis_groups(record, quantity=True))]
 
 
-def _t8b_names(record: Mapping[str, Any]) -> tuple[str, ...]:
+def _declared(record: Mapping[str, Any]) -> tuple[str, ...]:
     meta = record.get("meta") or {}
-    if meta.get("set") != "T8b":
-        return ()
-    names = T8B_EVENTS.get(str(meta.get("scene")), ())
-    return tuple(n for n in names if n in record["request"]["questions"])
+    if meta.get("set") == "T8b":
+        return T8B_EVENTS.get(str(meta.get("scene")), ())
+    if meta.get("set") in DECLARED_SETS and isinstance(meta.get("events"), (list, tuple)):
+        return tuple(str(n) for n in meta["events"])
+    return ()
+
+
+def event_names(record: Mapping[str, Any]) -> tuple[str, ...]:
+    """The questions of a record about its key event, planned first: T8b's table (by scene) or, for :data:`DECLARED_SETS`,
+    ``meta.events``; only those the record asks."""
+    return tuple(n for n in _declared(record) if n in record["request"]["questions"])
+
+
+def outcome_name(record: Mapping[str, Any]) -> str | None:
+    """The record's outcome-category question: T8b's ``what_happens`` or a declared set's ``meta.outcome_question``."""
+    meta = record.get("meta") or {}
+    if meta.get("set") == "T8b":
+        return T8B_OUTCOME
+    if meta.get("set") in DECLARED_SETS:
+        return meta.get("outcome_question")
+    return None
+
+
+_t8b_names = event_names
 
 
 def t8b_direction_pairs(records: Sequence[Mapping[str, Any]]) -> list[Pair]:
-    """T8b: the planned question → each counterfactual question about the same event (the T8 direction diagnostic's pairs)."""
+    """T8b (and the declared sets): the planned question → each counterfactual question about the same event (the T8 direction
+    diagnostic's pairs)."""
     out: list[Pair] = []
     for record in records:
         names = _t8b_names(record)
         rid = str(record["id"])
-        planned = T8B_EVENTS.get(str((record.get("meta") or {}).get("scene")), ("",))[0]
+        planned = (_declared(record) or ("",))[0]
         if planned not in names:
             continue
         out += [(rid, (rid, planned, False), (rid, other, False)) for other in names if other != planned]
@@ -476,6 +527,35 @@ def order_items(set_name: str, records: Sequence[Mapping[str, Any]], predictions
     return out
 
 
+def _prior_scalar(record: Mapping[str, Any], name: str) -> dict[str, float] | None:
+    by_prior = (record.get("meta") or {}).get("labels_by_prior")
+    if not isinstance(by_prior, Mapping) or not by_prior:
+        return None
+    out = {}
+    for prior, labels in by_prior.items():
+        value = _scalar((labels or {}).get(name)) if isinstance(labels, Mapping) else None
+        if value is None:
+            return None
+        out[str(prior)] = value
+    return out
+
+
+def robust_pairs(records: Sequence[Mapping[str, Any]], pairs: Iterable[Pair], *, min_move: float = DIRECTION_MIN) -> list[Pair]:
+    """The pairs whose label moves the same way by at least `min_move` under every prior of ``meta.labels_by_prior`` (both records
+    must carry the same priors)."""
+    by_id = _by_id(records)
+    out = []
+    for pair in pairs:
+        _, (ra, qa, na), (rb, qb, nb) = pair
+        a, b = _prior_scalar(by_id[ra], qa), _prior_scalar(by_id[rb], qb)
+        if not a or not b or set(a) != set(b):
+            continue
+        moves = [_flip(b[p], nb) - _flip(a[p], na) for p in a]
+        if all(m >= min_move - _EPS for m in moves) or all(m <= -min_move + _EPS for m in moves):
+            out.append(pair)
+    return out
+
+
 def set_items(set_name: str, records: Sequence[Mapping[str, Any]], predictions: Sequence[Mapping[str, Any]], *,
               reading: str = "single_order") -> dict[str, Items]:
     """Every System-1 metric of one set → its items (metrics without items are absent)."""
@@ -483,8 +563,10 @@ def set_items(set_name: str, records: Sequence[Mapping[str, Any]], predictions: 
     direction = t5_direction_pairs(records) + t8b_direction_pairs(records)
     comparison = basis_event_pairs(records) + t8b_event_pairs(records)
     quantity = basis_quantity_pairs(records)
+    robust = robust_pairs(records, direction)
     for metric, pairs, threshold in (("direction", direction, DIRECTION_MIN), ("direction@0.05", direction, T8_REPORT_MOVE),
-                                     ("comparison", comparison, COMPARISON_MIN), ("comparison:quantity", quantity, COMPARISON_MIN)):
+                                     ("comparison", comparison, COMPARISON_MIN), ("comparison:quantity", quantity, COMPARISON_MIN),
+                                     ("direction_robust", robust, DIRECTION_MIN)):
         if pairs:
             items = order_items(set_name, records, predictions, pairs, min_move=threshold, reading=reading)
             if items:
@@ -625,18 +707,19 @@ def label_profile(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
 #: Metrics shown in the scorecard and paired (report order); a group shows those that have items.
 SCORECARD_METRICS = (
     "band_accuracy", "band_balanced", "band_accuracy_clear", "severe_error", "severe_error_clear", "direction", "comparison", "safe_choice",
-    "catastrophic_choice", "outcome", "outcome:all_families", "choice_accuracy",
+    "catastrophic_choice", "outcome", "outcome:all_families", "choice_accuracy", "direction_choice", "band_balanced_robust",
+    "severe_error_robust", "direction_robust",
 )
 #: Breakdowns kept in the JSON (and a detail table).
 DETAIL_METRICS = (
     "band_accuracy:noul", "band_accuracy:score", "band_recall:low", "band_recall:middle", "band_recall:high", "band_balanced:event",
     "severe_error:event", "severe_miss", "severe_false_alarm", "severe_miss_clear", "comparison:quantity",
     "safe_choice:default", "safe_choice:stated", "safe_choice:look_again", "catastrophic_choice:default", "catastrophic_choice:stated",
-    "catastrophic_choice:look_again", "direction@0.05",
+    "catastrophic_choice:look_again", "direction@0.05", "band_accuracy_robust",
 )
 ROLES = ("baseline", "ours", "api", "reference")
 #: Metrics averaged over label bands (key[0] = the label's band): balanced accuracy.
-STRATIFIED = frozenset({"band_balanced", "band_balanced:event"})
+STRATIFIED = frozenset({"band_balanced", "band_balanced:event", "band_balanced_robust"})
 
 
 def _better(metric: str, a: float, b: float) -> bool:
@@ -752,7 +835,8 @@ METRIC_LABELS = {
     "physics_skill": "Brier skill (ref.)", "band_accuracy": "band acc ↑", "band_balanced": "band acc, balanced ↑", "band_accuracy_clear": "band acc, clear ↑", "severe_error": "severe ↓",
     "severe_error_clear": "severe, clear ↓", "direction": "direction ↑", "comparison": "comparison ↑", "safe_choice": "safe choice ↑",
     "catastrophic_choice": "catastrophic ↓", "outcome": "outcome (deck, 3-way) ↑", "outcome:all_families": "outcome (all families) ↑",
-    "choice_accuracy": "accuracy ↑",
+    "choice_accuracy": "accuracy ↑", "direction_choice": "direction choice ↑", "band_balanced_robust": "band acc, balanced, robust ↑",
+    "severe_error_robust": "severe, robust ↓", "direction_robust": "direction, robust ↑",
 }
 GROUP_TITLES = {"home_T2-T4": "Home ground — T2–T4 (new style / ranges / combination)", "home_T5": "Home ground — T5 (one-fact pairs)",
                 "outside_T8b": "Outside — T8b (MuJoCo-labelled robot moments)", "outside_T8a": "Outside — T8a (PIQA)"}

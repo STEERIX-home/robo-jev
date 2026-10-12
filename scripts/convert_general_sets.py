@@ -38,6 +38,7 @@ SEALED = {
     "G1": "artifacts/simgen/probes/G1.jsonl",
     "G2": "artifacts/simgen/probes/G2.jsonl",
     **{f"T{i}": f"artifacts/simgen/v0b/tests/T{i}.jsonl" for i in range(1, 8)},
+    "T9": "artifacts/t9/T9.jsonl",  # Task T9: the second outside test
 }
 #: PIQA validation (T8a's source) — read only for the overlap check, never converted or trained on.
 PIQA = {"repo": "ybisk/piqa", "revision": "142c51238b3ca2bc61e9a075913871b8b600e8e1", "file": "plain_text/validation/0000.parquet",

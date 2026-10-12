@@ -449,7 +449,7 @@ class SealedIndex:
 
     #: Sets written outside our engine: shared text units with them are refused. T1–T7 share the engine's templates with the
     #: training data, so they are matched on whole texts only.
-    OUTSIDE = ("G1", "G2", "T8a", "T8b")
+    OUTSIDE = ("G1", "G2", "T8a", "T8b", "T9")
 
     @classmethod
     def build(cls, paths: dict[str, Path]) -> "SealedIndex":

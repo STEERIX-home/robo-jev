@@ -46,6 +46,7 @@ SEALED = {
     "G2": REPO / "artifacts" / "simgen" / "probes" / "G2.jsonl",
     "T8a": REPO / "artifacts" / "t8" / "T8a.jsonl",
     "T8b": REPO / "artifacts" / "t8" / "T8b.jsonl",
+    "T9": REPO / "artifacts" / "t9" / "T9.jsonl",
 }
 INDEX = OUT / "sealed-index.json"
 PLAN = OUT / "plan.jsonl"
