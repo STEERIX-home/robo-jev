@@ -1,0 +1,143 @@
+# v0.5, seed 1 (one pod): exactly decisions-v05-s0-h100 with the training seed 1 (`--set seed=1`: LoRA init, data order, question picks and
+# option-order augmentation) and its own run name — the PRE-DECLARED v0.5 VERDICT RULE compares v0.5-s1 with v0.4-s1 (seed-matched). Training
+# config otherwise unchanged (decisions-v0-lora-h100: 2B LoRA bf16 + fp32 master, λ 0.2, prompt v0c-p3, 1 epoch, final checkpoint,
+# questions_per_request 2); only train_input and run_name (and the names of the job, checkpoint and reports) differ from v0.4-s1.
+# Training input artifacts/simgen/v05/train-v05.jsonl, built on this box in one command (recipe in the v0.5a report):
+#   python scripts/assemble_v05.py all --out-dir artifacts/simgen/v05
+# = v0.4's input (train-v04.jsonl, sha256 89bca715…) byte for byte except ONE change (PRE-DECLARED v0.5 VERDICT RULE, hypothesis H-clarity):
+# the yes/no and score labels of prior-dependent MuJoCo questions (band not identical under the record's three priors) become
+# clip(mean over the priors, 0.40, 0.60) — "unclear, look again"; robust questions, every choice question, the engine, general and d1 parts,
+# the record order, ids, meta and the second-pass repeats are unchanged. The trainer's exposure is v0.4's exactly (seed 1: 201,856
+# examples per epoch, 6,308 steps, action 21,272, derived 18,626).
+# Diagnoses on the job's own checkpoint (after-v05-s1-2b-*), as v0.4: first the sets the PRE-DECLARED v0.5 VERDICT RULE reads on the pod — T2,
+# T3, T4 (N), G2 (G), then T1, T5, T7 ((R) with T3, T4) — then the secondary T6, G1, T8a. NOT on the pod, by the rule: T9, T8b, B1-infamily
+# and the H-set are scored on Spark (artifacts/scratch/v05a/score_spark.sh after both runs) — none of them is uploaded. v0.4's measured pods:
+# train 134.0 / 136.7 min, whole job 337 / 351 min (plan 354, cap 390). Apply the rule with scripts/verdict_v05.py.
+kind: robojev-cloud-job-v0
+name: decisions-v05-s1-h100
+job:
+  kind: decisions
+  model: Qwen/Qwen3.5-2B
+  inputs:
+    - artifacts/simgen/v05/train-v05.jsonl
+    - artifacts/simgen/probes/G2.jsonl
+    - artifacts/simgen/probes/G2.manifest.json
+    - artifacts/simgen/v0b/tests/T1.jsonl
+    - artifacts/simgen/v0b/tests/T2.jsonl
+    - artifacts/simgen/v0b/tests/T3.jsonl
+    - artifacts/simgen/v0b/tests/T4.jsonl
+    - artifacts/simgen/v0b/tests/T5.jsonl
+    - artifacts/simgen/v0b/tests/T6.jsonl
+    - artifacts/simgen/v0b/tests/T7.jsonl
+    - artifacts/simgen/v0b/tests/manifest.json
+    - artifacts/t8/T8a.jsonl
+    - artifacts/t8/T8a.manifest.json
+    - artifacts/simgen/probes/G1.jsonl
+    - artifacts/simgen/probes/G1.manifest.json
+  runtime:
+    env:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      HF_HUB_DISABLE_TELEMETRY: "1"
+  setup:
+    - name: sync
+      argv: ["{uv}", "sync", "--frozen", "--group", "backbone"]
+      fallback: ["{uv}", "sync", "--frozen", "--group", "backbone", "--no-install-package", "evdev"]
+      max_minutes: 15
+      est_minutes: 1.5
+      env: {UV_LINK_MODE: copy, UV_PYTHON_DOWNLOADS: automatic}
+  steps:
+    - name: env
+      argv: ["{python}", "-m", "robo_jev.launch.envprobe", "--out", "{reports}/env.json"]
+      max_minutes: 3
+      est_minutes: 0.3
+    - name: weights
+      argv: ["{python}", "scripts/fetch_backbone.py", "--from-manifest", "artifacts/models/manifest.json", "--id", "{model}"]
+      max_minutes: 10
+      est_minutes: 0.5
+    - name: train
+      argv: ["{python}", "scripts/train_decisions.py", "train", "--config", "configs/train/decisions-v0-lora-h100.yaml",
+             "--set", "train_input=artifacts/simgen/v05/train-v05.jsonl", "--set", "out_dir={runs}", "--set", "run_name=v05-s1-2b",
+             "--set", "seed=1",
+             "--gpu-memory-fraction", "0.92"]
+      wall_set: max_wall_hours
+      max_minutes: 300
+      est_minutes: 135
+    - name: after-T2
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v05-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T2.jsonl", "--out", "{reports}/after-v05-s1-2b-T2.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 27
+      optional: true
+    - name: after-T3
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v05-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T3.jsonl", "--out", "{reports}/after-v05-s1-2b-T3.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 26
+      optional: true
+    - name: after-T4
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v05-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T4.jsonl", "--out", "{reports}/after-v05-s1-2b-T4.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 15
+      optional: true
+    - name: after-G2
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v05-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/probes/G2.jsonl", "--out", "{reports}/after-v05-s1-2b-G2.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 20
+      est_minutes: 3
+      optional: true
+    - name: after-T1
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v05-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T1.jsonl", "--out", "{reports}/after-v05-s1-2b-T1.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 27
+      optional: true
+    - name: after-T5
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v05-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T5.jsonl", "--out", "{reports}/after-v05-s1-2b-T5.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 14
+      optional: true
+    - name: after-T7
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v05-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T7.jsonl", "--out", "{reports}/after-v05-s1-2b-T7.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 27
+      optional: true
+    - name: after-T6
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v05-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T6.jsonl", "--out", "{reports}/after-v05-s1-2b-T6.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 90
+      est_minutes: 54
+      optional: true
+    - name: after-G1
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v05-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/probes/G1.jsonl", "--out", "{reports}/after-v05-s1-2b-G1.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 45
+      est_minutes: 10
+      optional: true
+    - name: after-T8a
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v05-s1-2b/checkpoint.pt", "--input", "artifacts/t8/T8a.jsonl", "--out", "{reports}/after-v05-s1-2b-T8a.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 30
+      est_minutes: 5
+      optional: true
+  fetch:
+    - runs/*/metrics.json
+    - runs/*/config.yaml
+    - runs/*/checkpoint.pt
+    - reports/*
+provider:
+  name: runpod
+  gpu_type: NVIDIA H100 80GB HBM3
+  gpu_count: 1
+  cloud: SECURE
+  image: runpod/base:1.4.0-cuda1300-ubuntu2404
+  min_cuda_version: "13.0"
+  disk_gb: 100
+  boot_timeout_minutes: 15
+  fetch_reserve_minutes: 8
+  delete_margin_minutes: 2
+  start_grace_minutes: 30
+  done_grace_minutes: 30
+budget:
+  hourly_usd: 3.99
+  max_wall_hours: 6.5
+  max_usd: null
+  price_source: "RunPod v2 카탈로그 (launch 직전 대조)"
+  phase: {name: cloud-phase-1, cap_usd: 250}
+estimate:
+  boot_minutes: 3
+  uplink_mbps: 40
+  fetch_minutes: 3
+  assumption: "Train from v0.3's pod (H100, same recipe, measured): 5,726 steps in 118.2 min incl. 13 dev passes over the same 300 engine dev records. This input has ≈ 6,306 steps (+10 %) and ≈ 12 % more sampled prompt tokens (the engine part's added derived examples quote two instructions), so train ≈ 118.2 × 1.12 ≈ 132 min, rounded up to 135 (the dev passes are unchanged). Diagnoses = v0.3's measured pod (rounded up, or the slower earlier pods): T2 27, T3 26, T4 15, G2 3, T1 27, T5 14, T7 27, T6 54, G1 10, T8a 5 min. No T8b on the pod (Spark, with T9, B1-infamily and the H-set). The 6.5 h wall cap keeps ≥ 30 min of slack in the plan."

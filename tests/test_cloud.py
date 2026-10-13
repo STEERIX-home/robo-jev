@@ -236,7 +236,7 @@ def test_a_gpu_the_cloud_does_not_offer_is_refused():
 
 #: Jobs written after the user raised the phase cap to $250 (2026-10-13, recorded in the ledger's history with
 #: `launch_run.py ledger --set-phase-cap 250`) carry the raised cap — the ledger refuses a job whose phase differs from its own.
-RAISED_PHASE_JOBS = ("decisions-v04-s0-h100.yaml", "decisions-v04-s1-h100.yaml")
+RAISED_PHASE_JOBS = ("decisions-v04-s0-h100.yaml", "decisions-v04-s1-h100.yaml", "decisions-v05-s0-h100.yaml", "decisions-v05-s1-h100.yaml")
 
 
 def test_the_default_phase_is_150_dollars_and_the_shipped_configs_agree():
