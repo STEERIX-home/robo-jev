@@ -530,6 +530,19 @@ def cmd_exposure(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 
+def share_to_examples(engine: Path, share: float, *, config: dict[str, Any]) -> int:
+    """``--mujoco-share``: the MuJoCo examples per epoch that make `share` of the input at the train config's seed, next to the engine part
+    (counted with its pick rule), the d1 mix and v0.3's general part (both fixed) — the mix then holds the part at that count."""
+    from robo_jev.decisions.examples import examples_per_epoch, split_dev
+
+    if not 0.0 < share < 1.0:
+        raise SystemExit(f"--mujoco-share must be in (0, 1) (got {share})")
+    q, seed = int(config["questions_per_request"]), int(config["seed"])
+    others = examples_per_epoch(split_dev(_read_records(engine), fraction=config["dev_fraction"], salt=config["dev_salt"])[0], q=q, seed=seed)
+    others += V03_COUNTS["probe_examples"] + V03_COUNTS["general_examples"]
+    return math.ceil(share * others / (1.0 - share))
+
+
 def _run(argv: list[str]) -> None:
     _log("$ " + " ".join(argv))
     subprocess.run([sys.executable, *argv], check=True, cwd=REPO)
@@ -555,7 +568,8 @@ def cmd_all(args: argparse.Namespace) -> int:
     mix = ["scripts/convert_single_probe.py", "mix", "--base", str(engine), "--extra", f"mujoco={mujoco}", "--probe", str(PROBE),
            "--sealed", *map(str, SEALED_FOR_MIX), str(args.holdout), "--general", str(GENERAL), "--general-records", str(V03_COUNTS["general_records"]), "--general-repeat-if-short",
            "--train-config", str(args.train_config), "--token-sample", str(args.token_sample), "--out", str(train)]
-    mix += ["--extra-share", f"mujoco={args.mujoco_share}"] if args.mujoco_share is not None else ["--extra-examples", f"mujoco={args.mujoco_examples}"]
+    target = args.mujoco_examples if args.mujoco_share is None else share_to_examples(engine, args.mujoco_share, config=_config(args.train_config))
+    mix += ["--extra-examples", f"mujoco={target}"]
     _run(mix)
     overlap = ["scripts/system1_v03.py", "overlap", "--input", str(train), "--out", str(out / "train-v04.overlap.json"),
                "--sealed-extra", f"B1={B1}", "--sealed-extra", f"H-set={args.holdout}"]
@@ -613,7 +627,8 @@ def build_parser() -> argparse.ArgumentParser:
     every.add_argument("--per-family", type=int, default=1500)
     every.add_argument("--seed", type=int, default=SUBSAMPLE_SEED)
     every.add_argument("--mujoco-examples", type=int, default=V03_COUNTS["mujoco_examples"])
-    every.add_argument("--mujoco-share", type=float, default=None, help="hold the MuJoCo share instead of its count (not the default)")
+    every.add_argument("--mujoco-share", type=float, default=None,
+                       help="hold the MuJoCo share instead of v0.3's count (not the default): converted into an example count at the train config's seed")
     every.add_argument("--token-sample", type=int, default=3000)
     every.add_argument("--train-config", type=Path, default=TRAIN_CONFIG)
     every.add_argument("--out-dir", type=Path, required=True)

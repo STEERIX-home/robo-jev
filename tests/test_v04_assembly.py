@@ -462,3 +462,26 @@ def test_the_built_v04_input_when_present():
     assert seed0["action"] == 21297 and seed0["derived"] == 18551 and seed0["checks"]["mujoco_examples_within_5pct"] and seed0["checks"]["steps_le_1.25x"]
     overlap = json.loads((root / "train-v04.overlap.json").read_text(encoding="utf-8"))
     assert overlap["total_hits"] == 0 and {"B1", "H-set"} <= set(overlap["sealed"]) and not overlap["missing_sealed"]
+
+
+def test_a_share_target_is_refused_next_to_an_exact_general_count_and_converted_by_the_assembly(tmp_path):
+    script = _load("convert_single_probe.py")
+    mujoco = _paired(tmp_path, ("tilt",), pairs=3)
+    general = _general(tmp_path, n_rows=4)
+    args = [*_mix_args(tmp_path, REQUESTS, tmp_path / "t.jsonl"), "--extra", f"mujoco={mujoco}", "--extra-share", "mujoco=0.2",
+            "--general", str(general), "--general-records", "10"]
+    with pytest.raises(SystemExit, match="--extra-examples"):
+        script.main(args)
+    from robo_jev.simgen.record import dumps
+
+    assemble = _load("assemble_v04.py")
+    engine = tmp_path / "engine.jsonl"
+    ruled = [s1.with_pick_rule(_engine_like(i, derived=1 + i % 4)) for i in range(40)]
+    engine.write_text("".join(dumps(r) + "\n" for r in ruled), encoding="utf-8")
+    config = assemble._config(TRAIN_CONFIG)
+    train, _ = E.split_dev(ruled, fraction=config["dev_fraction"], salt=config["dev_salt"])
+    others = E.examples_per_epoch(train, q=2, seed=config["seed"]) + 2724 + 45808
+    target = assemble.share_to_examples(engine, 0.2, config=config)
+    assert target == -(-others // 4) and target / (target + others) >= 0.2 > (target - 1) / (target - 1 + others)
+    with pytest.raises(SystemExit, match="in \\(0, 1\\)"):
+        assemble.share_to_examples(engine, 1.2, config=config)

@@ -557,6 +557,9 @@ def cmd_mix(args: argparse.Namespace) -> int:
         extra["train"], extra["dev"] = split_dev(extra["records"], fraction=config["dev_fraction"], salt=config["dev_salt"])
         examples[extra["name"]] = _examples(extra["train"], q, seed)
     shares = _shares_arg(args.extra_share or [], [e["name"] for e in extras])
+    if shares and args.general_records is not None:
+        raise SystemExit("--extra-share sizes a part against the others before the general part, which --general-records fixes afterwards — "
+                         "give the part an example count instead (--extra-examples)")
     _extra_second_passes(extras, examples, shares,
                          general_share=float(args.general_share) if args.general is not None and args.general_share is not None else 0.0,
                          config=config, q=q, counts=_counts_arg(args.extra_examples or [], [e["name"] for e in extras], shares))
