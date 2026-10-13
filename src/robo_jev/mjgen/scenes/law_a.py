@@ -207,7 +207,9 @@ class ForksScene(PlatformScene):
     question_names = {"key": "load_shifts_on_forks", "direction": "push_change_effect", "outcome": "load_after_manoeuvre",
                       "action": "safest_fork_plan", "compare": "riskier_fork_plan", "score_cf": "shift_risk_other_rate", "severe": "load_tips_off"}
     outcome_keys = {"stays_put": "stay", "slides": "slide", "tips_over": "tip"}
-    dominant_option = "tilt_back"
+    #: braking or turning more gently with the mast level is the safer option by construction (it lowers the push; in a turn the mast tilt
+    #: barely matters): it won 72 % of the first forks action questions, so it is the option left out of a seeded half of them
+    dominant_option = "gentler_level"
     factors = {
         "tine_surface": {"field": "surface", "fact": "word", "how": "word"},
         "load_base": {"field": "base", "fact": "word", "how": "word"},
