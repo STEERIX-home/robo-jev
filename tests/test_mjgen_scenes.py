@@ -189,6 +189,23 @@ def test_a_short_stop_holds_its_stated_rate_for_most_of_the_stop():
 # -- candidates, labels, records -------------------------------------------------------------------------------------------------
 
 
+def test_scenes_with_the_aim_check_reach_their_targets_and_keep_them_uniform():
+    """Regression: most one-drawer cabinets cannot tip, so the bisection used to stop at the extension limit and high aims were missed;
+    redrawing the target on every retry then biased the accepted targets low."""
+    for name in ("cabinet", "reach", "tray", "palms"):
+        assert SCENES[name].verify_aim
+        aims, misses = [], 0
+        for index in range(40):
+            group = B.candidate(name, 3000 + index, MASTER, k=32, pair_share=0.0)
+            target = min(1.0, max(0.0, group.plan["aim_key"]))
+            aims.append(target)
+            misses += abs(group.notes["static_key"] - target) > 0.2 + 1e-9 and 0.0 <= group.plan["aim_key"] <= 1.0
+        assert misses == 0, name
+        assert sum(1 for a in aims if a >= 0.5) >= 12, (name, sorted(aims))  # high aims are not starved
+    for name in ("forks", "bin", "table", "plate", "clamp"):
+        assert not SCENES[name].verify_aim  # their labelled candidates keep v0.3b's sampling order
+
+
 def test_candidates_are_deterministic_and_the_table_aim_is_exact():
     for name in SCENES:
         a, b = B.candidate(name, 11, MASTER, k=4), B.candidate(name, 11, MASTER, k=4)
