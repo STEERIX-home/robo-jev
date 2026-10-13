@@ -240,16 +240,26 @@ class ShiftScene(Scene):
         g = self.geometry(v)
         return g["feet_x"][1] + rigs.FOOT_HALF[0]
 
+    #: share of the mover's peak stopping moment that counts toward a lift in the static aim (calibrated on ≈ 20 MuJoCo draws of reach and
+    #: cabinet: with the full moment the aim predicted lifts MuJoCo rarely showed — a brief stop barely rotates the base —, with none it
+    #: missed the lifts of quick reaches and pulls)
+    JOLT_SHARE = 0.5
+
     def static_outcome(self, v: dict[str, Any], draw: dict[str, float]) -> str:
-        """``tips`` when the resting centre of mass of base and mover is past the front feet, else ``steady``. Aiming only — the labels
-        are MuJoCo's, whose lifts near the boundary come from the mover's stop. (A first version also counted the stop's peak forward
-        moment as a lift; a stop lasting a fraction of a second barely rotates a 20–90 kg base, so MuJoCo rarely agreed.)"""
+        """``tips`` when the resting centre of mass of base and mover is past the front feet; ``lifts`` when it is not but the moment about
+        the front feet plus :data:`JOLT_SHARE` of the stop's peak moment m·(2π·travel/T²)·h turns forward; else ``steady``. Aiming only —
+        the labels are MuJoCo's."""
         g = self.geometry(v)
         m = self.mover_mass(v, draw)
         x_m = g["mover_at"][0] + self.travel(v)
         x_b = draw["cx"] * g["base_dims"][0]
         edge = self.front_edge(v)
-        return "tips" if g["base_mass"] * (x_b - edge) + m * (x_m - edge) > 0 else "steady"
+        moment = G * (g["base_mass"] * (x_b - edge) + m * (x_m - edge))
+        if moment > 0:
+            return "tips"
+        height = g["base_z"] + g["base_dims"][2] / 2 + g["mover_at"][2]
+        jolt = m * (2 * math.pi * self.travel(v) / v["duration"] ** 2) * height
+        return "lifts" if moment + self.JOLT_SHARE * jolt > 0 else "steady"
 
     def static_travel(self, v: dict[str, Any], mover_mass: float) -> float:
         """The travel at which the centre of mass of base (centred) and mover passes the front feet's edge."""
