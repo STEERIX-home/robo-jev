@@ -502,7 +502,7 @@ class PalmsScene(SqueezeScene):
     accel_max = 8.0
     accel_add = 0.5
     question_names = {"key": "box_slips_between_palms", "direction": "press_change_effect", "outcome": "box_after_carry", "action": "safest_carry",
-                      "compare": "riskier_carry", "score_cf": "slip_risk_other_press", "severe": "box_falls"}
+                      "compare": "riskier_carry", "score_cf": "slip_risk_other_press", "severe": "box_slips_free"}
     outcome_keys = {"secure": "hold", "slid_lower": "slip", "on_the_floor": "drop"}
     factors = {
         "palms": {"field": "pads", "fact": "word", "how": "word"},
@@ -612,7 +612,7 @@ class PalmsScene(SqueezeScene):
             out["slip_risk_other_press"] = {"type": "score", "instructions": f"Give the chance, from 0 to 1, that the {item} slips or falls if each palm "
                                             f"pressed {other} rather than {now}.", "criteria": ["0 = no chance it moves", "1 = it will surely slip or fall"]}
         if "severe" in mix:
-            out["box_falls"] = {"type": "noul", "instructions": f"Does the {item} slip free and fall during the {what}?"}
+            out["box_slips_free"] = {"type": "noul", "instructions": f"Does the {item} slip free and fall during the {what}?"}
         return out
 
     def catalogs(self) -> dict[str, Any]:
