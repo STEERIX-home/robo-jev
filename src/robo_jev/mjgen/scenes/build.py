@@ -109,11 +109,16 @@ def candidate(name: str, index: int, master: int, *, k: int = fam.DEFAULT_K, pai
     seed = group_seed(master, name, index)
     rng = random.Random(seed)
     cache: dict = {}
-    for _ in range(200):
+    # with the aim check the target is drawn once and kept while the scene is resampled (redrawn every 50 tries), so rejecting
+    # unreachable targets does not bias the accepted targets low; scenes without the check keep v0.3b's order (a target per try)
+    fixed_aim = fam._target(rng) if scene.verify_aim else None
+    for attempt in range(200):
+        if fixed_aim is not None and attempt and attempt % 50 == 0:
+            fixed_aim = fam._target(rng)
         visible, decisive = scene.sample(rng)
         field = decisive["field"]
         rate_at = _rate_fn(scene, visible, field, seed ^ 0xD3A5, k, cache)
-        aim_key = fam._target(rng)
+        aim_key = fixed_aim if fixed_aim is not None else fam._target(rng)
         value = fam.solve_value(rate_at, decisive["lo"], decisive["hi"], min(max(aim_key, 1e-3), 1.0), increasing=decisive["increasing"])
         if aim_key > 1.0:  # clear-cut: push past the last threshold
             value = value * (1.15 if decisive["increasing"] else 0.85)
@@ -125,6 +130,10 @@ def candidate(name: str, index: int, master: int, *, k: int = fam.DEFAULT_K, pai
         fam._set_field(visible, field, value)
         if not scene.accept(visible):
             continue
+        if scene.verify_aim:
+            got = rate_at(value)
+            if (aim_key > 1.0 and got < 0.95) or (aim_key < 0.0 and got > 0.05) or (0.0 <= aim_key <= 1.0 and abs(got - aim_key) > 0.2):
+                continue
         aim_cf, cf_kind = fam._second_target(rng, aim_key)
         cf_value = fam._round(fam.solve_value(rate_at, decisive["lo"], decisive["hi"], max(aim_cf, 1e-3), increasing=decisive["increasing"]), decisive["step"])
         if abs(cf_value - value) < decisive["step"] / 2:

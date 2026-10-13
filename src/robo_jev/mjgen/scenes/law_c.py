@@ -492,6 +492,7 @@ PALM_DOMAINS = ("apartment hallway", "office move", "school storeroom", "communi
 
 class PalmsScene(SqueezeScene):
     name = "palms"
+    verify_aim = True
     pad_half = (0.06, 0.012, 0.07)
     mass_digits = 1
     pads = PALM_COVERS

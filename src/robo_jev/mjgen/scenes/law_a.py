@@ -676,6 +676,7 @@ TRAY_SIZE = ((0.35, 0.50), (0.25, 0.38))
 
 class TrayScene(PlatformScene):
     name = "tray"
+    verify_aim = True
     aim_slide_distance = True
     slide_m = 0.02
     question_names = {"key": "drink_moves_on_tray", "direction": "pace_change_effect", "outcome": "drink_after_move", "action": "safest_tray_plan",

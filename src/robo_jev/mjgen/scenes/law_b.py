@@ -241,20 +241,15 @@ class ShiftScene(Scene):
         return g["feet_x"][1] + rigs.FOOT_HALF[0]
 
     def static_outcome(self, v: dict[str, Any], draw: dict[str, float]) -> str:
-        """``tips`` when the resting centre of mass of base and mover is past the front feet; ``lifts`` when it is not, but the mover's
-        stop at the end of the run (peak deceleration 2π·travel/duration², at the mover's height) briefly turns the moment about the
-        front feet forward; else ``steady``. Aiming only — the labels are MuJoCo's."""
+        """``tips`` when the resting centre of mass of base and mover is past the front feet, else ``steady``. Aiming only — the labels
+        are MuJoCo's, whose lifts near the boundary come from the mover's stop. (A first version also counted the stop's peak forward
+        moment as a lift; a stop lasting a fraction of a second barely rotates a 20–90 kg base, so MuJoCo rarely agreed.)"""
         g = self.geometry(v)
         m = self.mover_mass(v, draw)
         x_m = g["mover_at"][0] + self.travel(v)
         x_b = draw["cx"] * g["base_dims"][0]
         edge = self.front_edge(v)
-        moment = G * (g["base_mass"] * (x_b - edge) + m * (x_m - edge))
-        if moment > 0:
-            return "tips"
-        height = g["base_z"] + g["base_dims"][2] / 2 + g["mover_at"][2]
-        jolt = m * (2 * math.pi * self.travel(v) / v["duration"] ** 2) * height
-        return "lifts" if moment + jolt > 0 else "steady"
+        return "tips" if g["base_mass"] * (x_b - edge) + m * (x_m - edge) > 0 else "steady"
 
     def static_travel(self, v: dict[str, Any], mover_mass: float) -> float:
         """The travel at which the centre of mass of base (centred) and mover passes the front feet's edge."""
@@ -312,6 +307,7 @@ X0 = 0.25
 
 class ReachScene(ShiftScene):
     name = "reach"
+    verify_aim = True
     question_names = {"key": "base_tips_or_lifts", "direction": "reach_change_effect", "outcome": "base_after_reach", "action": "safest_reach_plan",
                       "compare": "riskier_reach_plan", "score_cf": "tip_risk_other_reach", "severe": "base_goes_over"}
     outcome_keys = {"steady": "steady", "wheels_lift": "lifts", "tips_over": "tips"}
@@ -468,11 +464,11 @@ class ReachScene(ShiftScene):
 # --------------------------------------------------------------------------
 
 CABINET_CONTENTS = {
-    "files": {"mass": (18.0, 32.0), "text": "packed tight with hanging files"},
-    "tools": {"mass": (22.0, 40.0), "text": "full of hand tools"},
-    "half": {"mass": (8.0, 16.0), "text": "about half full of binders"},
+    "files": {"mass": (22.0, 36.0), "text": "packed tight with hanging files"},
+    "tools": {"mass": (26.0, 45.0), "text": "full of hand tools"},
+    "half": {"mass": (10.0, 18.0), "text": "about half full of binders"},
     "light": {"mass": (1.5, 5.0), "text": "holding only a few folders"},
-    "unknown": {"mass": (1.5, 36.0), "text": "holding contents nobody has listed"},
+    "unknown": {"mass": (1.5, 40.0), "text": "holding contents nobody has listed"},
 }
 CABINET_BALLAST = {
     "none": {"cx": (-0.03, 0.03), "text": "the other drawers are empty"},
@@ -485,10 +481,10 @@ CABINET_FLOORS = {
     "tile": {"text": "ceramic tiles", "mu": (0.45, 0.60)},
 }
 CABINET_KINDS = (
-    {"key": "filing4", "name": "four-drawer filing cabinet", "depth": (0.60, 0.70), "width": (0.45, 0.50), "height": (1.30, 1.40), "mass": (28.0, 45.0), "drawers": 4},
-    {"key": "filing3", "name": "three-drawer filing cabinet", "depth": (0.60, 0.68), "width": (0.45, 0.50), "height": (1.00, 1.05), "mass": (22.0, 36.0), "drawers": 3},
-    {"key": "toolchest", "name": "tall mechanic's tool chest", "depth": (0.45, 0.55), "width": (0.65, 0.80), "height": (0.95, 1.10), "mass": (35.0, 60.0), "drawers": 5},
-    {"key": "plan", "name": "tall sample-storage cabinet", "depth": (0.50, 0.60), "width": (0.40, 0.50), "height": (1.50, 1.80), "mass": (25.0, 40.0), "drawers": 5},
+    {"key": "filing4", "name": "four-drawer filing cabinet", "depth": (0.60, 0.70), "width": (0.45, 0.50), "height": (1.30, 1.40), "mass": (20.0, 34.0), "drawers": 4},
+    {"key": "filing3", "name": "three-drawer filing cabinet", "depth": (0.60, 0.68), "width": (0.45, 0.50), "height": (1.00, 1.05), "mass": (15.0, 27.0), "drawers": 3},
+    {"key": "toolchest", "name": "tall mechanic's tool chest", "depth": (0.45, 0.55), "width": (0.65, 0.80), "height": (0.95, 1.10), "mass": (26.0, 42.0), "drawers": 5},
+    {"key": "plan", "name": "tall sample-storage cabinet", "depth": (0.50, 0.60), "width": (0.40, 0.50), "height": (1.50, 1.80), "mass": (16.0, 28.0), "drawers": 5},
 )
 CABINET_ROBOTS = ("office helper robot with an arm", "pharmacy picking robot", "workshop rover with a gripper arm")
 CABINET_DOMAINS = ("records office", "school office", "hospital records room", "machine shop", "law firm archive", "architect's studio", "garage workshop",
@@ -498,6 +494,7 @@ DRAWER_SHELL = 3.0
 
 class CabinetScene(ShiftScene):
     name = "cabinet"
+    verify_aim = True
     question_names = {"key": "cabinet_tips_or_rocks", "direction": "extension_change_effect", "outcome": "cabinet_after_pull",
                       "action": "safest_pull_plan", "compare": "riskier_pull_plan", "score_cf": "tip_risk_other_extension", "severe": "cabinet_falls"}
     outcome_keys = {"steady": "steady", "rocks_forward": "lifts", "falls_forward": "tips"}

@@ -58,6 +58,9 @@ class Scene:
     #: numeric pair spans (field → callable(current, visible) → (lo, hi, step))
     pair_spans: dict[str, Callable[[float, dict[str, Any]], tuple[float, float, float]]] = {}
     domains: tuple[str, ...] = ()
+    #: resample a candidate whose static key rate misses its target by more than 0.2 (or a clear-cut target): for scenes where part of
+    #: the parameter space cannot reach high targets (a heavy cabinet, a light payload). Off for the scenes labelled before it existed.
+    verify_aim: bool = False
 
     # -- sampling and priors -------------------------------------------------------------------------------------------------------
 
