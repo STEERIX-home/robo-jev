@@ -5,8 +5,9 @@ rollout; loads are boxes only) and on T8's contact settings and tracking gains (
 ``implicitfast``, elliptic cones, ``impratio`` 10, 4 ms contacts). Four engines:
 
 * **platform** (law A — tip or slide under acceleration or tilt; scenes ``forks``, ``bin``, ``tray``): a heavy carriage on two slide
-  joints carries a support (two fork tines; a cargo-bin floor with four walls; a hand-held tray), fixed at a tilt about the lateral
-  axis (the forks' mast tilt); a free box load rests on it. The carriage follows a planned acceleration profile along x (braking or
+  joints carries a support (two fork tines and a load backrest; a cargo-bin floor with four walls; a hand-held tray), fixed at a tilt
+  about the lateral axis (the forks' mast tilt); a free box load rests on it. Every support geom is its own body (see
+  :func:`platform_xml`: a load whose hidden centre of mass is moved at runtime otherwise lost its contacts with multi-geom bodies). The carriage follows a planned acceleration profile along x (braking or
   starting off) or y (a turn, as its lateral acceleration — a pure translation, so the load feels the same inertial push v²/R as in
   the turn). Only relative motion matters, so a stop from speed v is rolled as the carriage speeding up to v the other way from rest.
   Read in the support frame: the load's slide along the support plane and the tilt of its up axis from the support normal.
