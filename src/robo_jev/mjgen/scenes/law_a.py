@@ -195,7 +195,7 @@ TINE_W = (0.10, 0.15)
 
 class ForksScene(PlatformScene):
     name = "forks"
-    question_names = {"key": "load_shifts_on_forks", "direction": "braking_change_effect", "outcome": "load_after_manoeuvre",
+    question_names = {"key": "load_shifts_on_forks", "direction": "push_change_effect", "outcome": "load_after_manoeuvre",
                       "action": "safest_fork_plan", "compare": "riskier_fork_plan", "score_cf": "shift_risk_other_rate", "severe": "load_tips_off"}
     outcome_keys = {"stays_put": "stay", "slides": "slide", "tips_over": "tip"}
     dominant_option = "tilt_back"
@@ -348,7 +348,7 @@ class ForksScene(PlatformScene):
         out["load_shifts_on_forks"] = {"type": "noul", "instructions": rng.choice((
             f"During this {manoeuvre}, does the {load} slide 3 cm or more along the tines, or tip over?",
             f"Will the {load} shift at least 3 cm on the forks, or topple, during the {manoeuvre}?"))}
-        out["braking_change_effect"] = {"type": "choice", "instructions": change, "criteria": dict(FORK_DIRECTION)}
+        out["push_change_effect"] = {"type": "choice", "instructions": change, "criteria": dict(FORK_DIRECTION)}
         if "outcome" in mix:
             out["load_after_manoeuvre"] = {"type": "choice", "instructions": f"How does the {load} end up after the {manoeuvre}?",
                                            "criteria": {"stays_put": "still in place on the tines (under 3 cm of movement)",
@@ -358,8 +358,8 @@ class ForksScene(PlatformScene):
             out["safest_fork_plan"] = {"type": "choice", "instructions": f"Which of these plans keeps the {load} safest?",
                                        "criteria": {k: options[k] for k in action_keys}}
         if "compare" in mix:
-            out["riskier_fork_plan"] = {"type": "choice", "instructions": f"Which is more likely to end with the {load} slid or tipped: the plan as it "
-                                        f"stands, or to {options[cf_option]}?",
+            out["riskier_fork_plan"] = {"type": "choice", "instructions": f"Which is more likely to end with the {load} slid or tipped: sticking to the "
+                                        f"plan, or to {options[cf_option]}?",
                                         "criteria": {"as_planned": "sticking to the plan", cf_option: "the alternative plan",
                                                      "about_same": "roughly equal (within 0.1)"}}
         if "score_cf" in mix:

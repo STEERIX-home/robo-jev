@@ -339,6 +339,53 @@ def cmd_assemble(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------
+# regeneration check
+# --------------------------------------------------------------------------
+
+
+def _regen_job(job: tuple[str, dict[str, Any], dict[str, Any] | None, int]) -> dict[str, Any]:
+    from robo_jev.mjgen.scenes.build import candidate, label_group
+
+    kind, row, group_row, k = job
+    if kind == "candidate":
+        group = candidate(row["group"]["family"], int(row["group"]["index"]), row["_seed"], k=k, pair_share=row["_pair_share"])
+        same_group = group_to_json(group) == row["group"]
+        same_labels = json.loads(json.dumps(label_group(group, k=k))) == row["labelled"]
+        return {"kind": kind, "key": [row["group"]["family"], row["group"]["index"]], "group": same_group, "labels": same_labels}
+    fresh = _factor_job((group_row, k))
+    return {"kind": kind, "key": row["key"], "pair": fresh["pair"] == row["pair"], "labels": fresh.get("member") == row.get("member")}
+
+
+def cmd_regen(args: argparse.Namespace) -> int:
+    """Sampled candidate groups and one-factor partners regenerate bit-identically from (scene, index, master seed) with this code."""
+    import multiprocessing
+    import random
+
+    root = Path(args.root)
+    runs = [json.loads(line) for line in (root / "label-runs.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    jobs = []
+    rng = random.Random(args.seed_pick)
+    for scene in args.scenes:
+        rows = _read_rows(_candidates_path(root, scene))
+        run = next(r for r in reversed(runs) if scene in r["scenes"])
+        for row in rng.sample(rows, min(args.per_scene, len(rows))):
+            jobs.append(("candidate", {**row, "_seed": run["seed"], "_pair_share": run["pair_share"]}, None, run["k"]))
+        groups = {int(r["group"]["index"]): r["group"] for r in rows}
+        partners = [r for r in _read_rows(_partners_path(root, scene)) if r.get("pair") is not None]
+        for row in rng.sample(partners, min(args.per_scene, len(partners))):
+            jobs.append(("partner", row, groups[int(row["key"][1])], run["k"]))
+    with multiprocessing.get_context("fork").Pool(args.workers) as pool:
+        results = pool.map(_regen_job, jobs, chunksize=1)
+    ok = all(all(v for k, v in r.items() if k not in ("kind", "key")) for r in results)
+    report = {"kind": "v04a-regen", "root": str(root), "checked": len(results), "identical": ok, "results": results, "git": _git_sha(),
+              "created": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
+    _guard_out(Path(args.out))
+    _write_json(Path(args.out), report)
+    _log(f"regen → {args.out}: {len(results)} checked, identical={ok}")
+    return 0 if ok else 2
+
+
+# --------------------------------------------------------------------------
 # sanity and sweeps
 # --------------------------------------------------------------------------
 
@@ -502,11 +549,15 @@ def cmd_overlap(args: argparse.Namespace) -> int:
     missing = [name for name, path in SEALED_SETS.items() if not path.is_file()]
     if missing:
         raise SystemExit(f"sealed sets missing: {missing}")
+    our_questions = {name: {q for r in rows for q in r["request"]["questions"]} for name, rows in records.items()}
     for set_name, path in SEALED_SETS.items():
-        theirs = O.T9Units(read_records(path), sizes=(4, 5, 6) if set_name in NGRAM_SETS else ())
+        sealed_rows = read_records(path)
+        theirs = O.T9Units(sealed_rows, sizes=(4, 5, 6) if set_name in NGRAM_SETS else ())
+        their_questions = {q for r in sealed_rows for q in (r.get("request") or {}).get("questions") or {}}
         entry = {"records": len(theirs.ids), "sha256": file_sha256(path)}
         for name in ours:
             entry[name] = _against(units[name], theirs, grams[name] if set_name in NGRAM_SETS else None)
+            entry[name]["question_names"] = len(our_questions[name] & their_questions)
             hits = entry[name]
             total = sum(v for k, v in hits.items() if k != "ngrams") + (sum(v for n, v in hits.get("ngrams", {}).items() if int(n) >= 5))
             if total:
@@ -568,13 +619,15 @@ def cmd_overlap(args: argparse.Namespace) -> int:
         hold["scenes_shared"] = sorted({r["meta"]["scene"] for r in records["holdout"]} & {r["meta"]["scene"] for r in train_rows})
         hold["group_seeds_shared"] = len({r["generator"]["seed"] for r in records["holdout"]} & {r["generator"]["seed"] for r in train_rows})
         hold["catalog_names_shared"] = sorted(hold_catalogs & train_catalogs)
+        hold["question_names_shared"] = sorted(our_questions["holdout"] & {q for r in train_rows for q in r["request"]["questions"]})
         report["holdout_vs_train"] = {"train_records": len(train_rows), "train_files": [str(ours.get("train")), str(V03_TRAIN)], **hold}
         _log("holdout vs train: " + json.dumps(hold))
     checks = report["checks"]
     for set_name, entry in report["against_sealed"].items():
         for name in ours:
             hits = entry[name]
-            checks[f"{name} vs {set_name}: ids, hashes, texts"] = hits["ids"] == 0 and hits["requests"] == 0 and hits["states"] == 0 and hits["instruction_or_option_texts"] == 0
+            checks[f"{name} vs {set_name}: ids, hashes, texts, question names"] = (hits["ids"] == 0 and hits["requests"] == 0 and hits["states"] == 0
+                                                                                  and hits["instruction_or_option_texts"] == 0 and hits["question_names"] == 0)
             checks[f"{name} vs {set_name}: sentences"] = hits["sentences"] == 0 and hits["sentences_number_normalised"] == 0
             if set_name in NGRAM_SETS:
                 checks[f"{name} vs {set_name}: no shared 5- or 6-grams"] = all(v == 0 for n, v in hits["ngrams"].items() if int(n) >= 5)
@@ -587,7 +640,7 @@ def cmd_overlap(args: argparse.Namespace) -> int:
         h = report["holdout_vs_train"]
         checks["holdout vs train: nothing shared"] = (not any(h[k] for k in ("ids", "requests", "states", "instruction_or_option_texts", "sentences",
                                                                             "sentences_number_normalised", "group_seeds_shared"))
-                                                      and not h["scenes_shared"] and not h["catalog_names_shared"])
+                                                      and not h["scenes_shared"] and not h["catalog_names_shared"] and not h["question_names_shared"])
     report["verdict"] = {"passed": all(checks.values()), "failed": [k for k, v in checks.items() if not v]}
     report["created"] = dt.datetime.now().astimezone().isoformat(timespec="seconds")
     _guard_out(Path(args.out))
@@ -644,6 +697,14 @@ def build_parser() -> argparse.ArgumentParser:
     tokens.add_argument("--input", type=Path, required=True)
     tokens.add_argument("--out", type=Path, default=None)
     tokens.set_defaults(func=cmd_tokens)
+    regen = sub.add_parser("regen", help="sampled candidates and partners regenerate bit-identically (CPU unit)")
+    regen.add_argument("--scenes", nargs="+", required=True)
+    regen.add_argument("--root", type=Path, default=OUT / "train")
+    regen.add_argument("--per-scene", type=int, default=3)
+    regen.add_argument("--seed-pick", type=int, default=0)
+    regen.add_argument("--workers", type=int, default=16)
+    regen.add_argument("--out", type=Path, default=OUT / "regen-check.json")
+    regen.set_defaults(func=cmd_regen)
     over = sub.add_parser("overlap", help="zero-overlap and sealing checks (counts only; sealed texts are read in code, never printed)")
     over.add_argument("--train", type=Path, default=OUT / "mujoco-scenes.jsonl")
     over.add_argument("--holdout", type=Path, default=OUT / "scene-holdout.jsonl")
