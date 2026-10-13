@@ -21,12 +21,13 @@ __all__ = ["NEVER_SENT_SETS", "SEALED_RECORD_FILES", "SEALED_RECORD_PREFIXES", "
 #: 봉인 분할 — 이 적재기는 이 분할의 파일을 열지 않는다.
 SEALED_SPLITS = ("ood_test",)
 
-#: Sealed outside tests in the Decisions-record format that must never be part of a training input (Task T9: T9 is the gate of the
-#: next trained version). A record belongs to one if its ``meta.set`` names it or its id carries the set's prefix.
-SEALED_RECORD_SETS = ("T9",)
-SEALED_RECORD_PREFIXES = {"T9": "t9-"}
+#: Sealed sets in the Decisions-record format that must never be part of a training input (Task T9: T9 is the gate of the next trained
+#: version; Task v0.4a: the internal scene holdout of the MuJoCo scenes, never trained on). A record belongs to one if its ``meta.set``
+#: names it or its id carries the set's prefix.
+SEALED_RECORD_SETS = ("T9", "v04a-scene-holdout")
+SEALED_RECORD_PREFIXES = {"T9": "t9-", "v04a-scene-holdout": "v04h-"}
 #: Their files (relative to the repository root) — the training-input assembly checks every input against them when present.
-SEALED_RECORD_FILES = {"T9": "artifacts/t9/T9.jsonl"}
+SEALED_RECORD_FILES = {"T9": "artifacts/t9/T9.jsonl", "v04a-scene-holdout": "artifacts/simgen/v04/scene-holdout.jsonl"}
 #: Sets that are never sent to any API (OpenRouter, the narration rewriter, …).
 NEVER_SENT_SETS = ("T9",)
 
