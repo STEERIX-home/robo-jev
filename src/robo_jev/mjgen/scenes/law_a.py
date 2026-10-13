@@ -294,8 +294,8 @@ class ForksScene(PlatformScene):
     def _manoeuvre(self, v: dict[str, Any], person: str) -> str:
         subject = {"third": "The truck", "second": "You", "first": "I"}[person]
         if v["move"] == "brake":
-            return (f"{subject} {'are' if person == 'second' else ('am' if person == 'first' else 'is')} travelling at {v['speed']:.1f} m/s and will brake "
-                    f"to a stop at {v['accel']:.1f} m/s²; full braking is reached {v['ramp']:.2f} s after the brakes come on.")
+            return (f"{subject} {'are' if person == 'second' else ('am' if person == 'first' else 'is')} doing {v['speed']:.1f} m/s with this load; the planned "
+                    f"stop decelerates at {v['accel']:.1f} m/s², full braking coming {v['ramp']:.2f} s after the brakes engage.")
         verb = {"third": "will swing", "second": "will swing", "first": "will swing"}[person]
         return (f"{subject} {verb} through a quarter circle of {v['radius']:.1f} m radius, holding {v['speed']:.1f} m/s throughout; the sideways "
                 f"pull builds up over {v['ramp']:.2f} s.")
@@ -309,16 +309,16 @@ class ForksScene(PlatformScene):
         tilt = "level (no tilt)" if v["tilt"] == 0 else f"tilted back {v['tilt']:.1f}°, tips raised"
         spread = f"{num(v['spread'])} m apart centre to centre, each {cm(v['tine_w'])} wide"
         if style == "log":
-            return (f"Yard log, {v['domain']}. Unit: {a_or_an(v['robot'])}. On the forks: one {v['load_name']}, {size}, {v['mass']:.0f} kg, "
-                    f"resting on {base} with its back against the load backrest, not tied down. Load note: {contents}. Forks: {tines}, {spread}; mast {tilt}. {self._manoeuvre(v, 'third')}")
+            return (f"Yard log, {v['domain']}. Unit — {a_or_an(v['robot'])}. On the forks — one {v['load_name']}, {size}, {v['mass']:.0f} kg, "
+                    f"resting on {base} with its back against the load backrest, not tied down. Load note — {contents}. Forks — {tines}, {spread}; mast {tilt}. {self._manoeuvre(v, 'third')}")
         if style == "brief":
             return (f"You drive {a_or_an(v['robot'])} in {a_or_an(v['domain'])}. Your forks carry {a_or_an(v['load_name'])} ({size}; {v['mass']:.0f} kg) "
                     f"on {base}, back against the load backrest and not tied down; {contents}. Your forks are {tines}, {spread}, and your mast is {tilt}. {self._manoeuvre(v, 'second')}")
         if style == "sheet":
             return "\n".join((
-                f"truck: {v['robot']} ({v['domain']})", f"load on forks: {v['load_name']}, against the load backrest, not tied down", f"load size: {size}",
-                f"load weight: {v['mass']:.0f} kg", f"load base: {base}", f"inside the load: {contents}", f"forks: {tines}; {spread}",
-                f"mast: {tilt}", f"manoeuvre: {self._manoeuvre(v, 'third')}",
+                f"truck — {v['robot']} ({v['domain']})", f"load on forks — {v['load_name']}, against the load backrest, not tied down", f"load size — {size}",
+                f"load weight — {v['mass']:.0f} kg", f"load base — {base}", f"inside the load — {contents}", f"forks — {tines}; {spread}",
+                f"mast — {tilt}", f"manoeuvre — {self._manoeuvre(v, 'third')}",
             ))
         return (f"I am {a_or_an(v['robot'])} at work in the {v['domain']}. I have {a_or_an(v['load_name'])} on my forks, {size}, weighing "
                 f"{v['mass']:.0f} kg; it stands on {base}, back against my load backrest, loose. As for the inside: {contents}. My forks are {tines}, {spread}, and my mast is "
@@ -343,16 +343,16 @@ class ForksScene(PlatformScene):
         truck = {"third": "the truck", "second": "you", "first": "I"}[person]
         if v["move"] == "brake":
             now, other = f"{v['accel']:.1f} m/s²", f"{plan['cf_value']:.1f} m/s²"
-            change = rng.choice((f"Suppose {truck} braked at {other} rather than {now}. Would the {load} be more likely, less likely or about as likely "
-                                 "to slide or tip?",
+            change = rng.choice((f"Suppose {truck} braked at {other} rather than {now}. Then would the {load} be more likely, less likely or about as "
+                                 "likely to slide or tip?",
                                  f"Against the planned {now} of braking, what would {other} of braking do to the chance that the {load} slides or tips?"))
-            rate_text = f"if the braking were {other}, not the planned {now}"
+            rate_text = f"if the braking used {other} in place of the planned {now}"
         else:
             now, other = f"{v['speed']:.1f} m/s", f"{plan['cf_value']:.1f} m/s"
-            change = rng.choice((f"Suppose the turning speed were {other} (the plan says {now}). Would the {load} be more likely, less likely or "
-                                 "about as likely to slide or tip?",
+            change = rng.choice((f"Suppose {other} were the turning speed, where the plan says {now}. Then would the {load} be more likely, less "
+                                 "likely or about as likely to slide or tip?",
                                  f"Against the planned turning speed of {now}, what would {other} do to the chance that the {load} slides or tips?"))
-            rate_text = f"if the turning speed were {other}, not the planned {now}"
+            rate_text = f"if {other} were the turning speed in place of the planned {now}"
         out: dict[str, Any] = {}
         out["load_shifts_on_forks"] = {"type": "noul", "instructions": rng.choice((
             f"During this {manoeuvre}, does the {load} slide 3 cm or more along the tines, or tip over?",
@@ -361,7 +361,7 @@ class ForksScene(PlatformScene):
         if "outcome" in mix:
             out["load_after_manoeuvre"] = {"type": "choice", "instructions": f"How does the {load} end up after the {manoeuvre}?",
                                            "criteria": {"stays_put": "still in place on the tines (under 3 cm of movement)",
-                                                        "slides": "slid 3 cm or more along the tines, still upright", "tips_over": "tipped over"}}
+                                                        "slides": "slid 3 cm or more along the tines, still upright", "tips_over": "toppled off its base"}}
         options = self._option_text(v, plan)
         if "action" in mix:
             out["safest_fork_plan"] = {"type": "choice", "instructions": f"Which of these plans keeps the {load} safest?",
@@ -556,8 +556,8 @@ class BinScene(PlatformScene):
     def _stop(self, v: dict[str, Any], person: str) -> str:
         subject = {"third": "The rover", "second": "You", "first": "I"}[person]
         be = {"third": "is", "second": "are", "first": "am"}[person]
-        return (f"{subject} {be} cruising at {v['speed']:.1f} m/s and must stop for a crossing: it stops at {v['accel']:.1f} m/s², braking that "
-                f"builds up over {v['ramp']:.2f} s.")
+        return (f"{subject} {be} moving along the pavement at {v['speed']:.1f} m/s when a crossing forces a stop, made at {v['accel']:.1f} m/s² once the "
+                f"braking has built up over {v['ramp']:.2f} s.")
 
     def state_text(self, v: dict[str, Any], style: str, rng: random.Random) -> str:
         length, width, height = v["dims"]
@@ -567,7 +567,7 @@ class BinScene(PlatformScene):
         size = f"{num(height)} m tall on a {num(length)} × {num(width)} m base (the first figure is its depth toward the front wall)"
         place = f"its front face {cm(v['gap'])} behind the bin's front wall, which is {cm(v['wall_h'])} high"
         if style == "log":
-            return (f"Route log, {v['domain']}. Unit: {a_or_an(v['robot'])}. In the cargo bin: one {v['item_name']} standing on its base, {size}, "
+            return (f"Route log, {v['domain']}. Unit — {a_or_an(v['robot'])}. In the cargo bin — one {v['item_name']} standing on its base, {size}, "
                     f"{v['mass']:.1f} kg, wrapped in {outside}; {contents}. It stands loose on {liner}, {place}; the other walls are well clear. "
                     f"{self._stop(v, 'third')}")
         if style == "brief":
@@ -576,9 +576,9 @@ class BinScene(PlatformScene):
                     f"near it. {self._stop(v, 'second')}")
         if style == "sheet":
             return "\n".join((
-                f"robot: {v['robot']} ({v['domain']})", f"cargo: {v['item_name']}, standing, not secured", f"cargo size: {size}",
-                f"cargo weight: {v['mass']:.1f} kg", f"cargo outside: {outside}", f"packing: {contents}", f"bin floor: {liner}",
-                f"position: {place}; side and rear walls well clear", f"event: {self._stop(v, 'third')}",
+                f"robot — {v['robot']} ({v['domain']})", f"cargo — {v['item_name']}, standing, not secured", f"cargo size — {size}",
+                f"cargo weight — {v['mass']:.1f} kg", f"cargo outside — {outside}", f"packing — {contents}", f"bin floor — {liner}",
+                f"position — {place}; side and rear walls well clear", f"event — {self._stop(v, 'third')}",
             ))
         return (f"I'm {a_or_an(v['robot'])} on my route through the {v['domain']}. In my bin stands {a_or_an(v['item_name'])}, {size}, "
                 f"{v['mass']:.1f} kg, its outside {outside}; {contents}. It is not held by anything, just standing on {liner}, with {place}. "
@@ -586,7 +586,7 @@ class BinScene(PlatformScene):
 
     def _option_text(self, v: dict[str, Any], plan: dict[str, Any]) -> dict[str, str]:
         opts = plan["option_values"]
-        out = {"as_planned": f"leave it where it is and stop at {v['accel']:.1f} m/s²",
+        out = {"as_planned": f"leave it where it is and brake as planned, {v['accel']:.1f} m/s²",
                "against_wall": "push it forward until it touches the front wall, then stop as planned"}
         if plan["other_option"] == "laid_down":
             out["laid_down"] = "lay it down with its top facing the front wall, then stop as planned"
@@ -607,7 +607,7 @@ class BinScene(PlatformScene):
         out["stop_change_effect"] = {"type": "choice", "instructions": rng.choice((
             f"Imagine stopping with a deceleration of {other} in place of {now}. Is the {item} then more likely, less likely or about as likely to "
             "move or fall?",
-            f"How would stopping at {other}, not {now}, change the chance that the {item} moves or falls over?")),
+            f"With {other} of braking where the plan has {now}, how does the chance that the {item} moves or falls over change?")),
             "criteria": dict(FORK_DIRECTION)}
         if "outcome" in mix:
             out["parcel_after_stop"] = {"type": "choice", "instructions": f"Where is the {item} once the rover has come to rest?",
@@ -751,10 +751,10 @@ class TrayScene(PlatformScene):
             return (f"{subject} will round a table on a curve of {v['radius']:.1f} m radius, moving {v['speed']:.2f} m/s; its sideways push grows "
                     f"over {v['ramp']:.2f} s.")
         if v["move"] == "start":
-            return (f"{subject} will set off from standing, speeding up at {v['accel']:.1f} m/s² to a walking pace of {v['speed']:.1f} m/s; "
-                    f"the push builds over {v['ramp']:.2f} s.")
-        return (f"{subject} will come to a halt from a walking pace of {v['speed']:.1f} m/s, slowing at {v['accel']:.1f} m/s² (a rate it builds up "
-                f"to over {v['ramp']:.2f} s).")
+            return (f"{subject} will set off from standing and reach {v['speed']:.1f} m/s, accelerating at a steady {v['accel']:.1f} m/s² once its push "
+                    f"has built up over {v['ramp']:.2f} s.")
+        return (f"{subject} will halt from {v['speed']:.1f} m/s, decelerating by {v['accel']:.1f} m/s² (a rate it builds up to over "
+                f"{v['ramp']:.2f} s).")
 
     def state_text(self, v: dict[str, Any], style: str, rng: random.Random) -> str:
         width, _, height = v["dims"]
@@ -763,14 +763,14 @@ class TrayScene(PlatformScene):
         wet = ", and it stands in a ring of spilt water" if v.get("wet") else ""
         drink = f"{v['item_name']} ({num(height, 3)} m high, base {num(width, 3)} m across, {v['mass']:.2f} kg; {fill})"
         if style == "log":
-            return (f"Service log, {v['domain']}. Unit: {a_or_an(v['robot'])}, carrying {tray}, held level. On it, alone in the middle: one {drink}{wet}. "
+            return (f"Service log, {v['domain']}. Unit — {a_or_an(v['robot'])}, carrying {tray}, held level. On it, alone in the middle: one {drink}{wet}. "
                     f"{self._move(v, 'third')}")
         if style == "brief":
-            return (f"You are {a_or_an(v['robot'])} in {a_or_an(v['domain'])}, holding {tray}, perfectly level. The only thing on it is {a_or_an(drink)}, "
+            return (f"You are {a_or_an(v['robot'])} in {a_or_an(v['domain'])}, holding {tray}, perfectly level. It carries a single {drink}, "
                     f"right in the middle{wet}. {self._move(v, 'second')}")
         if style == "sheet":
-            return "\n".join((f"server: {v['robot']} ({v['domain']})", f"tray: {tray}, held level", f"on the tray (centre): {drink}",
-                              f"under it: {'a ring of spilt water' if v.get('wet') else 'dry'}", f"next move: {self._move(v, 'third')}"))
+            return "\n".join((f"server on duty — {v['robot']} ({v['domain']})", f"what it holds — {tray}, held level", f"on the tray (centre) — {drink}",
+                              f"under the drink — {'a ring of spilt water' if v.get('wet') else 'dry'}", f"coming up — {self._move(v, 'third')}"))
         return (f"I am {a_or_an(v['robot'])} serving in the {v['domain']}, and I hold {tray} level in front of me. On it, in the middle and on its "
                 f"own, is {a_or_an(drink)}{wet}. {self._move(v, 'first')}")
 
@@ -779,7 +779,7 @@ class TrayScene(PlatformScene):
         if v["move"] == "turn":
             slower = f"round the table at only {opts['opt_slower']['speed']:.2f} m/s"
         else:
-            slower = f"change speed at only {opts['opt_slower']['accel']:.1f} m/s²"
+            slower = f"start or stop more gently, at only {opts['opt_slower']['accel']:.1f} m/s²"
         surface = opts["opt_rubber"]["surface"]
         swap = "move it onto a dry rubber mat on the tray first" if surface == "rubber" else "move it onto a dry cork coaster on the tray first"
         return {"as_planned": "carry on exactly as planned", "slower": slower, "swap_surface": swap}

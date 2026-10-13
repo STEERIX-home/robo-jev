@@ -152,14 +152,14 @@ class TableScene(Scene):
         inside = TABLE_CONTENTS[v["contents"]]["text"]
         size = f"{num(length)} m long (the direction it will stick out), {num(width)} m wide, {num(height)} m high"
         if style == "log":
-            return (f"Bench log, {v['domain']}. Unit: {a_or_an(v['robot'])}. Holding: one {v['item_name']}, {size}, {v['mass']:.1f} kg; {inside}. "
-                    f"Target: the straight edge of {top}, nothing below it but the floor. {self._place(v, 'third')}")
+            return (f"Bench log, {v['domain']}. Unit — {a_or_an(v['robot'])}. Holding — one {v['item_name']}, {size}, {v['mass']:.1f} kg; {inside}. "
+                    f"Target — the straight edge of {top}, nothing below it but the floor. {self._place(v, 'third')}")
         if style == "brief":
             return (f"You are {a_or_an(v['robot'])} in {a_or_an(v['domain'])}, holding {a_or_an(v['item_name'])} ({size}; {v['mass']:.1f} kg); {inside}. "
                     f"You are placing it at the edge of {top}, with only the floor below. {self._place(v, 'second')}")
         if style == "sheet":
-            return "\n".join((f"robot: {v['robot']} ({v['domain']})", f"item: {v['item_name']}", f"item size: {size}", f"item weight: {v['mass']:.1f} kg",
-                              f"weight inside: {inside}", f"surface: {top}, straight edge, floor below", f"placement: {self._place(v, 'third')}"))
+            return "\n".join((f"robot — {v['robot']} ({v['domain']})", f"item — {v['item_name']}", f"item size — {size}", f"item weight — {v['mass']:.1f} kg",
+                              f"weight inside — {inside}", f"surface — {top}, straight edge, floor below", f"placement — {self._place(v, 'third')}"))
         return (f"I'm {a_or_an(v['robot'])} working in the {v['domain']} with {a_or_an(v['item_name'])} in my gripper: {size}, {v['mass']:.1f} kg; "
                 f"{inside}. I'm putting it on {top}, right at the edge, with the floor below. {self._place(v, 'first')}")
 
@@ -179,7 +179,7 @@ class TableScene(Scene):
             f"When {let}, does the {item} tilt out over the edge by 4° or more, or drop to the floor?",
             f"After the release, does the {item} rock out over the edge (4° or more) or go over it?"))}
         out["overhang_change_effect"] = {"type": "choice", "instructions": rng.choice((
-            f"Suppose {other} stuck out instead of {now}. Would the {item} be more likely, less likely or about as likely to tip up or fall?",
+            f"Suppose {other} stuck out where the plan says {now}. Would the {item} be more likely, less likely or about as likely to tip up or fall?",
             f"Against the planned overhang of {now}, what would an overhang of {other} do to the chance that the {item} tips up or falls?")),
             "criteria": dict(TABLE_DIRECTION)}
         if "outcome" in mix:
@@ -400,14 +400,14 @@ class ReachScene(ShiftScene):
                 "apart")
         load = f"{v['payload_name']} ({self._mass(v)})"
         if style == "log":
-            return (f"Ops log, {v['domain']}. Unit: {a_or_an(v['robot'])}; base {base}; {ballast}. Floor: {floor}, level. In the gripper: one {load}. "
+            return (f"Ops log, {v['domain']}. Unit — {a_or_an(v['robot'])}; base {base}; {ballast}. Floor — {floor}, level. In the gripper — one {load}. "
                     f"{self._plan(v, 'third')}")
         if style == "brief":
             return (f"You are {a_or_an(v['robot'])} in {a_or_an(v['domain'])}: your base is {base}, and {ballast}. You stand on level {floor}, gripping "
                     f"{a_or_an(load)}. {self._plan(v, 'second')}")
         if style == "sheet":
-            return "\n".join((f"robot: {v['robot']} ({v['domain']})", f"base: {base}", f"batteries: {ballast}", f"floor: {floor}, level",
-                              f"payload: {load}", f"plan: {self._plan(v, 'third')}"))
+            return "\n".join((f"robot — {v['robot']} ({v['domain']})", f"base — {base}", f"batteries — {ballast}", f"floor — {floor}, level",
+                              f"payload — {load}", f"plan — {self._plan(v, 'third')}"))
         return (f"I'm {a_or_an(v['robot'])} at work in the {v['domain']}. My base is {base}, and {ballast}. I'm parked on level {floor} with "
                 f"{a_or_an(load)} in my gripper. {self._plan(v, 'first')}")
 
@@ -581,14 +581,14 @@ class CabinetScene(ShiftScene):
         cab = (f"{v['cabinet_name']}, {num(height)} m tall, {num(depth)} m deep, {num(width)} m wide, {v['cab_mass']:.0f} kg empty, {v['drawers']} "
                "drawers, standing free (not fixed to the wall)")
         if style == "log":
-            return (f"Task log, {v['domain']}. Unit: {a_or_an(v['robot'])}. Cabinet: {cab}, on {floor}; {ballast}. The {v['level']} drawer is "
+            return (f"Task log, {v['domain']}. Unit — {a_or_an(v['robot'])}. Cabinet — {cab}, on {floor}; {ballast}. The {v['level']} drawer is "
                     f"{contents}. {self._plan(v, 'third')}")
         if style == "brief":
             return (f"You are {a_or_an(v['robot'])} in {a_or_an(v['domain'])}, facing a {cab}, on {floor}. {ballast.capitalize()}. Its {v['level']} "
                     f"drawer is {contents}. {self._plan(v, 'second')}")
         if style == "sheet":
-            return "\n".join((f"robot: {v['robot']} ({v['domain']})", f"cabinet: {cab}", f"floor: {floor}", f"rest of the cabinet: {ballast}",
-                              f"{v['level']} drawer: {contents}", f"plan: {self._plan(v, 'third')}"))
+            return "\n".join((f"robot — {v['robot']} ({v['domain']})", f"cabinet — {cab}", f"floor — {floor}", f"rest of the cabinet — {ballast}",
+                              f"{v['level']} drawer — {contents}", f"plan — {self._plan(v, 'third')}"))
         return (f"I'm {a_or_an(v['robot'])} in the {v['domain']}, in front of a {cab}, on {floor}. {ballast.capitalize()}, and the {v['level']} "
                 f"drawer is {contents}. {self._plan(v, 'first')}")
 
@@ -607,7 +607,8 @@ class CabinetScene(ShiftScene):
             f"As the drawer comes out and stops, does {cab} rock forward off its back feet (1.5° or more), or fall over?",
             f"Will pulling the drawer make {cab} tilt forward by 1.5° or more, or topple?"))}
         out["extension_change_effect"] = {"type": "choice", "instructions": rng.choice((
-            f"Suppose the drawer came out {other} instead of {now}. Would a rock or fall of {cab} be more likely, less likely or about as likely?",
+            f"Suppose the drawer came out {other} where the plan says {now}. Would a rock or fall of {cab} be more likely, less likely or about as "
+            "likely?",
             f"Against pulling the drawer out {now}, what would pulling it {other} do to the chance that {cab} rocks or falls?")),
             "criteria": dict(TABLE_DIRECTION)}
         if "outcome" in mix:

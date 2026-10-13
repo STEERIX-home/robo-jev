@@ -229,14 +229,14 @@ class PlateScene(SqueezeScene):
         force = f"{v['squeeze']:.1f} N"
         mass = self.mass_text(v, "fill level not logged")
         if style == "log":
-            return (f"Run log, {v['domain']}. Unit: {a_or_an(v['robot'])} with {tips}. In the gripper: one {v['item_name']} ({size}), {outside}, "
-                    f"weighing {mass}. Grip: the two long sides, {force} of closing force. Next step: {self._move(v, 'third')}")
+            return (f"Run log, {v['domain']}. Unit — {a_or_an(v['robot'])} with {tips}. In the gripper — one {v['item_name']} ({size}), {outside}, "
+                    f"weighing {mass}. Grip — the two long sides, {force} of closing force. Next step — {self._move(v, 'third')}")
         if style == "brief":
             return (f"You are {a_or_an(v['robot'])} with {tips}, holding {a_or_an(v['item_name'])} by its two long sides at {force}. It is {size}; "
                     f"its sides are {outside}; it weighs {mass}. {self._move(v, 'second')}")
         if style == "sheet":
-            return "\n".join((f"robot: {v['robot']} ({v['domain']})", f"fingers: {tips}", f"labware: {v['item_name']}", f"size: {size}",
-                              f"gripped sides: {outside}", f"weight: {mass}", f"closing force: {force}", f"motion: {self._move(v, 'third')}"))
+            return "\n".join((f"robot — {v['robot']} ({v['domain']})", f"fingers — {tips}", f"labware — {v['item_name']}", f"size — {size}",
+                              f"gripped sides — {outside}", f"weight — {mass}", f"closing force — {force}", f"motion — {self._move(v, 'third')}"))
         return (f"As {a_or_an(v['robot'])} in the {v['domain']}, I am holding {a_or_an(v['item_name'])} between my {tips}, pressing its long sides "
                 f"with {force}. It is {size}, its sides are {outside}, and it weighs {mass}. {self._move(v, 'first')}")
 
@@ -381,7 +381,7 @@ class ClampScene(SqueezeScene):
         subject = {"third": "The truck", "second": "You", "first": "I"}[person]
         if v["move"] == "brake":
             be = {"third": "is", "second": "are", "first": "am"}[person]
-            return (f"{subject} {be} driving with it at {v['speed']:.1f} m/s and will brake to a halt at {v['accel']:.1f} m/s², full braking "
+            return (f"{subject} {be} carrying it across the floor at {v['speed']:.1f} m/s; a halt follows, decelerating at {v['accel']:.1f} m/s², full braking "
                     f"reached after {v['ramp']:.2f} s.")
         verb = "raise" if v["move"] == "lift" else "set down"
         return (f"{subject} will {verb} it {num(v['distance'])} m; top speed {v['peak']:.1f} m/s, speeding up and slowing at {v['accel']:.1f} m/s² "
@@ -395,15 +395,15 @@ class ClampScene(SqueezeScene):
         force = f"{v['squeeze']:.0f} N"
         mass = self.mass_text(v, "model not on the label")
         if style == "log":
-            return (f"Dock log, {v['domain']}. Unit: {a_or_an(v['robot'])} with {pads}. Clamped: one {v['item_name']} ({size}), {outside}, weighing "
-                    f"{mass}. Clamp force: {force}, arms centred on the two side faces; nothing under the carton. {self._move(v, 'third')}")
+            return (f"Dock log, {v['domain']}. Unit — {a_or_an(v['robot'])} with {pads}. Clamped — one {v['item_name']} ({size}), {outside}, weighing "
+                    f"{mass}. Clamp force — {force}, arms centred on the two side faces; nothing under the carton. {self._move(v, 'third')}")
         if style == "brief":
             return (f"You run {a_or_an(v['robot'])} with {pads}. You have {a_or_an(v['item_name'])} squeezed between the arms at {force}, centred on its "
                     f"sides, with nothing underneath. It is {size}, wrapped in {outside}, and weighs {mass}. {self._move(v, 'second')}")
         if style == "sheet":
-            return "\n".join((f"truck: {v['robot']} ({v['domain']})", f"clamp arms: {pads}", f"carton: {v['item_name']}", f"carton size: {size}",
-                              f"carton outside: {outside}", f"carton weight: {mass}", f"clamp force: {force}, on the side faces only",
-                              f"move: {self._move(v, 'third')}"))
+            return "\n".join((f"truck — {v['robot']} ({v['domain']})", f"clamp arms — {pads}", f"carton — {v['item_name']}", f"carton size — {size}",
+                              f"carton outside — {outside}", f"carton weight — {mass}", f"clamp force — {force}, on the side faces only",
+                              f"move — {self._move(v, 'third')}"))
         return (f"I am {a_or_an(v['robot'])} with {pads} in the {v['domain']}. Between my arms, pressed at {force} on its side faces and resting on "
                 f"nothing else, is {a_or_an(v['item_name'])}: {size}, finished in {outside}, weighing {mass}. {self._move(v, 'first')}")
 
@@ -547,7 +547,7 @@ class PalmsScene(SqueezeScene):
         if v["move"] == "walk":
             return (f"{subject} will walk {v['steps']} steps at {v['hz']:.2f} steps per second; with each step the hands bob up and down by "
                     f"{cm(v['rise'])} in all.")
-        return (f"{subject} will lift it {cm(v['distance'])} off the bench; top speed {v['peak']:.1f} m/s, speeding up at {v['accel']:.1f} m/s².")
+        return (f"{subject} will lift it {cm(v['distance'])} off the bench; top speed {v['peak']:.1f} m/s, accelerating upward at {v['accel']:.1f} m/s².")
 
     def state_text(self, v: dict[str, Any], style: str, rng: random.Random) -> str:
         length, width, height = v["dims"]
@@ -557,15 +557,15 @@ class PalmsScene(SqueezeScene):
         press = f"{v['squeeze']:.0f} N"
         mass = self.mass_text(v, "fill unknown")
         if style == "log":
-            return (f"Task note, {v['domain']}. Unit: {a_or_an(v['robot'])} wearing {palms}. Carrying: one {v['item_name']}, {size}, sides of {outside}, "
-                    f"weight {mass}. Hold: one palm flat on each side face, pressing {press} each, no hand underneath. {self._move(v, 'third')}")
+            return (f"Task note, {v['domain']}. Unit — {a_or_an(v['robot'])} wearing {palms}. Carrying — one {v['item_name']}, {size}, sides of {outside}, "
+                    f"weight {mass}. Hold — one palm flat on each side face, pressing {press} each, no hand underneath. {self._move(v, 'third')}")
         if style == "brief":
             return (f"You are {a_or_an(v['robot'])} with {palms}. You hold {a_or_an(v['item_name'])} ({size}; sides of {outside}; weight {mass}) with "
                     f"one palm flat on each side, each pressing {press}, and nothing beneath it. {self._move(v, 'second')}")
         if style == "sheet":
-            return "\n".join((f"robot: {v['robot']} ({v['domain']})", f"hands: {palms}", f"carried: {v['item_name']}", f"size: {size}",
-                              f"sides: {outside}", f"weight: {mass}", f"hold: palms flat on the two side faces, {press} each, no support below",
-                              f"plan: {self._move(v, 'third')}"))
+            return "\n".join((f"walker — {v['robot']} ({v['domain']})", f"palm covers — {palms}", f"box carried — {v['item_name']}", f"box size — {size}",
+                              f"box sides — {outside}", f"box weight — {mass}", f"grip — palms flat on the two side faces, {press} each, no support below",
+                              f"walk or lift — {self._move(v, 'third')}"))
         return (f"I am {a_or_an(v['robot'])} with {palms}, working in the {v['domain']}. I'm holding {a_or_an(v['item_name'])} pressed between my "
                 f"flat palms, {press} each and nothing underneath; it is {size}, its sides are {outside}, and it weighs {mass}. {self._move(v, 'first')}")
 
