@@ -148,20 +148,20 @@ class TableScene(Scene):
 
     def state_text(self, v: dict[str, Any], style: str, rng: random.Random) -> str:
         length, width, height = v["dims"]
-        top = TABLE_TOPS[v["top"]]["text"]
+        top = a_or_an(TABLE_TOPS[v["top"]]["text"])
         inside = TABLE_CONTENTS[v["contents"]]["text"]
         size = f"{num(length)} m long (the direction it will stick out), {num(width)} m wide, {num(height)} m high"
         if style == "log":
             return (f"Bench log, {v['domain']}. Unit: {a_or_an(v['robot'])}. Holding: one {v['item_name']}, {size}, {v['mass']:.1f} kg; {inside}. "
-                    f"Target: the straight edge of a {top}, nothing below it but the floor. {self._place(v, 'third')}")
+                    f"Target: the straight edge of {top}, nothing below it but the floor. {self._place(v, 'third')}")
         if style == "brief":
             return (f"You are {a_or_an(v['robot'])} in {a_or_an(v['domain'])}, holding {a_or_an(v['item_name'])} ({size}; {v['mass']:.1f} kg); {inside}. "
-                    f"You are placing it at the edge of a {top}, with only the floor below. {self._place(v, 'second')}")
+                    f"You are placing it at the edge of {top}, with only the floor below. {self._place(v, 'second')}")
         if style == "sheet":
             return "\n".join((f"robot: {v['robot']} ({v['domain']})", f"item: {v['item_name']}", f"item size: {size}", f"item weight: {v['mass']:.1f} kg",
                               f"weight inside: {inside}", f"surface: {top}, straight edge, floor below", f"placement: {self._place(v, 'third')}"))
         return (f"I'm {a_or_an(v['robot'])} working in the {v['domain']} with {a_or_an(v['item_name'])} in my gripper: {size}, {v['mass']:.1f} kg; "
-                f"{inside}. I'm putting it on a {top}, right at the edge, with the floor below. {self._place(v, 'first')}")
+                f"{inside}. I'm putting it on {top}, right at the edge, with the floor below. {self._place(v, 'first')}")
 
     def _options(self, v: dict[str, Any], plan: dict[str, Any]) -> dict[str, str]:
         back = plan["option_values"]["opt_in"]["overhang"]
@@ -191,8 +191,8 @@ class TableScene(Scene):
             out["safest_placement"] = {"type": "choice", "instructions": f"Which way of placing the {item} is safest?",
                                        "criteria": {k: options[k] for k in action_keys}}
         if "compare" in mix:
-            out["riskier_placement"] = {"type": "choice", "instructions": f"Which is more likely to end with the {item} tipping up or falling: the plan as "
-                                        f"it stands, or to {options[cf_option]}?",
+            out["riskier_placement"] = {"type": "choice", "instructions": f"Which is more likely to end with the {item} tipping up or falling: sticking to "
+                                        f"the plan, or to {options[cf_option]}?",
                                         "criteria": {"as_planned": "sticking to the plan", cf_option: "the other placement",
                                                      "about_same": "roughly equal (within 0.1)"}}
         if "score_cf" in mix:

@@ -95,10 +95,13 @@ class SqueezeScene(Scene):
     def xml_example(self, v: dict[str, Any]) -> str:
         return rigs.squeeze_xml(self.name, v["dims"], pad_half=self.pad_for(v["dims"]), hand_mass=self.hand_mass)
 
+    mass_digits = 2
+
     def mass_text(self, v: dict[str, Any], unknown: str) -> str:
+        d = self.mass_digits
         if v["mass_kind"] == "about":
-            return f"about {v['mass']:.2f} kg"
-        return f"between {v['mass_lo']:.2f} and {v['mass_hi']:.2f} kg ({unknown})"
+            return f"about {v['mass']:.{d}f} kg"
+        return f"between {v['mass_lo']:.{d}f} and {v['mass_hi']:.{d}f} kg, {unknown}"
 
     def options(self, group: Any, rng: random.Random) -> None:
         v = group.visible
@@ -329,6 +332,7 @@ class ClampScene(SqueezeScene):
     name = "clamp"
     pad_half = (0.30, 0.02, 0.35)
     hand_mass = 4000.0
+    mass_digits = 1
     pads = CLAMP_PADS
     surfaces = CLAMP_SURFACES
     force_step = 10.0
@@ -489,6 +493,7 @@ PALM_DOMAINS = ("apartment hallway", "office move", "school storeroom", "communi
 class PalmsScene(SqueezeScene):
     name = "palms"
     pad_half = (0.06, 0.012, 0.07)
+    mass_digits = 1
     pads = PALM_COVERS
     surfaces = PALM_SURFACES
     force_step = 1.0
@@ -550,7 +555,7 @@ class PalmsScene(SqueezeScene):
         outside = PALM_SURFACES[v["surface"]]["text"] + (", slick with drizzle" if v.get("wet") else "")
         size = f"{num(width)} m across between the palms, {num(length)} m deep and {num(height)} m high"
         press = f"{v['squeeze']:.0f} N"
-        mass = self.mass_text(v, "how full it is is not known")
+        mass = self.mass_text(v, "fill unknown")
         if style == "log":
             return (f"Task note, {v['domain']}. Unit: {a_or_an(v['robot'])} wearing {palms}. Carrying: one {v['item_name']}, {size}, sides of {outside}, "
                     f"weight {mass}. Hold: one palm flat on each side face, pressing {press} each, no hand underneath. {self._move(v, 'third')}")

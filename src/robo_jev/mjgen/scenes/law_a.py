@@ -755,7 +755,7 @@ class TrayScene(PlatformScene):
             return (f"Service log, {v['domain']}. Unit: {a_or_an(v['robot'])}, carrying {tray}, held level. On it, alone in the middle: one {drink}{wet}. "
                     f"{self._move(v, 'third')}")
         if style == "brief":
-            return (f"You are {a_or_an(v['robot'])} in {a_or_an(v['domain'])}, holding {tray} perfectly level. The only thing on it is {a_or_an(drink)}, "
+            return (f"You are {a_or_an(v['robot'])} in {a_or_an(v['domain'])}, holding {tray}, perfectly level. The only thing on it is {a_or_an(drink)}, "
                     f"right in the middle{wet}. {self._move(v, 'second')}")
         if style == "sheet":
             return "\n".join((f"server: {v['robot']} ({v['domain']})", f"tray: {tray}, held level", f"on the tray (centre): {drink}",
