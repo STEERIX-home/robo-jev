@@ -302,6 +302,45 @@ def test_the_assembly_refuses_held_out_scenes_in_a_training_file(tmp_path):
         module._guard_out(REPO / "artifacts" / "simgen" / "v03" / "x.jsonl")
 
 
+def _script():
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("mjgen_v04_overlap", REPO / "scripts" / "mjgen_v04.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_overlap_command_catches_a_planted_sealed_sentence_and_checks_the_holdout(tmp_path, monkeypatch):
+    from robo_jev.mjgen.overlap import t8b_texts_from_generator
+
+    script = _script()
+    sealed = t8b_texts_from_generator(per_family=2)
+    train = [r for r in records() if r["meta"]["scene"] not in HOLDOUT_SCENES]
+    hold = [r for r in records() if r["meta"]["scene"] in HOLDOUT_SCENES]
+
+    def write(name, rows):
+        path = tmp_path / name
+        path.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
+        return path
+
+    sets = {name: write(f"{name}.jsonl", sealed) for name in ("T1", "T8b", "T9")}
+    monkeypatch.setattr(script, "SEALED_SETS", sets)
+    monkeypatch.setattr(script, "V03_TRAIN", write("v03.jsonl", []))
+    out = tmp_path / "overlap.json"
+    clean = script.main(["overlap", "--train", str(write("train.jsonl", train)), "--holdout", str(write("hold.jsonl", hold)), "--out", str(out)])
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert clean == 0 and report["verdict"]["passed"], report["verdict"]
+    assert report["holdout_vs_train"]["scenes_shared"] == [] and report["holdout_vs_train"]["sentences"] == 0
+    planted = copy.deepcopy(train)
+    planted[0]["request"]["state"] += " " + sealed[0]["request"]["state"].split(". ")[1] + "."
+    assert script.main(["overlap", "--train", str(write("planted.jsonl", planted)), "--out", str(out)]) == 2
+    report = json.loads(out.read_text(encoding="utf-8"))
+    assert report["against_sealed"]["T8b"]["train"]["sentences"] >= 1 and not report["verdict"]["passed"]
+    assert "examples" not in json.dumps(report["against_sealed"])  # counts and our own record ids only
+
+
 # -- the trainer reads the records -----------------------------------------------------------------------------------------------
 
 

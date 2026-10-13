@@ -546,12 +546,18 @@ def cmd_overlap(args: argparse.Namespace) -> int:
     t8b_names = {n.lower() for n in v03_catalog_names()[1]}
     import re as _re
 
-    def phrase_hits(their: set[str]) -> list[str]:
-        return sorted(m for m in mine if any(_re.search(r"\b" + _re.escape(t) + r"\b", m) for t in their))
+    def phrase_hits(their: set[str], *, multi: bool) -> list[str]:
+        """Our names that contain one of theirs as a phrase (their names of ≥ 2 words, or — for information — of one word)."""
+        chosen = {t for t in their if (len(t.split()) >= 2) == multi}
+        return sorted(m for m in mine if m not in their and any(_re.search(r"\b" + _re.escape(t) + r"\b", m) for t in chosen))
 
     report["catalog_names"] = {"ours": len(mine), "t9": len(t9_names), "t8b": len(t8b_names), "shared_with_t9": len(mine & t9_names),
-                               "shared_with_t8b": len(mine & t8b_names), "our_names_containing_a_t9_name": phrase_hits(t9_names),
-                               "our_names_containing_a_t8b_name": phrase_hits(t8b_names)}
+                               "shared_with_t8b": len(mine & t8b_names), "our_names_containing_a_t9_name": phrase_hits(t9_names, multi=True),
+                               "our_names_containing_a_t8b_name": phrase_hits(t8b_names, multi=True),
+                               "information_our_names_containing_a_one_word_t9_name": phrase_hits(t9_names, multi=False),
+                               "information_our_names_containing_a_one_word_t8b_name": phrase_hits(t8b_names, multi=False),
+                               "rule": "exact names disjoint, and no multi-word T9 or T8b name inside ours (v0.3b's rule was exact names only); "
+                                       "one-word hits (generic words such as a container type) are reported, not judged"}
     # the H-set against every training record (the new scenes and v0.3b's three families, which v0.4 trains on)
     if "holdout" in ours:
         train_rows = (records.get("train") or []) + read_records(V03_TRAIN)

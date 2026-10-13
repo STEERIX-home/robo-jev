@@ -215,12 +215,17 @@ class ForksScene(PlatformScene):
     domains = FORK_DOMAINS
 
     def support(self, v: dict[str, Any]) -> list[tuple[str, tuple[float, float, float], tuple[float, float, float], bool]]:
+        """Two tines from the heel forward, and the load backrest (1.2 m high) at the heel, 5 mm behind the load: a load on forks sits
+        back against it, so the mast tilt never slides or tips it backward (without it, a load on worn tines slid back under a steep
+        mast tilt and the tilt sweep was not monotone)."""
         length = self.load_dims(v)[0]
         tine_len = max(1.07, length + 0.20)
-        heel = -(length / 2 + 0.05)
+        heel = -(length / 2 + 0.005)
         cx = heel + tine_len / 2
         half = (tine_len / 2, v["tine_w"] / 2, 0.025)
-        return [("tine_l", (cx, v["spread"] / 2, -0.025), half, True), ("tine_r", (cx, -v["spread"] / 2, -0.025), half, True)]
+        width = v["spread"] / 2 + v["tine_w"] / 2 + 0.10
+        return [("tine_l", (cx, v["spread"] / 2, -0.025), half, True), ("tine_r", (cx, -v["spread"] / 2, -0.025), half, True),
+                ("backrest", (heel - 0.02, 0.0, 0.60), (0.02, width, 0.60), False)]
 
     def lateral_edge(self, v: dict[str, Any]) -> float:
         return min(self.load_dims(v)[1] / 2, v["spread"] / 2 + v["tine_w"] / 2)
@@ -296,18 +301,18 @@ class ForksScene(PlatformScene):
         spread = f"{num(v['spread'])} m apart centre to centre, each {cm(v['tine_w'])} wide"
         if style == "log":
             return (f"Yard log, {v['domain']}. Unit: {a_or_an(v['robot'])}. On the forks: one {v['load_name']}, {size}, {v['mass']:.0f} kg, "
-                    f"resting on {base}, not tied down. Load note: {contents}. Forks: {tines}, {spread}; mast {tilt}. {self._manoeuvre(v, 'third')}")
+                    f"resting on {base} with its back against the load backrest, not tied down. Load note: {contents}. Forks: {tines}, {spread}; mast {tilt}. {self._manoeuvre(v, 'third')}")
         if style == "brief":
             return (f"You drive {a_or_an(v['robot'])} in {a_or_an(v['domain'])}. Your forks carry {a_or_an(v['load_name'])} ({size}; {v['mass']:.0f} kg) "
-                    f"on {base}, not tied down; {contents}. Your forks are {tines}, {spread}, and your mast is {tilt}. {self._manoeuvre(v, 'second')}")
+                    f"on {base}, back against the load backrest and not tied down; {contents}. Your forks are {tines}, {spread}, and your mast is {tilt}. {self._manoeuvre(v, 'second')}")
         if style == "sheet":
             return "\n".join((
-                f"truck: {v['robot']} ({v['domain']})", f"load on forks: {v['load_name']}, not tied down", f"load size: {size}",
+                f"truck: {v['robot']} ({v['domain']})", f"load on forks: {v['load_name']}, against the load backrest, not tied down", f"load size: {size}",
                 f"load weight: {v['mass']:.0f} kg", f"load base: {base}", f"inside the load: {contents}", f"forks: {tines}; {spread}",
                 f"mast: {tilt}", f"manoeuvre: {self._manoeuvre(v, 'third')}",
             ))
         return (f"I am {a_or_an(v['robot'])} at work in the {v['domain']}. I have {a_or_an(v['load_name'])} on my forks, {size}, weighing "
-                f"{v['mass']:.0f} kg; it stands on {base}, loose. As for the inside: {contents}. My forks are {tines}, {spread}, and my mast is "
+                f"{v['mass']:.0f} kg; it stands on {base}, back against my load backrest, loose. As for the inside: {contents}. My forks are {tines}, {spread}, and my mast is "
                 f"{tilt}. {self._manoeuvre(v, 'first')}")
 
     def _option_text(self, v: dict[str, Any], plan: dict[str, Any]) -> dict[str, str]:
@@ -652,7 +657,7 @@ TRAY_FILLS = {
     "low": {"kh": (0.24, 0.36), "text": "nearly finished, only a little left"},
     "unknown": {"kh": (0.24, 0.50), "cx": (-0.06, 0.06), "cy": (-0.06, 0.06), "text": "filled to a level the robot cannot see"},
 }
-TRAY_ROBOTS = ("table-service robot with a tray arm", "café runner robot", "barista assistant on wheels")
+TRAY_ROBOTS = ("wheeled table waiter with a carrying arm", "café runner robot", "barista assistant on wheels")
 TRAY_DOMAINS = ("café", "hotel lounge", "airport bar", "hospital canteen", "rooftop bistro", "museum café", "office pantry", "food court")
 TRAY_SIZE = ((0.35, 0.50), (0.25, 0.38))
 

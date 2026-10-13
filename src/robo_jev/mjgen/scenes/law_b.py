@@ -480,7 +480,7 @@ CABINET_BALLAST = {
     "unknown": {"cx": (-0.10, 0.10), "text": "what is in the other drawers is not known"},
 }
 CABINET_FLOORS = {
-    "carpet": {"text": "low-pile carpet", "mu": (0.60, 0.85)},
+    "carpet": {"text": "cord carpet tiles", "mu": (0.60, 0.85)},
     "vinyl": {"text": "polished vinyl", "mu": (0.35, 0.50)},
     "tile": {"text": "ceramic tiles", "mu": (0.45, 0.60)},
 }
