@@ -7,6 +7,9 @@
     # every record of a training input against every sealed set (T1–T7, G1, G2, T8a, T8b, T9): ids, whole requests, whole states, and the
     # text units of the sets written outside our engine; plus the d1 lineage check against G1 and the engine seed ranges
     python scripts/system1_v03.py overlap --input artifacts/simgen/v03/train-v03.jsonl --out artifacts/simgen/v03/train-v03.overlap.json
+    # Task v0.4b: also against B1-infamily and v0.4a's scene holdout (ids, whole requests, whole states), with v0.4a's set as MuJoCo
+    python scripts/system1_v03.py overlap --input <train-v04>.jsonl --out <train-v04>.overlap.json --sealed-extra B1=artifacts/b1/b1-infamily.jsonl \
+        --sealed-extra H-set=artifacts/simgen/v04/scene-holdout.jsonl --mujoco-set <v0.4a's meta.set>
 
 The rules of the transform are :mod:`robo_jev.simgen.system1_questions`. ``transform`` refuses an input inside a sealed location and any
 record that is not a training-split engine record; it writes byte-stable JSONL (``simgen.record.dumps``) and checks, for every record,
@@ -222,13 +225,17 @@ def cmd_transform(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 
 
-def part_of(record: dict[str, Any]) -> str:
+#: ``meta.set`` of the MuJoCo training records (v0.3b); ``overlap --mujoco-set`` adds others (Task v0.4b: v0.4a's new scenes).
+MUJOCO_SETS = ("v03b-mujoco-train",)
+
+
+def part_of(record: dict[str, Any], *, mujoco_sets: tuple[str, ...] | list[str] = MUJOCO_SETS) -> str:
     """Which part of a v0.3 training input a record belongs to: engine · mujoco · d1 · general (else ``other``)."""
     from robo_jev.data.general_sets import SOURCES
     from robo_jev.decisions.single_probe import MIX_SPLITS
 
     meta = record.get("meta") or {}
-    if meta.get("set") == "v03b-mujoco-train":
+    if meta.get("set") in tuple(mujoco_sets):
         return "mujoco"
     if isinstance(meta.get("source"), dict) and meta["source"].get("set") in SOURCES:
         return "general"
@@ -246,10 +253,20 @@ def cmd_overlap(args: argparse.Namespace) -> int:
     from robo_jev.simgen.holdout import load_holdout, request_hash
     from robo_jev.simgen.narration import SealedIndex, state_sha256
 
+    extra_sealed: dict[str, Path] = {}
+    for spec in args.sealed_extra or []:  # Task v0.4b: B1-infamily, v0.4a's scene holdout — whole ids, requests and states (same generators)
+        name, sep, raw = str(spec).partition("=")
+        if not sep or not name or not raw or name in SEALED or name in extra_sealed:
+            raise SystemExit(f"--sealed-extra takes NAME=PATH with a new name (got {spec!r})")
+        if not Path(raw).is_file():
+            raise SystemExit(f"--sealed-extra {name}: {raw} does not exist — every named sealed file must be checked")
+        extra_sealed[name] = Path(raw)
     sealed = {name: path for name, path in SEALED.items() if path.is_file()}
     missing = sorted(set(SEALED) - set(sealed))
     if missing and not args.allow_missing:
         raise SystemExit(f"sealed sets missing: {missing} (--allow-missing to check against the rest)")
+    sealed.update(extra_sealed)
+    mujoco_sets = tuple(dict.fromkeys([*MUJOCO_SETS, *(args.mujoco_set or [])]))
     index = SealedIndex.build(sealed)
     sealed_ids = {name: {str(r["id"]) for r in _lines(path)} for name, path in sealed.items()}
     outside_units = {name: units for name, units in index.units.items() if units}
@@ -264,7 +281,7 @@ def cmd_overlap(args: argparse.Namespace) -> int:
     from robo_jev.data.sealed import sealed_record_set
 
     for record in _lines(args.input):
-        part = part_of(record)
+        part = part_of(record, mujoco_sets=mujoco_sets)
         tally = per_part[part]
         tally["records"] += 1
         rid = str(record["id"])
@@ -315,7 +332,7 @@ def cmd_overlap(args: argparse.Namespace) -> int:
         "input": {"path": str(args.input), "sha256": file_sha256(args.input), "records": sum(t["records"] for t in per_part.values())},
         "sealed": {name: {"path": str(path), "sha256": index.files[name]["sha256"], "records": len(sealed_ids[name]),
                           "units": len(index.units.get(name) or ())} for name, path in sealed.items()},
-        "missing_sealed": missing,
+        "missing_sealed": missing, "sealed_extra": sorted(extra_sealed), "mujoco_sets": list(mujoco_sets),
         "checks": {"ids": "record id equal to a sealed record id", "request": "whole-request sha256 (holdout.request_hash)",
                    "state": "whole-state sha256 (normalised, narration.state_sha256)",
                    "units": "text units (normalised state, state lines / list items and option texts with >= 5 words) shared with a set "
@@ -351,6 +368,11 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--input", type=Path, required=True)
     check.add_argument("--out", type=Path, required=True)
     check.add_argument("--allow-missing", action="store_true", help="check against the sealed sets that exist (else refuse)")
+    check.add_argument("--sealed-extra", action="append", default=[], metavar="NAME=PATH",
+                       help="Task v0.4b: a further sealed file (e.g. B1=artifacts/b1/b1-infamily.jsonl, H-set=…/scene-holdout.jsonl) — matched on "
+                            "ids, whole requests and whole states (it shares its generator's templates with training, so not on text units)")
+    check.add_argument("--mujoco-set", action="append", default=[], metavar="SET",
+                       help="Task v0.4b: a further meta.set that counts as the MuJoCo part (default: v03b-mujoco-train)")
     check.set_defaults(func=cmd_overlap)
     return parser
 

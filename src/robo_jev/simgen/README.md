@@ -362,3 +362,17 @@ state, original questions and labels, `generator`, `truth`, `rationale`, other m
 python scripts/system1_v03.py transform --input artifacts/simgen/v02/train-50k.jsonl --out artifacts/simgen/v03/engine-s1.jsonl
 python scripts/system1_v03.py overlap --input artifacts/simgen/v03/train-v03.jsonl --out artifacts/simgen/v03/train-v03.overlap.json
 ```
+
+## 11. Task v0.4b — the derived questions as recorded secondary picks (`engine-s1-pick`)
+
+In v0.3 the derived questions are choice questions inside the engine records, so they share the trainer's choice slot (two questions of
+different types per record and epoch) with the original choice questions: action examples per epoch fell 21,297 → 8,446. v0.4 keeps
+every derived question and gives the originals their slot back with one field per record — the data layout is the opt-in, the trainer's
+defaults and config do not change:
+
+* **`meta.question_pick`** = `{"version": "qpick-1", "secondary": [the derived question names]}` (`system1_questions.with_pick_rule`).
+  The trainer (`decisions.examples.record_pick`) picks the record's q examples from the *other* questions with the plain pick's seeded
+  stream — the untransformed record's pick (v0.1-mix / v0.2's) — and trains each secondary question **in addition** in the epochs where the
+  plain pick over all questions (v0.3's) chooses it. Seed 0: action 21,297 and derived 18,551 per epoch, both exactly as before.
+* The epoch length then depends on the run seed (`examples_per_epoch(…, seed=)`); a run with the rule stays within one epoch.
+* `scripts/assemble_v04.py pick` writes it (every other byte of the record unchanged — checked); `assemble_v04.py all` builds the v0.4 input.

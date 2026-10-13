@@ -23,6 +23,14 @@
 순서로 돌며 종류마다 아직 안 뽑힌 질문 하나씩. 종류가 둘 이상이면 q = 2개는 서로 다른 종류다(세 종류가 다 있으면 각 종류가 2/3의
 확률로 뽑힌다). 비용 조절이다(요청 하나의 질문 3~8개를 다 쓰지 않는다); epoch마다 다시 뽑으므로 여러 epoch에 걸쳐 다른 질문을 본다.
 
+**Recorded per-record pick (Task v0.4b, opt-in by data).** A record may carry ``meta.question_pick = {"version": "qpick-1",
+"secondary": [names]}`` (:func:`record_pick`). Its q examples are then picked from the *other* (primary) questions exactly as above —
+the same seeded stream, so a record whose primary questions are those of an untransformed record gets that record's pick — and each
+secondary question is trained **in addition** in the epochs where the plain pick over all its questions (same stream) chooses it. The
+secondary questions keep the exposure they had when they shared the record's slots, and stop displacing the primary ones. Records
+without the field are picked exactly as before (the trainer's default); the epoch length then depends on (seed, epoch)
+(:func:`examples_per_epoch` with the run seed).
+
 **dev 나눔** (:func:`split_dev`): 학습 파일에서 레코드 열쇠(:func:`shuffle_key` — 쌍이면 두 id 중 작은 것, 아니면 자기 id)의
 salt 붙인 sha256이 `fraction`(기본 2 %) 아래인 레코드를 dev로 뗀다. 쌍(사실 하나만 바꾼 두 레코드)은 함께 간다 — 짝 하나로 학습하고
 다른 하나로 dev 손실을 재면 거의 같은 글을 재는 것이 된다. 파일 순서와 무관하다. 고르기·멈추기는 dev로만 한다.
@@ -48,6 +56,7 @@ __all__ = [
     "DEFAULT_DEV_SALT",
     "DEFAULT_QUESTIONS_PER_REQUEST",
     "FIXED_ORDER_SEED",
+    "QUESTION_PICK_VERSION",
     "SCORE_READABLE",
     "build_examples",
     "code_target",
@@ -55,8 +64,11 @@ __all__ = [
     "dev_examples",
     "epoch_plan",
     "examples_per_epoch",
+    "has_pick_rule",
     "is_dev",
     "length_summary",
+    "pick_rule",
+    "record_pick",
     "score_target",
     "select_questions",
     "split_dev",
@@ -70,6 +82,8 @@ FIXED_ORDER_SEED = 1
 #: 판마다 score 읽기(읽기 값의 기대값)가 닿을 수 있는 범위 — p2 (0.05, 0.95), p3 (0.0, 1.0).
 SCORE_READABLE = {version: (score_values(version)[0], score_values(version)[-1]) for version in PROMPT_VERSIONS}
 _TYPES = ("choice", "noul", "score")
+#: The recorded per-record pick rule (``meta.question_pick``, module docstring) — the only version the trainer knows.
+QUESTION_PICK_VERSION = "qpick-1"
 
 
 def derive_seed(*parts: Any) -> int:
@@ -164,9 +178,51 @@ def split_dev(records: Sequence[dict[str, Any]], *, fraction: float = DEFAULT_DE
     return train, dev
 
 
-def examples_per_epoch(records: Sequence[dict[str, Any]], *, q: int) -> int:
-    """epoch 하나의 학습 예 수 = Σ min(q, 요청의 질문 수) — epoch마다 같다."""
-    return sum(min(int(q), len(record["request"]["questions"])) for record in records)
+def pick_rule(record: dict[str, Any]) -> list[str] | None:
+    """The record's secondary questions under a recorded pick rule (``meta.question_pick``, module docstring), or None without one.
+    A malformed rule — another version, no list of names, or a name the request does not ask — raises ``ValueError``."""
+    rule = (record.get("meta") or {}).get("question_pick")
+    if rule is None:
+        return None
+    rid = record.get("id")
+    if not isinstance(rule, dict) or rule.get("version") != QUESTION_PICK_VERSION or not isinstance(rule.get("secondary"), list):
+        raise ValueError(f"{rid}: meta.question_pick must be {{'version': {QUESTION_PICK_VERSION!r}, 'secondary': [names]}} (got {rule!r})")
+    names = [str(name) for name in rule["secondary"]]
+    unknown = [name for name in names if name not in record["request"]["questions"]]
+    if unknown or len(set(names)) != len(names):
+        raise ValueError(f"{rid}: meta.question_pick names questions the request does not ask, or repeats one: {unknown or names}")
+    return names
+
+
+def has_pick_rule(records: Sequence[dict[str, Any]]) -> bool:
+    """Whether any record carries a recorded pick rule (``meta.question_pick``)."""
+    return any((record.get("meta") or {}).get("question_pick") is not None for record in records)
+
+
+def record_pick(record: dict[str, Any], *, q: int, seed: int, epoch: int) -> list[str]:
+    """The questions a record trains in one epoch: :func:`select_questions` on its questions with the stream (seed, epoch, id) — or,
+    under a recorded pick rule (module docstring), that pick over the primary questions followed by the secondary questions the plain
+    pick over all questions (same stream) chooses."""
+    questions = record["request"]["questions"]
+    stream = derive_seed(seed, epoch, str(record.get("id") or ""), "questions")
+    secondary = pick_rule(record)
+    if secondary is None:
+        return select_questions(questions, q=q, rng=random.Random(stream))
+    extra = set(secondary)
+    primary = {name: question for name, question in questions.items() if name not in extra}
+    names = select_questions(primary, q=q, rng=random.Random(stream)) if primary else []
+    plain = select_questions(questions, q=q, rng=random.Random(stream))
+    return names + [name for name in plain if name in extra]
+
+
+def examples_per_epoch(records: Sequence[dict[str, Any]], *, q: int, seed: int | None = None, epoch: int = 0) -> int:
+    """epoch 하나의 학습 예 수 = Σ min(q, 요청의 질문 수) — epoch마다 같다. Under a recorded pick rule (module docstring) the count is that
+    of the (seed, epoch) plan; the run `seed` must then be given."""
+    if not has_pick_rule(records):
+        return sum(min(int(q), len(record["request"]["questions"])) for record in records)
+    if seed is None:
+        raise ValueError("records with a recorded pick rule (meta.question_pick): the epoch length depends on the run seed — pass seed=")
+    return sum(len(record_pick(record, q=q, seed=seed, epoch=epoch)) for record in records)
 
 
 def epoch_plan(records: Sequence[dict[str, Any]], *, seed: int, epoch: int, q: int, augment: bool) -> list[tuple[int, str, int]]:
@@ -174,7 +230,7 @@ def epoch_plan(records: Sequence[dict[str, Any]], *, seed: int, epoch: int, q: i
     plan: list[tuple[int, str, int]] = []
     for index, record in enumerate(records):
         rid = str(record.get("id") or "")
-        names = select_questions(record["request"]["questions"], q=q, rng=random.Random(derive_seed(seed, epoch, rid, "questions")))
+        names = record_pick(record, q=q, seed=seed, epoch=epoch)
         order_seed = derive_seed(seed, epoch, rid, "order") if augment else FIXED_ORDER_SEED
         plan.extend((index, name, order_seed) for name in names)
     random.Random(derive_seed(seed, epoch, "shuffle")).shuffle(plan)

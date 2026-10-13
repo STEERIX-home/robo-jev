@@ -14,6 +14,12 @@
     uv run python scripts/convert_single_probe.py mix --base artifacts/simgen/v03/engine-s1.jsonl --extra mujoco=artifacts/simgen/v03/mujoco-train.jsonl \
         --probe artifacts/simgen/probes/G1-train-mix.jsonl --sealed artifacts/simgen/probes/G1.jsonl --general artifacts/simgen/v02/general-train.jsonl \
         --general-share 0.25 --train-config configs/train/decisions-v0-lora-h100.yaml --token-sample 3000 --out artifacts/simgen/v03/train-v03.jsonl
+    # Task v0.4b — an extra part held at an example count (--extra-examples), the general part at an exact record count (v0.3's, with its
+    # recorded second pass) and a base part whose records carry a recorded pick rule (counted with the train config's seed); the whole
+    # v0.4 assembly is scripts/assemble_v04.py all
+    uv run python scripts/convert_single_probe.py mix --base <engine-s1-pick>.jsonl --extra mujoco=<mujoco-v04>.jsonl --extra-examples mujoco=36648 \
+        --probe artifacts/simgen/probes/G1-train-mix.jsonl --sealed artifacts/simgen/probes/G1.jsonl … --general artifacts/simgen/v02/general-train.jsonl \
+        --general-records 46771 --general-repeat-if-short --train-config configs/train/decisions-v0-lora-h100.yaml --out <train-v04>.jsonl
     # Task v0.2 — the same, plus the shortest prefix of the general-reading file that makes ~10 % (v02-a) or ~25 % (v02-b) of the
     # train examples per epoch (counted with the trainer's own dev split and q), and a sampled token estimate
     uv run python scripts/convert_single_probe.py mix --base artifacts/simgen/v02/train-50k.jsonl --probe artifacts/simgen/probes/G1-train-mix.jsonl \
@@ -45,10 +51,10 @@ from typing import Any
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
 
-SCRIPT_VERSION = "v03-mix-1"
+SCRIPT_VERSION = "v04-mix-1"
 #: 변환본이 기대는 코드 — manifest의 ``git_dirty``는 이 파일들이 HEAD와 다른지다.
 CODE_PATHS = ("src/robo_jev/decisions/single_probe.py", "src/robo_jev/decisions/records.py", "scripts/convert_single_probe.py",
-              "src/robo_jev/data/general_sets.py")
+              "src/robo_jev/data/general_sets.py", "src/robo_jev/decisions/examples.py")
 
 
 def _log(message: str) -> None:
@@ -237,10 +243,11 @@ def cmd_compare(args: argparse.Namespace) -> int:
     return 0
 
 
-def _examples(records: list[dict[str, Any]], q: int) -> int:
+def _examples(records: list[dict[str, Any]], q: int, seed: int | None = None) -> int:
+    """Train examples per epoch of a part — the trainer's own count (Task v0.4b: under a recorded pick rule, that of the run `seed`)."""
     from robo_jev.decisions.examples import examples_per_epoch
 
-    return examples_per_epoch(records, q=q)
+    return examples_per_epoch(records, q=q, seed=seed)
 
 
 def _general_prefix(general: list[dict[str, Any]], *, target: float, fixed: int, config: dict[str, Any], q: int, allow_short: bool = False) -> int:
@@ -299,6 +306,21 @@ def _shares_arg(specs: list[str], names: list[str]) -> dict[str, float]:
     return out
 
 
+def _counts_arg(specs: list[str], names: list[str], shares: dict[str, float]) -> dict[str, int]:
+    """``--extra-examples NAME=COUNT`` (Task v0.4b) → name → target number of train examples per epoch (not with --extra-share NAME)."""
+    out: dict[str, int] = {}
+    for spec in specs:
+        name, sep, raw = str(spec).partition("=")
+        if not sep or name not in names:
+            raise SystemExit(f"--extra-examples takes NAME=COUNT for a given --extra NAME (got {spec!r}; extras {names})")
+        if name in shares:
+            raise SystemExit(f"--extra-examples {name} and --extra-share {name} exclude each other")
+        if not raw.isdigit() or int(raw) < 1:
+            raise SystemExit(f"--extra-examples {name}: the count must be a positive integer (got {raw!r})")
+        out[name] = int(raw)
+    return out
+
+
 def _family(record: dict[str, Any]) -> str:
     meta = record.get("meta") or {}
     return str(meta.get("scene") or meta.get("group") or "all")
@@ -323,28 +345,33 @@ def _repeated_group(group: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _extra_second_passes(extras: list[dict[str, Any]], examples: dict[str, int], shares: dict[str, float], *, general_share: float,
-                         config: dict[str, Any], q: int) -> None:
+                         config: dict[str, Any], q: int, counts: dict[str, int] | None = None) -> None:
     """``--extra-share NAME=SHARE`` (Task v0.3c): when an extra part's train examples fall short of SHARE of all train examples per
     epoch — the general part being sized afterwards to its own share g — append a recorded second pass of whole pair groups, taken
     round-robin over the part's families (``meta.scene``) in file order, until examples ≥ SHARE · others / (1 − g − SHARE) (+1 example
     for the general prefix's rounding). A copy gets a new id, so the trainer picks its own questions for it (different ones from the
-    first pass, by the id-hashed pick). Sets ``copies`` / ``copy_train`` / ``copy_dev`` / ``second_pass`` on each extra."""
+    first pass, by the id-hashed pick). Sets ``copies`` / ``copy_train`` / ``copy_dev`` / ``second_pass`` on each extra.
+    ``--extra-examples NAME=COUNT`` (Task v0.4b, `counts`): the same second pass, until the part's train examples ≥ COUNT."""
     from fractions import Fraction
 
     from robo_jev.decisions.examples import split_dev
     from robo_jev.decisions.records import pair_groups
 
     g = Fraction(str(general_share))
+    counts = counts or {}
     for extra in extras:
         extra.update(copies=[], copy_train=[], copy_dev=[], second_pass=None, target_share=shares.get(extra["name"]),
-                     first_pass_examples=examples[extra["name"]])
-        if extra["target_share"] is None:
+                     target_examples=counts.get(extra["name"]), first_pass_examples=examples[extra["name"]])
+        if extra["target_share"] is None and extra["target_examples"] is None:
             continue
-        s_ = Fraction(str(extra["target_share"]))
-        if g + s_ >= 1:
-            raise SystemExit(f"--extra-share {extra['name']} {extra['target_share']} + general share {general_share} must stay below 1")
-        others = sum(v for k, v in examples.items() if k != extra["name"])
-        need = s_ * others / (1 - g - s_) + 1
+        if extra["target_examples"] is not None:
+            need = Fraction(extra["target_examples"])
+        else:
+            s_ = Fraction(str(extra["target_share"]))
+            if g + s_ >= 1:
+                raise SystemExit(f"--extra-share {extra['name']} {extra['target_share']} + general share {general_share} must stay below 1")
+            others = sum(v for k, v in examples.items() if k != extra["name"])
+            need = s_ * others / (1 - g - s_) + 1
         if examples[extra["name"]] >= need:
             continue
         queues: dict[str, list[list[dict[str, Any]]]] = {}
@@ -367,15 +394,20 @@ def _extra_second_passes(extras: list[dict[str, Any]], examples: dict[str, int],
             extra["copy_dev"] += dev
             by_family[_family(group[0])] = by_family.get(_family(group[0]), 0) + len(copies)
             groups += 1
+        target = (f"--extra-examples {extra['target_examples']}" if extra["target_examples"] is not None
+                  else f"--extra-share {extra['target_share']}")
         if have < need:
-            raise SystemExit(f"{extra['path']}: even a whole second pass cannot reach --extra-share {extra['target_share']}")
+            raise SystemExit(f"{extra['path']}: even a whole second pass cannot reach {target}")
         examples[extra["name"]] = have
+        why = (f"the part's first pass gives {extra['first_pass_examples']} train examples, short of the target {extra['target_examples']} train "
+               "examples per epoch" if extra["target_examples"] is not None else
+               f"the part's first pass gives {extra['first_pass_examples']} train examples, short of {extra['target_share']} of all train "
+               f"examples next to the general share {general_share}")
         extra["second_pass"] = {"records": len(extra["copies"]), "pair_groups": groups, "records_by_family": dict(sorted(by_family.items())),
                                 "train_examples": have - extra["first_pass_examples"],
                                 "ids": "<id>~r2 (meta.repeat_of = the original id; a pair's meta.pair.of points at its partner's copy)",
                                 "order": "whole pair groups, round-robin over the families (meta.scene) in file order",
-                                "why": f"the part's first pass gives {extra['first_pass_examples']} train examples, short of {extra['target_share']} "
-                                       f"of all train examples next to the general share {general_share}"}  # fmt: skip
+                                "why": why}  # fmt: skip
 
 
 def _load_extras(specs: list[str], *, taken: set[str]) -> list[dict[str, Any]]:
@@ -511,22 +543,33 @@ def cmd_mix(args: argparse.Namespace) -> int:
         sealed = {"path": str(g1_path), "sha256": file_sha256(g1_path), "overlap": {"origin_groups": 0, "source_records": 0, "base_ids": 0}}
     config = resolve_config(_read_yaml(args.train_config)) if args.train_config else resolve_config({})
     q = int(config["questions_per_request"])
+    seed = int(config["seed"])
+    from robo_jev.decisions.examples import has_pick_rule
+
+    for name, records in [("probe", probe), *((f"extra {e['name']}", e["records"]) for e in extras)]:
+        if has_pick_rule(records):  # Task v0.4b: the second-pass and prefix arithmetic assumes min(q, questions) per record there
+            raise SystemExit(f"{name}: records with a recorded pick rule (meta.question_pick) are only accepted in the base part")
     train_base, dev_base = split_dev(base, fraction=config["dev_fraction"], salt=config["dev_salt"])
     train_probe, dev_probe = split_dev(probe, fraction=config["dev_fraction"], salt=config["dev_salt"])
     cap = config["dev_max_records"]
-    examples = {"base": _examples(train_base, q), "probe": _examples(train_probe, q)}
+    examples = {"base": _examples(train_base, q, seed), "probe": _examples(train_probe, q, seed)}
     for extra in extras:
         extra["train"], extra["dev"] = split_dev(extra["records"], fraction=config["dev_fraction"], salt=config["dev_salt"])
-        examples[extra["name"]] = _examples(extra["train"], q)
-    _extra_second_passes(extras, examples, _shares_arg(args.extra_share or [], [e["name"] for e in extras]),
+        examples[extra["name"]] = _examples(extra["train"], q, seed)
+    shares = _shares_arg(args.extra_share or [], [e["name"] for e in extras])
+    if shares and args.general_records is not None:
+        raise SystemExit("--extra-share sizes a part against the others before the general part, which --general-records fixes afterwards — "
+                         "give the part an example count instead (--extra-examples)")
+    _extra_second_passes(extras, examples, shares,
                          general_share=float(args.general_share) if args.general is not None and args.general_share is not None else 0.0,
-                         config=config, q=q)
+                         config=config, q=q, counts=_counts_arg(args.extra_examples or [], [e["name"] for e in extras], shares))
     general_block, general_lines, train_general, dev_general = None, [], [], []
     if args.general is not None:
         from robo_jev.data.general_sets import SOURCES
 
-        if args.general_share is None:
-            raise SystemExit("--general needs --general-share (target share of train examples per epoch, e.g. 0.10)")
+        if (args.general_share is None) == (args.general_records is None):
+            raise SystemExit("--general needs exactly one of --general-share (target share of train examples per epoch, e.g. 0.10) and "
+                             "--general-records (an exact record count, Task v0.4b)")
         general, general_check = load_training_records(args.general)
         if general_check["invalid"] or not general:
             raise SystemExit(f"{args.general}: {general_check['invalid']} invalid records — not a general training file")
@@ -541,9 +584,17 @@ def cmd_mix(args: argparse.Namespace) -> int:
             raise SystemExit(f"{args.general}: the manifest does not record a zero overlap with the sealed sets")
         if args.general_take_all_if_short and args.general_repeat_if_short:
             raise SystemExit("--general-take-all-if-short and --general-repeat-if-short exclude each other")
+        if has_pick_rule(general):
+            raise SystemExit(f"{args.general}: records with a recorded pick rule (meta.question_pick) are only accepted in the base part")
         pool = general + ([_repeated(r) for r in general] if args.general_repeat_if_short else [])
-        n = _general_prefix(pool, target=float(args.general_share), fixed=sum(examples.values()), config=config, q=q,
-                            allow_short=bool(args.general_take_all_if_short))
+        if args.general_records is not None:  # Task v0.4b: exactly N records of the pool (the file, then its recorded second pass)
+            if not 1 <= int(args.general_records) <= len(pool):
+                raise SystemExit(f"--general-records {args.general_records}: the pool holds {len(pool)} records"
+                                 + ("" if args.general_repeat_if_short else " (a second pass needs --general-repeat-if-short)"))
+            n = int(args.general_records)
+        else:
+            n = _general_prefix(pool, target=float(args.general_share), fixed=sum(examples.values()), config=config, q=q,
+                                allow_short=bool(args.general_take_all_if_short))
         used = pool[:n]
         clash = {str(r["id"]) for r in used} & ({str(r["id"]) for r in base} | {str(r["id"]) for r in probe}
                                                 | {str(r["id"]) for extra in extras for r in extra["records"] + extra["copies"]})
@@ -560,8 +611,10 @@ def cmd_mix(args: argparse.Namespace) -> int:
             "path": str(args.general), "sha256": file_sha256(args.general), "records_in_file": len(general), "records_used": n,
             "prefix": (f"first {n} of {len(general)} records (the file interleaves its sources)" if n <= len(general) else
                        f"all {len(general)} records, then a second pass over the first {n - len(general)} (the file interleaves its sources)"),
-            "target_share": float(args.general_share),
-            "target_reached": _reaches(examples["general"], sum(v for k, v in examples.items() if k != "general"), float(args.general_share)),
+            "target_share": float(args.general_share) if args.general_share is not None else None,
+            "target_reached": (_reaches(examples["general"], sum(v for k, v in examples.items() if k != "general"), float(args.general_share))
+                               if args.general_share is not None else None),
+            "records_target": int(args.general_records) if args.general_records is not None else None,
             "second_pass": {"records": max(0, n - len(general)), "ids": "<id>~r2 (meta.repeat_of = the original id)",
                             "why": "the whole file could not reach the target share; a prefix of the file is used a second time"}
                            if n > len(general) else None,
@@ -613,7 +666,7 @@ def cmd_mix(args: argparse.Namespace) -> int:
         "sealed_check": sealed,
         "sealed_outside": sealed_outside,
         "train_config": {"path": str(args.train_config) if args.train_config else None, "questions_per_request": q, "dev_fraction": config["dev_fraction"],
-                         "dev_salt": config["dev_salt"], "dev_max_records": cap, "batch_examples": batch},
+                         "dev_salt": config["dev_salt"], "dev_max_records": cap, "batch_examples": batch, "seed": seed},
         "split": {"base_train": len(train_base), "base_dev": len(dev_base), "probe_train": len(train_probe), "probe_dev": len(dev_probe),
                   "probe_dev_used": dev_used["probe"], "probe_dev_unused": len(dev_probe) - dev_used["probe"]},
         "examples_per_epoch": epoch,
@@ -621,13 +674,25 @@ def cmd_mix(args: argparse.Namespace) -> int:
         "steps_per_epoch": {"base_only": -(-examples["base"] // batch), "mixed": -(-total // batch)},
         "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
     }  # fmt: skip
+    if has_pick_rule(base):  # Task v0.4b: the base part's recorded pick rule — the counts above are the config seed's
+        from robo_jev.decisions.examples import QUESTION_PICK_VERSION, pick_rule
+
+        manifest["question_pick"] = {
+            "version": QUESTION_PICK_VERSION, "base_records_with_rule": sum(1 for r in base if pick_rule(r) is not None),
+            "seed": seed, "rule": "q examples from the primary questions with the plain pick's stream; each secondary question in addition "
+                                  "when the plain pick over all questions chooses it (robo_jev.decisions.examples.record_pick)",
+            "note": "examples_per_epoch, shares and steps are those of the train config's seed; another run seed draws other secondary "
+                    "examples (the trainer counts its own)"}  # fmt: skip
     if extras:
         manifest["extra"] = [{k: extra[k] for k in ("name", "manifest", "validation")} | {"path": str(extra["path"]), "sha256": file_sha256(extra["path"]),
                               "records": len(extra["records"]), "train": len(extra["train"]), "dev": len(extra["dev"]),
                               "dev_used": dev_used[extra["name"]], "first_pass_examples": extra["first_pass_examples"],
                               "target_share": extra["target_share"],
-                              "target_reached": (examples[extra["name"]] / total >= extra["target_share"]) if extra["target_share"] is not None and total else None,
-                              "second_pass": extra["second_pass"]} for extra in extras]  # fmt: skip
+                              "target_reached": (examples[extra["name"]] / total >= extra["target_share"]) if extra["target_share"] is not None and total else
+                                                (examples[extra["name"]] >= extra["target_examples"]) if extra.get("target_examples") is not None else None,
+                              "second_pass": extra["second_pass"]}
+                             | ({"target_examples": extra["target_examples"]} if extra.get("target_examples") is not None else {})
+                             for extra in extras]  # fmt: skip
         manifest["shares"] = {"examples": {name: value / total for name, value in examples.items()} if total else None}
     if general_block is not None:
         manifest["general"] = general_block
@@ -702,6 +767,12 @@ def build_parser() -> argparse.ArgumentParser:
     mix.add_argument("--extra-share", action="append", default=[], metavar="NAME=SHARE",
                      help="target share of train examples per epoch for an --extra part (e.g. mujoco=0.20); if its first pass falls short, a "
                           "recorded second pass of whole pair groups, round-robin over its families, is appended (ids <id>~r2)")
+    mix.add_argument("--extra-examples", action="append", default=[], metavar="NAME=COUNT",
+                     help="Task v0.4b: target number of train examples per epoch for an --extra part (e.g. mujoco=36648) instead of a share; if "
+                          "its first pass falls short, the same recorded second pass of whole pair groups is appended")
+    mix.add_argument("--general-records", type=int, default=None,
+                     help="Task v0.4b: take exactly this many general records (the file, then its recorded second pass with "
+                          "--general-repeat-if-short) instead of sizing them by --general-share — e.g. v0.3's general part unchanged")
     mix.add_argument("--general-take-all-if-short", action="store_true",
                      help="if the whole general file cannot reach --general-share, use all of it (the manifest records the share reached)")
     mix.add_argument("--general-repeat-if-short", action="store_true",

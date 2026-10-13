@@ -87,10 +87,14 @@ from robo_jev.decisions.examples import (
     DEFAULT_DEV_FRACTION,
     DEFAULT_DEV_SALT,
     DEFAULT_QUESTIONS_PER_REQUEST,
+    QUESTION_PICK_VERSION,
     build_examples,
     dev_examples,
     epoch_plan,
     examples_per_epoch,
+    has_pick_rule,
+    pick_rule,
+    record_pick,
     split_dev,
 )
 from robo_jev.decisions.prompt import FORMATS, PROMPT_VERSION, PROMPT_VERSIONS, fixed_text_digest
@@ -610,11 +614,17 @@ class DecisionTrainer:
         self.dev_records = dev_records[: cfg["dev_max_records"]] if cfg["dev_max_records"] else dev_records
         self.dev_unused = len(dev_records) - len(self.dev_records)  # dev로 뗐지만 dev에도 학습에도 쓰지 않는 레코드 (리뷰 1 Minor 7 — manifest에 적는다)
         self.dev = dev_examples(self.dev_records, tokenizer, fmt=cfg["format"], version=cfg["prompt_version"])
-        self.examples_per_epoch = examples_per_epoch(self.train_records, q=cfg["questions_per_request"])
+        # Task v0.4b: records may carry a recorded pick rule (meta.question_pick, robo_jev.decisions.examples) — opt-in by data; the epoch
+        # length is then that of the run seed's epoch-0 plan, and a run may not reach a second epoch (whose plan has another length)
+        self.question_pick = has_pick_rule(self.train_records)
+        self.examples_per_epoch = examples_per_epoch(self.train_records, q=cfg["questions_per_request"], seed=cfg["seed"], epoch=0)
         self.steps_per_epoch = math.ceil(self.examples_per_epoch / cfg["batch_examples"])
         if cfg["max_steps"] is None:
             cfg["max_steps"] = int(cfg["epochs"]) * self.steps_per_epoch
         self.max_steps = int(cfg["max_steps"])
+        _need(not self.question_pick or self.max_steps <= self.steps_per_epoch,
+              "records with a recorded pick rule (meta.question_pick): the epoch length depends on the epoch, so only runs within one epoch "
+              f"are defined (max_steps {self.max_steps} > steps_per_epoch {self.steps_per_epoch}; epochs: 1)")
         # 결정성: LoRA 초기화(peft의 kaiming)가 전역 torch generator에서 뽑는다
         random.seed(cfg["seed"])
         np.random.seed(cfg["seed"] % 2**32)
@@ -660,6 +670,7 @@ class DecisionTrainer:
                 "train_records": len(self.train_records), "dev_records": len(self.dev_records),
                 "dev_ids": [str(r.get("id")) for r in self.dev_records], "dev_prompts": len(self.dev), "dev_unused_records": self.dev_unused,
                 "examples_per_epoch": self.examples_per_epoch, "steps_per_epoch": self.steps_per_epoch, "mix": [],
+                "question_pick": self._pick_summary() if self.question_pick else None,
             },
             "git": _git_sha(),
             "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -677,6 +688,17 @@ class DecisionTrainer:
             self._load(resume)
 
     # -- 데이터 --
+
+    def _pick_summary(self) -> dict[str, Any]:
+        """The recorded pick rule in this run's train records (Task v0.4b): how many records carry it, and how many of the epoch-0 examples
+        are their secondary questions trained in addition."""
+        q, seed = self.config["questions_per_request"], self.config["seed"]
+        ruled = [r for r in self.train_records if pick_rule(r) is not None]
+        extra = sum(len(record_pick(r, q=q, seed=seed, epoch=0)) - min(q, len(r["request"]["questions"]) - len(pick_rule(r) or []))
+                    for r in ruled)
+        return {"version": QUESTION_PICK_VERSION, "records": len(ruled), "secondary_examples_epoch0": extra,
+                "rule": "q examples from the primary questions (the plain pick's stream); each secondary question in addition when the plain "
+                        "pick over all questions chooses it (robo_jev.decisions.examples.record_pick)"}
 
     def mix_plan(self, epoch: int) -> list[tuple[int, str, int]]:
         """일반 능력 보호 갈고리 — 다른 판단 데이터를 섞을 자리(모듈 설명). 지금은 언제나 빈 목록이다.
