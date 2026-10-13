@@ -41,6 +41,10 @@ class PlatformScene(Scene):
     event = ("slide", "tip")
     severe = "tip"
     slide_m = 0.03
+    #: aim with the slide distance of a push of finite length (bin, tray): a draw only counts as a slide when the load would slide at least
+    #: ``slide_m`` before friction matches speeds again — d = (a − μg)·a·T²/(2μg) for a push a lasting T. Forks were labelled with the
+    #: plain static rule (their stored candidates stay reproducible); the labels are MuJoCo's either way.
+    aim_slide_distance = False
     physics_fields = ("dims", "mass", "move", "speed", "accel", "radius", "ramp", "tilt", "spread", "tine_w", "gap", "wall_h", "tray", "laid")
 
     # -- geometry -------------------------------------------------------------------------------------------------------------------
@@ -88,6 +92,11 @@ class PlatformScene(Scene):
         tip_at = max(edge, 1e-6) / max(h_c, 1e-6)
         if ratio <= min(tip_at, draw["mu"]):
             return "stay"
+        if self.aim_slide_distance and draw["mu"] <= tip_at:
+            grip = draw["mu"] * normal
+            slide = (tangential - grip) * tangential * self.duration(visible) ** 2 / (2 * grip)
+            if slide < self.slide_m:
+                return "stay"
         if way == 1 and self.front_room(visible) < self.slide_m and draw["mu"] <= tip_at:
             return "stay"  # a slide that the wall stops before it counts
         return "tip" if tip_at < draw["mu"] else "slide"
@@ -430,6 +439,7 @@ BIN_DOMAINS = ("residential street", "university campus", "shopping district", "
 
 class BinScene(PlatformScene):
     name = "bin"
+    aim_slide_distance = True
     outcomes = ("stays", "shifts", "falls")
     event = ("shifts", "falls")
     severe = "falls"
@@ -664,6 +674,7 @@ TRAY_SIZE = ((0.35, 0.50), (0.25, 0.38))
 
 class TrayScene(PlatformScene):
     name = "tray"
+    aim_slide_distance = True
     slide_m = 0.02
     question_names = {"key": "drink_moves_on_tray", "direction": "pace_change_effect", "outcome": "drink_after_move", "action": "safest_tray_plan",
                       "compare": "riskier_tray_plan", "score_cf": "spill_risk_other_pace", "severe": "drink_topples"}
