@@ -91,7 +91,8 @@ def _bank_state(group: dict[str, Any], vis: dict[str, Any], c: dict[str, Any]) -
     contents = BANK_CONTENTS_TEXT[vis["contents"]].format(filler=vis["filler"])
     across = vis["orientation"] == "across"
     orient = "long side across the slope" if across else "long side pointing straight down the slope"
-    flat = group["options"]["opt_flatter"]
+    patch = group["options"]["opt_patch"]
+    other = f"{_n(patch['patch_slope'])} degrees, {_n(patch['patch_distance'])} metres"
     size = f"{_cm(vis['long'])} by {_cm(vis['short'])} centimetres and {_cm(vis['height'])} tall, {_n(vis['mass'])} kilograms"
     if c["template"] == 0:
         lines = [f"SUPERVISOR: {cs}, {st}. Where are you leaving the {load}?",
@@ -99,8 +100,7 @@ def _bank_state(group: dict[str, Any], vis: dict[str, Any], c: dict[str, Any]) -
                  "SUPERVISOR: What's in it?",
                  f"ROBOT: It's {contents}. {size}.",
                  "SUPERVISOR: How will you put it down?",
-                 f"ROBOT: Set it with the {orient}, let go, and go back for the next one. There's a flatter patch at about {_n(flat['flat_slope'])} degrees, "
-                 f"{_n(flat['flat_distance'])} metres further on."]
+                 f"ROBOT: Set it with the {orient}, let go, and go back for the next one. The other patch I could use reads {other} along."]
     elif c["template"] == 1:
         lines = [f"ROBOT: {st}, {cs}, ready to drop the {load} on the {place}.",
                  f"SUPERVISOR: Go ahead, {cs}. What's the grade?",
@@ -108,15 +108,15 @@ def _bank_state(group: dict[str, Any], vis: dict[str, Any], c: dict[str, Any]) -
                  "SUPERVISOR: Size and weight?",
                  f"ROBOT: {size}. It's {contents}.",
                  "SUPERVISOR: Which way round?",
-                 f"ROBOT: {orient[0].upper() + orient[1:]}. If you want it flatter, the ground eases to {_n(flat['flat_slope'])} degrees about "
-                 f"{_n(flat['flat_distance'])} metres along. I'll leave it unattended."]
+                 f"ROBOT: {orient[0].upper() + orient[1:]}. If you want it elsewhere, there's a patch at {_n(patch['patch_slope'])} degrees about "
+                 f"{_n(patch['patch_distance'])} metres along. I'll leave it unattended."]
     else:
         lines = [f"SUPERVISOR: {cs}, {st}. I have you on the {place}. Survey says {_n(vis['slope'])} degrees there, {vis['ground']}. Confirm?",
                  f"ROBOT: Confirmed, {_n(vis['slope'])} degrees, {vis['ground']}.",
                  f"SUPERVISOR: And the {load}?",
                  f"ROBOT: {size}, {contents}. Plan is to stand it with the {orient} and leave it there.",
-                 "SUPERVISOR: Anywhere flatter?",
-                 f"ROBOT: About {_n(flat['flat_slope'])} degrees, {_n(flat['flat_distance'])} metres further on."]
+                 "SUPERVISOR: Any other spot?",
+                 f"ROBOT: One patch at about {_n(patch['patch_slope'])} degrees, {_n(patch['patch_distance'])} metres further on."]
     return "\n".join(lines)
 
 
@@ -153,7 +153,7 @@ def _ledge_state(group: dict[str, Any], vis: dict[str, Any], c: dict[str, Any]) 
 def _anchor_state(group: dict[str, Any], vis: dict[str, Any], c: dict[str, Any]) -> str:
     st, cs = c["station"], c["callsign"]
     where = ANCHOR_WHERE[vis["domain"]]
-    soft = group["options"]["opt_soft"]["start_time"]
+    preset = group["options"]["opt_start"]["start_time"]
     apron = group["options"]["opt_apron"]["apron_distance"]
     load = f"{vis['load']} at about {_n(vis['load_mass'])} kilograms, {vis['mass_source']}"
     winch = f"line speed {_n(vis['line_speed'])} metres a second, reached in {_n(vis['start_time'])} seconds"
@@ -164,7 +164,7 @@ def _anchor_state(group: dict[str, Any], vis: dict[str, Any], c: dict[str, Any])
                  "SUPERVISOR: What's on the line?",
                  f"ROBOT: A {load}. It's on the same ramp below me.",
                  "SUPERVISOR: Winch setting?",
-                 f"ROBOT: Quick start, {winch}. A soft start would take {_n(soft)} seconds. There's flat apron {_n(apron)} metres behind me."]
+                 f"ROBOT: Start preset one, {winch}. Preset two would take {_n(preset)} seconds. There's flat apron {_n(apron)} metres behind me."]
     elif c["template"] == 1:
         lines = [f"ROBOT: {st}, {cs}. In position {where} to winch up a {vis['load']}.",
                  "SUPERVISOR: Weight on the line?",
@@ -172,13 +172,13 @@ def _anchor_state(group: dict[str, Any], vis: dict[str, Any], c: dict[str, Any])
                  "SUPERVISOR: And where you're parked?",
                  f"ROBOT: {_n(vis['slope'])} degrees of {vis['ramp']}, brakes on, facing up. I'm {_n(vis['mass'])} kilograms myself.",
                  "SUPERVISOR: How will you start it?",
-                 f"ROBOT: Quick start, {winch}. Soft start is {_n(soft)} seconds to line speed, and the flat apron is {_n(apron)} metres back."]
+                 f"ROBOT: Preset one, {winch}. Preset two is {_n(preset)} seconds to line speed, and the flat apron is {_n(apron)} metres back."]
     else:
         lines = [f"SUPERVISOR: {cs}, {st}. You're {where} with a {load}?",
                  f"ROBOT: Affirmative. The load is on the ramp below me. I'm braked on {vis['ramp']} at {_n(vis['slope'])} degrees, "
                  f"{_n(vis['mass'])} kilograms.",
                  "SUPERVISOR: Start settings?",
-                 f"ROBOT: Quick start, {winch}. Soft start would be {_n(soft)} seconds. Flat apron is {_n(apron)} metres behind me if needed."]
+                 f"ROBOT: Preset one, {winch}. The other preset would be {_n(preset)} seconds. Flat apron is {_n(apron)} metres behind me if needed."]
     return "\n".join(lines)
 
 
@@ -198,11 +198,13 @@ def _bank_questions(group: dict[str, Any], vis: dict[str, Any], c: dict[str, Any
     n = QUESTION_NAMES["bank"]
     load, q = vis["load"], c["q"]
     cf = _n(group["cf_value"])
-    flat = _n(group["options"]["opt_flatter"]["flat_slope"])
+    patch = _n(group["options"]["opt_patch"]["patch_slope"])
     turned = ("Give it a quarter turn first, so the long side points down the slope" if vis["orientation"] == "across"
               else "Give it a quarter turn first, so the long side runs across the slope")
+    moved = f"Take it to the other patch, at {patch} degrees"
     alt_text = {"turned_first": "giving it a quarter turn first" + turned[len("Give it a quarter turn first"):],
-                "flatter_spot": f"carrying it on to the {flat}-degree patch"}
+                "other_patch": f"taking it to the other patch, at {patch} degrees"}
+    labels = {"turned_first": turned, "other_patch": moved}
     alt = group["compare_option"]
     return {
         n["key"]: _q("noul", (f"Once the robot lets go, will the {load} move from where it was set, by sliding or tipping?",
@@ -217,13 +219,12 @@ def _bank_questions(group: dict[str, Any], vis: dict[str, Any], c: dict[str, Any
                            {"goes_up": "More likely to move", "goes_down": "Less likely to move", "stays_similar": "About as likely"}),
         n["compare"]: _q("choice", (f"Which set-down is more likely to end with the {load} moving: the plan as stated, or {alt_text[alt]}?",
                                     f"Riskier for the {load}: the stated plan or {alt_text[alt]}? Pick the one more likely to slide or tip.")[q[4]],
-                         {"the_plan": "The plan as stated", alt: (turned if alt == "turned_first" else f"Carry it on to the {flat}-degree patch"),
-                          "no_difference": "About the same"}),
+                         {"the_plan": "The plan as stated", alt: labels[alt], "no_difference": "About the same"}),
         n["action"]: _q("choice", (f"Which way of leaving the {load} is best? A slide means a trip back, a toppled {load} is much worse, the quarter turn "
-                                   "costs a few seconds, and the flatter patch costs a longer carry.",
+                                   "costs a few seconds, and the other patch costs a short carry.",
                                    f"Best choice for the {load}? Weigh a slide (a trip back), a topple (far worse), a quarter turn (a few seconds) and "
-                                   "the walk to the flatter patch (longer).")[q[5]],
-                        {"the_plan": "Set it down as planned", "turned_first": turned, "flatter_spot": f"Carry it on to the {flat}-degree patch"}),
+                                   "the carry to the other patch (a little longer).")[q[5]],
+                        {"the_plan": "Set it down as planned", "turned_first": turned, "other_patch": moved}),
         n["outcome"]: _q("choice", (f"What will the {load} do after release?", f"Once let go, how does the {load} end up?")[q[6]],
                          {"stays_put": "Stays where it was set", "slides_down": "Slides down the slope", "tips_over": "Tips over"}),
     }
@@ -234,8 +235,13 @@ def _ledge_questions(group: dict[str, Any], vis: dict[str, Any], c: dict[str, An
     q = c["q"]
     cf = _cm(group["cf_value"])
     edge = vis["edge"]
-    short = _cm(group["options"]["opt_short"]["short_by"])
-    alt_text = {"stop_short": f"stopping {short} centimetres shorter", "reverse_in": "turning round and backing out to the same overhang, rear first"}
+    change = float(group["options"]["opt_stop"]["stop_change"])
+    step = _cm(abs(change))
+    stop = f"Stop {step} centimetres shorter" if change < 0 else f"Go {step} centimetres further out"
+    reverse = "Turn round and back out to the same overhang, rear first"
+    alt_text = {"other_stop": (f"stopping {step} centimetres shorter" if change < 0 else f"going {step} centimetres further out"),
+                "reverse_in": "turning round and backing out to the same overhang, rear first"}
+    labels = {"other_stop": stop, "reverse_in": reverse}
     alt = group["compare_option"]
     return {
         n["key"]: _q("noul", ("Once it stops there, will the robot tip forward over the edge?",
@@ -251,15 +257,12 @@ def _ledge_questions(group: dict[str, Any], vis: dict[str, Any], c: dict[str, An
                            {"goes_up": "More likely to tip", "goes_down": "Less likely to tip", "stays_similar": "About as likely"}),
         n["compare"]: _q("choice", (f"Which is more likely to end with the robot tipping over the edge: the plan as stated, or {alt_text[alt]}?",
                                     f"Riskier at the {edge}: the stated plan or {alt_text[alt]}?")[q[4]],
-                         {"the_plan": "The plan as stated", alt: {"stop_short": f"Stop {short} centimetres shorter",
-                                                                  "reverse_in": "Turn round and back out to the same overhang, rear first"}[alt],
-                          "no_difference": "About the same"}),
-        n["action"]: _q("choice", ("Which way to do it is best? Nosing down needs a recovery, going over the edge is far worse, stopping shorter costs "
-                                   "some of the view, and turning round costs time.",
-                                   "Best plan at the edge? Weigh a nose-down (a recovery job), going over (far worse), a shorter stop (less view) and "
-                                   "turning round (time).")[q[5]],
-                        {"the_plan": "Go out as planned", "stop_short": f"Stop {short} centimetres shorter",
-                         "reverse_in": "Turn round and back out to the same overhang, rear first"}),
+                         {"the_plan": "The plan as stated", alt: labels[alt], "no_difference": "About the same"}),
+        n["action"]: _q("choice", ("Which way to do it is best? Nosing down needs a recovery, going over the edge is far worse, moving the stop point "
+                                   "costs a little, and turning round costs time.",
+                                   "Best plan at the edge? Weigh a nose-down (a recovery job), going over (far worse), a different stop point (a little) "
+                                   "and turning round (time).")[q[5]],
+                        {"the_plan": "Go out as planned", "other_stop": stop, "reverse_in": reverse}),
         n["outcome"]: _q("choice", ("Where does the robot end up?", "How does the robot finish once it stops?")[q[6]],
                          {"holds": "Stays level on top", "noses_down": "Tips forward, nose resting on the lower level",
                           "goes_over": "Goes right over the edge"}),
@@ -270,8 +273,11 @@ def _anchor_questions(group: dict[str, Any], vis: dict[str, Any], c: dict[str, A
     n = QUESTION_NAMES["anchor"]
     q = c["q"]
     cf = _n(group["cf_value"])
-    soft = _n(group["options"]["opt_soft"]["start_time"])
-    alt_text = {"soft_start": f"a soft start ({soft} seconds to line speed)", "from_apron": "backing up to the flat apron first and hauling from there"}
+    preset = _n(group["options"]["opt_start"]["start_time"])
+    other = f"Switch to the other preset, {preset} seconds to line speed"
+    apron = "Back up to the flat apron and haul from there"
+    alt_text = {"other_start": f"the other preset ({preset} seconds to line speed)", "from_apron": "backing up to the flat apron first and hauling from there"}
+    labels = {"other_start": other, "from_apron": apron}
     alt = group["compare_option"]
     return {
         n["key"]: _q("noul", ("When the winch starts, will the robot slide down the ramp at all, even slightly?",
@@ -287,15 +293,12 @@ def _anchor_questions(group: dict[str, Any], vis: dict[str, Any], c: dict[str, A
                            {"goes_up": "More likely to slip", "goes_down": "Less likely to slip", "stays_similar": "About as likely"}),
         n["compare"]: _q("choice", (f"Which haul is more likely to make the robot slip: the plan as stated, or {alt_text[alt]}?",
                                     f"Riskier for the robot's grip: the stated plan or {alt_text[alt]}?")[q[4]],
-                         {"the_plan": "The plan as stated", alt: {"soft_start": f"Use the soft start, {soft} seconds to line speed",
-                                                                  "from_apron": "Back up to the flat apron and haul from there"}[alt],
-                          "no_difference": "About the same"}),
-        n["action"]: _q("choice", ("Which way to haul is best? A short slip is a nuisance, being dragged down the ramp is far worse, a soft start costs a "
-                                   "little time, and moving to the apron costs more.",
-                                   "Best way to run this haul? Weigh a short slip (a nuisance), being dragged (far worse), a soft start (a little time) "
-                                   "and moving to the apron (more time).")[q[5]],
-                        {"the_plan": "Haul as planned", "soft_start": f"Use the soft start, {soft} seconds to line speed",
-                         "from_apron": "Back up to the flat apron and haul from there"}),
+                         {"the_plan": "The plan as stated", alt: labels[alt], "no_difference": "About the same"}),
+        n["action"]: _q("choice", ("Which way to haul is best? A short slip is a nuisance, being dragged down the ramp is far worse, switching presets "
+                                   "costs a little time, and moving to the apron costs more.",
+                                   "Best way to run this haul? Weigh a short slip (a nuisance), being dragged (far worse), switching presets (a little "
+                                   "time) and moving to the apron (more time).")[q[5]],
+                        {"the_plan": "Haul as planned", "other_start": other, "from_apron": apron}),
         n["outcome"]: _q("choice", ("How does the robot fare when the winch starts?", "What happens to the robot once the haul begins?")[q[6]],
                          {"holds_fast": "Holds without moving", "creeps": "Slides a little, then holds", "dragged": "Gets dragged down the ramp"}),
     }

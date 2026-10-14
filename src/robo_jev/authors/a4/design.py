@@ -4,16 +4,18 @@ Three scenes, one per law, all outdoors (orchards, farms, building sites, marina
 
 * **bank** (A) — a robot sets a load down on sloping ground and lets go. Decisive stated number: the slope (degrees). Hidden: the
   friction of the load on the ground (ground word), the centre-of-mass height and downhill shift (contents word), and the local slope
-  deviation from the stated reading (ground word: σ in degrees). Actions: the plan, turned a quarter turn first, carried on to a
-  flatter patch (its slope stated).
+  deviation from the stated reading (ground word: σ in degrees). Actions: the plan, a quarter turn first (safer or riskier, by which
+  side ends up downhill), another patch nearby (its slope stated — flatter or steeper).
 * **ledge** (B) — the robot creeps forward until its nose sticks out past the edge of a drop. Decisive stated number: the overhang
   (cm). Hidden: the robot's centre of mass along its length and its height (payload word), the friction of the ground (ground word)
-  and the error of the stopping point (ground word: σ in m). Actions: the plan, stop shorter by a stated distance, turn round and
-  reverse to the same overhang (the centre of mass mirrored).
+  and the error of the stopping point (ground word: σ in m). Actions: the plan, another stop point (a stated distance shorter or
+  further out), turn round and reverse to the same overhang (the centre of mass mirrored — safer or riskier by the payload).
 * **anchor** (C) — the parked robot holds a winch line hauling a load up a ramp. Decisive stated number: the load's estimated mass
   (kg). Hidden: the robot's friction on the ramp (ramp word), the load's drag coefficient (load word), the ratio of the true to the
-  stated mass (word for how the mass is known). Actions: the plan, a soft start (its time to line speed stated), haul from the flat
-  apron behind (the line runs over the crest).
+  stated mass (word for how the mass is known). Actions: the plan, the winch's other start preset (its time to line speed stated —
+  quicker or softer), haul from the flat apron behind (the line runs over the crest).
+
+Every scene's alternatives can be safer or riskier than the plan, so the comparison question is two-sided.
 
 **Priors.** ``base`` = the catalog ranges; ``alt_a`` = friction-type ranges × 0.7 (friction and drag), centre-of-mass and mass ranges
 1.5 × wider around the same centre, placement σ × 1.5; ``alt_b`` = friction × 1.3, those ranges half as wide, σ × 0.75. Every hidden
@@ -68,12 +70,12 @@ PLAN_KEY = {scene: "the_plan" for scene in SCENES}
 #: Cost of each outcome and of each action (the action question's expected costs = outcome frequencies · cost + action cost).
 OUTCOME_COST = {"bank": {"stays_put": 0.0, "slides_down": 1.0, "tips_over": 2.5}, "ledge": {"holds": 0.0, "noses_down": 1.5, "goes_over": 4.0},
                 "anchor": {"holds_fast": 0.0, "creeps": 1.0, "dragged": 4.0}}
-ACTION_COST = {"bank": {"the_plan": 0.0, "turned_first": 0.05, "flatter_spot": 0.3}, "ledge": {"the_plan": 0.0, "stop_short": 0.2, "reverse_in": 0.35},
-               "anchor": {"the_plan": 0.0, "soft_start": 0.1, "from_apron": 0.35}}
+ACTION_COST = {"bank": {"the_plan": 0.0, "turned_first": 0.05, "other_patch": 0.2}, "ledge": {"the_plan": 0.0, "other_stop": 0.1, "reverse_in": 0.35},
+               "anchor": {"the_plan": 0.0, "other_start": 0.1, "from_apron": 0.35}}
 #: Option key → variant name.
-OPTIONS = {"bank": {"the_plan": "planned", "turned_first": "opt_turned", "flatter_spot": "opt_flatter"},
-           "ledge": {"the_plan": "planned", "stop_short": "opt_short", "reverse_in": "opt_reverse"},
-           "anchor": {"the_plan": "planned", "soft_start": "opt_soft", "from_apron": "opt_apron"}}
+OPTIONS = {"bank": {"the_plan": "planned", "turned_first": "opt_turned", "other_patch": "opt_patch"},
+           "ledge": {"the_plan": "planned", "other_stop": "opt_stop", "reverse_in": "opt_reverse"},
+           "anchor": {"the_plan": "planned", "other_start": "opt_start", "from_apron": "opt_apron"}}
 DOMAINS = ("orchard", "farm", "construction", "marina", "park", "sidewalk")
 
 _PHI_INV = NormalDist().inv_cdf
@@ -104,6 +106,8 @@ BANK_LOADS = {
     "instrument case": ((0.45, 0.55), (0.30, 0.36), (0.50, 0.65), (10, 26), "survey gear", ("construction", "park", "sidewalk")),
     "seed tote": ((0.55, 0.65), (0.35, 0.45), (0.28, 0.36), (10, 26), "seed potatoes", ("farm", "orchard")),
     "battery crate": ((0.40, 0.50), (0.30, 0.36), (0.30, 0.40), (25, 45), "spare cells", ("construction", "marina", "sidewalk")),
+    "planter box": ((0.38, 0.46), (0.36, 0.42), (0.60, 0.85), (25, 60), "soil", ("park", "sidewalk", "construction")),
+    "gas cylinder cage": ((0.40, 0.48), (0.28, 0.36), (0.80, 1.00), (30, 70), "gas bottles", ("construction", "marina", "farm")),
 }
 #: bank — contents: (centre-of-mass height above the box centre, fraction of H; downhill shift, fraction of the downslope extent).
 BANK_CONTENTS = {
@@ -120,6 +124,9 @@ BANK_CONTENTS_FOR = {
     "picking bin": tuple(BANK_CONTENTS), "seed tote": tuple(BANK_CONTENTS), "battery crate": tuple(BANK_CONTENTS),
     "jerrycan": ("packed full, level with the top", "half full, settled at the bottom", "full, with a coil of chain strapped on the lid"),
     "tool chest": _LIDDED, "cool box": _LIDDED, "hive box": _LIDDED, "instrument case": _LIDDED,
+    "planter box": ("packed full, level with the top", "half full, settled at the bottom", "nearly empty, one heavy offcut on the floor",
+                    "heaped up over the rim", "half full, all shoved to one side"),
+    "gas cylinder cage": ("packed full, level with the top", "half full, settled at the bottom", "half full, all shoved to one side"),
 }
 
 #: ledge — ground at the top: (mu_lo, mu_hi, stopping-point σ in m, domains).
@@ -392,12 +399,15 @@ def sample_visible(scene: str, rng: np.random.Generator) -> dict[str, Any]:
 
 def options_values(scene: str, vis: dict[str, Any], rng: np.random.Generator) -> dict[str, dict[str, Any]]:
     """The stated parameters of the two alternative actions (shared by both records of a pair)."""
+    sign = 1.0 if rng.random() < 0.5 else -1.0
     if scene == "bank":
         return {"opt_turned": {"orientation": "along" if vis["orientation"] == "across" else "across"},
-                "opt_flatter": {"flat_drop": _r(rng, 4.0, 10.0, 0), "flat_distance": float(int(rng.integers(4, 16)))}}
+                "opt_patch": {"patch_step": sign * _r(rng, 4.0, 10.0, 0), "patch_distance": float(int(rng.integers(4, 16)))}}
     if scene == "ledge":
-        return {"opt_short": {"short_by": float(int(rng.integers(2, 6)) * 0.05)}, "opt_reverse": {"reverse": True}}
-    return {"opt_soft": {"start_time": _r(rng, 3.0, 5.0, 1)}, "opt_apron": {"apron": True, "apron_distance": float(int(rng.integers(3, 12)))}}
+        return {"opt_stop": {"stop_change": round(sign * int(rng.integers(2, 5)) * 0.05, 2)}, "opt_reverse": {"reverse": True}}
+    quicker = sign > 0
+    start = round(float(vis["start_time"]) * float(rng.uniform(0.35, 0.6)), 2) if quicker else _r(rng, 2.5, 5.0, 1)
+    return {"opt_start": {"start_time": max(0.1, start), "quicker": quicker}, "opt_apron": {"apron": True, "apron_distance": float(int(rng.integers(3, 12)))}}
 
 
 def resolve_variants(scene: str, vis: dict[str, Any], option_values: dict[str, dict[str, Any]], cf_value: float) -> dict[str, dict[str, Any]]:
@@ -405,10 +415,10 @@ def resolve_variants(scene: str, vis: dict[str, Any], option_values: dict[str, d
     spec = SCENE_SPECS[scene]
     out: dict[str, dict[str, Any]] = {"planned": {}, "cf": {spec.decisive: cf_value}}
     for variant, values in option_values.items():
-        if scene == "bank" and variant == "opt_flatter":
-            out[variant] = {"slope": values["flat_slope"]}
-        elif scene == "ledge" and variant == "opt_short":
-            out[variant] = {"overhang": round(max(0.0, vis["overhang"] - values["short_by"]), 6)}
+        if scene == "bank" and variant == "opt_patch":
+            out[variant] = {"slope": values["patch_slope"]}
+        elif scene == "ledge" and variant == "opt_stop":
+            out[variant] = {"overhang": round(max(0.0, vis["overhang"] + values["stop_change"]), 6)}
         elif scene == "anchor" and variant == "opt_apron":
             out[variant] = {"apron": True}
         else:

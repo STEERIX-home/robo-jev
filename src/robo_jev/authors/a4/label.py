@@ -110,13 +110,17 @@ def build_group(scene: str, index: int, seed: int) -> dict[str, Any] | None:
                 continue
         options = D.options_values(scene, vis, rng)
         if scene == "bank":
-            low = min(vis["slope"], partner["slope"])
-            flat = max(1.0, low - options["opt_flatter"]["flat_drop"])
-            if flat >= low:
+            patch = min(42.0, max(1.0, vis["slope"] + options["opt_patch"]["patch_step"]))
+            if patch in (vis["slope"], partner["slope"]):
                 continue
-            options["opt_flatter"]["flat_slope"] = flat
-        if scene == "ledge" and min(vis["overhang"], partner["overhang"]) <= options["opt_short"]["short_by"] + 0.01:
-            options["opt_short"]["short_by"] = round(max(0.05, min(vis["overhang"], partner["overhang"]) / 2), 2)
+            options["opt_patch"]["patch_slope"] = patch
+        if scene == "ledge":
+            change = options["opt_stop"]["stop_change"]
+            members = (vis, partner)
+            if change > 0 and any(m["overhang"] + change > 0.9 * m["length"] for m in members):
+                options["opt_stop"]["stop_change"] = change = -change
+            if change < 0 and min(m["overhang"] for m in members) + change < 0.02:
+                continue
         alternatives = [k for k in D.OPTIONS[scene] if k != D.PLAN_KEY[scene]]
         compare = alternatives[int(rng.integers(len(alternatives)))]
         aims = {"key": share, "target": target, "partner_key": float(np.mean(D.key_analytic(scene, D.variant_facts(scene, partner, "planned", {}), hid_p)[0]))}

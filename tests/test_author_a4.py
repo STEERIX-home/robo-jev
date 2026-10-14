@@ -227,6 +227,26 @@ def test_the_partners_text_differs_only_where_the_fact_changes(groups):
         assert list(q0) == list(q1) and all(q0[n]["type"] == q1[n]["type"] for n in q0)
 
 
+def test_every_scene_has_alternatives_on_both_sides_of_the_plan():
+    """The comparison question is two-sided: another patch can be flatter or steeper, another stop shorter or further out, the other
+    winch preset quicker or softer (and the quarter turn and the reverse can help or hurt)."""
+    import numpy as np
+
+    seen = {"bank": set(), "ledge": set(), "anchor": set()}
+    for i in range(40):
+        rng = np.random.default_rng(i)
+        for scene in D.SCENES:
+            vis = D.sample_visible(scene, rng)
+            options = D.options_values(scene, vis, rng)
+            if scene == "bank":
+                seen[scene].add(options["opt_patch"]["patch_step"] > 0)
+            elif scene == "ledge":
+                seen[scene].add(options["opt_stop"]["stop_change"] > 0)
+            else:
+                seen[scene].add(options["opt_start"]["start_time"] < vis["start_time"])
+    assert all(v == {True, False} for v in seen.values()), seen
+
+
 def test_records_pass_the_loader_and_carry_the_contract(records):
     for r in records:
         assert validate_record(r) == [], r["id"]
