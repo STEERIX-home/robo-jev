@@ -273,3 +273,27 @@ def test_request_length_budget():
                 parts += [f"{k}: {v}" if v else k for k, v in crit.items()] if isinstance(crit, dict) else list(crit or [])
             lengths.append(len(tokenizer.encode("\n".join(parts), add_special_tokens=False).ids))
     assert max(lengths) <= 500 and float(np.median(lengths)) <= 360
+
+
+@pytest.mark.parametrize("scene, field, values, risk_up", [
+    ("indexdial", "index_s", (0.35, 0.5, 0.7, 0.9, 1.2, 1.6, 2.2, 3.0), False),
+    ("mayostand", "setdown_mm", None, True),
+    ("holddown", "press_n", (20, 40, 70, 110, 160, 230, 330, 480), True),
+])
+def test_key_label_is_monotone_in_the_decisive_number(scene, field, values, risk_up):
+    sc = SCENES[scene]
+    plan = build.plan_group(scene, 11)
+    state = dict(plan["base_state"])
+    if values is None:
+        lo, hi = sc.decisive_bounds(state)
+        values = tuple(float(v) for v in np.linspace(lo, hi, 8))
+    points = cat.uniform_points(plan["draws_seed"], 6, sc.hidden_names)
+    hidden = sc.values(state, "base", points)
+    shares = []
+    for x in values:
+        st = dict(state)
+        st[field] = float(x)
+        events = [sc.simulate(st, {q: float(v[k]) for q, v in hidden.items()})["outcome"] in sc.key_events for k in range(6)]
+        shares.append(sum(events) / 6)
+    steps = np.diff(shares)
+    assert (steps >= -1e-9).all() if risk_up else (steps <= 1e-9).all(), shares

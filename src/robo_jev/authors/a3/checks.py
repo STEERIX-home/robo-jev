@@ -274,10 +274,11 @@ def overlap_report(path: Path, repo: Path) -> dict[str, Any]:
 # --------------------------------------------------------------------------
 
 SWEEPS = {
-    # scene: [(field, values-builder, risk_up)]
-    "indexdial": [("index_s", "decisive", False), ("radius_mm", "radius", True), ("mu_scale", "mu", False)],
-    "mayostand": [("setdown_mm", "decisive", True), ("release_mm", "release", True), ("base_extra_kg", "base", False)],
-    "holddown": [("press_n", "decisive", True), ("clamp_n", "clamp", False), ("mu_scale", "mu", False)],
+    # scene: [(field, values-builder, key risk rises with the value, severe risk rises with the value)]. More friction on the dial
+    # lowers the key risk (no slide) but raises the severe one (a part that cannot slide tips instead) — the physics, not a violation.
+    "indexdial": [("index_s", "decisive", False, False), ("radius_mm", "radius", True, True), ("mu_scale", "mu", False, True)],
+    "mayostand": [("setdown_mm", "decisive", True, True), ("release_mm", "release", True, True), ("base_extra_kg", "base", False, False)],
+    "holddown": [("press_n", "decisive", True, True), ("clamp_n", "clamp", False, False), ("mu_scale", "mu", False, False)],
 }
 
 
@@ -387,13 +388,15 @@ def _threshold_job(args: tuple[str, int]) -> dict[str, Any]:
                                       "ok": None if expect is None else event == expect})
     elif scene_name == "mayostand":
         # centre of mass past the support: released at 0 mm, combined centre of mass ±15 mm about the front feet line
-        state = sc.sample_state(rng)
-        state["release_mm"] = 0
-        base, load = float(rng.uniform(1.6, 9.5)), float(rng.uniform(2.0, 11.0))
-        length = state["dims_mm"][0] / 1000
-        ms, com, _ = sim.stand_inertial(state["reach_mm"] / 1000, state["tray_mm"] / 1000, state["height_mm"] / 1000, base)
-        x_star = state["reach_mm"] / 1000 + ms * (state["reach_mm"] / 1000 - com[0]) / load
-        lo, hi = sc.decisive_bounds(state)
+        for _ in range(200):  # a case whose critical set-down point (± 15 mm) lies on the tray
+            state = sc.sample_state(rng)
+            state["release_mm"] = 0
+            base, load = float(rng.uniform(1.6, 9.5)), float(rng.uniform(2.0, 11.0))
+            ms, com, _ = sim.stand_inertial(state["reach_mm"] / 1000, state["tray_mm"] / 1000, state["height_mm"] / 1000, base)
+            x_star = state["reach_mm"] / 1000 + ms * (state["reach_mm"] / 1000 - com[0]) / load
+            lo, hi = sc.decisive_bounds(state)
+            if lo / 1000 <= x_star - 0.015 and x_star + 0.015 <= hi / 1000:
+                break
         for offset in (-0.015, 0.015):
             x = x_star + offset
             if not (lo / 1000 <= x <= hi / 1000):
@@ -435,14 +438,15 @@ def _determinism_job(args: tuple[str, int]) -> dict[str, Any]:
 def physics_sanity(*, workers: int = 4, quick: bool = False) -> dict[str, Any]:
     t0 = time.perf_counter()
     n_states, n_values, k = (3, 8, 6) if quick else (10, 14, 12)
-    sweep_jobs = [(scene, field, 500 + 37 * i, n_values, k) for scene, specs in SWEEPS.items() for field, _, _ in specs for i in range(n_states)]
+    sweep_jobs = [(scene, field, 500 + 37 * i, n_values, k) for scene, specs in SWEEPS.items() for field, *_ in specs for i in range(n_states)]
     threshold_jobs = [(scene, i) for scene in SCENES for i in range(4 if quick else 24)]
     determinism_jobs = [(scene, g) for scene in SCENES for g in (0, 7)]
     with mp.get_context("fork").Pool(int(workers)) as pool:
         sweeps = pool.map(_sweep_job, sweep_jobs, chunksize=1)
         thresholds = pool.map(_threshold_job, threshold_jobs, chunksize=1)
         determinism = pool.map(_determinism_job, determinism_jobs, chunksize=1)
-    risk = {(scene, field): up for scene, specs in SWEEPS.items() for field, _, up in specs}
+    risk = {(scene, field): up for scene, specs in SWEEPS.items() for field, _, up, _ in specs}
+    severe_risk = {(scene, field): up for scene, specs in SWEEPS.items() for field, _, _, up in specs}
     mono: dict[str, Any] = defaultdict(lambda: {"sweeps": 0, "key_label_violations": 0, "key_draw_violations": 0, "severe_label_violations": 0,
                                                 "severe_draw_violations": 0})
     for s in sweeps:
@@ -451,8 +455,11 @@ def physics_sanity(*, workers: int = 4, quick: bool = False) -> dict[str, Any]:
         entry["sweeps"] += 1
         entry["key_label_violations"] += _violations(s["key"], up)
         entry["key_draw_violations"] += _draw_violations(s["key_draws"], up)
-        entry["severe_label_violations"] += _violations(s["severe"], up)
-        entry["severe_draw_violations"] += _draw_violations(s["severe_draws"], up)
+        severe_up = severe_risk[(s["scene"], s["field"])]
+        entry["severe_label_violations"] += _violations(s["severe"], severe_up)
+        entry["severe_draw_violations"] += _draw_violations(s["severe_draws"], severe_up)
+        entry["severe_direction"] = "up" if severe_up else "down"
+        entry["key_direction"] = "up" if up else "down"
         entry.setdefault("examples", []).append({"xs": s["xs"], "key": [round(v, 3) for v in s["key"]], "severe": [round(v, 3) for v in s["severe"]]})
     for entry in mono.values():
         entry["examples"] = entry["examples"][:2]
@@ -479,11 +486,16 @@ def sanity_markdown(result: Mapping[str, Any]) -> str:
     s = result["summary"]
     lines = ["# A3 physics sanity", "", f"Sweeps: {s['sweeps']} ({result['settings']}); {s['seconds']} s.", "",
              "## Monotonicity (key label must never move against the physics)", "",
-             "| scene:factor | sweeps | key label violations | key draw violations | severe label violations | severe draw violations |",
-             "|---|---|---|---|---|---|"]
+             "Each sweep: one random state, shared hidden draws, the factor stepped over its range; a violation = the label (share over the",
+             "draws) or one draw's event moves against the stated physical direction between neighbouring values.", "",
+             "| scene:factor | key dir | sweeps | key label violations | key draw violations | severe dir | severe label violations | severe draw violations |",
+             "|---|---|---|---|---|---|---|---|"]
     for name, e in result["monotonicity"].items():
-        lines.append(f"| {name} | {e['sweeps']} | {e['key_label_violations']} | {e['key_draw_violations']} | {e['severe_label_violations']} | "
-                     f"{e['severe_draw_violations']} |")
+        lines.append(f"| {name} | {e['key_direction']} | {e['sweeps']} | {e['key_label_violations']} | {e['key_draw_violations']} | "
+                     f"{e['severe_direction']} | {e['severe_label_violations']} | {e['severe_draw_violations']} |")
+    lines += ["", "The index dial's severe event (falls over) is not required to be monotone: the cam's tangential acceleration reverses",
+              "mid-index and sliding competes with tipping, so near its threshold a slightly harder index can leave a rocking part upright.",
+              "The key event (slides 10 mm, lifts 10 deg or falls) is monotone; that is why the dial asks for it as the key question."]
     lines += ["", "## Analytic thresholds", "", "| law | checked | not asserted | failed |", "|---|---|---|---|"]
     for law, c in s["threshold_checks"].items():
         lines.append(f"| {law} | {c.get('checked', 0)} | {c.get('not_asserted', 0)} | {c.get('failed', 0)} |")
