@@ -213,7 +213,7 @@ def _bank_questions(group: dict[str, Any], vis: dict[str, Any], c: dict[str, Any
                           ["0 = it surely stays where it is set", "1 = it surely slides or tips"]),
         n["direction"]: _q("choice", (f"Suppose the slope were {cf} degrees rather than {_n(vis['slope'])}. Does that raise, lower, or barely change the chance "
                                       f"that the {load} moves after release?",
-                                      f"Compared with {_n(vis['slope'])} degrees, how would a {cf}-degree slope change the chance that the {load} moves?")[q[3]],
+                                      f"Compared with {_n(vis['slope'])} degrees, how would a slope of {cf} degrees change the chance that the {load} moves?")[q[3]],
                            {"goes_up": "More likely to move", "goes_down": "Less likely to move", "stays_similar": "About as likely"}),
         n["compare"]: _q("choice", (f"Which set-down is more likely to end with the {load} moving: the plan as stated, or {alt_text[alt]}?",
                                     f"Riskier for the {load}: the stated plan or {alt_text[alt]}? Pick the one more likely to slide or tip.")[q[4]],
@@ -274,16 +274,16 @@ def _anchor_questions(group: dict[str, Any], vis: dict[str, Any], c: dict[str, A
     alt_text = {"soft_start": f"a soft start ({soft} seconds to line speed)", "from_apron": "backing up to the flat apron first and hauling from there"}
     alt = group["compare_option"]
     return {
-        n["key"]: _q("noul", ("When the winch starts, will the robot slide down the ramp at all, even a few centimetres?",
+        n["key"]: _q("noul", ("When the winch starts, will the robot slide down the ramp at all, even slightly?",
                               "Does the robot lose its grip and slip when the haul starts?")[q[0]]),
         n["severe"]: _q("noul", ("Will the robot be dragged down the ramp and keep sliding?",
                                  "Does the load drag the robot down the ramp without it stopping?")[q[1]]),
         n["score_cf"]: _q("score", (f"Say the load were about {cf} kilograms. Give the chance that the robot slips when the winch starts.",
-                                    f"Rate the chance of the robot slipping with a {cf}-kilogram load on the line.")[q[2]],
+                                    f"Rate the chance of the robot slipping with {cf} kilograms on the line.")[q[2]],
                           ["0 = it surely holds without moving", "1 = it surely slips"]),
         n["direction"]: _q("choice", (f"Suppose the load were about {cf} kilograms rather than {_n(vis['load_mass'])}. Does that raise, lower, or barely change "
                                       "the chance that the robot slips?",
-                                      f"How does a {cf}-kilogram load, instead of {_n(vis['load_mass'])}, change the chance that the robot slips?")[q[3]],
+                                      f"How does a load of about {cf} kilograms, instead of {_n(vis['load_mass'])}, change the chance that the robot slips?")[q[3]],
                            {"goes_up": "More likely to slip", "goes_down": "Less likely to slip", "stays_similar": "About as likely"}),
         n["compare"]: _q("choice", (f"Which haul is more likely to make the robot slip: the plan as stated, or {alt_text[alt]}?",
                                     f"Riskier for the robot's grip: the stated plan or {alt_text[alt]}?")[q[4]],

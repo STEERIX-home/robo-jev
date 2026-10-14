@@ -19,8 +19,8 @@ chunks (``mj_step(..., nstep)``) and is deterministic: the same model, hidden va
   angle; 0 for the flat apron) and holds a winch line that hauls a load up the ramp. The line pulls the robot downhill at a low hitch
   with the tension of the haul: ``T = m_load · (g · (sin θ + c · cos θ) + a(t))`` with the start acceleration ``a(t)`` ramped in and out
   (holding before the start: ``m_load · g · (sin θ − c · cos θ)``). The robot's slip does not feed back into the tension (the winch
-  follows its haul profile). Outcome: ``dragged`` (slid ≥ 40 cm or still sliding at the end), ``creeps`` (slid ≥ 2 cm, then held) or
-  ``holds_fast``.
+  follows its haul profile). Outcome: ``dragged`` (slid ≥ 40 cm or still sliding at the end), ``creeps`` (slid ≥ 5 mm, then held) or
+  ``holds_fast``. Under static friction the contact model shows no creep (< 0.5 mm at 96 % of the slip load), so 5 mm marks a real slip.
 """
 
 from __future__ import annotations
@@ -50,7 +50,7 @@ __all__ = [
 BANK_TIP_DEG = 45.0
 BANK_SLIDE_M = 0.03
 LEDGE_TILT_DEG = 8.0
-ANCHOR_CREEP_M = 0.02
+ANCHOR_CREEP_M = 0.005
 ANCHOR_DRAG_M = 0.40
 #: Steps per chunk between checks (10 ms).
 CHUNK = 10
