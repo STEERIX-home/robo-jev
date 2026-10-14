@@ -83,7 +83,8 @@ def cmd_assemble(args: argparse.Namespace) -> int:
         "priors": ["base", "alt_a", "alt_b"], "label": "base prior frequencies (no clipping)",
         "files": {"train.jsonl": {"records": len(records), "sha256": digest}},
         "scenes": summary, "id_pattern": "v06a1-<scene>-<group:06d>[p]", "families": {"mast": "mastpick", "dock": "dockedge", "ramp": "tugramp"},
-        "command": "scripts/author_a1.py label --groups 720 (4 capped workers) ; scripts/author_a1.py assemble --per-scene 625",
+        "command": ("scripts/author_a1.py label --groups 720 (4 capped workers, all scenes); scripts/author_a1.py label --groups 900 --start 720 "
+                    "--scenes mast ramp (3 capped workers: more candidates for the flat-key selection); scripts/author_a1.py assemble --per-scene 625"),
     }
     _write_json(OUT / "manifest.json", manifest)
     _log(f"wrote {len(records)} records ({digest[:12]}) and the manifest / stats")
