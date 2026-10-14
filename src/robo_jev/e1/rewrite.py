@@ -103,6 +103,11 @@ def assert_sendable(record: dict[str, Any], texts: Iterable[str], index: SealedI
         raise SealedTextError(f"{rid}: T8-derived record — never sent")
     if rid.startswith("t9") or (record.get("meta") or {}).get("set") == "T9":
         raise SealedTextError(f"{rid}: T9 record — sealed, never sent to any API")
+    from robo_jev.data.sealed import NEVER_SENT_SETS, sealed_record_set
+
+    sealed_set = sealed_record_set(record)
+    if sealed_set in NEVER_SENT_SETS:
+        raise SealedTextError(f"{rid}: {sealed_set} record — sealed, never sent to any API")
     state = record["request"]["state"]
     if _sha(state) in index.states:
         raise SealedTextError(f"{rid}: the state is a sealed state")

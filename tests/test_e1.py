@@ -172,6 +172,10 @@ def test_sealed_guard(tmp_path, t8b_like):
         rw.assert_sendable(fresh, [fresh["request"]["state"]], index)
     ok = {**A_RECORD, "id": "e1a-000011", "request": {**A_RECORD["request"], "state": "You are moving at 1.10 m/s with a crate on your deck."}}
     rw.assert_sendable(ok, [ok["request"]["state"]], index)
+    # every never-sent sealed set is refused by id prefix or meta.set, not only T9 (v0.6's held-out author A4)
+    for sealed_record in ({**ok, "id": "v06a4-bank-000001"}, {**ok, "id": "e1a-000012", "meta": {"set": "v06-a4"}}):
+        with pytest.raises(rw.SealedTextError):
+            rw.assert_sendable(sealed_record, [ok["request"]["state"]], index)
 
 
 # --------------------------------------------------------------------------
