@@ -380,6 +380,9 @@ class Wallpress(Scene):
     costs = C.WP_COSTS
     action_costs = C.WP_ACTION_COSTS
     kappa = 1.0
+    #: Rollouts re-express the load's bounding volumes after each centre-of-mass write (physics audit 2026-10-14; the load–world pair
+    #: goes through the midphase here). Set to False only to reproduce the labels stored before the fix.
+    refresh_bvh = True
 
     def sample(self, rng: np.random.Generator, flavour: np.random.Generator) -> dict[str, Any]:
         domain = str(flavour.choice(sorted(C.WP_VENUES)))
@@ -415,9 +418,9 @@ class Wallpress(Scene):
 
     def run(self, scene_cache: dict, facts: Mapping[str, Any], values: Mapping[str, float]) -> dict[str, Any]:
         dims = self.dims(facts)
-        key = ("wp", dims)
+        key = ("wp", dims, self.refresh_bvh)
         if key not in scene_cache:
-            scene_cache[key] = PH.WallpressScene(dims, 5.0, 0.5)
+            scene_cache[key] = PH.WallpressScene(dims, 5.0, 0.5, refresh_bvh=self.refresh_bvh)
         sc = scene_cache[key]
         return sc.run(force=float(facts["force_n"]) * int(facts.get("pads", 1)), reflex=float(facts["reflex"]),
                       mu=max(0.02, float(values["mu"])), offset=(float(values["dy"]), float(values["dz"])),

@@ -17,7 +17,8 @@ Three scenes, one per law:
   force, and settles for 0.3 s with an unlimited arm; then the stated limit applies for 3 s. Outcome: ``over`` (tilt > 45°, or the
   hand saturated with the tilt already 2° past the plan), ``hangs`` (the hand pulls: the centre of mass is behind the rear edge and
   the arm holds it) or ``rests`` (the hand pushes, or the piece came back onto its feet).
-* **wallpress** (law C, friction-limited holding) — a flat item (mirror, framed print, pinboard ...) is pressed flat against a wall
+* **wallpress** (law C, friction-limited holding; rolled with ``refresh_bvh`` since the 2026-10-14 physics audit) — a flat item
+  (mirror, framed print, pinboard ...) is pressed flat against a wall
   by a padded paddle with a stated force; nothing else holds it up. The item's back carries the hidden wall friction, the paddle's
   face its own friction. The paddle is on a slide joint normal to the wall (it cannot move up or down) and is pushed with the planned
   force. A slip reflex is part of the plan: once the item has dropped 4 mm, the push ramps to a stated multiple of the planned force
@@ -334,12 +335,18 @@ def wallpress_xml(dims: Sequence[float], mass: float, pad_mu: float) -> str:
 
 
 class WallpressScene:
-    """One compiled model per (dims, mass, pad friction); the paddle offset (placement) and the force are set per rollout."""
+    """One compiled model per (dims, mass, pad friction); the paddle offset (placement) and the force are set per rollout.
 
-    def __init__(self, dims: Sequence[float], mass: float, pad_mu: float):
+    ``refresh_bvh`` (default on since the physics audit of 2026-10-14): the world body here holds two geoms (floor and wall), so the
+    load–world pair goes through MuJoCo's midphase, which reads the load's bounding volumes in its compile-time inertial frame; every
+    hidden centre-of-mass write therefore also re-expresses them (:func:`robo_jev.outside.physics.refresh_bvh`). ``False`` reproduces the
+    labels stored before the fix (``artifacts/v06/a2/work/labels-wallpress.jsonl``). The turntable and tiltback scenes have no
+    midphase pair (:meth:`robo_jev.outside.physics.Scene.midphase_pairs` is empty) and are left as they were."""
+
+    def __init__(self, dims: Sequence[float], mass: float, pad_mu: float, *, refresh_bvh: bool = True):
         self.dims = tuple(float(v) for v in dims)
         self.mass = float(mass)
-        self.scene = P.Scene(wallpress_xml(self.dims, mass, pad_mu))
+        self.scene = P.Scene(wallpress_xml(self.dims, mass, pad_mu), refresh_bvh=refresh_bvh)
         model = self.scene.model
         self.press = int(model.jnt_dofadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "press")])
         self.press_q = int(model.jnt_qposadr[mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_JOINT, "press")])

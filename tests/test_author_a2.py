@@ -293,6 +293,60 @@ def test_key_frequency_is_monotone_in_the_decisive_number(scene):
 
 
 @mujoco_only
+def test_only_wallpress_has_a_midphase_pair_and_only_it_refreshes_bounding_volumes():
+    """Physics audit 2026-10-14: a run-time centre of mass leaves MuJoCo's stored bounding volumes behind, which matters only for body
+    pairs that go through the midphase. Only wallpress has one (the world holds the floor and the wall), and only it refreshes."""
+    import mujoco
+
+    from robo_jev.authors.a2 import physics as PH
+
+    scenes = {"turntable": PH.TurntableScene((0.065, 0.065, 0.24), 0.9), "tiltback": PH.TiltbackScene((0.32, 0.8, 1.8), 50.0),
+              "wallpress": PH.WallpressScene((0.02, 0.5, 0.6), 5.0, 0.5)}
+    pairs = {}
+    for scene, obj in scenes.items():
+        model = obj.scene.model
+        pairs[scene] = [tuple(mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, b) or "world" for b in pair) for pair in obj.scene.midphase_pairs()]
+    assert pairs == {"turntable": [], "tiltback": [], "wallpress": [("load", "world")]}
+    assert {scene: obj.scene.refresh_bvh for scene, obj in scenes.items()} == {"turntable": False, "tiltback": False, "wallpress": True}
+    assert SCENES["wallpress"].refresh_bvh is True and not hasattr(SCENES["turntable"], "refresh_bvh")
+    # the refresh really acts: after a rollout (hidden centre of mass at the geometric centre) the load's stored bounding volumes sit
+    # 1 mm (the compiled nominal inertial offset) further along each axis of its inertial frame than compiled; without it they stay
+    from robo_jev.outside.physics import NOMINAL_IPOS
+
+    for flag in (True, False):
+        wp = PH.WallpressScene((0.02, 0.5, 0.6), 5.0, 0.5, refresh_bvh=flag)
+        model, load = wp.scene.model, wp.scene.load
+        start, count = int(model.body_bvhadr[load]), int(model.body_bvhnum[load])
+        compiled = np.array(model.bvh_aabb[start : start + count])
+        wp.run(force=60.0, reflex=2.0, mu=0.4, mass=4.0, pad_mu=0.6, seconds=0.05)
+        moved = np.array(model.bvh_aabb[start : start + count]) - compiled
+        assert np.allclose(moved[:, :3], NOMINAL_IPOS if flag else 0.0) and np.allclose(moved[:, 3:], 0.0)
+
+
+@mujoco_only
+@pytest.mark.parametrize("scene", ("turntable", "tiltback"))
+def test_turntable_and_tiltback_rollouts_are_bit_identical_with_the_flag(scene):
+    class Flagged(dict):  # every scene put in this cache re-expresses its bounding volumes after each centre-of-mass write
+        def __setitem__(self, key, value):
+            value.scene.refresh_bvh = True
+            super().__setitem__(key, value)
+
+    spec = SCENES[scene]
+    plan = plan_group(scene, 11)
+    draws = spec.draws(np.random.default_rng(plan["draws_seed"]), K)
+    plain: dict = {}
+    flagged = Flagged()
+    for member in ("base", "pair"):
+        for facts in member_variants(plan, member).values():
+            vals = hidden_values(spec, spec.ranges(facts), draws, "alt_a")
+            for k in range(0, K, 4):
+                values = {n: float(vals[n][k]) for n in vals}
+                assert spec.run(plain, facts, values) == spec.run(flagged, facts, values)
+    assert flagged and all(obj.scene.refresh_bvh for obj in flagged.values())
+    assert not any(obj.scene.refresh_bvh for obj in plain.values())
+
+
+@mujoco_only
 @pytest.mark.parametrize("scene", SCENE_NAMES)
 def test_a_group_labels_end_to_end(scene):
     from robo_jev.authors.a2.generate import label_group
@@ -301,8 +355,10 @@ def test_a_group_labels_end_to_end(scene):
     plan = plan_group(scene, 5)
     labelled = label_group(plan)
     assert labelled["unstable"] == 0
+    assert labelled.get("refresh_bvh", False) == (scene == "wallpress")
     for entry in labelled["setups"].values():
         assert all(len(codes) == K for codes in entry["codes"].values())
     for record in assemble_group(plan, labelled, git="t", mujoco_version="3.9.0"):
         assert validate_record(record) == []
+        assert record["generator"].get("refresh_bvh", False) == (scene == "wallpress")
     assert Counter(len(e["codes"]) for e in labelled["setups"].values()) == Counter({3: len(labelled["setups"])})

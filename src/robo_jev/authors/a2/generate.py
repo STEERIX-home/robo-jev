@@ -170,7 +170,10 @@ def label_group(plan: Mapping[str, Any]) -> dict[str, Any]:
                 unstable += int(bool(result.get("unstable")))
             codes[prior], metrics[prior] = "".join(row), mrow
         out[key] = {"codes": codes, "metric": metrics}
-    return {"scene": plan["scene"], "index": plan["index"], "setups": out, "unstable": unstable, "cpu_s": round(time.process_time() - started, 3)}
+    result = {"scene": plan["scene"], "index": plan["index"], "setups": out, "unstable": unstable, "cpu_s": round(time.process_time() - started, 3)}
+    if getattr(spec, "refresh_bvh", False):
+        result["refresh_bvh"] = True
+    return result
 
 
 # --------------------------------------------------------------------------
@@ -370,7 +373,7 @@ def assemble_group(plan: Mapping[str, Any], labelled: Mapping[str, Any], *, git:
             "id": ids[member],
             "generator": {"name": GENERATOR, "family": scene, "group": int(plan["index"]), "seed": int(plan["seed"]),
                           "draws_seed": int(plan["draws_seed"]), "k": K, "priors": list(C.PRIORS), "mujoco": mujoco_version, "git": git,
-                          "member": member},
+                          "member": member, **({"refresh_bvh": True} if labelled.get("refresh_bvh") else {})},
             "meta": meta,
             "request": {"state": state, "questions": questions},
             "labels": part["labels_by_prior"]["base"],
