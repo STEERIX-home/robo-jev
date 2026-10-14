@@ -100,7 +100,7 @@ def _hist(values: Sequence[float]) -> list[int]:
 def stats(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     """Composition: records, key-label profile, bands per question kind, robust and clear shares, pairs, choice argmaxes."""
     out: dict[str, Any] = {"records": len(records), "by_scene": {}}
-    by_scene: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
+    by_scene: dict[str, list[Mapping[str, Any]]] = defaultdict(list)  # keyed by the public family name
     for r in records:
         by_scene[r["meta"]["scene"]].append(r)
     for scene, recs in list(by_scene.items()) + [("all", list(records))]:

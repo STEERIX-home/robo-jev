@@ -129,11 +129,11 @@ def _fake_cached(scene: str, index: int, seed: int = 0) -> dict:
 def test_records_match_the_contract_and_pass_the_loader_checks(scene):
     sc = SCENES[scene]
     base, partner = build.records_of_group(_fake_cached(scene, 3), git="test")
-    assert base["id"] == f"v06a1-{scene}-000003" and partner["id"] == f"v06a1-{scene}-000003p"
+    assert base["id"] == f"v06a1-{sc.family}-000003" and partner["id"] == f"v06a1-{sc.family}-000003p"
     for record in (base, partner):
         assert validate_record(record) == []
         meta = record["meta"]
-        assert meta["set"] == "v06-a1" and meta["split"] == "train" and record["generator"]["family"] == scene
+        assert meta["set"] == "v06-a1" and meta["split"] == "train" and record["generator"]["family"] == sc.family == meta["scene"]
         assert set(meta["question_kind"].values()) == {"key", "severe", "score_cf", "direction", "compare", "action", "outcome"}
         assert record["labels"] == meta["labels_by_prior"]["base"]
         assert set(meta["labels_by_prior"]) == set(PRIORS) and set(meta["robustness"]) == set(record["request"]["questions"])

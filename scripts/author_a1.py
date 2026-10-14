@@ -82,7 +82,7 @@ def cmd_assemble(args: argparse.Namespace) -> int:
         "generator": build.GENERATOR, "git": git, "mujoco": mujoco.__version__, "master_seed": build.MASTER_SEED, "k": build.K,
         "priors": ["base", "alt_a", "alt_b"], "label": "base prior frequencies (no clipping)",
         "files": {"train.jsonl": {"records": len(records), "sha256": digest}},
-        "scenes": summary, "id_pattern": "v06a1-<scene>-<group:06d>[p]",
+        "scenes": summary, "id_pattern": "v06a1-<scene>-<group:06d>[p]", "families": {"mast": "mastpick", "dock": "dockedge", "ramp": "tugramp"},
         "command": "scripts/author_a1.py label --groups 720 (4 capped workers) ; scripts/author_a1.py assemble --per-scene 625",
     }
     _write_json(OUT / "manifest.json", manifest)

@@ -78,7 +78,10 @@ def _r(x: float, nd: int) -> float:
 
 
 class Scene:
+    #: internal key (cache folders, rollouts) and the public family / scene name used in ids and meta (distinct from other
+    #: authors' likely names, so families never collide when sets are pooled)
     name = ""
+    family = ""
     law = ""
     phenomena: tuple[str, ...] = ()
     decisive = ""
@@ -170,7 +173,7 @@ class Scene:
 
 
 class MastScene(Scene):
-    name, law, phenomena = "mast", "A", ("tip_or_slide", "braking", "weight_transfer")
+    name, family, law, phenomena = "mast", "mastpick", "A", ("tip_or_slide", "braking", "weight_transfer")
     decisive, decimals = "decel", 1
     hidden_names = ("mu", "tote_mass", "tote_x")
     q = {"key": "skid_or_tipup", "severe": "rear_lifts", "score_cf": "risk_at_alt_decel", "direction": "decel_shift",
@@ -303,7 +306,7 @@ class MastScene(Scene):
 
 
 class DockScene(Scene):
-    name, law, phenomena = "dock", "B", ("centre_of_mass_past_edge", "overhang", "support_edge")
+    name, family, law, phenomena = "dock", "dockedge", "B", ("centre_of_mass_past_edge", "overhang", "support_edge")
     decisive, decimals = "overhang", 2
     hidden_names = ("mu", "cg_x", "cg_z", "place")
     q = {"key": "goes_over_edge", "severe": "drops_off_dock", "score_cf": "risk_at_alt_overhang", "direction": "overhang_shift",
@@ -419,7 +422,7 @@ class DockScene(Scene):
 
 
 class RampScene(Scene):
-    name, law, phenomena = "ramp", "C", ("friction_limited_holding", "braking_on_slope", "towing")
+    name, family, law, phenomena = "ramp", "tugramp", "C", ("friction_limited_holding", "braking_on_slope", "towing")
     decisive, decimals = "grade", 1
     hidden_names = ("mu", "payload")
     q = {"key": "fails_to_hold", "severe": "train_runs_away", "score_cf": "risk_at_alt_grade", "direction": "grade_shift",

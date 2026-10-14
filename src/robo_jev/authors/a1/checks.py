@@ -19,7 +19,7 @@ from typing import Any, Iterable, Mapping, Sequence
 REPO = Path(__file__).resolve().parents[4]
 #: The comparison scorer keys its event and plan-option tables by family; A1's families are registered from the records' own
 #: ``meta.key_events`` / ``meta.plan_option`` (in this process only — :mod:`robo_jev.bench.infamily` is not edited).
-A1_FAMILIES = ("mast", "dock", "ramp")
+A1_FAMILIES = ("mastpick", "dockedge", "tugramp")
 
 
 # --------------------------------------------------------------------------

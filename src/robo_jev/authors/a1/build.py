@@ -272,8 +272,8 @@ def records_of_group(cached: Mapping[str, Any], git: str | None = None) -> list[
                              "no_reversal": not {"up", "down"} <= set(dirs.values())})
     out = []
     for member, (visible, variants, lab) in built.items():
-        rid = record_id(sc.name, index, member)
-        other = record_id(sc.name, index, "pair" if member == "base" else "base")
+        rid = record_id(sc.family, index, member)
+        other = record_id(sc.family, index, "pair" if member == "base" else "base")
         options = {a: ("planned" if a == sc.actions[0] else f"opt_{a}") for a in sc.actions}
         static_key = plan["static_key"] if member == "base" else plan["static_key_partner"]
         aim_key = plan["aim_key"] if member == "base" else static_key
@@ -283,7 +283,7 @@ def records_of_group(cached: Mapping[str, Any], git: str | None = None) -> list[
             if pr != sc.priors(visible):
                 variant_priors[var] = pr
         meta: dict[str, Any] = {
-            "set": SET, "split": "train", "author": AUTHOR, "scene": sc.name, "group": sc.name, "law": sc.law, "phenomena": list(sc.phenomena),
+            "set": SET, "split": "train", "author": AUTHOR, "scene": sc.family, "group": sc.family, "law": sc.law, "phenomena": list(sc.phenomena),
             "language": "en", "domain": "warehouse", "style": "telemetry", "template": plan["template"],
             "key_question": key_q, "question_kind": {name: kind for kind, name in sc.q.items()},
             "key_events": list(sc.key_events), "severe_outcome": sc.severe, "plan_option": PLAN_KEY,
@@ -304,7 +304,7 @@ def records_of_group(cached: Mapping[str, Any], git: str | None = None) -> list[
             meta["variant_hidden_transform"] = dict(sc.variant_transforms)
         record = {
             "schema": "simgen-request/0", "id": rid,
-            "generator": {"name": GENERATOR, "family": sc.name, "group": index, "seed": plan["seed"], "draws_seed": plan["draws_seed"], "k": K,
+            "generator": {"name": GENERATOR, "family": sc.family, "group": index, "seed": plan["seed"], "draws_seed": plan["draws_seed"], "k": K,
                           "priors": list(PRIORS), "mujoco": cached.get("mujoco", mujoco.__version__), "git": git, "member": member},
             "meta": meta,
             "request": {"state": sc.render(visible, plan["template"]), "questions": sc.questions(visible, plan["cf_value"], plan["template"])},
