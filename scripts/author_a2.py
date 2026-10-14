@@ -25,7 +25,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(REPO / "src"))
@@ -69,6 +69,16 @@ def labels_path(scene: str, tag: str = "") -> Path:
     return WORK / f"labels-{scene}{'-' + tag if tag else ''}.jsonl"
 
 
+#: The label file each scene's records are built from. wallpress was relabelled after the physics audit of 2026-10-14 (stale bounding
+#: volumes in MuJoCo's midphase after a run-time centre-of-mass write; the load–world pair of this scene goes through the midphase):
+#: its labels now come from the ``bvhfix`` run; the stored pre-fix file ``labels-wallpress.jsonl`` is kept for the comparison.
+LABEL_TAGS = {"turntable": "", "tiltback": "", "wallpress": "bvhfix"}
+
+
+def current_labels_path(scene: str) -> Path:
+    return labels_path(scene, LABEL_TAGS[scene])
+
+
 def cmd_plan(args: argparse.Namespace) -> int:
     from robo_jev.authors.a2.generate import plan_group
 
@@ -96,13 +106,14 @@ def cmd_label(args: argparse.Namespace) -> int:
     if not os.environ.get("INVOCATION_ID") and not args.allow_outside_unit:
         raise SystemExit("MuJoCo labelling runs only inside a capped systemd-run unit (see the module docstring)")
     plans = _read_jsonl(plan_path(args.scene, args.tag))
-    done = {r["index"] for r in _read_jsonl(labels_path(args.scene, args.tag))}
+    out_path = labels_path(args.scene, args.label_tag if args.label_tag is not None else args.tag)
+    done = {r["index"] for r in _read_jsonl(out_path)}
     todo = [p for p in plans if p["index"] not in done]
     if args.limit is not None:
         todo = todo[: args.limit]
-    _log(f"{args.scene}: {len(plans)} planned, {len(done)} labelled, {len(todo)} to do with {args.workers} workers")
+    _log(f"{args.scene}: {len(plans)} planned, {len(done)} labelled, {len(todo)} to do with {args.workers} workers -> {out_path.name}")
     started = time.time()
-    with labels_path(args.scene, args.tag).open("a", encoding="utf-8") as handle, mp.get_context("fork").Pool(args.workers) as pool:
+    with out_path.open("a", encoding="utf-8") as handle, mp.get_context("fork").Pool(args.workers) as pool:
         for n, result in enumerate(pool.imap_unordered(_label_one, todo, chunksize=1), 1):
             handle.write(json.dumps(result, sort_keys=True) + "\n")
             handle.flush()
@@ -119,10 +130,11 @@ def cmd_assemble(args: argparse.Namespace) -> int:
     from robo_jev.decisions.records import validate_record
 
     git = args.git or _git()
+    scene_git = dict(item.split("=", 1) for item in (args.scene_git or []))
     records, manifest_scenes = [], {}
     for scene in args.scenes:
         plans = {p["index"]: p for p in _read_jsonl(plan_path(scene))}
-        labelled = {r["index"]: r for r in _read_jsonl(labels_path(scene))}
+        labelled = {r["index"]: r for r in _read_jsonl(current_labels_path(scene))}
         rechecked = json.loads(unstable_path(scene).read_text(encoding="utf-8")) if unstable_path(scene).is_file() else {"groups": []}
         flung = {g["index"] for g in rechecked["groups"] if g["verdict"] == "flung"}
         used, dropped, kept_flung = [], [], []
@@ -137,14 +149,15 @@ def cmd_assemble(args: argparse.Namespace) -> int:
                 continue
             if lab["unstable"]:
                 kept_flung.append(index)
-            group = assemble_group(plans[index], lab, git=git, mujoco_version=mujoco.__version__)
+            group = assemble_group(plans[index], lab, git=scene_git.get(scene, git), mujoco_version=mujoco.__version__)
             for record in group:
                 problems = validate_record(record)
                 if problems:
                     raise SystemExit(f"{record['id']}: {problems[:3]}")
             records.extend(group)
             used.append(index)
-        manifest_scenes[scene] = {"groups": len(used), "records": 2 * len(used), "first_index": used[0] if used else None,
+        manifest_scenes[scene] = {"labels": str(current_labels_path(scene).relative_to(REPO)), "git": scene_git.get(scene, git),
+                                  "groups": len(used), "records": 2 * len(used), "first_index": used[0] if used else None,
                                   "last_index": used[-1] if used else None, "dropped_unstable": dropped, "kept_flung_topples": kept_flung,
                                   "labelled_cpu_s": round(sum(labelled[i]["cpu_s"] for i in used), 1)}
         _log(f"{scene}: {len(used)} groups, {2 * len(used)} records (dropped as unstable: {len(dropped)})")
@@ -164,6 +177,12 @@ def cmd_assemble(args: argparse.Namespace) -> int:
                              "artifacts/v06/a2/work/labels-<scene>.jsonl",
                 "label_rule": "training label = the base prior's outcome frequency over K = 32 shared hidden draws; labels_by_prior and "
                               "robustness carry alt_a / alt_b (standard alternative-prior rule on A2's catalog)"}
+    relabel = OUT / "relabel-wallpress.json"
+    if relabel.is_file():
+        summary = json.loads(relabel.read_text(encoding="utf-8"))
+        manifest["relabel"] = {"scene": "wallpress", "date": "2026-10-14", "why": summary["why"], "fix": summary["fix"],
+                               "previous_sha256": summary["previous_train_sha256"], "comparison": "artifacts/v06/a2/relabel-wallpress.json",
+                               "headline": summary["headline"]}
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     _log(f"wrote {len(records)} records to {out}")
     return 0
@@ -350,7 +369,7 @@ def cmd_report(args: argparse.Namespace) -> int:
     stats["prompt_lengths"] = _prompt_lengths(records)
     cpu = {}
     for scene in SCENE_NAMES:
-        labelled = _read_jsonl(labels_path(scene))
+        labelled = _read_jsonl(current_labels_path(scene))
         if labelled:
             cpu[scene] = {"groups_labelled": len(labelled), "cpu_s": round(sum(r["cpu_s"] for r in labelled), 1),
                           "rollouts": sum(len(s["codes"]) * len(next(iter(s["codes"].values()))) for r in labelled for s in r["setups"].values()),
@@ -403,7 +422,7 @@ def cmd_sanity(args: argparse.Namespace) -> int:
     for scene in SCENE_NAMES:
         plans = {p["index"]: p for p in _read_jsonl(plan_path(scene))}
         rows = []
-        for lab in _read_jsonl(labels_path(scene)):
+        for lab in _read_jsonl(current_labels_path(scene)):
             rows += static_agreement(plans[lab["index"]], lab)
         if not rows:
             continue
@@ -462,7 +481,7 @@ def cmd_recheck(args: argparse.Namespace) -> int:
     if not os.environ.get("INVOCATION_ID"):
         raise SystemExit("MuJoCo re-check runs only inside a capped systemd-run unit")
     plans = {p["index"]: p for p in _read_jsonl(plan_path(args.scene))}
-    todo = [plans[r["index"]] for r in _read_jsonl(labels_path(args.scene)) if r["unstable"]]
+    todo = [plans[r["index"]] for r in _read_jsonl(current_labels_path(args.scene)) if r["unstable"]]
     with mp.get_context("fork").Pool(args.workers) as pool:
         results = sorted(pool.imap_unordered(_recheck_one, todo, chunksize=1), key=lambda r: r["index"])
     unstable_path(args.scene).write_text(json.dumps({"scene": args.scene, "flung_min_m": FLUNG_MIN_M, "groups": results}, indent=1) + "\n",
@@ -528,6 +547,229 @@ def cmd_summary(args: argparse.Namespace) -> int:
     return 0
 
 
+# --------------------------------------------------------------------------
+# Wallpress relabel after the physics audit (stale bounding volumes)
+# --------------------------------------------------------------------------
+
+RELABEL_WHY = ("robo_jev.outside.physics.Scene.set_hidden writes the load's centre of mass (body_ipos) at run time, but MuJoCo keeps a "
+               "body's bounding volumes (bvh_aabb) in its compile-time inertial frame and its midphase places them with the current one; "
+               "only body pairs that go through the midphase are exposed (one body with >= 2 geoms). A2 wallpress: the load-world pair (the "
+               "world holds the floor and the wall); turntable and tiltback: no midphase pair.")
+RELABEL_FIX = ("WallpressScene compiles Scene(..., refresh_bvh=True): the load's bounding volumes are re-expressed after every centre-of-mass "
+               "write (main b94d734); every wallpress group relabelled with the same plans, draws, variants, priors and K = 32")
+
+
+def _flips(old: str, new: str, spec: Any, events: Sequence[str]) -> tuple[int, int]:
+    """(event -> no event, no event -> event) between two outcome-code strings of the same draws."""
+    idx = {str(spec.outcomes.index(e)) for e in events}
+    lost = sum(1 for a, b in zip(old, new) if a in idx and b not in idx)
+    gained = sum(1 for a, b in zip(old, new) if a not in idx and b in idx)
+    return lost, gained
+
+
+def cmd_compare_labels(args: argparse.Namespace) -> int:
+    """Pre-fix vs relabelled wallpress (no MuJoCo): rollout-level outcome changes and record-level label changes of the used groups."""
+    from collections import Counter
+
+    import numpy as np
+
+    from robo_jev.authors.a2 import catalog as C
+    from robo_jev.authors.a2.generate import assemble_group
+    from robo_jev.authors.a2.scenes import SCENES
+    from robo_jev.decisions.records import file_sha256
+
+    scene = "wallpress"
+    spec = SCENES[scene]
+    old = {r["index"]: r for r in _read_jsonl(labels_path(scene))}
+    new = {r["index"]: r for r in _read_jsonl(labels_path(scene, LABEL_TAGS[scene]))}
+    plans = {p["index"]: p for p in _read_jsonl(plan_path(scene))}
+    common = sorted(set(old) & set(new))
+    if len(common) != len(plans):
+        raise SystemExit(f"{scene}: {len(common)} groups in both label files, {len(plans)} planned — relabel incomplete")
+    # rollout level (every distinct setup of every planned group, three priors, K draws)
+    total = changed = identical_groups = 0
+    transitions: Counter = Counter()
+    key_lost = key_gained = sev_lost = sev_gained = 0
+    metric_abs = []
+    for index in common:
+        a, b = old[index]["setups"], new[index]["setups"]
+        if set(a) != set(b):
+            raise SystemExit(f"{scene} group {index}: the two runs have different setups")
+        same_group = True
+        for key in a:
+            for prior in C.PRIORS:
+                ca, cb = a[key]["codes"][prior], b[key]["codes"][prior]
+                total += len(ca)
+                for x, y in zip(ca, cb):
+                    if x != y:
+                        changed += 1
+                        transitions[f"{spec.outcomes[int(x)]}->{spec.outcomes[int(y)]}"] += 1
+                        same_group = False
+                lo, ga = _flips(ca, cb, spec, spec.key)
+                key_lost, key_gained = key_lost + lo, key_gained + ga
+                lo, ga = _flips(ca, cb, spec, spec.severe)
+                sev_lost, sev_gained = sev_lost + lo, sev_gained + ga
+                metric_abs += [abs(float(u) - float(v)) for u, v in zip(a[key]["metric"][prior], b[key]["metric"][prior])]
+        identical_groups += same_group
+    metric_abs = np.array(metric_abs)
+    rollout = {"groups": len(common), "rollouts": total, "outcome_changed": changed, "outcome_changed_share": round(changed / total, 6),
+               "transitions": dict(transitions.most_common()), "key_event_lost": key_lost, "key_event_gained": key_gained,
+               "key_flip_share": round((key_lost + key_gained) / total, 6), "severe_event_lost": sev_lost, "severe_event_gained": sev_gained,
+               "groups_bit_identical_codes": identical_groups,
+               "drop_m_abs_change": {"mean": round(float(metric_abs.mean()), 6), "p99": round(float(np.percentile(metric_abs, 99)), 6),
+                                     "max": round(float(metric_abs.max()), 6), "nonzero_share": round(float(np.mean(metric_abs > 0)), 6)}}
+    # record level (the groups the training file uses)
+    v5 = _load_verdict_v05()
+    used = json.loads((OUT / "manifest.json").read_text(encoding="utf-8"))["scenes"][scene]
+    indices = [i for i in sorted(plans) if i not in set(used["dropped_unstable"])][: used["groups"]]
+    scalar_abs: dict[str, list[float]] = {}
+    scalar_signed: dict[str, list[float]] = {}
+    band_changed: Counter = Counter()
+    n_scalar: Counter = Counter()
+    truth_changes: Counter = Counter()
+    robust_changes = 0
+    choice_tv: dict[str, list[float]] = {}
+    argmax_changed: Counter = Counter()
+    n_choice: Counter = Counter()
+    records_changed = 0
+    for index in indices:
+        before = assemble_group(plans[index], old[index], git=None, mujoco_version="")
+        after = assemble_group(plans[index], new[index], git=None, mujoco_version="")
+        for ra, rb in zip(before, after):
+            records_changed += ra["labels"] != rb["labels"] or ra["meta"]["labels_by_prior"] != rb["meta"]["labels_by_prior"]
+            for name, kind in ra["meta"]["question_kind"].items():
+                la, lb = ra["labels"][name], rb["labels"][name]
+                if kind in ("key", "severe", "score_cf"):
+                    field = "value" if kind == "score_cf" else "p_yes"
+                    d = float(lb[field]) - float(la[field])
+                    scalar_abs.setdefault(kind, []).append(abs(d))
+                    scalar_signed.setdefault(kind, []).append(d)
+                    n_scalar[kind] += 1
+                    band_changed[kind] += _band(float(la[field])) != _band(float(lb[field]))
+                    ta, tb = v5.truth_class(ra, name), v5.truth_class(rb, name)
+                    if ta != tb:
+                        truth_changes[f"{ta}->{tb}"] += 1
+                    robust_changes += ra["meta"]["robustness"][name]["robust"] != rb["meta"]["robustness"][name]["robust"]
+                else:
+                    pa, pb = la["probabilities"], lb["probabilities"]
+                    choice_tv.setdefault(kind, []).append(0.5 * sum(abs(float(pa[k]) - float(pb[k])) for k in pa))
+                    n_choice[kind] += 1
+                    argmax_changed[kind] += max(pa, key=pa.get) != max(pb, key=pb.get)
+    record = {
+        "groups": len(indices), "records": 2 * len(indices), "records_with_any_label_change": records_changed,
+        "scalar": {k: {"n": n_scalar[k], "mean_abs_delta": round(float(np.mean(scalar_abs[k])), 6),
+                       "mean_signed_delta": round(float(np.mean(scalar_signed[k])), 6), "max_abs_delta": round(float(np.max(scalar_abs[k])), 6),
+                       "band_changed": band_changed[k], "band_changed_share": round(band_changed[k] / n_scalar[k], 6)} for k in n_scalar},
+        "scalar_all": {"n": sum(n_scalar.values()), "mean_abs_delta": round(float(np.mean([x for v in scalar_abs.values() for x in v])), 6),
+                       "mean_signed_delta": round(float(np.mean([x for v in scalar_signed.values() for x in v])), 6),
+                       "band_changed_share": round(sum(band_changed.values()) / sum(n_scalar.values()), 6)},
+        "truth_class_changes": dict(truth_changes), "robust_flag_changes": robust_changes,
+        "choice": {k: {"n": n_choice[k], "mean_total_variation": round(float(np.mean(choice_tv[k])), 6), "argmax_changed": argmax_changed[k]}
+                   for k in n_choice},
+    }
+    headline = (f"{changed} of {total} wallpress rollouts ({100 * changed / total:.3f} %) changed outcome; key-event flips {key_lost} lost / "
+                f"{key_gained} gained; {records_changed} of {2 * len(indices)} used records changed any label; yes/no+score mean |delta| "
+                f"{record['scalar_all']['mean_abs_delta']:.4f}, band changes {100 * record['scalar_all']['band_changed_share']:.2f} %, "
+                f"truth-class changes {sum(truth_changes.values())}")
+    out = {"scene": scene, "why": RELABEL_WHY, "fix": RELABEL_FIX, "previous_train_sha256": args.previous_sha or file_sha256(OUT / "train.jsonl"),
+           "old_labels": str(labels_path(scene).relative_to(REPO)), "new_labels": str(labels_path(scene, LABEL_TAGS[scene]).relative_to(REPO)),
+           "rollout_level": rollout, "record_level": record, "headline": headline}
+    (OUT / "relabel-wallpress.json").write_text(json.dumps(out, indent=1) + "\\n", encoding="utf-8")
+    _log(headline)
+    return 0
+
+
+class _FlaggedCache(dict):
+    """A scene cache whose new scenes re-express the load's bounding volumes after every centre-of-mass write (the audit's flag)."""
+
+    def __setitem__(self, key: Any, value: Any) -> None:
+        value.scene.refresh_bvh = True
+        super().__setitem__(key, value)
+
+
+def _bitcheck_one(job: tuple[str, dict[str, Any], dict[str, Any]]) -> dict[str, Any]:
+    import numpy as np
+
+    from robo_jev.authors.a2 import catalog as C
+    from robo_jev.authors.a2.generate import K, member_variants
+    from robo_jev.authors.a2.scenes import SCENES, Wallpress, hidden_values
+
+    mode, plan, stored = job
+    spec = SCENES[plan["scene"]]
+    draws = spec.draws(np.random.default_rng(plan["draws_seed"]), K)
+    if mode == "flag":  # turntable / tiltback: without vs with the flag, and both vs the stored codes
+        plain, flagged = {}, _FlaggedCache()
+        runs = (("plain", spec, plain), ("flagged", spec, flagged))
+    else:  # wallpress: the pre-fix rollouts (flag off) must reproduce the stored pre-fix codes
+        off = Wallpress()
+        off.refresh_bvh = False
+        runs = (("flag_off", off, {}),)
+    out = {"scene": plan["scene"], "index": plan["index"], "rollouts": 0, "identical_with_and_without_flag": 0, "match_stored_codes": 0,
+           "match_stored_metric": 0}
+    seen = set()
+    for member in ("base", "pair"):
+        for facts in member_variants(plan, member).values():
+            key = spec.setup_key(facts)
+            if key in seen:
+                continue
+            seen.add(key)
+            metric = {"turntable": "moved_m", "tiltback": "pull_n", "wallpress": "drop_m"}[plan["scene"]]
+            for prior in C.PRIORS:
+                vals = hidden_values(spec, spec.ranges(facts), draws, prior)
+                for k in range(K):
+                    values = {n: float(vals[n][k]) for n in vals}
+                    results = [s.run(cache, facts, values) for _, s, cache in runs]
+                    out["rollouts"] += 1
+                    if mode == "flag":
+                        out["identical_with_and_without_flag"] += results[0] == results[1]
+                    code = str(spec.outcomes.index(results[0]["outcome"]))
+                    out["match_stored_codes"] += code == stored["setups"][key]["codes"][prior][k]
+                    out["match_stored_metric"] += round(float(results[0][metric]), 4) == stored["setups"][key]["metric"][prior][k]
+    return out
+
+
+def cmd_bitcheck(args: argparse.Namespace) -> int:
+    """MuJoCo (capped unit): midphase pairs of the three scenes; turntable and tiltback rollouts with and without the bounding-volume
+    flag on a sample of groups (must be bit-identical and reproduce the stored codes); wallpress with the flag off on a sample (must
+    reproduce the stored pre-fix codes, i.e. the relabel changes nothing but the flag)."""
+    import multiprocessing as mp
+
+    import mujoco
+
+    from robo_jev.authors.a2 import physics as PH
+
+    if not os.environ.get("INVOCATION_ID"):
+        raise SystemExit("MuJoCo bit check runs only inside a capped systemd-run unit")
+    names = {}
+    for scene, obj in (("turntable", PH.TurntableScene((0.065, 0.065, 0.24), 0.9)), ("tiltback", PH.TiltbackScene((0.32, 0.8, 1.8), 50.0)),
+                       ("wallpress", PH.WallpressScene((0.02, 0.5, 0.6), 5.0, 0.5))):
+        model = obj.scene.model
+        name = lambda b: mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, b) or "world"
+        names[scene] = [(name(a), name(b)) for a, b in obj.scene.midphase_pairs()]
+    jobs = []
+    for scene, mode in (("turntable", "flag"), ("tiltback", "flag"), ("wallpress", "off")):
+        plans = {p["index"]: p for p in _read_jsonl(plan_path(scene))}
+        stored = {r["index"]: r for r in _read_jsonl(labels_path(scene))}  # the stored (pre-fix) labels of every scene
+        picked = sorted(plans)[:: max(1, len(plans) // (args.groups if mode == "flag" else args.wallpress_groups))]
+        jobs += [(mode, plans[i], stored[i]) for i in picked]
+    with mp.get_context("fork").Pool(args.workers) as pool:
+        results = list(pool.imap_unordered(_bitcheck_one, jobs, chunksize=1))
+    summary = {}
+    for scene in ("turntable", "tiltback", "wallpress"):
+        rows = [r for r in results if r["scene"] == scene]
+        summary[scene] = {"groups": len(rows), "rollouts": sum(r["rollouts"] for r in rows),
+                          "identical_with_and_without_flag": sum(r["identical_with_and_without_flag"] for r in rows) if scene != "wallpress" else None,
+                          "match_stored_codes": sum(r["match_stored_codes"] for r in rows),
+                          "match_stored_metric_4dp": sum(r["match_stored_metric"] for r in rows)}
+    out = {"midphase_pairs": names, "check": summary,
+           "note": "turntable / tiltback: every rollout of the sampled groups (all setups, three priors, K = 32) run without and with "
+                   "refresh_bvh; full result dicts compared. wallpress: the sampled groups re-run with the flag off against the stored "
+                   "pre-fix codes."}
+    (OUT / "bitcheck.json").write_text(json.dumps(out, indent=1) + "\\n", encoding="utf-8")
+    _log(f"midphase pairs {names}; {summary}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -543,17 +785,27 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--limit", type=int, default=None)
     p.add_argument("--allow-outside-unit", action="store_true", help="tests only")
     p.add_argument("--tag", default="")
+    p.add_argument("--label-tag", default=None, help="write the labels to labels-<scene>-<label tag>.jsonl (plans from the --tag file)")
     p.set_defaults(fn=cmd_label)
     p = sub.add_parser("assemble")
     p.add_argument("--scenes", nargs="+", default=list(SCENE_NAMES))
     p.add_argument("--groups", type=int, default=625)
     p.add_argument("--git", default=None)
     p.add_argument("--label-git", default=None, help="the commit whose physics produced the labels (recorded in the manifest)")
+    p.add_argument("--scene-git", action="append", default=None, help="SCENE=SHA: the generator commit of one scene's records")
     p.set_defaults(fn=cmd_assemble)
     p = sub.add_parser("recheck")
     p.add_argument("--scene", choices=SCENE_NAMES, required=True)
     p.add_argument("--workers", type=int, default=4)
     p.set_defaults(fn=cmd_recheck)
+    p = sub.add_parser("compare-labels")
+    p.add_argument("--previous-sha", default=None, help="sha256 of the train.jsonl built from the pre-fix labels")
+    p.set_defaults(fn=cmd_compare_labels)
+    p = sub.add_parser("bitcheck")
+    p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--groups", type=int, default=40, help="sampled groups per scene for turntable and tiltback")
+    p.add_argument("--wallpress-groups", type=int, default=20)
+    p.set_defaults(fn=cmd_bitcheck)
     p = sub.add_parser("report")
     p.set_defaults(fn=cmd_report)
     p = sub.add_parser("summary")
@@ -563,8 +815,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--plans", type=int, default=15, help="group plans per scene to sweep")
     p.set_defaults(fn=cmd_sanity)
     args = parser.parse_args(argv)
-    if getattr(args, "workers", 1) > 4:
-        raise SystemExit("at most 4 workers (four authors label at the same time)")
+    if getattr(args, "workers", 1) > 8:
+        raise SystemExit("at most 8 workers")
     return int(args.fn(args) or 0)
 
 
