@@ -674,7 +674,7 @@ def cmd_compare_labels(args: argparse.Namespace) -> int:
     out = {"scene": scene, "why": RELABEL_WHY, "fix": RELABEL_FIX, "previous_train_sha256": args.previous_sha or file_sha256(OUT / "train.jsonl"),
            "old_labels": str(labels_path(scene).relative_to(REPO)), "new_labels": str(labels_path(scene, LABEL_TAGS[scene]).relative_to(REPO)),
            "rollout_level": rollout, "record_level": record, "headline": headline}
-    (OUT / "relabel-wallpress.json").write_text(json.dumps(out, indent=1) + "\\n", encoding="utf-8")
+    (OUT / "relabel-wallpress.json").write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
     _log(headline)
     return 0
 
@@ -764,7 +764,7 @@ def cmd_bitcheck(args: argparse.Namespace) -> int:
            "note": "turntable / tiltback: every rollout of the sampled groups (all setups, three priors, K = 32) run without and with "
                    "refresh_bvh; full result dicts compared. wallpress: the sampled groups re-run with the flag off (against the stored "
                    "pre-fix codes) and on (full result dicts compared with the flag-off run)."}
-    (OUT / "bitcheck.json").write_text(json.dumps(out, indent=1) + "\\n", encoding="utf-8")
+    (OUT / "bitcheck.json").write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
     _log(f"midphase pairs {names}; {summary}")
     return 0
 

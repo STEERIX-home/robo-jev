@@ -309,6 +309,18 @@ def test_only_wallpress_has_a_midphase_pair_and_only_it_refreshes_bounding_volum
     assert pairs == {"turntable": [], "tiltback": [], "wallpress": [("load", "world")]}
     assert {scene: obj.scene.refresh_bvh for scene, obj in scenes.items()} == {"turntable": False, "tiltback": False, "wallpress": True}
     assert SCENES["wallpress"].refresh_bvh is True and not hasattr(SCENES["turntable"], "refresh_bvh")
+    # the refresh really acts: after a rollout (hidden centre of mass at the geometric centre) the load's stored bounding volumes sit
+    # 1 mm (the compiled nominal inertial offset) further along each axis of its inertial frame than compiled; without it they stay
+    from robo_jev.outside.physics import NOMINAL_IPOS
+
+    for flag in (True, False):
+        wp = PH.WallpressScene((0.02, 0.5, 0.6), 5.0, 0.5, refresh_bvh=flag)
+        model, load = wp.scene.model, wp.scene.load
+        start, count = int(model.body_bvhadr[load]), int(model.body_bvhnum[load])
+        compiled = np.array(model.bvh_aabb[start : start + count])
+        wp.run(force=60.0, reflex=2.0, mu=0.4, mass=4.0, pad_mu=0.6, seconds=0.05)
+        moved = np.array(model.bvh_aabb[start : start + count]) - compiled
+        assert np.allclose(moved[:, :3], NOMINAL_IPOS if flag else 0.0) and np.allclose(moved[:, 3:], 0.0)
 
 
 @mujoco_only
