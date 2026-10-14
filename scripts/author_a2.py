@@ -333,6 +333,20 @@ def cmd_report(args: argparse.Namespace) -> int:
         "note": "infamily.EVENT / PLAN_KEY do not know A2's scene names; the comparison reading registers robo_jev.authors.a2.EVENT / PLAN_KEY "
                 "for the call (registered_with_infamily) — the same entries are in every record as meta.key_events / meta.plan_key",
     }
+    # every pair's two briefings differ only in the sentence(s) carrying the changed fact; the questions differ only in numbers that
+    # quote the decisive value (direction question) when the decisive number is the changed fact
+    by_id = {r["id"]: r for r in records}
+    over, same_questions = 0, 0
+    for r in records:
+        if r["generator"]["member"] != "base":
+            continue
+        partner = by_id[r["meta"]["pair"]["of"]]
+        sa = r["request"]["state"].replace("\n", " ").split(". ")
+        sb = partner["request"]["state"].replace("\n", " ").split(". ")
+        over += len(sa) != len(sb) or sum(x != y for x, y in zip(sa, sb)) > 2
+        same_questions += r["request"]["questions"].keys() == partner["request"]["questions"].keys()
+    n_pairs = sum(1 for r in records if r["generator"]["member"] == "base")
+    stats["pair_text_check"] = {"pairs": n_pairs, "states_differing_in_more_than_2_sentences": over, "same_question_names": same_questions}
     stats["prompt_lengths"] = _prompt_lengths(records)
     cpu = {}
     for scene in SCENE_NAMES:
@@ -493,7 +507,7 @@ def cmd_summary(args: argparse.Namespace) -> int:
     for scene, e in stats["prompt_lengths"]["scenes"].items():
         a, b = e["state_plus_questions"], e["model_prompt_per_question_chat_direct"]
         L.append(f"| {scene} | {a['median']:.0f} / {a['p90']:.0f} / {a['max']} | {b['median']:.0f} / {b['max']} |")
-    L += ["", f"Loader: {stats['loader']}. Scorer checks: {stats['scorer_checks']}.", ""]
+    L += ["", f"Loader: {stats['loader']}. Pair text check: {stats.get('pair_text_check')}. Scorer checks: {stats['scorer_checks']}.", ""]
     L += [f"Overlap pass: {overlap['pass']} (missing sets: {overlap['missing']}).", "", "| set | records | shared ids / requests / states / instructions / sentences / 5-grams |", "|---|---|---|"]
     for name, row in overlap["sets"].items():
         L.append(f"| {name} | {row.get('records')} | {row.get('shared_ids')} / {row.get('shared_requests')} / {row.get('shared_states')} / "
