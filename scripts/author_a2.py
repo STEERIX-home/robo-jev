@@ -541,6 +541,20 @@ def cmd_summary(args: argparse.Namespace) -> int:
         L += ["", "| scene | rollouts | agree with the static law | by static margin |", "|---|---|---|---|"]
         for scene, row in sanity["static_agreement"].items():
             L.append(f"| {scene} | {row['rollouts']} | {row['agree']:.3f} | " + "; ".join(f"{k}: {v['agree']} (n {v['n']})" for k, v in row["by_margin"].items()) + " |")
+    relabel = OUT / "relabel-wallpress.json"
+    if relabel.is_file():
+        r = json.loads(relabel.read_text(encoding="utf-8"))
+        L += ["", "## Wallpress relabel (physics audit 2026-10-14, stale bounding volumes)", "", f"- Why: {r['why']}", f"- Fix: {r['fix']}",
+              f"- Result: {r['headline']}.", f"- Previous train.jsonl sha256: {r['previous_train_sha256']}; labels before: `{r['old_labels']}`, "
+              f"after: `{r['new_labels']}`."]
+    bitcheck = OUT / "bitcheck.json"
+    if bitcheck.is_file():
+        b = json.loads(bitcheck.read_text(encoding="utf-8"))
+        L += [f"- Midphase pairs: {b['midphase_pairs']}.", "", "| scene | sampled groups | rollouts | identical with and without the flag | "
+              "match the stored codes | match the stored reading (4 dp) |", "|---|---|---|---|---|---|"]
+        for scene, row in b["check"].items():
+            L.append(f"| {scene} | {row['groups']} | {row['rollouts']} | {row['identical_with_and_without_flag']} | {row['match_stored_codes']} | "
+                     f"{row['match_stored_metric_4dp']} |")
     text = "\n".join(L) + "\n"
     (OUT / "summary.md").write_text(text, encoding="utf-8")
     print(text)
