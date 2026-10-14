@@ -270,6 +270,22 @@ def test_the_exposure_check_wants_v04s_engine_d1_general_and_the_mujoco_count_he
     assert a.compare_exposure(_seed_view(mujoco=36650, total=201783, steps=6307), _seed_view())["difference"] == {"total": 2, "mujoco": 2, "steps": 1}
 
 
+def test_the_layout_check_wants_v04s_file_with_only_the_mujoco_block_swapped(tmp_path):
+    a = A()
+    engine, m4, m6, tail = b'{"e": 1}\n{"e": 2}\n', b'{"m": "v04"}\n' * 3, b'{"m": "v06"}\n' * 2, b'{"d1": 1}\n{"g": 1}\n'
+    files = {name: tmp_path / f"{name}.jsonl" for name in ("engine", "mujoco", "v04", "v06")}
+    for name, data in (("engine", engine), ("mujoco", m6), ("v04", engine + m4 + tail), ("v06", engine + m6 + tail)):
+        files[name].write_bytes(data)
+    good = a.layout_check(files["v06"], files["engine"], files["mujoco"], files["v04"])
+    assert good["pass"] is True and good["bytes"] == {"engine": len(engine), "mujoco_v06": len(m6), "tail": len(tail), "mujoco_v04_block": len(m4)}
+    for name, data, broken in (("tail", engine + m6 + b'{"g": 2}\n{"g": 1}\n', "tail_is_v04s"), ("block", engine + m6[:-1] + b" \n" + tail, "mujoco_block"),
+                               ("head", b'{"e": 9}\n{"e": 2}\n' + m6 + tail, "engine_prefix")):
+        path = tmp_path / f"bad-{name}.jsonl"
+        path.write_bytes(data)
+        result = a.layout_check(path, files["engine"], files["mujoco"], files["v04"])
+        assert result["pass"] is False and result["checks"][broken] is False, name
+
+
 def test_the_cross_author_overlap_counts_shared_texts_and_5grams_without_text():
     a = A()
     one = _author("a1", groups=2, scenes=("s",))

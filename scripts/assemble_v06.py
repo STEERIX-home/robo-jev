@@ -691,6 +691,32 @@ def author_exposure(records: Sequence[Mapping[str, Any]], *, config: Mapping[str
     return out
 
 
+def _range_sha(path: Path, start: int, end: int) -> str:
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        handle.seek(start)
+        left = end - start
+        while left > 0:
+            block = handle.read(min(1 << 20, left))
+            if not block:
+                break
+            digest.update(block)
+            left -= len(block)
+    return digest.hexdigest()
+
+
+def layout_check(train: Path, engine: Path, mujoco: Path, reference: Path) -> dict[str, Any]:
+    """The built input is v0.4's file with only its MuJoCo block swapped: the engine part's bytes first, then the MuJoCo part's file bytes,
+    then exactly v0.4's bytes after its MuJoCo block (d1 + general) — streamed, by sha256 of byte ranges."""
+    n_train, n_engine, n_mujoco, n_ref = (Path(p).stat().st_size for p in (train, engine, mujoco, reference))
+    tail = n_train - n_engine - n_mujoco
+    checks = {"engine_prefix": tail >= 0 and _range_sha(train, 0, n_engine) == _sha256(engine) == _range_sha(reference, 0, n_engine),
+              "mujoco_block": tail >= 0 and _range_sha(train, n_engine, n_engine + n_mujoco) == _sha256(mujoco),
+              "tail_is_v04s": tail >= 0 and n_ref - tail >= n_engine and _range_sha(train, n_train - tail, n_train) == _range_sha(reference, n_ref - tail, n_ref)}
+    return {"checks": checks, "pass": all(checks.values()), "bytes": {"engine": n_engine, "mujoco_v06": n_mujoco, "tail": tail,
+                                                                      "mujoco_v04_block": n_ref - tail - n_engine}}
+
+
 def cmd_exposure(args: argparse.Namespace) -> int:
     from robo_jev.decisions.train import load_training_records
 
@@ -710,17 +736,18 @@ def cmd_exposure(args: argparse.Namespace) -> int:
     theirs = v04._part_digests(args.reference, {A0_SET, "v04a-mujoco-scenes"})
     parts = {part: {"v06": mine.get(part), "v04": theirs.get(part), "identical": mine.get(part) == theirs.get(part)} for part in ("engine", "d1", "general")}
     parts["mujoco"] = {"v06": mine.get("mujoco"), "v04": theirs.get("mujoco"), "identical": mine.get("mujoco") == theirs.get("mujoco")}
+    layout = layout_check(args.input, args.engine, args.mujoco, args.reference) if args.mujoco is not None else None
     out = {"kind": "v06-exposure", "script_version": SCRIPT_VERSION, "git": _git(), "train_config": str(args.train_config), "mujoco_sets": sorted(sets),
            "input": {"path": str(args.input), "sha256": _sha256(args.input), "validation": validation},
            "reference": {"path": str(args.reference), "sha256": _sha256(args.reference), "stored_exposure": str(args.stored)},
-           "parts": parts, "split_vs_v04": split_same, **report, "target_examples": args.target,
+           "parts": parts, "layout": layout, "split_vs_v04": split_same, **report, "target_examples": args.target,
            "pass": all(e["pass"] for e in report["vs_v04"].values()) and all(parts[p]["identical"] for p in ("engine", "d1", "general"))
-                   and all(split_same.values()) and not any(k == "other" for k in report.get("train_by_part", {})),
+                   and all(split_same.values()) and not any(k == "other" for k in report.get("train_by_part", {})) and (layout is None or layout["pass"]),
            "created": dt.datetime.now().astimezone().isoformat(timespec="seconds")}  # fmt: skip
     _write_json(args.out, out)
     for seed, entry in out["vs_v04"].items():
         _log(f"seed {seed}: v0.6 {entry['v06']} · v0.4 {entry['v04']} · Δ {entry['difference']} · checks pass {entry['pass']}")
-    _log(f"parts identical to v0.4: {[(p, e['identical']) for p, e in parts.items()]} · pass {out['pass']}")
+    _log(f"parts identical to v0.4: {[(p, e['identical']) for p, e in parts.items()]} · layout {layout and layout['checks']} · pass {out['pass']}")
     return 0 if out["pass"] else 2
 
 
@@ -878,7 +905,7 @@ def cmd_all(args: argparse.Namespace) -> int:
     rc["overlap"] = _run(["scripts/system1_v03.py", "overlap", "--input", str(train), "--out", str(out / "train-v06.overlap.json"), "--sealed-extra", f"B1={B1}",
                           "--sealed-extra", f"H-set={HSET}", "--sealed-outside", f"A4={args.a4}", *sets])
     rc["exposure"] = _run([me, "exposure", "--input", str(train), "--seeds", "0", "1", "--train-config", str(args.train_config), "--target", str(args.examples),
-                           "--out", str(out / "train-v06.exposure.json")])
+                           "--mujoco", str(mujoco), "--out", str(out / "train-v06.exposure.json")])
     rc["authors"] = _run([me, "authors", "--mujoco", str(mujoco), *authors, "--a4", str(args.a4), "--out", str(out / "train-v06.authors.json")])
     load = lambda name: json.loads((out / name).read_text(encoding="utf-8")) if (out / name).is_file() else {}  # noqa: E731
     part, mix, overlap, exposure, cross = (load(n) for n in ("mujoco-v06.manifest.json", "train-v06.manifest.json", "train-v06.overlap.json",
@@ -889,6 +916,7 @@ def cmd_all(args: argparse.Namespace) -> int:
                "held": part.get("held"), "examples_per_epoch_mix": mix.get("examples_per_epoch"), "tokens_mix": mix.get("tokens"),
                "overlap_hits": overlap.get("total_hits"), "sealed_checked": sorted(overlap.get("sealed") or {}),
                "parts_identical_to_v04": {p: e.get("identical") for p, e in (exposure.get("parts") or {}).items()},
+               "layout_vs_v04": (exposure.get("layout") or {}).get("checks"),
                "exposure_vs_v04": {s: {"pass": e["pass"], "difference": e["difference"]} for s, e in (exposure.get("vs_v04") or {}).items()},
                "training_vs_A4_clean": cross.get("training_vs_A4_clean"),
                "pass": all(v == 0 for v in rc.values()) and overlap.get("total_hits") == 0 and bool(exposure.get("pass")) and cross.get("training_vs_A4_clean") is True,
@@ -931,6 +959,8 @@ def build_parser() -> argparse.ArgumentParser:
     ex.add_argument("--stored", type=Path, default=EXPOSURE_V04)
     ex.add_argument("--seeds", type=int, nargs="+", default=[0, 1])
     ex.add_argument("--target", type=int, default=MUJOCO_EXAMPLES)
+    ex.add_argument("--engine", type=Path, default=ENGINE_PICK)
+    ex.add_argument("--mujoco", type=Path, default=None, help="the MuJoCo part the input was mixed from: also check the byte layout against v0.4's file")
     ex.add_argument("--mujoco-set", action="append", default=[])
     ex.add_argument("--train-config", type=Path, default=TRAIN_CONFIG)
     ex.add_argument("--out", type=Path, required=True)
