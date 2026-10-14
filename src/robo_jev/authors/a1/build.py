@@ -287,6 +287,7 @@ def records_of_group(cached: Mapping[str, Any], git: str | None = None) -> list[
             "language": "en", "domain": "warehouse", "style": "telemetry", "template": plan["template"],
             "key_question": key_q, "question_kind": {name: kind for kind, name in sc.q.items()},
             "key_events": list(sc.key_events), "severe_outcome": sc.severe, "plan_option": PLAN_KEY,
+            "costs": {"outcome": dict(sc.outcome_cost), "action": dict(sc.action_cost), "temperature": L.ACTION_TEMPERATURE},
             "visible": dict(visible), "hidden_prior": sc.priors(visible), "prior_settings": dict(PRIOR_SETTINGS),
             "variants": variants,
             "plan": {"decisive": sc.decisive, "aim_key": aim_key, "aim_cf": plan["aim_cf"], "cf_kind": plan["cf_kind"], "cf_value": plan["cf_value"],
@@ -299,6 +300,8 @@ def records_of_group(cached: Mapping[str, Any], git: str | None = None) -> list[
         }
         if variant_priors:
             meta["variant_hidden_prior"] = variant_priors
+        if sc.variant_transforms:
+            meta["variant_hidden_transform"] = dict(sc.variant_transforms)
         record = {
             "schema": "simgen-request/0", "id": rid,
             "generator": {"name": GENERATOR, "family": sc.name, "group": index, "seed": plan["seed"], "draws_seed": plan["draws_seed"], "k": K,

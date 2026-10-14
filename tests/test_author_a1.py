@@ -199,3 +199,17 @@ def test_rollouts_are_deterministic():
     b = sims.rollout("mast", sc.spec(v), h, sc.state(v))
     assert a == b and not a["unstable"]
     assert math.isfinite(a["max_tilt"])
+
+
+@pytest.mark.parametrize("scene", sorted(SCENES))
+def test_key_share_never_falls_as_the_decisive_number_rises(scene):
+    sc = SCENES[scene]
+    plan = build.plan_group(scene, 77)
+    rows = sc.hidden(plan["visible"], "base", lhs(build.K, len(sc.hidden_names), plan["draws_seed"]))[:8]
+    lo, hi = sc.bounds(plan["visible"])
+    shares = []
+    for x in (lo + (hi - lo) * k / 3 for k in range(4)):
+        v = dict(plan["visible"])
+        v[sc.decisive] = sc.quantize(x)
+        shares.append(np.mean([r["outcome"] in sc.key_events for r in (sims.rollout(scene, sc.spec(v), h, sc.state(v)) for h in rows)]))
+    assert all(b >= a for a, b in zip(shares, shares[1:]))

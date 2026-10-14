@@ -148,23 +148,37 @@ def scorer_check(records: Sequence[Mapping[str, Any]], *, n: int = 400) -> dict[
 
 
 def prompt_lengths(records: Sequence[Mapping[str, Any]], tokenizer: Any) -> dict[str, Any]:
-    """Tokens of every question prompt (chat format, the trainer's default: fixed instruction + state + one question) and of the
-    whole request (the same prefix + every question block)."""
+    """Tokens of every question prompt (chat format, the trainer's default: fixed instruction + state + one question), of the whole
+    request as the trainer would format it (the same prefix + every question block), of the raw request text and of the state."""
     from robo_jev.decisions.prompt import record_prompts
 
-    per_prompt, per_request, state_only = [], [], []
+    per_prompt, per_request, state_only, raw = [], [], [], []
     for record in records:
         prompts = record_prompts(dict(record), tokenizer, seed=1, fmt="chat", orders="seeded")
         prefix = prompts[0]["prefix_tokens"]
         per_prompt.extend(len(p["tokens"]) for p in prompts)
         per_request.append(prefix + sum(len(p["tokens"]) - prefix for p in prompts))
         state_only.append(len(tokenizer.encode(record["request"]["state"], add_special_tokens=False).ids))
+        parts = [record["request"]["state"]]
+        for q in record["request"]["questions"].values():
+            parts.append(q["instructions"])
+            crit = q.get("criteria")
+            if isinstance(crit, Mapping):
+                parts.extend(f"{k}: {v}" for k, v in crit.items())
+            elif isinstance(crit, list):
+                parts.extend(crit)
+        raw.append(len(tokenizer.encode("\n".join(parts), add_special_tokens=False).ids))
 
     def summary(values: list[int]) -> dict[str, Any]:
         values = sorted(values)
         return {"n": len(values), "median": statistics.median(values), "p95": values[int(0.95 * (len(values) - 1))], "max": values[-1], "min": values[0]}
 
-    return {"question_prompt": summary(per_prompt), "state_plus_all_questions": summary(per_request), "state_only": summary(state_only)}
+    return {"question_prompt": summary(per_prompt), "state_plus_all_question_blocks": summary(per_request),
+            "state_plus_question_text_raw": summary(raw), "state_only": summary(state_only),
+            "definitions": {"question_prompt": "one trainer prompt: chat template, fixed system text, state, one question with its option lines",
+                            "state_plus_all_question_blocks": "the shared prefix plus every question block as the trainer formats it",
+                            "state_plus_question_text_raw": "state, every instruction and every option / scale text, newline-joined (no system text, no chat tokens, no letter codes)",
+                            "state_only": "the state block"}}
 
 
 # --------------------------------------------------------------------------

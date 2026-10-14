@@ -93,6 +93,7 @@ class Scene:
     key_events: tuple[str, ...] = ()
     severe: str = ""
     templates = 2
+    variant_transforms: dict[str, str] = {}
 
     @property
     def outcomes(self) -> tuple[str, ...]:
@@ -177,7 +178,8 @@ class MastScene(Scene):
     actions = ("brake_as_planned", "soft_brake", "drop_lift_first")
     compare_option = "drop_lift_first"
     outcome_cost = {"clean": 0.0, "skid": 0.6, "lift": 1.5}
-    action_cost = {"brake_as_planned": 0.0, "soft_brake": 0.12, "drop_lift_first": 0.20}
+    #: own costs of the alternatives (delay: a soft stop needs more aisle; lowering the lift takes a cycle) in outcome-cost units
+    action_cost = {"brake_as_planned": 0.0, "soft_brake": 0.35, "drop_lift_first": 0.30}
     key_events, severe = ("skid", "lift"), "lift"
     SOFT, LOW_LIFT = 0.55, 0.40
 
@@ -273,24 +275,23 @@ class MastScene(Scene):
     def questions(self, visible, cf_value, tpl):
         dec = float(visible["decel"])
         soft = _r(self.SOFT * dec, 1)
-        crit = (["0.0 = clean stop for sure", "1.0 = skid or caster lift for sure"] if tpl == 0
+        crit = (["0.0 = certain clean stop", "1.0 = certain skid or lift"] if tpl == 0
                 else ["0.0: stops clean, no doubt", "1.0: skids or lifts, no doubt"])
         return {
             self.q["key"]: {"type": "noul", "instructions": ("Will this stop end in a skid (over 6 cm past the mark) or a caster lift?" if tpl == 0
                                                               else "Skid past the mark (over 6 cm) or rear casters lifting: yes or no?")},
             self.q["severe"]: {"type": "noul", "instructions": ("Will the rear casters lift off the floor during this stop?" if tpl == 0
                                                                  else "Rear casters leave the floor on this stop?")},
-            self.q["score_cf"]: {"type": "score", "instructions": (f"Rate the skid-or-lift risk if the stop used {cf_value:.1f} m/s2 instead." if tpl == 0
+            self.q["score_cf"]: {"type": "score", "instructions": (f"Skid-or-lift risk if braking at {cf_value:.1f} m/s2 instead." if tpl == 0
                                                                     else f"Skid/lift risk score for a {cf_value:.1f} m/s2 stop."), "criteria": crit},
             self.q["direction"]: {"type": "choice", "instructions": f"Decel {cf_value:.1f} m/s2 instead of {dec:.1f}: skid-or-lift risk?",
                                   "criteria": {"higher": "goes up", "lower": "goes down", "unchanged": "about the same"}},
-            self.q["compare"]: {"type": "choice", "instructions": ("Riskier stop (skid or lift): as commanded, or lift lowered to 0.40 m first?" if tpl == 0
-                                                                    else "Which run carries more skid/lift risk: commanded stop or lowered-lift stop?"),
-                                "criteria": {PLAN_KEY: "as commanded", "drop_lift_first": "lift lowered to 0.40 m first", TIE_KEY: "about equal"}},
-            self.q["action"]: {"type": "choice", "instructions": "Pick the stop to run." if tpl == 0 else "Operator: choose stop mode.",
-                               "criteria": {"brake_as_planned": f"brake at {dec:.1f} m/s2, lift as is",
-                                            "soft_brake": f"brake at {soft:.1f} m/s2, lift as is",
-                                            "drop_lift_first": f"lower lift to 0.40 m, then brake at {dec:.1f} m/s2"}},
+            self.q["compare"]: {"type": "choice", "instructions": ("Riskier (skid or lift): commanded stop or lift at 0.40 m first?" if tpl == 0
+                                                                    else "More skid/lift risk: commanded stop or lowered-lift stop?"),
+                                "criteria": {PLAN_KEY: "as commanded", "drop_lift_first": "lift at 0.40 m first", TIE_KEY: "about equal"}},
+            self.q["action"]: {"type": "choice", "instructions": "Pick the stop to run (risk against delay)." if tpl == 0 else "Operator: choose stop mode, weighing risk and delay.",
+                               "criteria": {"brake_as_planned": f"{dec:.1f} m/s2, lift as is", "soft_brake": f"{soft:.1f} m/s2, lift as is",
+                                            "drop_lift_first": f"lift to 0.40 m, then {dec:.1f} m/s2"}},
             self.q["outcome"]: {"type": "choice", "instructions": "Most likely result of the commanded stop?" if tpl == 0 else "Expected stop result?",
                                 "criteria": {"clean": "stops near the mark", "skid": "slides past the mark", "lift": "rear casters lift"}},
         }
@@ -310,9 +311,12 @@ class DockScene(Scene):
     actions = ("set_down_as_planned", "back_off_25cm", "turn_end_for_end")
     compare_option = "turn_end_for_end"
     outcome_cost = {"level": 0.0, "lean": 0.9, "drop": 2.0}
-    action_cost = {"set_down_as_planned": 0.0, "back_off_25cm": 0.08, "turn_end_for_end": 0.25}
+    #: backing off leaves the pallet in the dock lane (re-handling later); turning costs a manoeuvre
+    action_cost = {"set_down_as_planned": 0.0, "back_off_25cm": 0.45, "turn_end_for_end": 0.20}
     key_events, severe = ("lean", "drop"), "drop"
     BACK = 0.25
+    #: how a variant changes the hidden draws (recorded in the records' meta)
+    variant_transforms = {"opt_turn_end_for_end": "cg_x -> -cg_x for every draw (the same pallet turned end for end)"}
 
     def sample_visible(self, rng):
         pallet = rng.choice(sorted(C.DOCK_PALLETS))
@@ -399,11 +403,11 @@ class DockScene(Scene):
                                   "criteria": {"higher": "goes up", "lower": "goes down", "unchanged": "about the same"}},
             self.q["compare"]: {"type": "choice", "instructions": ("Riskier set-down: as planned, or pallet turned end for end?" if tpl == 0
                                                                     else "More tip-over risk: planned set-down or turned-around set-down?"),
-                                "criteria": {PLAN_KEY: "as planned", "turn_end_for_end": "turned end for end, same overhang", TIE_KEY: "about equal"}},
-            self.q["action"]: {"type": "choice", "instructions": "Pick the set-down." if tpl == 0 else "Operator: choose release point.",
+                                "criteria": {PLAN_KEY: "as planned", "turn_end_for_end": "turned end for end", TIE_KEY: "about equal"}},
+            self.q["action"]: {"type": "choice", "instructions": "Pick the set-down (risk against re-handling)." if tpl == 0 else "Operator: choose release point, weighing risk and rework.",
                                "criteria": {"set_down_as_planned": f"lead end {o:.2f} m past edge",
                                             "back_off_25cm": back_text,
-                                            "turn_end_for_end": f"turn pallet, then {o:.2f} m past edge"}},
+                                            "turn_end_for_end": f"turned, {o:.2f} m past edge"}},
             self.q["outcome"]: {"type": "choice", "instructions": "Expected pallet state after release?" if tpl == 0 else "Release result?",
                                 "criteria": {"level": "sits level on the dock", "lean": "tips and leans on the edge", "drop": "goes off the dock"}},
         }
@@ -423,7 +427,8 @@ class RampScene(Scene):
     actions = ("stop_on_ramp", "use_ramp_b", "crawl_down")
     compare_option = "use_ramp_b"
     outcome_cost = {"held": 0.0, "overrun": 0.8, "runaway": 2.0}
-    action_cost = {"stop_on_ramp": 0.0, "use_ramp_b": 0.15, "crawl_down": 0.10}
+    #: ramp B is a detour; crawling halves the speed on the ramp
+    action_cost = {"stop_on_ramp": 0.0, "use_ramp_b": 0.25, "crawl_down": 0.20}
     key_events, severe = ("overrun", "runaway"), "runaway"
     CRAWL = 0.5
 
@@ -494,7 +499,7 @@ class RampScene(Scene):
     def questions(self, visible, cf_value, tpl):
         g, v = float(visible["grade"]), float(visible["speed"])
         crawl = _r(self.CRAWL * v, 2)
-        crit = (["0.0 = stops in the window for sure", "1.0 = misses the window for sure"] if tpl == 0
+        crit = (["0.0 = certain stop in window", "1.0 = certain miss"] if tpl == 0
                 else ["0.0: certain clean stop", "1.0: certain missed stop"])
         return {
             self.q["key"]: {"type": "noul", "instructions": ("Will the train miss the 0.30 m stop window or fail to hold?" if tpl == 0
@@ -508,7 +513,7 @@ class RampScene(Scene):
             self.q["compare"]: {"type": "choice", "instructions": ("Riskier stop: ramp A as planned, or ramp B?" if tpl == 0
                                                                     else "More missed-stop risk: planned ramp A or ramp B?"),
                                 "criteria": {PLAN_KEY: "ramp A as planned", "use_ramp_b": "ramp B, same speed", TIE_KEY: "about equal"}},
-            self.q["action"]: {"type": "choice", "instructions": "Pick the descent." if tpl == 0 else "Operator: choose descent.",
+            self.q["action"]: {"type": "choice", "instructions": "Pick the descent (risk against delay)." if tpl == 0 else "Operator: choose descent, weighing risk and delay.",
                                "criteria": {"stop_on_ramp": f"ramp A at {v:.2f} m/s", "use_ramp_b": f"ramp B at {v:.2f} m/s",
                                             "crawl_down": f"ramp A at {crawl:.2f} m/s"}},
             self.q["outcome"]: {"type": "choice", "instructions": "Expected outcome at the stop?" if tpl == 0 else "Stop result?",
