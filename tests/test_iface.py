@@ -440,3 +440,43 @@ def test_the_comparison_mapping_reproduces_infamily_on_b1():
     ours = verdict.V6().comparison_items("B1", records, oracle, mapping, clusters={r["id"]: infamily.group_of(r) for r in records})
     theirs = infamily.comparison_items("B1", records, oracle)
     assert ours == theirs and ours
+
+
+def test_reproduction_compares_the_fresh_run_with_listing_zero():
+    verdict = _script("iface_verdict")
+    records = [physics_record("r1", partner="r1p"), physics_record("r1p", partner="r1")]
+    existing = [_prediction(r) for r in records]  # three listings per question (cyclic shifts)
+    fresh = copy.deepcopy(existing)
+    for p in fresh:
+        for q in p["questions"].values():
+            q["listings"] = q["listings"][:1]
+            q["n_listings"] = 1
+            q["listings"][0]["code_probs"] = [0.8, 0.1, 0.1]
+    old = copy.deepcopy(existing)
+    for p in old:
+        for q in p["questions"].values():
+            q["listings"][0]["code_probs"] = [0.8, 0.1, 0.1]
+    same = verdict.reproduction(old, fresh, {"r1", "r1p"})
+    assert same == {"questions": 4, "order_mismatches": 0, "max_abs_prob_diff": 0.0, "mean_abs_prob_diff": 0.0, "same_argmax_share": 1.0}
+    old[0]["questions"]["effect"]["listings"][0]["code_probs"] = [0.1, 0.8, 0.1]
+    moved = verdict.reproduction(old, fresh, {"r1", "r1p"})
+    assert moved["max_abs_prob_diff"] == pytest.approx(0.7) and moved["same_argmax_share"] == 0.75
+    old[1]["questions"]["outcome"]["listings"][0]["options"] = list(reversed(old[1]["questions"]["outcome"]["listings"][0]["options"]))
+    assert verdict.reproduction(old, fresh, {"r1", "r1p"})["order_mismatches"] == 1
+
+
+def test_m2_deltas_are_wrapped_minus_short():
+    verdict = _script("iface_verdict")
+    keys = [("B1", f"r{i}", "q") for i in range(40)]
+    short = {"direction": {k: (f"g{i % 10}", 1.0) for i, k in enumerate(keys)}, "comparison": {k: (f"g{i % 10}", 1.0) for i, k in enumerate(keys)},
+             "choice_accuracy": {k: (f"g{i % 10}", 1.0) for i, k in enumerate(keys)},
+             "band_balanced": {("low", *k): (f"g{i % 10}", 1.0) for i, k in enumerate(keys)},
+             "calls": {k: (f"g{i % 10}", "unclear", (0.0, 1.0, 0.0)) for i, k in enumerate(keys)}}
+    wrapped = copy.deepcopy(short)
+    for i, k in enumerate(keys[:10]):
+        wrapped["direction"][k] = (f"g{i % 10}", 0.0)
+        wrapped["calls"][k] = (f"g{i % 10}", "unclear", (1.0, 0.0, 0.0))
+    d = verdict.m2_delta(wrapped, short, n_boot=200, seed=0)
+    assert d["direction"]["value"] == pytest.approx(-0.25) and d["direction"]["high"] < 0
+    assert d["DC"]["value"] == pytest.approx(0.25) and d["DC"]["low"] > 0
+    assert d["comparison"]["value"] == 0.0 and d["choice_accuracy"]["value"] == 0.0 and d["band_balanced"]["value"] == 0.0
