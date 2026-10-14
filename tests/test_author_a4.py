@@ -150,6 +150,22 @@ def test_ledge_nose_drops_once_the_centre_of_mass_is_past_the_edge(cx):
     assert S.run_ledge(S.ledge_scene((1.0, 0.6, 0.5), 100.0, 0.3, (cx, 0.0, 0.05), edge + 0.03), mu=0.5)["outcome"] != "holds"
 
 
+def test_ledge_noses_down_onto_a_shallow_step_and_goes_over_a_deep_one():
+    shallow = S.run_ledge(S.ledge_scene((1.0, 0.6, 0.5), 100.0, 0.15, (0.0, 0.0, 0.0), 0.7), mu=0.5)
+    deep = S.run_ledge(S.ledge_scene((1.0, 0.6, 0.5), 100.0, 0.6, (0.0, 0.0, 0.0), 0.55), mu=0.5)
+    assert shallow["outcome"] == "noses_down" and shallow["on_upper_level"] and 5 < shallow["final_tilt"] < 30
+    assert deep["outcome"] == "goes_over"
+
+
+def test_the_bank_release_is_gentle_just_below_the_friction_angle():
+    """A tall load 0.4° under atan(mu) stays put (the eased release leaves no landing transient to start a slide)."""
+    mu = 0.35
+    edge = math.degrees(math.atan(mu))
+    rig = S.bank_scene((0.40, 0.48, 0.80), 30.0, (0.0, 0.0, 0.0))
+    assert S.run_bank(rig, slope_deg=edge - 0.4, mu=mu)["outcome"] == "stays_put"
+    assert S.run_bank(S.bank_scene((0.40, 0.48, 0.80), 30.0, (0.0, 0.0, 0.0)), slope_deg=edge + 0.6, mu=mu)["outcome"] == "slides_down"
+
+
 def test_the_compiled_centre_of_mass_keeps_box_contacts():
     """A robot body with a large centre-of-mass offset rests on the upper level instead of sinking into it (the run-time body_ipos route
     lost these contacts — module docstring of sims)."""

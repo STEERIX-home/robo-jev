@@ -10,11 +10,16 @@ chunks (``mj_step(..., nstep)``) and is deterministic: the same model, hidden va
 
 * **bank** (law A, tip or slide under tilt) — a field robot sets a box-shaped load down on sloping ground and lets go. The ground is a
   level plane and gravity is turned by the local slope (stated slope + a hidden local deviation), so the plane's normal stays the world
-  z axis. Outcome: ``tips_over`` (the load's tilt passed 45° at any time), ``slides_down`` (it moved more than 3 cm) or ``stays_put``.
+  z axis. The release is gentle: the load first settles with gravity straight down (0.15 s), then the slope is eased in at 40°/s
+  (the robot letting go; the same history up to any angle whatever the final slope), so no landing transient moves a load that
+  friction and its base would hold. Outcome: ``tips_over`` (the
+  load's tilt passed 45° at any time), ``slides_down`` (it moved more than 3 cm from where it settled; a 10 cm slide ends the run —
+  past that, MuJoCo's box-plane contact chatters under a sliding tall box and can topple it late) or ``stays_put``.
 * **ledge** (law B, centre of mass past an edge) — the robot itself, a box with a hidden centre of mass, has crept forward until its
   nose sticks out past the edge of a drop (a step, terrace wall, quay step); it is released at rest. The upper level is a box whose
-  edge is at x = 0, the lower level a plane at z = 0, both carrying the hidden friction. Outcome after settling: ``goes_over`` (no part
-  of the robot is above the upper level any more), ``noses_down`` (tilted more than 8° but still partly on the upper level) or ``holds``.
+  edge is at x = 0, the lower level a plane at z = 0, both carrying the hidden friction. Outcome after settling: ``goes_over`` (no
+  longer resting on the upper level — no contact with its top or edge — or hanging steeper than 60°), ``noses_down`` (tilted more
+  than 8° but resting on the upper level) or ``holds``.
 * **anchor** (law C, friction-limited holding) — the robot is parked with its brakes set (a box on a plane, gravity turned by the ramp
   angle; 0 for the flat apron) and holds a winch line that hauls a load up the ramp. The line pulls the robot downhill at a low hitch
   with the tension of the haul: ``T = m_load · (g · (sin θ + c · cos θ) + a(t))`` with the start acceleration ``a(t)`` ramped in and out
@@ -49,7 +54,13 @@ __all__ = [
 
 BANK_TIP_DEG = 45.0
 BANK_SLIDE_M = 0.03
+#: A slide of this length while the load is still upright (tilt < 10°) decides the bank outcome (the run stops): a load that tips while
+#: sliding does so at the onset, and a long slide of a tall box on the plane makes MuJoCo's box-plane contact chatter (the box hops),
+#: which can topple it late — an artefact.
+BANK_SLIDE_DECIDED_M = 0.10
 LEDGE_TILT_DEG = 8.0
+#: A robot hanging steeper than this over the edge has gone over (its final pose near vertical is otherwise a coin toss).
+LEDGE_OVER_DEG = 60.0
 ANCHOR_CREEP_M = 0.005
 ANCHOR_DRAG_M = 0.40
 #: Steps per chunk between checks (10 ms).
@@ -91,14 +102,6 @@ def _load(dims: Sequence[float], mass: float, pos: Sequence[float], com: Sequenc
             "    </body>\n")
 
 
-def _box_corners(scene: Rig) -> np.ndarray:
-    """World coordinates of the load box's eight corners."""
-    half = np.asarray(scene.dims, dtype=float) / 2.0
-    signs = np.array([[sx, sy, sz] for sx in (-1, 1) for sy in (-1, 1) for sz in (-1, 1)], dtype=float)
-    rot = np.asarray(scene.data.xmat[scene.load], dtype=float).reshape(3, 3)
-    return np.asarray(scene.data.xpos[scene.load], dtype=float) + (signs * half) @ rot.T
-
-
 def _settle(scene: Rig, step, max_seconds: float) -> int:
     """Step in chunks until the load is at rest (physics' rest test, checked every 0.1 s) or `max_seconds` pass; returns the steps."""
     steps = 0
@@ -127,18 +130,29 @@ def bank_scene(dims: Sequence[float], mass: float, com: Sequence[float]) -> Rig:
     return Rig(xml)
 
 
-def run_bank(scene: Rig, *, slope_deg: float, mu: float, seconds: float = 2.5) -> dict[str, Any]:
-    """One release on the slope (downhill = +x) → ``{"outcome", "moved_m", "max_tilt", "unstable", "steps"}``."""
+def run_bank(scene: Rig, *, slope_deg: float, mu: float, seconds: float = 2.5, settle: float = 0.15, ease_rate: float = 40.0) -> dict[str, Any]:
+    """One gentle release on the slope (downhill = +x) → ``{"outcome", "moved_m", "max_tilt", "unstable", "steps"}``."""
     model, data = scene.model, scene.data
     mujoco.mj_resetData(model, data)
     model.geom_friction[scene.surface, 0] = float(mu)
     theta = math.radians(max(0.0, float(slope_deg)))
-    model.opt.gravity[:] = (P.GRAVITY * math.sin(theta), 0.0, -P.GRAVITY * math.cos(theta))
+
+    def tilt_gravity(angle: float) -> None:
+        model.opt.gravity[:] = (P.GRAVITY * math.sin(angle), 0.0, -P.GRAVITY * math.cos(angle))
+
+    tilt_gravity(0.0)
     mujoco.mj_forward(model, data)
+    steps = 0
+    for _ in range(int(round(settle / (P.TIMESTEP * CHUNK)))):
+        mujoco.mj_step(model, data, nstep=CHUNK)
+        steps += CHUNK
     start = np.array(data.xpos[scene.load], dtype=float)
     z0 = top = float(start[2])
-    max_tilt, steps, outcome = 0.0, 0, None
-    for _ in range(int(round(seconds / (P.TIMESTEP * CHUNK)))):
+    max_tilt, outcome = 0.0, None
+    rate = math.radians(float(ease_rate)) * P.TIMESTEP * CHUNK  # the same slope history up to any angle, whatever the final slope
+    ramp = int(math.ceil(theta / rate)) if theta > 0 else 0
+    for i in range(ramp + int(round(seconds / (P.TIMESTEP * CHUNK)))):
+        tilt_gravity(min(theta, rate * (i + 1)))
         mujoco.mj_step(model, data, nstep=CHUNK)
         steps += CHUNK
         max_tilt = max(max_tilt, scene.tilt_deg())
@@ -146,8 +160,8 @@ def run_bank(scene: Rig, *, slope_deg: float, mu: float, seconds: float = 2.5) -
         if max_tilt > BANK_TIP_DEG:
             outcome = "tips_over"
             break
-        if float(np.hypot(*(data.xpos[scene.load][:2] - start[:2]))) > 0.5:
-            outcome = "slides_down"
+        if float(np.hypot(*(data.xpos[scene.load][:2] - start[:2]))) > BANK_SLIDE_DECIDED_M and scene.tilt_deg() < 10.0:
+            outcome = "slides_down"  # translating, not rotating
             break
     if outcome is None:
         def step() -> None:
@@ -202,11 +216,24 @@ def run_ledge(scene: Rig, *, mu: float, seconds: float = 3.0) -> dict[str, Any]:
 
     steps += _settle(scene, step, 3.0)
     tilt = scene.tilt_deg()
-    corners = _box_corners(scene)
-    off = bool(corners[:, 0].min() > -0.005)
-    outcome = "goes_over" if off else ("noses_down" if tilt > LEDGE_TILT_DEG else "holds")
-    return {"outcome": outcome, "final_tilt": tilt, "max_tilt": max(max_tilt, tilt), "unstable": bool(top - z0 > P.max_rise(scene.dims)),
-            "steps": steps}
+    on_top = _rests_on_upper_level(scene)
+    if not on_top or tilt > LEDGE_OVER_DEG:
+        outcome = "goes_over"
+    else:
+        outcome = "holds" if tilt <= LEDGE_TILT_DEG else "noses_down"
+    return {"outcome": outcome, "final_tilt": tilt, "max_tilt": max(max_tilt, tilt), "on_upper_level": on_top,
+            "unstable": bool(top - z0 > P.max_rise(scene.dims)), "steps": steps}
+
+
+def _rests_on_upper_level(scene: Rig) -> bool:
+    """Whether the robot still touches the upper level's top or its edge (a contact with the upper box no more than 2 cm below its
+    top); contacts with the lower level or low on the wall do not count."""
+    data = scene.data
+    for i in range(data.ncon):
+        contact = data.contact[i]
+        if scene.surface in (contact.geom1, contact.geom2) and float(contact.pos[2]) >= scene.drop - 0.02:  # type: ignore[attr-defined]
+            return True
+    return False
 
 
 # --------------------------------------------------------------------------
