@@ -158,7 +158,12 @@ def cmd_assemble(args: argparse.Namespace) -> int:
     manifest = {"kind": "v06-a2-train", "set": "v06-a2", "split": "train", "author": "a2", "path": str(out.relative_to(REPO)),
                 "sha256": file_sha256(out), "records": len(records), "scenes": manifest_scenes, "git": git,
                 "mujoco": mujoco.__version__, "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
-                "k": 32, "priors": ["base", "alt_a", "alt_b"], "generator": "v06-a2-mujoco-v1"}
+                "k": 32, "priors": ["base", "alt_a", "alt_b"], "generator": "v06-a2-mujoco-v1", "label_code_git": args.label_git,
+                "labelling": "scripts/author_a2.py label, 4 worker processes in one capped systemd-run --user unit (MemoryMax 8G, choom -n 1000, "
+                             "OPENBLAS/OMP threads 1); plans in artifacts/v06/a2/work/plan-<scene>.jsonl, per-draw outcome codes in "
+                             "artifacts/v06/a2/work/labels-<scene>.jsonl",
+                "label_rule": "training label = the base prior's outcome frequency over K = 32 shared hidden draws; labels_by_prior and "
+                              "robustness carry alt_a / alt_b (standard alternative-prior rule on A2's catalog)"}
     (OUT / "manifest.json").write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     _log(f"wrote {len(records)} records to {out}")
     return 0
@@ -452,6 +457,63 @@ def cmd_recheck(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_summary(args: argparse.Namespace) -> int:
+    """Markdown tables from manifest.json, stats.json, sanity.json and overlap.json (printed and written to summary.md)."""
+    manifest = json.loads((OUT / "manifest.json").read_text(encoding="utf-8"))
+    stats = json.loads((OUT / "stats.json").read_text(encoding="utf-8"))
+    sanity = json.loads((OUT / "sanity.json").read_text(encoding="utf-8")) if (OUT / "sanity.json").is_file() else None
+    overlap = json.loads((OUT / "overlap.json").read_text(encoding="utf-8"))
+    L = [f"# A2 summary — {manifest['records']} records, sha256 {manifest['sha256'][:12]}…", ""]
+    L += ["| scene | groups | records | dropped (unstable) | kept flung topples | CPU s (labelled groups) |", "|---|---|---|---|---|---|"]
+    for scene, m in manifest["scenes"].items():
+        cpu = stats.get("cpu", {}).get(scene, {})
+        L.append(f"| {scene} | {m['groups']} | {m['records']} | {len(m['dropped_unstable'])} | {len(m.get('kept_flung_topples', []))} | "
+                 f"{cpu.get('cpu_s')} ({cpu.get('groups_labelled')} groups, {cpu.get('rollouts')} rollouts) |")
+    L += ["", "| scene | key mean | key bands L/M/H | severe bands L/M/H | score bands L/M/H | key hist (10 bins) |", "|---|---|---|---|---|---|"]
+    for scene, e in stats["scenes"].items():
+        b = lambda k: "/".join(f"{e['labels'][k]['bands'].get(x, 0):.2f}" for x in ("low", "middle", "high"))
+        L.append(f"| {scene} | {e['labels']['key']['mean']:.3f} | {b('key')} | {b('severe')} | {b('score_cf')} | {e['labels']['key']['hist10']} |")
+    L += ["", "| scene | robust key | severe | score | direction | compare | action | outcome | truth classes (clear-safe / clear-risky / unclear) |",
+          "|---|---|---|---|---|---|---|---|---|"]
+    for scene, e in stats["scenes"].items():
+        r = e["robust_share"]
+        t = e["truth_classes"]
+        L.append(f"| {scene} | {r['key']:.2f} | {r['severe']:.2f} | {r['score_cf']:.2f} | {r['direction']:.2f} | {r['compare']:.2f} | {r['action']:.2f} | "
+                 f"{r['outcome']:.2f} | {t.get('clear_safe', 0)} / {t.get('clear_risky', 0)} / {t.get('unclear', 0)} |")
+    L += ["", "| scene | pair kinds | one-factor share | mean abs key move | moves ≥ 0.1 | direction same over priors | no reversal |", "|---|---|---|---|---|---|---|"]
+    for scene, e in stats["scenes"].items():
+        pr = e["pairs"]
+        L.append(f"| {scene} | {pr['kinds']} | {pr['one_factor_share']:.2f} | {pr['mean_abs_key_delta']:.3f} | {pr['moves_at_least_0.1']:.2f} | "
+                 f"{pr['direction_same_over_priors']:.2f} | {pr['no_reversal']:.2f} |")
+    L += ["", "| scene | direction argmax | compare argmax | action argmax | outcome argmax | static aim vs key (base members) |", "|---|---|---|---|---|---|"]
+    for scene, e in stats["scenes"].items():
+        c = e["choice_argmax"]
+        L.append(f"| {scene} | {c['direction']} | {c['compare']} | {c['action']} | {c['outcome']} | {e['static_aim_vs_key']} |")
+    L += ["", "| scene | state + questions median / p90 / max | model prompt per question median / max |", "|---|---|---|"]
+    for scene, e in stats["prompt_lengths"]["scenes"].items():
+        a, b = e["state_plus_questions"], e["model_prompt_per_question_chat_direct"]
+        L.append(f"| {scene} | {a['median']:.0f} / {a['p90']:.0f} / {a['max']} | {b['median']:.0f} / {b['max']} |")
+    L += ["", f"Loader: {stats['loader']}. Scorer checks: {stats['scorer_checks']}.", ""]
+    L += [f"Overlap pass: {overlap['pass']} (missing sets: {overlap['missing']}).", "", "| set | records | shared ids / requests / states / instructions / sentences / 5-grams |", "|---|---|---|"]
+    for name, row in overlap["sets"].items():
+        L.append(f"| {name} | {row.get('records')} | {row.get('shared_ids')} / {row.get('shared_requests')} / {row.get('shared_states')} / "
+                 f"{row.get('shared_instructions')} / {row.get('shared_sentences')} / {row.get('shared_5grams', '—')} |")
+    if sanity:
+        L += ["", f"Determinism: {sanity['determinism']}.", "", "| law | check | expect | got | ok |", "|---|---|---|---|---|"]
+        for row in sanity["thresholds"]:
+            L.append(f"| {row['law']} | {row['check']} | {row['expect']} | {row['got']} | {row['ok']} |")
+        L += ["", "| sweep | sweeps | label-level violations |", "|---|---|---|"]
+        for key, row in sanity["sweep_summary"].items():
+            L.append(f"| {key} | {row['sweeps']} | {row['label_level_violations']} |")
+        L += ["", "| scene | rollouts | agree with the static law | by static margin |", "|---|---|---|---|"]
+        for scene, row in sanity["static_agreement"].items():
+            L.append(f"| {scene} | {row['rollouts']} | {row['agree']:.3f} | " + "; ".join(f"{k}: {v['agree']} (n {v['n']})" for k, v in row["by_margin"].items()) + " |")
+    text = "\n".join(L) + "\n"
+    (OUT / "summary.md").write_text(text, encoding="utf-8")
+    print(text)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -472,6 +534,7 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--scenes", nargs="+", default=list(SCENE_NAMES))
     p.add_argument("--groups", type=int, default=625)
     p.add_argument("--git", default=None)
+    p.add_argument("--label-git", default=None, help="the commit whose physics produced the labels (recorded in the manifest)")
     p.set_defaults(fn=cmd_assemble)
     p = sub.add_parser("recheck")
     p.add_argument("--scene", choices=SCENE_NAMES, required=True)
@@ -479,6 +542,8 @@ def main(argv: list[str] | None = None) -> int:
     p.set_defaults(fn=cmd_recheck)
     p = sub.add_parser("report")
     p.set_defaults(fn=cmd_report)
+    p = sub.add_parser("summary")
+    p.set_defaults(fn=cmd_summary)
     p = sub.add_parser("sanity")
     p.add_argument("--workers", type=int, default=4)
     p.add_argument("--plans", type=int, default=15, help="group plans per scene to sweep")

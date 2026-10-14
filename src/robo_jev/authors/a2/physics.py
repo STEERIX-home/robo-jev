@@ -4,23 +4,25 @@ contact defaults, the load body with a writable centre of mass, the tracking hel
 
 Three scenes, one per law:
 
-* **turntable** (law A, tip or slide under acceleration) — a box-shaped item (a square bottle, a pepper mill, a vase ...) stands on
+* **turntable** (law A, tip or slide under acceleration) — a box-shaped item (a square bottle, a carafe, a boxy vase ...) stands on
   a lazy Susan at a stated distance from its centre. The robot turns the top through a stated angle in a stated time with a smooth
   (raised-cosine) speed profile; the item feels the tangential and the centripetal acceleration of its spot. The top is a heavy body
   on a yaw hinge that follows the planned angle exactly (feed-forward of the planned angular acceleration plus a stiff PD). Its
   collision top is a 2 m square, so an item that skids keeps skidding on the top instead of dropping off an edge. Outcome after the
   turn and settling: ``topples`` (final tilt > 45°), ``skids`` (upright, moved more than 2 cm relative to the top) or ``stays``.
 * **tiltback** (law B, centre of mass past an edge) — a tall piece of furniture (bookcase, wardrobe, drinks fridge ...) standing on
-  the floor is tipped back about its rear bottom edge by a stated angle and let go from rest. If its centre of mass is already
-  behind that edge it goes over backwards; otherwise it rocks back onto its feet, and on a slippery floor the landing can make the
-  feet skid. Outcome: ``over`` (final tilt > 45°), ``skids`` (back on its feet, the rear bottom edge moved more than 2 cm) or
-  ``settles``.
+  the floor is tipped back about its rear bottom edge by the planned angle and held there by the robot's hand on the middle of its
+  top front edge: a weightless point tied to the piece by a ``connect`` constraint, moved along x by a position servo whose force is
+  limited to the arm's stated limit (either way). The hold starts in contact at the planned tilt, pre-loaded with the static holding
+  force, and settles for 0.3 s with an unlimited arm; then the stated limit applies for 3 s. Outcome: ``over`` (tilt > 45°, or the
+  hand saturated with the tilt already 2° past the plan), ``hangs`` (the hand pulls: the centre of mass is behind the rear edge and
+  the arm holds it) or ``rests`` (the hand pushes, or the piece came back onto its feet).
 * **wallpress** (law C, friction-limited holding) — a flat item (mirror, framed print, pinboard ...) is pressed flat against a wall
   by a padded paddle with a stated force; nothing else holds it up. The item's back carries the hidden wall friction, the paddle's
   face its own friction. The paddle is on a slide joint normal to the wall (it cannot move up or down) and is pushed with the planned
   force. A slip reflex is part of the plan: once the item has dropped 4 mm, the push ramps to a stated multiple of the planned force
-  after 0.1 s latency over 0.25 s. Outcome after 2 s: ``drops`` (fell more than 6 cm), ``slips`` (dropped 4 mm or more, or turned more
-  than 3°, but caught) or ``holds``.
+  after 60 ms latency over 150 ms. Outcome after 2 s: ``drops`` (still sliding down faster than 5 cm/s, or slid off the pad),
+  ``slips`` (dropped 4 mm or more, or turned more than 3°, then caught) or ``holds``.
 
 Contact model (all scenes): :func:`robo_jev.outside.physics._header` — 1 ms steps, ``implicitfast``, elliptic cones, ``impratio``
 10, ``solref`` 0.004 s, ``condim`` 3. The geom named ``surface`` carries the hidden friction (priority 1). Everything is
