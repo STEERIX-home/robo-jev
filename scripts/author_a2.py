@@ -700,10 +700,10 @@ def _bitcheck_one(job: tuple[str, dict[str, Any], dict[str, Any]]) -> dict[str, 
     if mode == "flag":  # turntable / tiltback: without vs with the flag, and both vs the stored codes
         plain, flagged = {}, _FlaggedCache()
         runs = (("plain", spec, plain), ("flagged", spec, flagged))
-    else:  # wallpress: the pre-fix rollouts (flag off) must reproduce the stored pre-fix codes
+    else:  # wallpress: the pre-fix rollouts (flag off) must reproduce the stored pre-fix codes; and flag off vs on, full results
         off = Wallpress()
         off.refresh_bvh = False
-        runs = (("flag_off", off, {}),)
+        runs = (("flag_off", off, {}), ("flag_on", spec, {}))
     out = {"scene": plan["scene"], "index": plan["index"], "rollouts": 0, "identical_with_and_without_flag": 0, "match_stored_codes": 0,
            "match_stored_metric": 0}
     seen = set()
@@ -720,8 +720,7 @@ def _bitcheck_one(job: tuple[str, dict[str, Any], dict[str, Any]]) -> dict[str, 
                     values = {n: float(vals[n][k]) for n in vals}
                     results = [s.run(cache, facts, values) for _, s, cache in runs]
                     out["rollouts"] += 1
-                    if mode == "flag":
-                        out["identical_with_and_without_flag"] += results[0] == results[1]
+                    out["identical_with_and_without_flag"] += results[0] == results[1]
                     code = str(spec.outcomes.index(results[0]["outcome"]))
                     out["match_stored_codes"] += code == stored["setups"][key]["codes"][prior][k]
                     out["match_stored_metric"] += round(float(results[0][metric]), 4) == stored["setups"][key]["metric"][prior][k]
@@ -758,13 +757,13 @@ def cmd_bitcheck(args: argparse.Namespace) -> int:
     for scene in ("turntable", "tiltback", "wallpress"):
         rows = [r for r in results if r["scene"] == scene]
         summary[scene] = {"groups": len(rows), "rollouts": sum(r["rollouts"] for r in rows),
-                          "identical_with_and_without_flag": sum(r["identical_with_and_without_flag"] for r in rows) if scene != "wallpress" else None,
+                          "identical_with_and_without_flag": sum(r["identical_with_and_without_flag"] for r in rows),
                           "match_stored_codes": sum(r["match_stored_codes"] for r in rows),
                           "match_stored_metric_4dp": sum(r["match_stored_metric"] for r in rows)}
     out = {"midphase_pairs": names, "check": summary,
            "note": "turntable / tiltback: every rollout of the sampled groups (all setups, three priors, K = 32) run without and with "
-                   "refresh_bvh; full result dicts compared. wallpress: the sampled groups re-run with the flag off against the stored "
-                   "pre-fix codes."}
+                   "refresh_bvh; full result dicts compared. wallpress: the sampled groups re-run with the flag off (against the stored "
+                   "pre-fix codes) and on (full result dicts compared with the flag-off run)."}
     (OUT / "bitcheck.json").write_text(json.dumps(out, indent=1) + "\\n", encoding="utf-8")
     _log(f"midphase pairs {names}; {summary}")
     return 0
