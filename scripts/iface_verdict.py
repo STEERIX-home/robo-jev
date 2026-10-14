@@ -481,6 +481,14 @@ def render(result: Mapping[str, Any]) -> str:
             for metric in M2_METRICS:
                 cells = [_f((m["levels"][tag][c].get(metric) or {}).get("value")) for c in ("short", *LENGTH_NAMES)]
                 lines.append(f"| {label} | {metric} | " + " | ".join(cells) + " |")
+        lines += ["", "Call view parts behind DC (Δ wrapped − short; reported, not deciding): P(safe | clear-risky), P(safe | unclear), and the "
+                  "look-again and clear-call readings of the v0.5 rule:", "",
+                  "| model | length | Δ P(safe given clear-risky) | Δ P(safe given unclear) | Δ LU | Δ LC | Δ CA |", "|---|---|---|---|---|---|---|"]
+        for tag, label, _ in MODELS:
+            for length in LENGTH_NAMES:
+                c = m["deltas"][tag][length].get("calls") or {}
+                lines.append(f"| {label} | {length} | {_ci(c.get('safe|clear_risky'), True)} | {_ci(c.get('safe|unclear'), True)} | {_ci(c.get('LU'), True)} | "
+                             f"{_ci(c.get('LC'), True)} | {_ci(c.get('CA'), True)} |")
         lines += ["", f"Aggregation: {o['aggregation']}.", "", "Per model: " + "; ".join(
             f"{LABELS[t]} triggers {r['triggers'] or 'none'}, all within ±0.03: {r['all_within_0.03']}" for t, r in o["per_model"].items()) + ".", "",
                   "### M2 by set (reported, not deciding)", "", "| model | length | set | Δ direction | Δ comparison | Δ DC | Δ balanced band | Δ choice |", "|---|---|---|---|---|---|---|---|"]
