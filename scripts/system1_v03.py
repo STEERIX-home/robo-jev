@@ -10,6 +10,9 @@
     # Task v0.4b: also against B1-infamily and v0.4a's scene holdout (ids, whole requests, whole states), with v0.4a's set as MuJoCo
     python scripts/system1_v03.py overlap --input <train-v04>.jsonl --out <train-v04>.overlap.json --sealed-extra B1=artifacts/b1/b1-infamily.jsonl \
         --sealed-extra H-set=artifacts/simgen/v04/scene-holdout.jsonl --mujoco-set <v0.4a's meta.set>
+    # Task v0.6b: the held-out author A4's test set is written outside our generators — matched on text units too (--sealed-outside)
+    python scripts/system1_v03.py overlap --input <train-v06>.jsonl --out <train-v06>.overlap.json --sealed-extra B1=… --sealed-extra H-set=… \
+        --sealed-outside A4=artifacts/v06/a4/test.jsonl --mujoco-set v06-a1 --mujoco-set v06-a2 --mujoco-set v06-a3
 
 The rules of the transform are :mod:`robo_jev.simgen.system1_questions`. ``transform`` refuses an input inside a sealed location and any
 record that is not a training-split engine record; it writes byte-stable JSONL (``simgen.record.dumps``) and checks, for every record,
@@ -254,23 +257,30 @@ def cmd_overlap(args: argparse.Namespace) -> int:
     from robo_jev.simgen.narration import SealedIndex, state_sha256
 
     extra_sealed: dict[str, Path] = {}
-    for spec in args.sealed_extra or []:  # Task v0.4b: B1-infamily, v0.4a's scene holdout — whole ids, requests and states (same generators)
-        name, sep, raw = str(spec).partition("=")
-        if not sep or not name or not raw or name in SEALED or name in extra_sealed:
-            raise SystemExit(f"--sealed-extra takes NAME=PATH with a new name (got {spec!r})")
-        if not Path(raw).is_file():
-            raise SystemExit(f"--sealed-extra {name}: {raw} does not exist — every named sealed file must be checked")
-        extra_sealed[name] = Path(raw)
+    outside_extra: dict[str, Path] = {}
+    for option, specs, target in (("--sealed-extra", args.sealed_extra, extra_sealed), ("--sealed-outside", getattr(args, "sealed_outside", None), outside_extra)):
+        # Task v0.4b --sealed-extra: B1-infamily, v0.4a's scene holdout — whole ids, requests and states (same generators).
+        # Task v0.6b --sealed-outside: a set written outside our generators (the held-out author A4) — also its text units, like G1/G2/T8/T9.
+        for spec in specs or []:
+            name, sep, raw = str(spec).partition("=")
+            if not sep or not name or not raw or name in SEALED or name in extra_sealed or name in outside_extra:
+                raise SystemExit(f"{option} takes NAME=PATH with a new name (got {spec!r})")
+            if not Path(raw).is_file():
+                raise SystemExit(f"{option} {name}: {raw} does not exist — every named sealed file must be checked")
+            target[name] = Path(raw)
     sealed = {name: path for name, path in SEALED.items() if path.is_file()}
     missing = sorted(set(SEALED) - set(sealed))
     if missing and not args.allow_missing:
         raise SystemExit(f"sealed sets missing: {missing} (--allow-missing to check against the rest)")
     sealed.update(extra_sealed)
+    sealed.update(outside_extra)
     mujoco_sets = tuple(dict.fromkeys([*MUJOCO_SETS, *(args.mujoco_set or [])]))
     index = SealedIndex.build(sealed)
     sealed_ids = {name: {str(r["id"]) for r in _lines(path)} for name, path in sealed.items()}
-    outside_units = {name: units for name, units in index.units.items() if units}
     unit_hash = lambda unit: hashlib.sha256(unit.encode("utf-8")).hexdigest()[:16]  # noqa: E731 — SealedIndex's 16-hex unit hashes
+    for name, path in outside_extra.items():  # SealedIndex builds units only for its OUTSIDE names
+        index.units[name] = {unit_hash(u) for r in _lines(path) for u in record_units(r)}
+    outside_units = {name: units for name, units in index.units.items() if units}
     seed_ranges = load_holdout().seed_ranges
     train_low, train_high = seed_ranges["train"]
     report: dict[str, Any] = {"parts": {}, "hits": defaultdict(list)}
@@ -332,7 +342,7 @@ def cmd_overlap(args: argparse.Namespace) -> int:
         "input": {"path": str(args.input), "sha256": file_sha256(args.input), "records": sum(t["records"] for t in per_part.values())},
         "sealed": {name: {"path": str(path), "sha256": index.files[name]["sha256"], "records": len(sealed_ids[name]),
                           "units": len(index.units.get(name) or ())} for name, path in sealed.items()},
-        "missing_sealed": missing, "sealed_extra": sorted(extra_sealed), "mujoco_sets": list(mujoco_sets),
+        "missing_sealed": missing, "sealed_extra": sorted(extra_sealed), "sealed_outside": sorted(outside_extra), "mujoco_sets": list(mujoco_sets),
         "checks": {"ids": "record id equal to a sealed record id", "request": "whole-request sha256 (holdout.request_hash)",
                    "state": "whole-state sha256 (normalised, narration.state_sha256)",
                    "units": "text units (normalised state, state lines / list items and option texts with >= 5 words) shared with a set "
@@ -371,6 +381,9 @@ def build_parser() -> argparse.ArgumentParser:
     check.add_argument("--sealed-extra", action="append", default=[], metavar="NAME=PATH",
                        help="Task v0.4b: a further sealed file (e.g. B1=artifacts/b1/b1-infamily.jsonl, H-set=…/scene-holdout.jsonl) — matched on "
                             "ids, whole requests and whole states (it shares its generator's templates with training, so not on text units)")
+    check.add_argument("--sealed-outside", action="append", default=[], metavar="NAME=PATH",
+                       help="Task v0.6b: a further sealed file written outside our generators (e.g. A4=artifacts/v06/a4/test.jsonl, the held-out "
+                            "author) — matched on ids, whole requests, whole states AND text units, like G1, G2, T8a, T8b and T9")
     check.add_argument("--mujoco-set", action="append", default=[], metavar="SET",
                        help="Task v0.4b: a further meta.set that counts as the MuJoCo part (default: v03b-mujoco-train)")
     check.set_defaults(func=cmd_overlap)
