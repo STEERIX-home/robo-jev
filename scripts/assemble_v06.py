@@ -561,7 +561,7 @@ def cmd_mujoco(args: argparse.Namespace) -> int:
                         "first_pass_records": len(first), "second_pass_records": len(copies)},
                 "sources": {"v03b": {"path": str(args.v03), "sha256": v03_sha}, **sources,
                             **{name: {"path": str(path), "sha256": _sha256(path)} for name, path in (("H-set", args.hset), ("A4", args.a4)) if path is not None}},
-                "target_examples": args.examples, "train_config": str(args.train_config), **report,
+                "target_examples": args.examples, "train_config": str(args.train_config), "plan_sizes": PLAN_RECORDS, **report,
                 "created": dt.datetime.now().astimezone().isoformat(timespec="seconds")}
     _write_json(args.out.with_name(args.out.stem + ".manifest.json"), manifest)
     held = report["held"]
