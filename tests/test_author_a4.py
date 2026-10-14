@@ -314,6 +314,46 @@ def test_in_family_readings_and_the_call_view_run_on_synthetic_answers(records):
     assert verdict.call_difference(calls, verdict.set_calls("A4", records, oracle), n_boot=50, seed=0)["n"] == len(calls)
 
 
+def test_the_unit_check_finds_a_shared_text_unit_and_reports_no_reference_text(records, tmp_path):
+    """The assembly's units (record_units) on both sides: a reference record that shares one of my option texts is counted, located in my
+    records by question and option key, and none of the reference's own text appears in the report."""
+    from robo_jev.authors.a4 import checks
+
+    index = checks.my_unit_index(records)
+    bank = next(r for r in records if r["meta"]["scene"] == "bank")
+    turned = bank["request"]["questions"]["best_way_to_leave_it"]["criteria"]["turned_first"]
+    secret = "zebra quokka marmalade lantern harbour window"
+    ref = tmp_path / "ref.jsonl"
+    ref.write_text(json.dumps({"id": "x-1", "request": {"state": secret, "questions": {"q": {"type": "choice", "instructions": "x",
+                                                                                            "criteria": {"a": turned, "b": secret}}}}}) + "\n",
+                   encoding="utf-8")
+    clean = tmp_path / "clean.jsonl"
+    clean.write_text(json.dumps({"id": "x-2", "request": {"state": secret, "questions": {}}}) + "\n", encoding="utf-8")
+    result = checks.unit_overlap(index, {"ref": ref, "clean": clean, "missing": tmp_path / "none.jsonl"})
+    assert result["per_set"]["ref"]["shared_units"] == 1 and result["per_set"]["clean"]["shared_units"] == 0
+    assert result["total_shared_units"] == 1 and result["absent"] == ["missing"]
+    assert "best_way_to_leave_it.turned_first" in result["shared_units"][0]["where_in_a4"]  # (also the comparison's option when compared)
+    assert all(where.endswith(".turned_first") for where in result["shared_units"][0]["where_in_a4"])
+    assert "zebra" not in json.dumps(result) and "quokka" not in json.dumps(result)
+
+
+def test_retext_rerenders_only_the_request_and_reports_each_changed_option(groups, records):
+    script = _script("author_a4.py")
+    by_group = {(g["scene"], g["index"]): g for g in groups}
+    stale = json.loads(json.dumps(records))
+    for r in stale:
+        if r["meta"]["scene"] == "bank":
+            r["request"]["questions"]["best_way_to_leave_it"]["criteria"]["the_plan"] = "an older wording"
+    new, report = script.retext_records(stale, by_group)
+    assert [r["id"] for r in new] == [r["id"] for r in records]
+    assert all({k: v for k, v in a.items() if k != "request"} == {k: v for k, v in b.items() if k != "request"} for a, b in zip(stale, new))
+    assert new == records
+    (change,) = report["changes"]
+    assert change["path"].endswith("best_way_to_leave_it/criteria/the_plan") and change["from"] == "an older wording"
+    assert change["records"] == sum(1 for r in records if r["meta"]["scene"] == "bank")
+    assert not script.retext_records(records, by_group)[1]["changes"]
+
+
 # --------------------------------------------------------------------------
 # the written set (when present)
 # --------------------------------------------------------------------------

@@ -224,7 +224,7 @@ def _bank_questions(group: dict[str, Any], vis: dict[str, Any], c: dict[str, Any
                                    "costs a few seconds, and the other patch costs a short carry.",
                                    f"Best choice for the {load}? Weigh a slide (a trip back), a topple (far worse), a quarter turn (a few seconds) and "
                                    "the carry to the other patch (a little longer).")[q[5]],
-                        {"the_plan": "Set it down as planned", "turned_first": turned, "other_patch": moved}),
+                        {"the_plan": "Leave it as briefed", "turned_first": turned, "other_patch": moved}),
         n["outcome"]: _q("choice", (f"What will the {load} do after release?", f"Once let go, how does the {load} end up?")[q[6]],
                          {"stays_put": "Stays where it was set", "slides_down": "Slides down the slope", "tips_over": "Tips over"}),
     }

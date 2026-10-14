@@ -4,6 +4,7 @@
     PY=/home/rodex_dgx/Desktop/projects/robo-jev/.venv/bin/python
     systemd-run --user --wait --collect -p MemoryMax=6G -E PYTHONPATH=$PWD/src choom -n 1000 -- $PY scripts/author_a4.py label --groups 160 --workers 4
     $PY scripts/author_a4.py assemble --per-scene 135          # → artifacts/v06/a4/test.jsonl (+ manifest, stats)
+    $PY scripts/author_a4.py retext                            # re-render the request text only (labels, ids, order, meta unchanged)
     $PY scripts/author_a4.py validate                          # loader, in-family readings, the v0.5 call view
     $PY scripts/author_a4.py tokens                            # prompt lengths (Qwen3.5-2B tokenizer, one example per question)
     systemd-run ... $PY scripts/author_a4.py sanity --workers 4  # monotonicity sweeps, analytic thresholds, determinism
@@ -216,6 +217,100 @@ def composition(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 # --------------------------------------------------------------------------
+# retext
+# --------------------------------------------------------------------------
+
+
+def _line(record: dict[str, Any]) -> str:
+    return json.dumps(record, ensure_ascii=False, separators=(",", ":"))
+
+
+def _strings_of(node: Any, path: str = "") -> dict[str, str]:
+    """Every string leaf of a JSON value by its path."""
+    if isinstance(node, str):
+        return {path: node}
+    out: dict[str, str] = {}
+    if isinstance(node, dict):
+        for k, v in node.items():
+            out.update(_strings_of(v, f"{path}/{k}"))
+    elif isinstance(node, list):
+        for i, v in enumerate(node):
+            out.update(_strings_of(v, f"{path}/{i}"))
+    return out
+
+
+def retext_records(records: list[dict[str, Any]], groups: dict[tuple[str, int], dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Each record with its ``request`` re-rendered from its stored group by the current :mod:`robo_jev.authors.a4.radio` — nothing else
+    is touched. Returns the new records and the changes: {(question path, old text, new text): records}. Refuses a change of the
+    request's structure (question names, types, option keys)."""
+    from collections import Counter
+
+    from robo_jev.authors.a4 import radio as R
+
+    out, changes = [], Counter()
+    for record in records:
+        gen = record["generator"]
+        group = groups[(str(gen["family"]), int(gen["group"]))]
+        member = 0 if gen["member"] == "base" else 1
+        state, questions = R.render(group, member)
+        new = json.loads(json.dumps(record))
+        new["request"] = {"state": state, "questions": questions}
+        old_strings, new_strings = _strings_of(record["request"]), _strings_of(new["request"])
+        if set(old_strings) != set(new_strings) or [q["type"] for q in record["request"]["questions"].values()] != [q["type"] for q in questions.values()]:
+            raise SystemExit(f"{record['id']}: the re-rendered request changes its structure — refusing")
+        for path, text in old_strings.items():
+            if new_strings[path] != text:
+                changes[(path, text, new_strings[path])] += 1
+        out.append(new)
+    return out, {"changes": [{"path": path, "from": a, "to": b, "records": n} for (path, a, b), n in sorted(changes.items())]}
+
+
+def cmd_retext(args: argparse.Namespace) -> int:
+    from robo_jev.decisions.records import validate_record
+
+    refuse_write(args.input)
+    raw = args.input.read_text(encoding="utf-8")
+    records = [json.loads(line) for line in raw.splitlines() if line.strip()]
+    if "".join(_line(r) + "\n" for r in records) != raw:
+        raise SystemExit(f"{args.input}: does not re-serialise byte for byte — refusing to rewrite it")
+    groups = {}
+    for w in _work_files():
+        if w.get("group"):
+            groups[(w["scene"], int(w["index"]))] = w["group"]
+    new, report = retext_records(records, groups)
+    allowed = set(args.allow or [])
+    unexpected = [c for c in report["changes"] if c["path"].split("/")[-1] not in allowed]
+    if unexpected or not report["changes"]:
+        raise SystemExit(f"text changes outside the allowed option keys {sorted(allowed)}: {len(unexpected)} (or nothing changed) — refusing")
+    for a, b in zip(records, new):
+        if {k: v for k, v in a.items() if k != "request"} != {k: v for k, v in b.items() if k != "request"} or validate_record(b):
+            raise SystemExit(f"{a['id']}: something besides the request text changed, or the record no longer validates — refusing")
+    old_sha = _sha256(args.input)
+    tmp = args.input.with_suffix(".jsonl.tmp")
+    tmp.write_text("".join(_line(r) + "\n" for r in new), encoding="utf-8")
+    os.replace(tmp, args.input)
+    sha = _sha256(args.input)
+    git = _git()
+    manifest = json.loads((OUT / "manifest.json").read_text(encoding="utf-8"))
+    if manifest.get("sha256") != old_sha:
+        raise SystemExit("the manifest does not describe the file that was rewritten")
+    revision = {"git": git, "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"), "previous_sha256": old_sha, "sha256": sha,
+                "what": "request text re-rendered from the stored groups; labels, ids, order, meta and generator unchanged",
+                "changes": [{"question_option": "/".join(c["path"].split("/")[-3:]), "from": c["from"], "to": c["to"], "records": c["records"]}
+                            for c in report["changes"]]}
+    manifest["sha256"] = sha
+    manifest["text_revisions"] = [*(manifest.get("text_revisions") or []), revision]
+    _write_json(OUT / "manifest.json", manifest)
+    stats = json.loads((OUT / "stats.json").read_text(encoding="utf-8"))
+    stats["file_sha256"] = sha
+    stats["text_revisions"] = manifest["text_revisions"]
+    _write_json(OUT / "stats.json", stats)
+    _log(f"rewrote the request text of {len(new)} records: {sum(c['records'] for c in report['changes'])} option texts changed; sha256 {old_sha[:12]} -> {sha[:12]}")
+    print(json.dumps(revision, indent=1, ensure_ascii=False))
+    return 0
+
+
+# --------------------------------------------------------------------------
 # tokens
 # --------------------------------------------------------------------------
 
@@ -294,6 +389,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", type=Path, default=TEST)
     p.set_defaults(func=cmd_assemble)
+    p = sub.add_parser("retext", help="re-render the request text of test.jsonl from the stored groups (no relabelling)")
+    p.add_argument("--input", type=Path, default=TEST)
+    p.add_argument("--allow", nargs="+", default=["the_plan"], help="option keys whose text may change (anything else refuses)")
+    p.set_defaults(func=cmd_retext)
     p = sub.add_parser("tokens", help="prompt lengths")
     p.add_argument("--input", type=Path, default=TEST)
     p.add_argument("--tokenizer", type=Path, default=TOKENIZER)
