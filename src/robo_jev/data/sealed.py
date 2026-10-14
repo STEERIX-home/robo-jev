@@ -22,14 +22,15 @@ __all__ = ["NEVER_SENT_SETS", "SEALED_RECORD_FILES", "SEALED_RECORD_PREFIXES", "
 SEALED_SPLITS = ("ood_test",)
 
 #: Sealed sets in the Decisions-record format that must never be part of a training input (Task T9: T9 is the gate of the next trained
-#: version; Task v0.4a: the internal scene holdout of the MuJoCo scenes, never trained on). A record belongs to one if its ``meta.set``
-#: names it or its id carries the set's prefix.
-SEALED_RECORD_SETS = ("T9", "v04a-scene-holdout")
-SEALED_RECORD_PREFIXES = {"T9": "t9-", "v04a-scene-holdout": "v04h-"}
+#: version; Task v0.4a: the internal scene holdout of the MuJoCo scenes, never trained on; Task v0.6 A4: the held-out author's test, the
+#: primary gate of v0.6). A record belongs to one if its ``meta.set`` names it or its id carries the set's prefix.
+SEALED_RECORD_SETS = ("T9", "v04a-scene-holdout", "v06-a4")
+SEALED_RECORD_PREFIXES = {"T9": "t9-", "v04a-scene-holdout": "v04h-", "v06-a4": "v06a4-"}
 #: Their files (relative to the repository root) — the training-input assembly checks every input against them when present.
-SEALED_RECORD_FILES = {"T9": "artifacts/t9/T9.jsonl", "v04a-scene-holdout": "artifacts/simgen/v04/scene-holdout.jsonl"}
+SEALED_RECORD_FILES = {"T9": "artifacts/t9/T9.jsonl", "v04a-scene-holdout": "artifacts/simgen/v04/scene-holdout.jsonl",
+                       "v06-a4": "artifacts/v06/a4/test.jsonl"}
 #: Sets that are never sent to any API (OpenRouter, the narration rewriter, …).
-NEVER_SENT_SETS = ("T9",)
+NEVER_SENT_SETS = ("T9", "v06-a4")
 
 
 def sealed_record_set(record: dict[str, Any]) -> str | None:
