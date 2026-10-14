@@ -333,6 +333,9 @@ def test_the_comparison_mapping_reads_an_authors_scene_and_checks_itself_on_the_
     broken = copy.deepcopy(records)
     broken[0]["meta"]["labels_by_prior"]["base"]["key"]["p_yes"] = 0.33
     assert v.comparison_map(broken)["dock_ramp"]["events"]["events"] is None
+    given = v.comparison_map(broken, {"dock_ramp": {"events": ["slides", "tips"], "plan_key": "keep_going"}})["dock_ramp"]
+    assert given["events"]["events"] == ["slides", "tips"] and given["plan"]["plan_key"] == "keep_going" and "override" in given["plan"]["method"]
+    assert given["label_agreement"] == 1.0, "an override is still checked against the comparison labels"
 
 
 def test_the_comparison_items_score_the_ordering_of_the_two_actions():

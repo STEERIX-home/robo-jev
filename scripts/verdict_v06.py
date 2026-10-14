@@ -403,9 +403,10 @@ def infer_plan_key(records: Sequence[Mapping[str, Any]], events: Sequence[str]) 
     return {"plan_key": None, "method": "no comparison question with a plan-riskier label"}
 
 
-def comparison_map(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
-    """Per scene: key events and the plan's option key (:func:`infer_events`, :func:`infer_plan_key`), and how often the comparison labels
-    order the two actions like their key-event shares (items with shares ≥ 0.15 apart) — the mapping's own check."""
+def comparison_map(records: Sequence[Mapping[str, Any]], override: Mapping[str, Mapping[str, Any]] | None = None) -> dict[str, Any]:
+    """Per scene: key events and the plan's option key (:func:`infer_events`, :func:`infer_plan_key`; or, for a scene in `override` —
+    ``{scene: {"events": [...], "plan_key": "..."}}``, read from the author's own documentation, never from predictions — those), and how
+    often the comparison labels order the two actions like their key-event shares (items with shares ≥ 0.15 apart) — the mapping's own check."""
     from robo_jev.bench.system1 import COMPARISON_MIN
 
     by_scene: dict[str, list] = defaultdict(list)
@@ -414,8 +415,13 @@ def comparison_map(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
             by_scene[_scene(record)].append(record)
     out = {}
     for scene, rows in sorted(by_scene.items()):
-        events = infer_events(rows)
-        plan = infer_plan_key(rows, events["events"] or [])
+        given = (override or {}).get(scene)
+        if given:
+            events = {"events": list(given["events"]), "method": "override (--a4-compare-map)", "candidates": None}
+            plan = {"plan_key": str(given["plan_key"]), "method": "override (--a4-compare-map)"}
+        else:
+            events = infer_events(rows)
+            plan = infer_plan_key(rows, events["events"] or [])
         agree = items = 0
         if events["events"] and plan["plan_key"]:
             for record in rows:
@@ -561,7 +567,7 @@ def _call_reading(items: Mapping[tuple, tuple], *, n_boot: int, seed: int) -> di
 
 
 def compute(sets: Mapping[str, Sequence[Mapping[str, Any]]], preds: Mapping[str, Mapping[str, Sequence[Mapping[str, Any]]]], *, n_boot: int = 2000,
-            seed: int = 0) -> dict[str, Any]:
+            seed: int = 0, compare_override: Mapping[str, Mapping[str, Any]] | None = None) -> dict[str, Any]:
     """Every reading of the rule (and the secondary ones). `sets[name]` = records (T8b with B2's robustness); `preds[model][set]` =
     predictions for v06s0, v06s1, v04s0, v04s1, base, mix (+ v05s0 / v05s1 for context); missing secondary inputs are skipped."""
     from robo_jev.bench import infamily, system1
@@ -590,7 +596,7 @@ def compute(sets: Mapping[str, Sequence[Mapping[str, Any]]], preds: Mapping[str,
     miss = {m: v4.keep(v4.items_of("A4", a4, preds[m]["A4"], by_pair=True).get("severe_miss") or {}, robust_a4) for m in ("v06s0", "v06s1", "base")}
     out["F"] = v4._paired(arm_values(miss["v06s0"], miss["v06s1"]), miss["base"], n_boot=n_boot, seed=seed)
     # (N)
-    mapping = comparison_map(a4)
+    mapping = comparison_map(a4, compare_override)
     out["A4_comparison_map"] = mapping
     a4_items = {m: v4.items_of("A4", a4, preds[m]["A4"], by_pair=True) for m in ("v06s0", "v06s1", "v04s0", "v04s1", "base")}
     for m in a4_items:
@@ -839,6 +845,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--a4", type=Path, default=SET_PATHS["A4"], help="the sealed A4 (default); another file only for a pipeline check")
     parser.add_argument("--t9", type=Path, default=SET_PATHS["T9"], help="the sealed T9 (default); another file only for a pipeline check")
     parser.add_argument("--b2-labels", type=Path, default=B2_LABELS)
+    parser.add_argument("--a4-compare-map", type=Path, default=None,
+                        help="only if the comparison mapping cannot read an A4 scene: JSON {scene: {events: [...], plan_key: ...}} from A4's own "
+                             "report (never from predictions); recorded in the verdict")
     parser.add_argument("--n-boot", type=int, default=2000)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--allow-mismatch", action="store_true", help="read even if a prediction file was scored on another set file or conditions")
@@ -875,7 +884,10 @@ def main(argv: list[str] | None = None) -> int:
         problems.append(f"T9 has {len(sets['T9'])} records — not the sealed T9")
     if problems and not args.allow_mismatch:
         raise SystemExit("refusing (use --allow-mismatch to read anyway):\n  " + "\n  ".join(problems))
-    readings = compute(sets, preds, n_boot=args.n_boot, seed=args.seed)
+    override = json.loads(args.a4_compare_map.read_text(encoding="utf-8")) if args.a4_compare_map else None
+    if override:
+        notes.append(f"A4 comparison mapping overridden for scenes {sorted(override)} from {args.a4_compare_map} (the author's documentation)")
+    readings = compute(sets, preds, n_boot=args.n_boot, seed=args.seed, compare_override=override)
     verdict = decide(readings)
     if pipeline:
         notes.insert(0, "PIPELINE CHECK ONLY: " + "; ".join(pipeline) + " — this is not the v0.6 verdict")
