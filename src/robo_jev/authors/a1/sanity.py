@@ -168,12 +168,19 @@ def determinism(n: int = 3) -> dict[str, Any]:
 
 
 def cached_rerun(root, per_scene: int = 2) -> dict[str, Any]:
-    """Re-run the planned / base-prior rollouts of a few cached groups and compare with the cache."""
+    """Re-plan every cached group with the current code (the plans must be identical) and re-run the planned / base-prior
+    rollouts of a few of them (the outcomes must be identical)."""
+    import json
+
+    plans_same = plans_total = 0
+    for scene in SCENES:
+        for path in sorted((root / scene).glob("*.json")):
+            cached = json.loads(path.read_text())
+            plans_total += 1
+            plans_same += int(json.loads(json.dumps(build.plan_group(scene, cached["plan"]["index"]))) == cached["plan"])
     same = total = 0
     for scene, sc in SCENES.items():
         for path in sorted((root / scene).glob("*.json"))[:per_scene]:
-            import json
-
             cached = json.loads(path.read_text())
             plan = cached["plan"]
             u = lhs(build.K, len(sc.hidden_names), plan["draws_seed"])
@@ -181,4 +188,4 @@ def cached_rerun(root, per_scene: int = 2) -> dict[str, Any]:
             outs = [sims.rollout(scene, sc.spec(v), h, sc.state(v))["outcome"] for h in sc.hidden(v, "base", u)]
             total += len(outs)
             same += sum(int(a == b) for a, b in zip(outs, cached["members"]["base"]["planned"]["base"]))
-    return {"rollouts": total, "identical": same}
+    return {"rollouts": total, "identical": same, "plans": plans_total, "plans_identical": plans_same}

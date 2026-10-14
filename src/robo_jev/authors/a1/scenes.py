@@ -275,25 +275,25 @@ class MastScene(Scene):
     def questions(self, visible, cf_value, tpl):
         dec = float(visible["decel"])
         soft = _r(self.SOFT * dec, 1)
-        crit = (["0.0 = certain clean stop", "1.0 = certain skid or lift"] if tpl == 0
-                else ["0.0: stops clean, no doubt", "1.0: skids or lifts, no doubt"])
+        crit = (["0.0 = certain clean stop", "1.0 = certain skid or tip-up"] if tpl == 0
+                else ["0.0: stops clean, no doubt", "1.0: skids or tips up, no doubt"])
         return {
-            self.q["key"]: {"type": "noul", "instructions": ("Will this stop end in a skid (over 6 cm past the mark) or a caster lift?" if tpl == 0
-                                                              else "Skid past the mark (over 6 cm) or rear casters lifting: yes or no?")},
-            self.q["severe"]: {"type": "noul", "instructions": ("Will the rear casters lift off the floor during this stop?" if tpl == 0
-                                                                 else "Rear casters leave the floor on this stop?")},
-            self.q["score_cf"]: {"type": "score", "instructions": (f"Skid-or-lift risk if braking at {cf_value:.1f} m/s2 instead." if tpl == 0
-                                                                    else f"Skid/lift risk score for a {cf_value:.1f} m/s2 stop."), "criteria": crit},
-            self.q["direction"]: {"type": "choice", "instructions": f"Decel {cf_value:.1f} m/s2 instead of {dec:.1f}: skid-or-lift risk?",
+            self.q["key"]: {"type": "noul", "instructions": ("Will this stop end in a skid (over 6 cm past the mark) or a tip-up (over 4 deg)?" if tpl == 0
+                                                              else "Skid past the mark (over 6 cm) or tip-up over 4 deg: yes or no?")},
+            self.q["severe"]: {"type": "noul", "instructions": ("Will the unit tip up more than 4 deg onto its front wheels during this stop?" if tpl == 0
+                                                                 else "Tip-up over 4 deg (rear casters clear of the floor) on this stop?")},
+            self.q["score_cf"]: {"type": "score", "instructions": (f"Skid-or-tip-up risk if braking at {cf_value:.1f} m/s2 instead." if tpl == 0
+                                                                    else f"Skid/tip-up risk score for a {cf_value:.1f} m/s2 stop."), "criteria": crit},
+            self.q["direction"]: {"type": "choice", "instructions": f"Decel {cf_value:.1f} m/s2 instead of {dec:.1f}: skid-or-tip-up risk?",
                                   "criteria": {"higher": "goes up", "lower": "goes down", "unchanged": "about the same"}},
-            self.q["compare"]: {"type": "choice", "instructions": ("Riskier (skid or lift): commanded stop or lift at 0.40 m first?" if tpl == 0
-                                                                    else "More skid/lift risk: commanded stop or lowered-lift stop?"),
+            self.q["compare"]: {"type": "choice", "instructions": ("Riskier (skid or tip-up): commanded stop or lift at 0.40 m first?" if tpl == 0
+                                                                    else "More skid/tip-up risk: commanded stop or lowered-lift stop?"),
                                 "criteria": {PLAN_KEY: "as commanded", "drop_lift_first": "lift at 0.40 m first", TIE_KEY: "about equal"}},
             self.q["action"]: {"type": "choice", "instructions": "Pick the stop to run (risk against delay)." if tpl == 0 else "Operator: choose stop mode, weighing risk and delay.",
                                "criteria": {"brake_as_planned": f"{dec:.1f} m/s2, lift as is", "soft_brake": f"{soft:.1f} m/s2, lift as is",
                                             "drop_lift_first": f"lift to 0.40 m, then {dec:.1f} m/s2"}},
             self.q["outcome"]: {"type": "choice", "instructions": "Most likely result of the commanded stop?" if tpl == 0 else "Expected stop result?",
-                                "criteria": {"clean": "stops near the mark", "skid": "slides past the mark", "lift": "rear casters lift"}},
+                                "criteria": {"clean": "stops near the mark", "skid": "slides past the mark", "lift": "tips up over 4 deg"}},
         }
 
 
