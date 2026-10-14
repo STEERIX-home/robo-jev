@@ -237,13 +237,15 @@ def test_a_gpu_the_cloud_does_not_offer_is_refused():
 #: Jobs written after the user raised the phase cap to $250 (2026-10-13, recorded in the ledger's history with
 #: `launch_run.py ledger --set-phase-cap 250`) carry the raised cap — the ledger refuses a job whose phase differs from its own.
 RAISED_PHASE_JOBS = ("decisions-v04-s0-h100.yaml", "decisions-v04-s1-h100.yaml", "decisions-v05-s0-h100.yaml", "decisions-v05-s1-h100.yaml")
+#: Jobs written after the second raise to $350 (2026-10-14, recorded in the ledger's history; Task v0.6b).
+PHASE_350_JOBS = ("decisions-v06-s0-h100.yaml", "decisions-v06-s1-h100.yaml")
 
 
 def test_the_default_phase_is_150_dollars_and_the_shipped_configs_agree():
     assert DEFAULT_PHASE["cap_usd"] == 150.0
     for path in sorted((REPO / "configs" / "cloud").glob("*.yaml")):
         phase = (yaml.safe_load(path.read_text(encoding="utf-8")).get("budget") or {}).get("phase")
-        cap = 250 if path.name in RAISED_PHASE_JOBS else 150
+        cap = 350 if path.name in PHASE_350_JOBS else 250 if path.name in RAISED_PHASE_JOBS else 150
         assert phase == {"name": "cloud-phase-1", "cap_usd": cap}, f"{path.name}: 단계 상한은 ${cap}"
 
 
