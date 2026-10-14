@@ -281,7 +281,8 @@ TRAY_THICK = 0.012
 TRAY_BACK = 0.05  # the tray starts this far behind the post axis
 STAND_TIP_DEG = 20.0
 STAND_ROCK_DEG = 0.5
-STAND_RUN = 2.0
+#: Fixed run after the release; then the rollout continues (checked every 0.1 s) until the stand and the container are at rest.
+STAND_RUN = 1.0
 
 
 def _stand_parts(reach: float, tray_len: float, tray_top: float) -> list[tuple[str, tuple[float, float, float], tuple[float, float, float]]]:

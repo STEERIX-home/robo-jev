@@ -60,6 +60,19 @@ def _verdict_v05(repo: Path) -> Any:
     return module
 
 
+def request_tokens(record: Mapping[str, Any], tokenizer: Any) -> int:
+    """Tokens of the whole request: the state plus every question's instructions and options (``key: description``, or the key)."""
+    parts = [record["request"]["state"]]
+    for question in record["request"]["questions"].values():
+        parts.append(question["instructions"])
+        criteria = question.get("criteria")
+        if isinstance(criteria, Mapping):
+            parts += [f"{k}: {v}" if v else str(k) for k, v in criteria.items()]
+        elif isinstance(criteria, list):
+            parts += [str(c) for c in criteria]
+    return len(tokenizer.encode("\n".join(parts), add_special_tokens=False).ids)
+
+
 def validate(path: Path, repo: Path, *, sample: int = 400) -> dict[str, Any]:
     """Every record through the trainer's loader and format check; a pair-preserving sample through the prompt builder (real
     tokenizer, chat format, counterbalanced listings, displayed-line check), the in-family readers (robust keys, direction,
@@ -88,8 +101,17 @@ def validate(path: Path, repo: Path, *, sample: int = 400) -> dict[str, Any]:
             line_problems += sum(len(check_displayed_lines(p)) for p in prompts)
             lengths += [len(p["tokens"]) for p in prompts]
         dev = sum(1 for r in records if examples.is_dev(r, fraction=examples.DEFAULT_DEV_FRACTION, salt=examples.DEFAULT_DEV_SALT))
+        request_lengths = defaultdict(list)
+        for record in records:
+            request_lengths[record["meta"]["scene"]].append(request_tokens(record, tokenizer))
+        every = [n for v in request_lengths.values() for n in v]
         out["prompts"] = {"tokenizer": found[0], "prompts": n_prompts, "displayed_line_problems": line_problems,
-                          "per_prompt_tokens": {"median": float(np.median(lengths)), "max": int(max(lengths))}, "dev_records": dev}
+                          "per_prompt_tokens": {"median": float(np.median(lengths)), "max": int(max(lengths)),
+                                                "what": "one prompt = system text + state + one question (chat, the trainer's format)"},
+                          "request_tokens": {"median": float(np.median(every)), "p90": float(np.percentile(every, 90)), "max": int(max(every)),
+                                             "what": "state + every question's instructions and options, joined by newlines",
+                                             "by_scene": {k: {"median": float(np.median(v)), "max": int(max(v))} for k, v in request_lengths.items()}},
+                          "dev_records": dev}
     # in-family readers (A3's families registered in-process)
     a3.register_infamily()
     readers: dict[str, Any] = {}
@@ -125,6 +147,7 @@ def validate(path: Path, repo: Path, *, sample: int = 400) -> dict[str, Any]:
     out["summary"] = {"records": len(records), "format_problems": len(problems), "pair_groups": len(groups),
                       "prompt_line_problems": out.get("prompts", {}).get("displayed_line_problems"),
                       "per_prompt_tokens": out.get("prompts", {}).get("per_prompt_tokens"),
+                      "request_tokens": {k: v for k, v in (out.get("prompts", {}).get("request_tokens") or {}).items() if k != "by_scene"},
                       "infamily_oracle": {k: readers["oracle"][k] for k in ("direction_items", "direction", "comparison_items", "comparison")},
                       "call_view_oracle": calls["oracle"], "call_view_noisy": calls["noisy_0.35"], "ok": bool(ok)}
     return out

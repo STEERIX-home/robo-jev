@@ -105,12 +105,32 @@ def manifest(records: Sequence[Mapping[str, Any]], path: Path, *, git: str | Non
         "id_pattern": "v06a3-<scene>-<group:06d>[p]", "generator": records[0]["generator"]["name"] if records else None, "git": git,
         "k": 32, "priors": list(cat.PRIORS), "training_label_prior": "base",
         "label_files": {p.name: _sha(p) for p in sorted(labels_dir.glob("*.jsonl"))},
+        "mujoco_cost": _label_cost(labels_dir),
         "created": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         "infamily_registration": {
             "EVENT": {s: list(records_for(records, s)[0]["meta"]["key_events"]) for s in scenes if records_for(records, s)},
             "PLAN_KEY": {s: "as_written" for s in scenes},
         },
     }
+
+
+def _label_cost(labels_dir: Path) -> dict[str, Any]:
+    """Rollouts and CPU seconds per scene from the label files (each group line records its own wall time in one worker)."""
+    import json
+
+    out = {}
+    for path in sorted(labels_dir.glob("*.jsonl")):
+        rollouts = seconds = groups = 0
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                if line.strip():
+                    row = json.loads(line)
+                    rollouts += int(row["rollouts"])
+                    seconds += float(row["seconds"])
+                    groups += 1
+        out[path.stem] = {"groups": groups, "rollouts": rollouts, "cpu_seconds": round(seconds, 1),
+                          "ms_per_rollout": round(1000 * seconds / max(rollouts, 1), 2)}
+    return out
 
 
 def records_for(records: Sequence[Mapping[str, Any]], scene: str) -> list[Mapping[str, Any]]:

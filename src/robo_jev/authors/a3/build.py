@@ -7,8 +7,9 @@
 2. Draw a target key share t ~ U(0, 1) and states until the analytic aim (:meth:`robo_jev.authors.a3.scenes.Scene.aim`) puts the
    decisive stated number at t — the key labels then spread flat over 0–1 (MuJoCo gives the label; the aim is stored as ``static_aim``).
 3. Pair design: **one-factor** (2/3) — exactly one stated fact changes (a material / condition / contents / model / method word, or one
-   number: a non-decisive number or a near change of the decisive one); **far-number** (1/3) — the decisive number moves to a value
-   whose aimed key share is ≥ 0.45 away.
+   number: a non-decisive number or a near change of the decisive one), drawn from the scene's catalog weights, down-weighted × 0.2
+   when the aimed partner share would sit outside [0.05, 0.95]; **far-number** (1/3) — the decisive number moves to a value whose
+   aimed key share is ≥ 0.45 away.
 4. Counterfactual value of the decisive number (shared by both records): **near** (40 %, a small change) or **far** (60 %, aimed ≥ 0.3
    away); it never equals either record's own value.
 5. Two alternatives valid for both records (half the groups get one written as riskier), one of them compared with the plan.
@@ -50,6 +51,8 @@ FAR_CF_GAP = 0.30
 NEAR_CF_SHARE = 0.4
 #: A state is kept only when its aimed key share is this close to the drawn target (the far partner: + 0.03).
 AIM_TOLERANCE = 0.12
+#: Weight of a one-factor change whose aimed partner share falls outside [0.05, 0.95] (relative to the catalog weight).
+EXTREME_PARTNER_WEIGHT = 0.2
 QUESTION_KIND_LABEL = {"key": "key", "severe": "severe", "score_cf": "score_cf", "direction": "direction", "compare": "compare",
                        "action": "action", "outcome": "outcome"}
 
@@ -115,7 +118,13 @@ def plan_group(scene_name: str, group: int) -> dict[str, Any]:
             changes = sc.one_factor_changes(base, rng)
             if not changes:
                 continue
-            field, value, fact, _ = _choose(rng, changes, [c[3] for c in changes])
+            # keep partners off the 0 / 1 ends when the scene allows it (the base is aimed flat; a one-fact change of a steep
+            # scene would otherwise land most partners on an end)
+            weights = []
+            for c_field, c_value, _, c_weight in changes:
+                p_partner = sc.proxy(sc.apply_change(base, c_field, c_value), points)
+                weights.append(c_weight * (1.0 if 0.05 <= p_partner <= 0.95 else EXTREME_PARTNER_WEIGHT))
+            field, value, fact, _ = _choose(rng, changes, weights)
             pair = sc.apply_change(base, field, value)
             factor = field
         if sc.name == "mayostand" and not (lo <= pair[sc.decisive] <= hi):
