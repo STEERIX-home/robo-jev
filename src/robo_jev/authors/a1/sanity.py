@@ -3,8 +3,8 @@ law, and determinism.
 
 * **Monotone sweeps** — for sampled plans, the K = 32 shared base-prior draws are rolled out along a grid of one quantity with
   everything else fixed; the key-event share must never move against physics (a *label-level violation* is any step in the
-  wrong direction; per-draw flips are reported too). Mast: deceleration ↑ ⇒ key ↑; friction ↑ ⇒ key ↓ (and the tip-up share ↑:
-  a slippery floor skids instead). Dock: overhang ↑ ⇒ key ↑; centre of mass toward the lead end ↑ ⇒ key ↑. Ramp: grade ↑ ⇒ key ↑;
+  wrong direction; per-draw flips are reported too). Mast: deceleration ↑ ⇒ key ↑; friction ↑ ⇒ skid share ↓ and tip-up share ↑
+  (a slippery floor skids instead of tipping up — so the key share itself is not monotone in friction: skid, clean, tip-up). Dock: overhang ↑ ⇒ key ↑; centre of mass toward the lead end ↑ ⇒ key ↑. Ramp: grade ↑ ⇒ key ↑;
   payload ↑ ⇒ key ↑; friction ↑ ⇒ key ↓.
 * **Analytic thresholds** — MuJoCo bisection against the closed form: sliding (mast front-wheel lock and the overrun it causes;
   ramp runaway at tan θ = μ·M_tug / (M_tug + m_cart)), tipping (mast rear-caster lift-off onset at a = g·d / h), centre of mass
@@ -28,13 +28,16 @@ def _key(scene: str, outcome: str) -> int:
 
 
 def _sweep(scene: str, visible: Mapping[str, Any], hidden_rows: Sequence[Mapping[str, float]],
-           make: Callable[[float], tuple[dict[str, Any], list[dict[str, float]]]], grid: Sequence[float], sign: int) -> dict[str, Any]:
-    """Key share along `grid` (make(x) → (visible, hidden rows)); `sign` +1 = must not fall, −1 = must not rise."""
+           make: Callable[[float], tuple[dict[str, Any], list[dict[str, float]]]], grid: Sequence[float], sign: int,
+           events: Sequence[str] | None = None) -> dict[str, Any]:
+    """Share of `events` (default: the key events) along `grid` (make(x) → (visible, hidden rows)); `sign` +1 = must not fall,
+    −1 = must not rise."""
     sc = SCENES[scene]
+    events = tuple(events or sc.key_events)
     per_draw = []
     for x in grid:
         v, rows = make(x)
-        per_draw.append([_key(scene, sims.rollout(scene, sc.spec(v), h, sc.state(v))["outcome"]) for h in rows])
+        per_draw.append([int(sims.rollout(scene, sc.spec(v), h, sc.state(v))["outcome"] in events) for h in rows])
     arr = np.array(per_draw)  # grid × draws
     shares = arr.mean(1)
     steps = np.diff(shares) * sign
@@ -68,7 +71,12 @@ def monotone_sweeps(n_plans: int = 6, points: int = 8, start: int = 50_000) -> d
                     return dict(visible), [dict(h, **{name: h[name] * s}) for h in rows]
                 return make
 
-            if scene in ("mast", "ramp"):
+            if scene == "mast":
+                # friction moves the two mast failures in opposite directions (a grippier floor turns skids into clean stops
+                # and clean stops into tip-ups), so each is checked on its own; the key share is not monotone in friction
+                results.setdefault("friction_up_skid_share", []).append(_sweep(scene, visible, rows, scaled("mu"), scales, -1, ("skid",)))
+                results.setdefault("friction_up_tipup_share", []).append(_sweep(scene, visible, rows, scaled("mu"), scales, +1, ("lift",)))
+            if scene == "ramp":
                 results.setdefault("friction_up", []).append(_sweep(scene, visible, rows, scaled("mu"), scales, -1))
             if scene == "ramp":
                 results.setdefault("payload_up", []).append(_sweep(scene, visible, rows, scaled("payload"), scales, +1))

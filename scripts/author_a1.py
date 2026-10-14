@@ -121,7 +121,8 @@ def cmd_overlap(args: argparse.Namespace) -> int:
     from robo_jev.decisions.records import read_records
 
     records = read_records(OUT / "train.jsonl")
-    result = checks.overlap(records)
+    # a positive control: 200 of A1's own records passed as if they were a protected set (every count must be > 0)
+    result = checks.overlap(records, sets={**checks.PROTECTED, "control_a1_sample": records[:200]})
     _write_json(OUT / "overlap.json", result)
     for name, entry in result["sets"].items():
         _log(f"{name}: " + ", ".join(f"{k}={v}" for k, v in entry.items() if not isinstance(v, list)))

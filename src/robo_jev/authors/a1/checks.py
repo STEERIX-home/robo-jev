@@ -192,7 +192,7 @@ PROTECTED = {
     "B1": REPO / "artifacts" / "b1" / "b1-infamily.jsonl", "Hset": REPO / "artifacts" / "simgen" / "v04" / "scene-holdout.jsonl",
     "train-v04": REPO / "artifacts" / "simgen" / "v04" / "train-v04.jsonl",
 }
-NGRAM_SETS = ("T8b", "T9", "Hset")
+NGRAM_SETS = ("T8b", "T9", "Hset", "control_a1_sample")
 _WORD = re.compile(r"[a-z0-9]+(?:[.'][a-z0-9]+)*")
 _SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 
@@ -265,14 +265,14 @@ def overlap(records: Sequence[Mapping[str, Any]], *, sets: Mapping[str, Path] = 
     my_grams = ngrams(my_units)
     out: dict[str, Any] = {"mine": {"records": len(records), "sentences": len(my_sent), "5grams": len(my_grams)}, "sets": {}}
     for name, path in sets.items():
-        if not Path(path).exists():
+        if not isinstance(path, list) and not Path(path).exists():
             out["sets"][name] = {"missing": True}
             continue
         ids = req = state = instr = 0
         shared_sent: set[str] = set()
         shared_grams: set[tuple[str, ...]] = set()
         n = 0
-        for record in _stream(Path(path)):
+        for record in (_stream(Path(path)) if not isinstance(path, list) else path):
             n += 1
             fp = fingerprints(record)
             ids += fp["id"] in my_ids
