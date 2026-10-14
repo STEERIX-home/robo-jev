@@ -438,13 +438,14 @@ def _com(family: str, visible: dict[str, Any], draw: dict[str, float]) -> tuple[
     return (draw["cx"] * dims[0], 0.0, z)  # stack: + = toward the outer end; push: + = toward the far side (the tipping edge)
 
 
-def _roll_variant(moment: Moment, name: str, draws: list[dict[str, float]], scenes: dict[Any, ph.Scene]) -> list[dict[str, Any]]:
+def _roll_variant(moment: Moment, name: str, draws: list[dict[str, float]], scenes: dict[Any, ph.Scene], *,
+                  refresh_bvh: bool = False) -> list[dict[str, Any]]:
     v, spec = moment.visible, moment.variants[name]
     out = []
     if moment.family in ("deck_brake", "deck_turn"):
         key = "deck"
         if key not in scenes:
-            scenes[key] = ph.Scene(ph.deck_xml(v["shape"], v["dims"], v["mass"]))
+            scenes[key] = ph.Scene(ph.deck_xml(v["shape"], v["dims"], v["mass"]), refresh_bvh=refresh_bvh)
         if spec["kind"] == "brake":
             profile = ph.brake_profile(spec["speed"], spec["decel"])
         else:
@@ -454,7 +455,8 @@ def _roll_variant(moment: Moment, name: str, draws: list[dict[str, float]], scen
     elif moment.family == "stack":
         key = "stack"
         if key not in scenes:
-            scenes[key] = ph.Scene(ph.stack_xml(v["dims"], v["mass"], (v["support_top"], max(0.3, v["dims"][1] + 0.1), v["support_height"])))
+            scenes[key] = ph.Scene(ph.stack_xml(v["dims"], v["mass"], (v["support_top"], max(0.3, v["dims"][1] + 0.1), v["support_height"])),
+                                   refresh_bvh=refresh_bvh)
         length = v["dims"][0]
         for draw in draws:
             centre = v["support_top"] / 2 + spec["overhang"] - length / 2 + draw["eps"]
@@ -463,18 +465,20 @@ def _roll_variant(moment: Moment, name: str, draws: list[dict[str, float]], scen
     else:
         key = ("push", spec["height"])
         if key not in scenes:
-            scenes[key] = ph.Scene(ph.push_xml(v["dims"], v["mass"], spec["height"]))
+            scenes[key] = ph.Scene(ph.push_xml(v["dims"], v["mass"], spec["height"]), refresh_bvh=refresh_bvh)
         profile = ph.push_profile(v["speed"], v["travel"])
         for draw in draws:
             out.append(ph.run_push(scenes[key], profile, mu=draw["mu"], com=_com("push", v, draw)))
     return out
 
 
-def label_moment(moment: Moment, k: int = DEFAULT_K, *, prior: str = "original") -> dict[str, Any]:
+def label_moment(moment: Moment, k: int = DEFAULT_K, *, prior: str = "original", refresh_bvh: bool = False) -> dict[str, Any]:
     """Roll every variant out for the same K hidden draws → ``{"k", "draws_seed", "variants": {name: {"freq": {outcome: share},
     "n": {...}, "max_tilt_mean", "slide_mean"?}}, "majority"}``. `prior` (task B2): the hidden priors' setting
     (:data:`PRIOR_SETTINGS`, :func:`prior_ranges`) — the draw points stay the same; ``original`` (default) is T8b's labelling unchanged,
-    and any other setting adds ``"prior"`` and the ``"hidden"`` ranges it used to the result."""
+    and any other setting adds ``"prior"`` and the ``"hidden"`` ranges it used to the result. `refresh_bvh` (physics audit, opt-in;
+    :class:`physics.Scene`): keep the load's bounding volumes with its hidden centre of mass — it changes stack labels (the stored T8b
+    labels were rolled without it) and adds ``"refresh_bvh": True`` to the result."""
     draws_seed = moment.seed ^ 0x5EED
     ranges = prior_ranges(moment.hidden, prior)
     draws = hidden_draws(ranges, k, draws_seed)
@@ -482,7 +486,7 @@ def label_moment(moment: Moment, k: int = DEFAULT_K, *, prior: str = "original")
     outcomes = OUTCOMES[moment.family]
     variants = {}
     for name in moment.variants:
-        rolls = _roll_variant(moment, name, draws, scenes)
+        rolls = _roll_variant(moment, name, draws, scenes, refresh_bvh=refresh_bvh)
         counts = {o: sum(1 for r in rolls if r["outcome"] == o) for o in outcomes}
         entry: dict[str, Any] = {"n": counts, "freq": {o: counts[o] / len(rolls) for o in outcomes},
                                  "max_tilt_mean": float(np.mean([r["max_tilt"] for r in rolls])),
@@ -499,6 +503,8 @@ def label_moment(moment: Moment, k: int = DEFAULT_K, *, prior: str = "original")
            "off_deck": int(off_deck)}
     if prior != "original":
         out.update({"prior": prior, "hidden": {name: list(spec) for name, spec in ranges.items()}})
+    if refresh_bvh:
+        out["refresh_bvh"] = True
     return out
 
 

@@ -30,6 +30,16 @@ than geometry allows (``unstable``, :func:`max_rise`); moments with a flagged ro
 The load's inertial frame is compiled with a small non-zero offset (:data:`NOMINAL_IPOS`): MuJoCo treats a body whose inertial
 frame coincides with its body frame as "same frame" and then ignores later changes of ``body_ipos``.
 
+**Stale bounding volumes (physics audit, 2026-10-14).** MuJoCo stores each body's bounding volumes (``model.bvh_aabb``) in the body's
+inertial frame *as compiled* and never rebuilds them (``mj_setConst`` does not touch them), while its midphase (``mj_collideTree``)
+places them with the *current* inertial frame (``data.xipos``/``ximat``). Writing ``body_ipos`` at run time therefore moves a body's
+bounding volumes by the change of its centre of mass. The midphase runs for every colliding body pair except two single-geom bodies
+(:func:`midphase_pairs`), so in the **stack** scene — the floor plane and the support box are two geoms of the world body — a load
+whose hidden centre of mass sits above its geometric centre sinks into the support by about that height before any contact is made,
+then is thrown up. The deck and push scenes have only single-geom pairs and are unaffected. ``Scene(xml, refresh_bvh=True)`` (opt-in;
+off by default so stored labels stay reproducible) re-expresses the load's bounding volumes after every hidden centre of mass
+(:func:`refresh_bvh`), which makes the compiled model equal to one compiled with that centre of mass in the XML.
+
 Every rollout continues after its planned motion until the load is at rest relative to its support (|v| < 2 cm/s, |ω| < 0.05 rad/s,
 checked every 0.1 s, at most :data:`SETTLE_MAX` s more), so no outcome is read mid-pivot. Everything is deterministic: the same model,
 hidden values and profile give bit-identical rollouts.
@@ -54,9 +64,12 @@ __all__ = [
     "Scene",
     "brake_profile",
     "deck_xml",
+    "bvh_reference",
     "inertia",
+    "midphase_pairs",
     "push_profile",
     "push_xml",
+    "refresh_bvh",
     "run_deck",
     "run_push",
     "run_stack",
@@ -182,11 +195,71 @@ def push_xml(dims: Sequence[float], mass: float, push_height: float) -> str:
     )
 
 
-class Scene:
-    """A compiled MJCF scene with a ``load`` body and a ``surface`` geom (the one that carries the hidden friction)."""
+def midphase_pairs(model: Any, bodies: Sequence[int]) -> list[tuple[int, int]]:
+    """The colliding body pairs, each holding one of `bodies`, that MuJoCo 3.x collides through its midphase (``mj_collideTree``),
+    which reads the stored bounding volumes (``model.bvh_aabb``, in each body's compile-time inertial frame). A pair of two single-geom
+    bodies skips the midphase (its geoms are tested directly), and so does every pair when the midphase is disabled. The pair filter
+    mirrors MuJoCo's broadphase (contype/conaffinity of the bodies, same weld, the parent filter); ``(body, other)`` per pair."""
+    if int(model.opt.disableflags) & int(mujoco.mjtDisableBit.mjDSBL_MIDPHASE):
+        return []
+    filterparent = not int(model.opt.disableflags) & int(mujoco.mjtDisableBit.mjDSBL_FILTERPARENT)
+    out = []
+    for body in bodies:
+        body = int(body)
+        for other in range(int(model.nbody)):
+            if other == body or int(model.body_geomnum[other]) == 0 or int(model.body_geomnum[body]) == 0:
+                continue
+            if not (int(model.body_contype[body]) & int(model.body_conaffinity[other]) or int(model.body_contype[other]) & int(model.body_conaffinity[body])):
+                continue
+            weld1, weld2 = int(model.body_weldid[body]), int(model.body_weldid[other])
+            if weld1 == weld2:
+                continue
+            parent1, parent2 = int(model.body_weldid[model.body_parentid[weld1]]), int(model.body_weldid[model.body_parentid[weld2]])
+            if filterparent and weld1 != 0 and weld2 != 0 and (weld1 == parent2 or weld2 == parent1):
+                continue
+            if int(model.body_geomnum[body]) == 1 and int(model.body_geomnum[other]) == 1:
+                continue
+            out.append((body, other))
+    return out
 
-    def __init__(self, xml: str):
+
+def bvh_reference(model: Any, body: int) -> tuple[np.ndarray, np.ndarray]:
+    """``(inertial position, bounding-volume rows)`` of `body` as they are now — call it on the freshly compiled model and pass the
+    result to :func:`refresh_bvh` after every change of ``body_ipos``."""
+    body = int(body)
+    start, count = int(model.body_bvhadr[body]), int(model.body_bvhnum[body])
+    rows = np.array(model.bvh_aabb[start : start + count], dtype=float) if start >= 0 else np.zeros((0, 6))
+    return np.array(model.body_ipos[body], dtype=float), rows
+
+
+def refresh_bvh(model: Any, body: int, reference: tuple[np.ndarray, np.ndarray]) -> None:
+    """Set `body`'s stored bounding volumes for its current ``body_ipos`` (inertial orientation ``body_iquat`` unchanged) from their
+    compiled values (`reference`, :func:`bvh_reference`). MuJoCo keeps them in the inertial frame as compiled and never rebuilds them;
+    after this call they equal those of a model compiled with the current ``body_ipos`` (up to rounding; tested). Always computed from
+    the compiled values, so a rollout does not depend on the hidden values of the rollouts before it."""
+    body = int(body)
+    compiled_ipos, rows = reference
+    start, count = int(model.body_bvhadr[body]), int(model.body_bvhnum[body])
+    if start < 0 or count == 0:
+        return
+    if rows.shape != (count, 6):
+        raise ValueError("bounding-volume reference does not match the body")
+    rot = np.zeros(9)
+    mujoco.mju_quat2Mat(rot, np.asarray(model.body_iquat[body], dtype=float))
+    shift = rot.reshape(3, 3).T @ (np.asarray(compiled_ipos, dtype=float) - np.asarray(model.body_ipos[body], dtype=float))
+    model.bvh_aabb[start : start + count, :3] = rows[:, :3] + shift
+    model.bvh_aabb[start : start + count, 3:] = rows[:, 3:]
+
+
+class Scene:
+    """A compiled MJCF scene with a ``load`` body and a ``surface`` geom (the one that carries the hidden friction).
+
+    ``refresh_bvh`` (opt-in, physics audit): re-express the load's bounding volumes whenever its hidden centre of mass is written
+    (module docstring, :func:`refresh_bvh`). Off by default: the stored T8b labels were rolled without it."""
+
+    def __init__(self, xml: str, *, refresh_bvh: bool = False):
         self.xml = xml
+        self.refresh_bvh = bool(refresh_bvh)
         self.model = mujoco.MjModel.from_xml_string(xml)
         self.data = mujoco.MjData(self.model)
         self.load = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "load")
@@ -199,12 +272,20 @@ class Scene:
         self.dims = tuple(float(2 * v) for v in self.model.geom_size[load_geom])
         if int(self.model.body_sameframe[self.load]) == int(mujoco.mjtSameFrame.mjSAMEFRAME_BODY) or int(self.model.body_simple[self.load]) != 0:
             raise ValueError("the load must compile with an inertial offset (non-zero inertial pos) so the hidden centre of mass applies")
+        self._bvh_reference = bvh_reference(self.model, self.load)
+
+    def midphase_pairs(self) -> list[tuple[int, int]]:
+        """Body pairs of the load that go through MuJoCo's midphase (where a runtime centre of mass moves the stored bounding volumes)."""
+        return midphase_pairs(self.model, [self.load])
 
     def set_hidden(self, mu: float, com: Sequence[float]) -> None:
         """Friction of the surface (the pair's friction — the surface has priority) and the load's centre-of-mass offset from its
-        geometric centre (body frame), then refresh the constants that depend on them."""
+        geometric centre (body frame), then refresh the constants that depend on them (and, with ``refresh_bvh``, the load's bounding
+        volumes)."""
         self.model.geom_friction[self.surface, 0] = float(mu)
         self.model.body_ipos[self.load] = np.asarray(com, dtype=float)
+        if self.refresh_bvh:
+            refresh_bvh(self.model, self.load, self._bvh_reference)
         mujoco.mj_resetData(self.model, self.data)
         mujoco.mj_setConst(self.model, self.data)
         mujoco.mj_resetData(self.model, self.data)

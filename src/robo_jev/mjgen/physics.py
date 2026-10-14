@@ -126,10 +126,18 @@ def _box_body(name: str, dims: Sequence[float], mass: float, pos: Sequence[float
 
 class Rig:
     """A compiled MJCF scene whose hidden values (friction of named geoms, centre of mass and mass of named boxes) are written
-    before every rollout. Refuses non-box loads and loads compiled without an inertial offset (T8 lessons 4 and 5)."""
+    before every rollout. Refuses non-box loads and loads compiled without an inertial offset (T8 lessons 4 and 5).
 
-    def __init__(self, xml: str, *, boxes: Sequence[str], dims: dict[str, Sequence[float]]):
+    A runtime centre of mass moves a body's stored bounding volumes, which MuJoCo's midphase reads (physics audit 2026-10-14,
+    :func:`robo_jev.outside.physics.midphase_pairs`); every rig built here has only single-geom collision pairs for its boxes, which skip
+    the midphase (tested). ``refresh_bvh`` (opt-in, off by default) re-expresses the boxes' bounding volumes after every write anyway."""
+
+    refresh_bvh: bool = False
+
+    def __init__(self, xml: str, *, boxes: Sequence[str], dims: dict[str, Sequence[float]], refresh_bvh: bool | None = None):
         self.xml = xml
+        if refresh_bvh is not None:
+            self.refresh_bvh = bool(refresh_bvh)
         self.model = mujoco.MjModel.from_xml_string(xml)
         self.data = mujoco.MjData(self.model)
         self.boxes = {}
@@ -144,7 +152,12 @@ class Rig:
                 raise ValueError(f"{name}: compile with a non-zero inertial pos so the hidden centre of mass applies")
             jnt = int(self.model.body_jntadr[body])
             self.boxes[name] = {"body": body, "geom": geom, "dims": tuple(float(v) for v in dims[name]),
-                                "qpos": int(self.model.jnt_qposadr[jnt]), "qvel": int(self.model.jnt_dofadr[jnt])}
+                                "qpos": int(self.model.jnt_qposadr[jnt]), "qvel": int(self.model.jnt_dofadr[jnt]),
+                                "bvh": t8.bvh_reference(self.model, body)}
+
+    def midphase_pairs(self) -> list[tuple[int, int]]:
+        """Collision pairs of the boxes that go through MuJoCo's midphase (where a runtime centre of mass moves the bounding volumes)."""
+        return t8.midphase_pairs(self.model, [box["body"] for box in self.boxes.values()])
 
     def geom(self, name: str) -> int:
         out = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, name)
@@ -158,6 +171,8 @@ class Rig:
             self.model.geom_friction[self.geom(geom), 0] = float(mu)
         for name, offset in com.items():
             self.model.body_ipos[self.boxes[name]["body"]] = np.asarray(offset, dtype=float)
+            if self.refresh_bvh:
+                t8.refresh_bvh(self.model, self.boxes[name]["body"], self.boxes[name]["bvh"])
         for name, value in (mass or {}).items():
             box = self.boxes[name]
             self.model.body_mass[box["body"]] = float(value)
