@@ -13,8 +13,11 @@
   steady tension against μ·m·g·cos θ − m·g·sin θ), and draw-level agreement of the labelled draws with the closed form away from the
   threshold; determinism (a re-run gives identical outcomes and identical records).
 * :func:`overlap` — 0 shared ids, request / state / instruction hashes and sentences against T1–T7, G1, G2, T8a, T8b, T9, B1, the H-set
-  and the v0.4 training input; no shared word 5-grams with T8b, T9 and the H-set. The other sets are read in code only; only counts and
-  this author's own shared fragments are reported.
+  and the v0.4 training input; no shared word 5-grams with T8b, T9 and the H-set; and **0 shared text units** in the v0.6 assembly's own
+  definition (:func:`robo_jev.data.general_sets.record_units`: the whole state, every state line value with ≥ 5 words, every option text
+  with ≥ 5 words, normalised) against all of those sets, the whole v0.4 training input and the training authors' files
+  (``artifacts/v06/a{1,2,3}/train.jsonl``). The other sets are read in code only and nothing of their text is kept or reported: a hit is
+  reported by count, by the unit's sha256, and by where it sits in this author's records (the state, or ``question.option``).
 """
 
 from __future__ import annotations
@@ -454,6 +457,69 @@ def _stream(path: Path) -> Iterator[dict[str, Any]]:
                 yield json.loads(line)
 
 
+#: The training authors' files (v0.6) — checked for shared text units only (the assembly's definition).
+AUTHOR_TRAIN = {"A1-train": ("artifacts", "v06", "a1", "train.jsonl"), "A2-train": ("artifacts", "v06", "a2", "train.jsonl"),
+                "A3-train": ("artifacts", "v06", "a3", "train.jsonl")}
+
+
+def _unit_hash(unit: str) -> str:
+    """The assembly's unit hash (sha256 hex of the normalised unit) — comparable with its manifests."""
+    return hashlib.sha256(unit.encode("utf-8")).hexdigest()
+
+
+def my_unit_index(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """unit hash → {"records": [my record ids], "where": sorted locations} for every text unit of my records (``record_units``); a location
+    is ``state`` or ``<question>.<option key>``. Holds my own text only, never another set's."""
+    from robo_jev.data.general_sets import raw_units, record_units, text_units
+
+    out: dict[str, dict[str, Any]] = {}
+    for record in records:
+        request = record["request"]
+        located: dict[str, set[str]] = {}
+        for unit in text_units(str(request.get("state") or "")):
+            located.setdefault(_unit_hash(unit), set()).add("state")
+        for name, question in request["questions"].items():
+            for key, text in (question.get("criteria") or {}).items() if isinstance(question.get("criteria"), dict) else ():
+                for unit in raw_units([str(text)]):
+                    located.setdefault(_unit_hash(unit), set()).add(f"{name}.{key}")
+        units = {_unit_hash(u) for u in record_units(record)}
+        if units != set(located):
+            raise ValueError(f"{record['id']}: unit locations do not cover record_units")
+        for h, where in located.items():
+            entry = out.setdefault(h, {"records": [], "where": set()})
+            entry["records"].append(str(record["id"]))
+            entry["where"] |= where
+    return out
+
+
+def unit_overlap(mine: dict[str, dict[str, Any]], refs: dict[str, Path]) -> dict[str, Any]:
+    """Shared text units (hashes) between my index (:func:`my_unit_index`) and each reference file, streamed; only counts and hashes leave
+    this function."""
+    from robo_jev.data.general_sets import record_units
+
+    per: dict[str, Any] = {}
+    hits: dict[str, dict[str, int]] = {}
+    for name, ref in refs.items():
+        if not ref.is_file():
+            per[name] = {"absent": str(ref)}
+            continue
+        shared: Counter = Counter()
+        count = 0
+        for record in _stream(ref):
+            count += 1
+            for unit in record_units(record):
+                h = _unit_hash(unit)
+                if h in mine:
+                    shared[h] += 1
+        per[name] = {"records": count, "shared_units": len(shared), "their_records_with_a_shared_unit_occurrences": int(sum(shared.values())),
+                     "my_records_with_a_shared_unit": len({rid for h in shared for rid in mine[h]["records"]})}
+        for h, n in shared.items():
+            hits.setdefault(h, {})[name] = n
+    shared_units = [{"sha256": h, "where_in_a4": sorted(mine[h]["where"]), "a4_records": len(mine[h]["records"]), "occurrences_by_set": by_set}
+                    for h, by_set in sorted(hits.items())]
+    return {"per_set": per, "shared_units": shared_units, "total_shared_units": len(hits), "absent": [k for k, v in per.items() if "absent" in v]}
+
+
 def overlap(path: Path, repo: Path) -> dict[str, Any]:
     from robo_jev.decisions.records import read_records
 
@@ -513,5 +579,14 @@ def overlap(path: Path, repo: Path) -> dict[str, Any]:
                "per_set": {k: ({**v["shared"], "sentences": v["shared_sentences"], **({"5grams": v["shared_5grams"]} if "shared_5grams" in v else {}),
                                 "records": v["records"]} if "shared" in v else v) for k, v in per.items()},
                "shared_total": total, "shared_5grams_total": grams, "absent": [k for k, v in per.items() if "absent" in v]}
-    summary["pass"] = bool(total == 0 and grams == 0 and not summary["absent"])
-    return {"summary": summary, "my_shared_sentences": sorted(shared_sentences), "my_shared_5grams": sorted(shared_grams)}
+    unit_refs = {**refs, **{name: repo.joinpath(*parts) for name, parts in AUTHOR_TRAIN.items()}}
+    index = my_unit_index(mine)
+    units = unit_overlap(index, unit_refs)
+    summary["text_units"] = {"definition": "robo_jev.data.general_sets.record_units (the v0.6 assembly's): whole normalised state, every state "
+                                           "line value with >= 5 words, every option text with >= 5 words",
+                             "my_units": len(index), "per_set": units["per_set"], "total_shared_units": units["total_shared_units"],
+                             "absent": units["absent"]}
+    summary["pass"] = bool(total == 0 and grams == 0 and not summary["absent"] and units["total_shared_units"] == 0 and not units["absent"])
+    return {"summary": summary, "shared_units": units["shared_units"],
+            "my_shared_sentences": {"count": len(shared_sentences), "sha256": sorted(_unit_hash(x) for x in shared_sentences)},
+            "my_shared_5grams": {"count": len(shared_grams), "sha256": sorted(_unit_hash(x) for x in shared_grams)}}
