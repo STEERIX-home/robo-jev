@@ -64,6 +64,7 @@ __all__ = [
     "build_peft_model",
     "CARD_FIELDS",
     "check_no_pickle",
+    "check_no_verdicts",
     "check_public_text",
     "lora_config",
     "load_adapter_state",
@@ -72,6 +73,7 @@ __all__ = [
     "render_card",
     "save_adapter",
     "save_merged",
+    "strip_verdicts",
     "write_common_files",
 ]
 
@@ -81,14 +83,17 @@ MERGED_REPO = "Steerix-org/robo-jev-2b"
 ADAPTER_REPO = "Steerix-org/robo-jev-2b-lora"
 #: The release this export makes — the Hub tag, ``robo_jev.json``'s ``version`` and the model card's title.
 TAG = "v0.7"
-#: What ``robo_jev.json`` records about the release (Task rel07 §0; the user chose v0.7 seed 0 on 2026-10-16).
+#: What ``robo_jev.json`` records about the release (Task rel07; the user chose v0.7 seed 0 on 2026-10-16) — no experiment verdicts:
+#: public files carry none (user, 2026-10-16), see :data:`VERDICT_TEXT`.
 RELEASE = {
     "tag": TAG,
     "previous": "v0.1",
     "model": "v0.7, training seed 0 (run v07-s0-2b, final checkpoint)",
-    "pre_declared_rule": "not passed: S REJECTED; guards O, N and F fail",
-    "why_released": "clearly better than the public v0.1; released so that robojev bench requests with up to 26 options can be served",
 }
+#: Experiment-protocol wording public files never carry (user, 2026-10-16: no experiment verdicts on public pages): a pre-declared
+#: rule or its verdict. :func:`strip_verdicts` drops such strings from ``robo_jev.json``; :func:`check_no_verdicts` refuses a folder whose
+#: README.md or robo_jev.json still has one.
+VERDICT_TEXT = re.compile(r"pre-?declared|verdict|pre-?registered|\bREJECTED\b|not passed|clearly better than", re.IGNORECASE)
 #: The request limits of both runners (the package's :class:`robo_jev.infer.RoboJev` and the Hub's ``robo_jev_decide.py``).
 LIMITS = {"state_chars": MAX_STATE_CHARS, "questions": [1, MAX_QUESTIONS], "choice_options": list(CHOICE_OPTIONS)}
 GITHUB = "https://github.com/STEERIX-home/robo-jev"
@@ -248,7 +253,8 @@ def build_metadata(
     data["dev_ids_sha256"] = hashlib.sha256("\n".join(dev_ids).encode("utf-8")).hexdigest() if dev_ids else None
     lora = (manifest.get("model") or {}).get("lora") or {}
     extra = public_paths(dict(data_manifests or {}))
-    return {
+    selection = re.sub(r"\s*\(pre-?registered\)", "", str((manifest.get("selection") or {}).get("evaluated") or "")) or None
+    return strip_verdicts({
         "format": "robo-jev-hf/1",
         "name": f"robo-jev {TAG}",
         "version": TAG,
@@ -301,7 +307,7 @@ def build_metadata(
         },
         "training": {
             "run_id": state.get("run_id"), "step": state.get("step"), "status": state.get("status"),
-            "selection": (manifest.get("selection") or {}).get("evaluated"),
+            "selection": selection,
             "objective": manifest.get("objective"),
             "recipe": {k: config.get(k) for k in (
                 "mode", "lora_dtype", "epochs", "max_steps", "batch_examples", "lr", "weight_decay", "warmup_ratio", "gradient_clip",
@@ -319,7 +325,7 @@ def build_metadata(
             "export_git": _git_sha(repo),
             "exported": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         },
-    }
+    })
 
 
 def write_common_files(
@@ -451,3 +457,28 @@ def check_public_text(folder: str | Path) -> dict[str, int]:
                 hits.append(f"{name}:{text.count(chr(10), 0, match.start()) + 1} ({kind})")
     _need(not hits, f"{folder}: private text in {len(hits)} place(s): {hits[:10]}")
     return scanned
+
+
+def strip_verdicts(value: Any) -> Any:
+    """`value` without any string that carries experiment-protocol wording (:data:`VERDICT_TEXT`): such dict entries and list items are
+    dropped, recursively. Format and data-construction rules (answer codes, question picks, subsampling) are kept."""
+    if isinstance(value, dict):
+        return {k: strip_verdicts(v) for k, v in value.items() if not (isinstance(v, str) and VERDICT_TEXT.search(v))}
+    if isinstance(value, list):
+        return [strip_verdicts(v) for v in value if not (isinstance(v, str) and VERDICT_TEXT.search(v))]
+    return value
+
+
+def check_no_verdicts(folder: str | Path) -> list[str]:
+    """Raise if the folder's README.md or robo_jev.json carries experiment-protocol wording (:data:`VERDICT_TEXT`); return the files
+    checked. (The tokenizer and the runner are not authored here and are checked by hash and by the public-text scan.)"""
+    folder, hits, checked = Path(folder), [], []
+    for name in ("README.md", METADATA_FILE):
+        path = folder / name
+        if not path.is_file():
+            continue
+        checked.append(name)
+        text = path.read_text(encoding="utf-8")
+        hits += [f"{name}:{text.count(chr(10), 0, m.start()) + 1}" for m in VERDICT_TEXT.finditer(text)]
+    _need(not hits, f"{folder}: experiment-verdict wording in {hits[:10]}")
+    return checked

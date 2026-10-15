@@ -12,8 +12,9 @@ the original scoring path, upload them privately, and verify the uploaded copies
     uv run python scripts/diagnose_decisions.py --model Qwen/Qwen3.5-2B --checkpoint <ckpt> --input <equiv-140.jsonl> --out <equiv-i.json>
     uv run python scripts/export_hf.py equivalence --input <equiv-140.jsonl> --reference <equiv-i.predictions.jsonl> \\
         --model adapter=artifacts/hf/v0.7/robo-jev-2b-lora --model merged=artifacts/hf/v0.7/robo-jev-2b --example <request.json> --out <equiv.json>
-    # model cards with the equivalence run's real example answers
+    # model cards with the equivalence run's real example answers; robo_jev.json alone re-written in place (weights untouched)
     uv run python scripts/export_hf.py cards --root artifacts/hf/v0.7 --equivalence <equiv.json>
+    uv run python scripts/export_hf.py metadata --root artifacts/hf/v0.7 --checkpoint <run>/checkpoint.pt --out <metadata.json>
     # upload (private repos only) + the release tag
     uv run python scripts/export_hf.py upload --root artifacts/hf/v0.7 --out <upload.json>
     # clean-cache download + RoboJev.decide() and the standalone script vs the local folders, incl. the 21- and 26-option requests (GPU unit)
@@ -104,13 +105,31 @@ def _figures(args: argparse.Namespace) -> int:
     return 0
 
 
+def load_data_manifests(args: argparse.Namespace) -> dict[str, Any]:
+    """The data manifests ``robo_jev.json`` records (``--manifest LABEL=PATH``, default :data:`DATA_MANIFESTS`; an empty list records
+    none) and the simulated part's shares (``--data-stats``)."""
+    data_manifests: dict[str, Any] = {}
+    specs = args.manifest if args.manifest is not None else [f"{label}={path}" for label, path in DATA_MANIFESTS]
+    for spec in specs:
+        label, path = spec.split("=", 1)
+        path = Path(path) if Path(path).is_absolute() else REPO / path
+        if not path.is_file():
+            raise SystemExit(f"data manifest {label}: {path} is missing")
+        data_manifests[label] = json.loads(path.read_text(encoding="utf-8"))
+    if args.data_stats is not None and Path(args.data_stats).is_file():
+        stats = json.loads(Path(args.data_stats).read_text(encoding="utf-8"))
+        data_manifests["simulated_shares"] = {k: {kk: vv["share"] for kk, vv in stats["shares"][k].items()} for k in ("domain", "phenomena", "style", "body")}
+        data_manifests["simulated_shares"]["korean"] = stats.get("korean_share")
+    return data_manifests
+
+
 def _export(args: argparse.Namespace) -> int:
     import torch
     from transformers import AutoModelForCausalLM
 
     from robo_jev.hf.export import (
-        BASE_ID, BASE_REVISION, TAG, build_metadata, build_peft_model, check_no_pickle, check_public_text, load_adapter_state, read_training_checkpoint,
-        render_card, save_adapter, save_merged, write_common_files,
+        BASE_ID, BASE_REVISION, TAG, build_metadata, build_peft_model, check_no_pickle, check_no_verdicts, check_public_text, load_adapter_state,
+        read_training_checkpoint, render_card, save_adapter, save_merged, write_common_files,
     )
     from robo_jev.infer import file_sha256
     from robo_jev.model.backbone import describe_backbone
@@ -133,18 +152,8 @@ def _export(args: argparse.Namespace) -> int:
     if base.get("digest") != (state["manifest"]["model"]["base"] or {}).get("digest"):
         raise SystemExit("local base digest differs from the training base")
     _log(f"base {BASE_ID}@{BASE_REVISION[:7]} verified ({base['verified']}) at {base['path']}")
-    data_manifests = {}
-    for spec in args.manifest or [f"{label}={path}" for label, path in DATA_MANIFESTS]:
-        label, path = spec.split("=", 1)
-        path = Path(path) if Path(path).is_absolute() else REPO / path
-        if not path.is_file():
-            raise SystemExit(f"data manifest {label}: {path} is missing")
-        data_manifests[label] = json.loads(path.read_text(encoding="utf-8"))
+    data_manifests = load_data_manifests(args)
     _log(f"{TAG}: data manifests {sorted(data_manifests)}")
-    if args.data_stats is not None and Path(args.data_stats).is_file():
-        stats = json.loads(Path(args.data_stats).read_text(encoding="utf-8"))
-        data_manifests["simulated_shares"] = {k: {kk: vv["share"] for kk, vv in stats["shares"][k].items()} for k in ("domain", "phenomena", "style", "body")}
-        data_manifests["simulated_shares"]["korean"] = stats.get("korean_share")
     files = {f"figures/{name}.png": args.figures / f"{name}.png" for name in FIGURES} if args.figures else {}
     out = Path(args.out)
     if out.exists():
@@ -171,7 +180,7 @@ def _export(args: argparse.Namespace) -> int:
                                   tokenizer_sha256=tokenizer_info["sha256"], repo=REPO, weights=weights, data_manifests=data_manifests)
         write_common_files(folder, metadata=metadata, card=card, **common)
         listing[variant] = {"folder": str(folder), "files": {f: (folder / f).stat().st_size for f in check_no_pickle(folder)},
-                            "public_text_scanned": check_public_text(folder)}
+                            "public_text_scanned": check_public_text(folder), "no_verdicts": check_no_verdicts(folder)}
     _write_json(out / "export.json", {"script_version": SCRIPT_VERSION, "tag": TAG, "checkpoint": str(args.checkpoint), "checkpoint_sha256": checkpoint_sha,
                                       "adapter": adapter, "merged": merged, "listing": listing, "seconds": round(time.perf_counter() - started, 1)})
     _log(f"export done in {time.perf_counter() - started:.0f} s → {out}")
@@ -181,6 +190,69 @@ def _export(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------
 # equivalence
 # --------------------------------------------------------------------------
+
+
+def json_changes(old: Any, new: Any, path: str = "") -> list[dict[str, Any]]:
+    """Every leaf that differs between two JSON values: removed, added or changed (``path``, ``old``, ``new``)."""
+    if isinstance(old, dict) and isinstance(new, dict):
+        out = []
+        for key in list(old) + [k for k in new if k not in old]:
+            if key not in new:
+                out.append({"path": f"{path}.{key}", "change": "removed", "old": old[key]})
+            elif key not in old:
+                out.append({"path": f"{path}.{key}", "change": "added", "new": new[key]})
+            else:
+                out += json_changes(old[key], new[key], f"{path}.{key}")
+        return out
+    return [] if old == new else [{"path": path, "change": "changed", "old": old, "new": new}]
+
+
+def _metadata(args: argparse.Namespace) -> int:
+    """Re-write ``robo_jev.json`` in both folders of an existing export from the checkpoint with the current tooling. Nothing else in the
+    folders is touched: the weights block is carried over after checking that the weight files still have its sizes, and the card, the
+    tokenizer files, the runner and the figures stay as they are. The folders are scanned afterwards (pickles and bytecode, private text,
+    experiment verdicts)."""
+    from robo_jev.hf.export import (
+        build_metadata, check_no_pickle, check_no_verdicts, check_public_text, read_training_checkpoint,
+    )
+    from robo_jev.infer import METADATA_FILE, file_sha256
+    from robo_jev.model.tokenizer import available_tokenizer, describe_tokenizer, load_tokenizer
+
+    state = read_training_checkpoint(args.checkpoint)
+    checkpoint_sha = file_sha256(args.checkpoint)
+    tokenizer_id = available_tokenizer()[0]
+    tokenizer_info = describe_tokenizer(tokenizer_id)
+    if tokenizer_info["sha256"] != (state["manifest"].get("tokenizer") or {}).get("sha256"):
+        raise SystemExit("the local tokenizer is not the training tokenizer")
+    tokenizer = load_tokenizer(tokenizer_id)
+    data_manifests = load_data_manifests(args)
+    report: dict[str, Any] = {"script_version": SCRIPT_VERSION, "checkpoint_sha256": checkpoint_sha, "folders": {}}
+    for variant, folder in (("adapter", args.root / ADAPTER_DIR), ("merged", args.root / MERGED_DIR)):
+        path = folder / METADATA_FILE
+        old = json.loads(path.read_text(encoding="utf-8"))
+        if (old.get("source") or {}).get("checkpoint_sha256") != checkpoint_sha:
+            raise SystemExit(f"{folder}: exported from another checkpoint than {args.checkpoint}")
+        weights = old["weights"]
+        names = [weights["file"]] if "file" in weights else list(weights["files"])
+        on_disk = sum((folder / name).stat().st_size for name in names)
+        if on_disk != weights["bytes"]:
+            raise SystemExit(f"{folder}: the weight files ({on_disk} B) do not match robo_jev.json's weights block ({weights['bytes']} B)")
+        hashes = {name: file_sha256(folder / name) for name in names}
+        new = build_metadata(state, variant=variant, checkpoint_path=args.checkpoint, checkpoint_sha256=checkpoint_sha, tokenizer=tokenizer,
+                             tokenizer_sha256=tokenizer_info["sha256"], repo=REPO, weights=weights, data_manifests=data_manifests)
+        path.write_text(json.dumps(new, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+        if {name: file_sha256(folder / name) for name in names} != hashes:
+            raise SystemExit(f"{folder}: a weight file changed")  # never: only robo_jev.json is written
+        report["folders"][variant] = {
+            "folder": str(folder), "weights_sha256": hashes, "robo_jev_json_sha256": file_sha256(path),
+            "changes": [c for c in json_changes(old, new) if c["path"] not in (".source.exported", ".source.export_git.commit", ".source.export_git.dirty")],
+            "export_git": new["source"]["export_git"], "files": check_no_pickle(folder), "public_text_scanned": check_public_text(folder),
+            "no_verdicts": check_no_verdicts(folder),
+        }
+        _log(f"{variant}: robo_jev.json rewritten ({len(report['folders'][variant]['changes'])} content changes); weights untouched; scans clean")
+    _write_json(args.out, report)
+    _log(f"→ {args.out}")
+    return 0
 
 
 def example_markdown(answers: dict[str, Any], *, variant: str) -> str:
@@ -200,7 +272,7 @@ def example_markdown(answers: dict[str, Any], *, variant: str) -> str:
 
 
 def _cards(args: argparse.Namespace) -> int:
-    from robo_jev.hf.export import check_no_pickle, check_public_text, render_card
+    from robo_jev.hf.export import check_no_pickle, check_no_verdicts, check_public_text, render_card
 
     examples = json.loads(args.equivalence.read_text(encoding="utf-8")).get("examples", {}) if args.equivalence is not None else {}
     for variant, folder in (("adapter", args.root / ADAPTER_DIR), ("merged", args.root / MERGED_DIR)):
@@ -208,7 +280,8 @@ def _cards(args: argparse.Namespace) -> int:
         (folder / "README.md").write_text(render_card(variant, example_output=example), encoding="utf-8")
         check_no_pickle(folder)
         check_public_text(folder)
-        _log(f"{folder}/README.md written ({'with' if example else 'without'} the example output); public-text scan clean")
+        check_no_verdicts(folder)
+        _log(f"{folder}/README.md written ({'with' if example else 'without'} the example output); public-text and verdict scans clean")
     return 0
 
 
@@ -473,12 +546,13 @@ def run_bundle(label: str, folder: Path, records: list[dict[str, Any]], package:
 def _upload(args: argparse.Namespace) -> int:
     from huggingface_hub import HfApi
 
-    from robo_jev.hf.export import ADAPTER_REPO, MERGED_REPO, TAG, check_no_pickle, check_public_text
+    from robo_jev.hf.export import ADAPTER_REPO, MERGED_REPO, TAG, check_no_pickle, check_no_verdicts, check_public_text
     from robo_jev.hf.hub import ensure_private_repo, load_token, redact, remote_listing, tag_release, upload
 
     for folder in (args.root / ADAPTER_DIR, args.root / MERGED_DIR):  # before any network call
         check_no_pickle(folder)
         check_public_text(folder)
+        check_no_verdicts(folder)
         meta = json.loads((folder / "robo_jev.json").read_text(encoding="utf-8"))
         if meta.get("version") != TAG:
             raise SystemExit(f"{folder}: robo_jev.json says {meta.get('version')}, this upload tags {TAG}")
@@ -653,6 +727,12 @@ def _parser() -> argparse.ArgumentParser:
                    help="a data manifest for robo_jev.json (repeatable; default: v0.7's — " + ", ".join(label for label, _ in DATA_MANIFESTS) + ")")
     p.add_argument("--data-stats", type=Path, default=REPO / "artifacts/simgen/v02/train-50k.stats.json",
                    help="the simulated part's stats (domain, phenomena, style, body shares; Korean share)")
+    p = sub.add_parser("metadata", help="re-write robo_jev.json in an existing export (nothing else touched), then scan")
+    p.add_argument("--root", type=Path, required=True)
+    p.add_argument("--checkpoint", type=Path, required=True, help="the checkpoint the export was made from (checked by sha256)")
+    p.add_argument("--out", type=Path, required=True, help="a report: the changed fields, the new sha256s, the scans")
+    p.add_argument("--manifest", action="append", default=None, metavar="LABEL=PATH", help="as for export")
+    p.add_argument("--data-stats", type=Path, default=REPO / "artifacts/simgen/v02/train-50k.stats.json", help="as for export")
     p = sub.add_parser("cards", help="re-render README.md (model cards) in an existing export")
     p.add_argument("--root", type=Path, required=True)
     p.add_argument("--equivalence", type=Path, default=None, help="the equivalence report with the example's answers per variant")
@@ -695,7 +775,8 @@ def _parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
-    handlers = {"figures": _figures, "export": _export, "cards": _cards, "sample": _sample, "equivalence": _equivalence, "upload": _upload, "verify-hub": _verify_hub}
+    handlers = {"figures": _figures, "export": _export, "metadata": _metadata, "cards": _cards, "sample": _sample, "equivalence": _equivalence,
+                "upload": _upload, "verify-hub": _verify_hub}
     return handlers[args.command](args)
 
 

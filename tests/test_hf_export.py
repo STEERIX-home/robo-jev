@@ -141,10 +141,12 @@ def test_the_export_writes_safetensors_and_metadata_only(exported):
     assert meta["answer_codes"]["token_ids"] == dict(zip(codes, ids)) and meta["score_anchors"] == [i / 10 for i in range(11)]
     assert list(meta["answer_codes"]["token_ids"]) == list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") and meta["answer_codes"]["options"]["choice"].startswith("2-26 ")
     assert (meta["name"], meta["version"], meta["release"]["tag"], meta["release"]["previous"]) == ("robo-jev v0.7", "v0.7", "v0.7", "v0.1")
-    assert "not passed" in meta["release"]["pre_declared_rule"] and "S REJECTED" in meta["release"]["pre_declared_rule"]
+    assert set(meta["release"]) == {"tag", "previous", "model"} and meta["training"]["selection"] == "final checkpoint"
+    assert not E.VERDICT_TEXT.search(json.dumps(meta, ensure_ascii=False))  # no experiment verdict or rule text (user, 2026-10-16)
     assert {k: meta["limits"][k] for k in ("state_chars", "questions", "choice_options")} == {"state_chars": 16_000, "questions": [1, 12], "choice_options": [2, 26]}
     for folder in (adapter, merged):
         assert set(E.check_public_text(folder)) >= {"README.md", "robo_jev.json", "robo_jev_decide.py", "tokenizer.json"}
+        assert E.check_no_verdicts(folder) == ["README.md", "robo_jev.json"]
     assert meta["tokenizer"]["sha256"] == file_sha256(merged / "tokenizer.json") == exported["state"]["manifest"]["tokenizer"]["sha256"]
     assert meta["source"]["checkpoint_sha256"] == file_sha256(exported["root"] / "checkpoint.pt") and meta["base"]["revision"] == E.BASE_REVISION
     assert "dev_ids" not in meta["training"]["data"] and len(meta["training"]["data"]["dev_ids_sha256"]) == 64
@@ -432,3 +434,39 @@ def test_the_shipped_runner_is_imported_without_bytecode(tmp_path):
     module = export_script()._load_standalone(tmp_path / "robo_jev_decide.py")
     assert module.LIMITS["choice_options"] == (2, 26)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["robo_jev_decide.py"]  # no __pycache__ to upload
+
+
+def test_verdict_wording_is_stripped_from_metadata_and_refused_in_public_files(tmp_path):
+    manifest = {"rule": "PRE-DECLARED v0.7 VERDICT RULE (progress.md): v0.6's training input …", "shares": {"sheets": 0.25},
+                "question_pick": {"rule": "q examples from the primary questions"}, "notes": ["S REJECTED", "kept"], "n": 3}
+    assert E.strip_verdicts(manifest) == {"shares": {"sheets": 0.25}, "question_pick": {"rule": "q examples from the primary questions"},
+                                          "notes": ["kept"], "n": 3}
+    (tmp_path / "README.md").write_text("# card\nA fast, single-pass 2B System 1.\n", encoding="utf-8")
+    (tmp_path / "robo_jev.json").write_text(json.dumps({"release": {"tag": "v0.7"}}), encoding="utf-8")
+    assert E.check_no_verdicts(tmp_path) == ["README.md", "robo_jev.json"]
+    (tmp_path / "robo_jev.json").write_text(json.dumps({"release": {"tag": "v0.7", "pre_declared_rule": "not passed"}}), encoding="utf-8")
+    with pytest.raises(ValueError, match="experiment-verdict wording"):
+        E.check_no_verdicts(tmp_path)
+
+
+def test_the_metadata_command_rewrites_only_robo_jev_json(exported, tmp_path):
+    import argparse
+    import shutil
+    from pathlib import Path
+
+    root = tmp_path / "export"
+    for variant, name in (("adapter", "robo-jev-2b-lora"), ("merged", "robo-jev-2b")):
+        shutil.copytree(exported["folders"][variant], root / name)
+        meta = json.loads((root / name / "robo_jev.json").read_text(encoding="utf-8"))
+        meta["release"] = {**meta["release"], "pre_declared_rule": "not passed: S REJECTED", "why_released": "clearly better than the public v0.1"}
+        (root / name / "robo_jev.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    before = {p.relative_to(root): file_sha256(p) for p in root.rglob("*") if p.is_file()}
+    args = argparse.Namespace(root=root, checkpoint=exported["root"] / "checkpoint.pt", out=tmp_path / "metadata.json", manifest=[], data_stats=None)
+    assert export_script()._metadata(args) == 0
+    after = {p.relative_to(root): file_sha256(p) for p in root.rglob("*") if p.is_file()}
+    assert {k for k in before if before[k] != after[k]} == {Path("robo-jev-2b-lora/robo_jev.json"), Path("robo-jev-2b/robo_jev.json")}
+    report = json.loads((tmp_path / "metadata.json").read_text(encoding="utf-8"))
+    for variant in ("adapter", "merged"):
+        removed = {c["path"] for c in report["folders"][variant]["changes"] if c["change"] == "removed"}
+        assert {".release.pre_declared_rule", ".release.why_released"} <= removed
+        assert report["folders"][variant]["no_verdicts"] == ["README.md", "robo_jev.json"]
