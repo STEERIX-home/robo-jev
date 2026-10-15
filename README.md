@@ -6,18 +6,18 @@ robo-jev reads a short text of what a robot senses, answers the questions that m
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/figures/bench-v0-physics-dark.svg">
-  <img alt="Physical judgment on our simulation benchmark: robo-jev v0.1 (2B) scores 0.80, against 0.28 for TypeSafe Jev, 0.17 for Liquid d1 and near zero for Microsoft-Decision-1, Together Tev1 4B, OpenAI GPT-6 Luna Decisions, Upstage Solar Decide and the untrained Qwen3.5-2B" src="docs/figures/bench-v0-physics-light.svg">
+  <img alt="Physical judgment on our simulation benchmark: robo-jev v0.7 (2B) scores 0.81 and the previous release v0.1 0.80, against 0.28 for TypeSafe Jev, 0.17 for Liquid d1 and near zero or below for Microsoft-Decision-1, Together Tev1 4B, OpenAI GPT-6 Luna Decisions, Upstage Solar Decide and the untrained Qwen3.5-2B" src="docs/figures/bench-v0-physics-light.svg">
 </picture>
 
 General decision models read the *meaning* of a situation well, but on our physics benchmark most of them score close to always answering 50 %. robo-jev learns physics from simulation and carries it to new wording, out-of-range values and unseen combinations *within our simulator*.
 
-> **Honest status (2026-10-13).** On an outside test written and simulated independently of our engine ([T8](#outside-test-t8)), our latest research checkpoint (v0.3) now tells which way risk moves almost as well as the best general decision model.
-> - It does **not** yet judge how high the risk is.
-> - Making risk levels carry beyond our simulator is the current work.
+> **Honest status (2026-10-16).** The published model is now **v0.7**. v0.7 did not pass its own pre-declared rule (S REJECTED; guards O, N and F fail). It is released because it is clearly better than the public v0.1.
+> - On moments written outside our engine ([Outside tests](#outside-tests)), it calls fewer risky situations "safe" than v0.1, but still more than the untrained base.
+> - It takes choice questions with up to 26 options; choosing among many *plausible* options is untested.
 
 ## Highlights
 
-- **Physical judgment on our benchmark, far ahead.** On 1,100 held-out moments from our simulator, robo-jev scores 0.80 physics skill.
+- **Physical judgment on our benchmark, far ahead.** On 1,100 held-out moments from our simulator, robo-jev v0.7 scores 0.81 physics skill (v0.1: 0.80).
   - TypeSafe Jev, the best general decision model, scores 0.28. Liquid d1 scores 0.17.
   - The rest — Microsoft-Decision-1, Together Tev1 4B, OpenAI GPT-6 Luna Decisions, Upstage Solar Decide — score about zero or below.
 - **Generalizes inside the simulator.** The gains hold on:
@@ -25,15 +25,16 @@ General decision models read the *meaning* of a situation well, but on our physi
   - values beyond its training range;
   - combinations of phenomena it never saw together.
 
-  Change one fact and the answer moves the right way 90 % of the time (55 % before training).
-- **Partly outside it.** On independently written, MuJoCo-labelled moments (T8), the latest research checkpoint moves the answer the right way 83 % of the time (40 % untrained).
-  - Absolute risk levels do not carry yet.
+  Change one fact and the answer moves the right way 92 % of the time (55 % before training).
+- **Outside it: better than v0.1, not yet safe.** On independently written, MuJoCo-labelled moments (T8b), v0.7 makes fewer dangerous "safe" calls than v0.1 (0.51 vs 0.65) and gets more clear cases right (0.47 vs 0.38).
+  - The untrained base still makes the fewest dangerous "safe" calls (0.34).
+- **Up to 26 options.** A choice question can list up to 26 options. On held-out physics questions, accuracy drops by only 0.012 from 8 options to 17–26 (two-seed mean).
 - **Calibrated.** Its 70 % means 70 %. Expected calibration error is 0.011 on yes/no questions, against 0.134 for the untrained base.
-- **Judges the advice it gets.** It follows a wrong planner recommendation 11 % of the time (65 % untrained) and still follows right ones (67 %).
-- **Stable.** Reordering the options flips 6–9 % of answers, against 50–65 % for the untrained base.
+- **Judges the advice it gets.** It follows a wrong planner recommendation 9 % of the time (65 % untrained) and still follows right ones (65 %).
+- **Stable.** Reordering the options flips 5–10 % of answers, against 50–65 % for the untrained base.
 - **Small and drop-in.**
-  - One forward pass of Qwen3.5-2B with a LoRA adapter, trained in about an hour on one H100.
-  - Requests use the same shape as the [OpenRouter Decisions API](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request): a state text plus 1–12 `choice`, `noul` (yes/no) or `score` questions.
+  - One forward pass of Qwen3.5-2B with a LoRA adapter, trained in about three and a quarter hours on one H100.
+  - Requests use the same shape as the [OpenRouter Decisions API](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request): a state text plus 1–12 `choice` (2–26 options), `noul` (yes/no) or `score` questions.
 
 ## What it judges
 
@@ -79,7 +80,8 @@ We sent the same requests to six decision models on [OpenRouter](https://openrou
 
 | Model | Physics skill ↑ | Public reading (BoolQ + MultiNLI) ↑ | $/M input tokens |
 |---|---|---|---|
-| **robo-jev v0.1 · 2B** | **0.80** | 0.68 | self-hosted |
+| **robo-jev v0.7 · 2B** | **0.81** | 0.71 | self-hosted |
+| robo-jev v0.1 · 2B (previous release) | 0.80 | 0.68 | self-hosted |
 | TypeSafe Jev | 0.28 | 0.91 | 0.042 |
 | Liquid d1 | 0.17 | **0.93** | 0.040 |
 | Microsoft-Decision-1 | 0.04 | 0.92 | 0.042 |
@@ -88,52 +90,55 @@ We sent the same requests to six decision models on [OpenRouter](https://openrou
 | Upstage Solar Decide | −0.15 | 0.86 | 0.050 |
 | Qwen3.5-2B, untrained | −0.15 | 0.74 | self-hosted |
 
-robo-jev is a specialist. It leads on physics by a wide margin; on general reading the larger general models are ahead, and closing that gap is the next step.
+robo-jev is a specialist. It leads on physics by a wide margin; on general reading the larger general models are ahead, and robo-jev is still below its own untrained base (0.74).
 
 - **Physics skill** is 1 − Brier ÷ Brier of always answering 50 %, over the yes/no and score questions of the held-out sets. 0 means no better than a coin flip; 1 is perfect.
-- **Home ground.** The physics moments come from our own simulator and are held out from training. For a test outside this engine, see [Outside test](#outside-test-t8).
-- **One call each.** OpenRouter models were asked once per request through the Decisions API, with data collection denied.
+- **Home ground.** The physics moments come from our own simulator and are held out from training. For tests outside this engine, see [Outside tests](#outside-tests).
+- **One call each.** OpenRouter models were asked once per request through the Decisions API (2026-10-12), with data collection denied.
 - ¹ GPT-6 Luna Decisions declined about a fifth of the physics requests; its score covers the rest.
 
 All numbers, intervals and caveats are in [docs/results.md](docs/results.md).
 
-## Outside test (T8)
+## Outside tests
 
-Every set above comes from our own engine. T8 checks transfer outside it, with a different writer and a different physics source.
-- **T8b — 480 robot moments, written fresh in a first-person voice.**
-  - Families: a braking deck, a turning deck, a box released over a stack's edge, and a pushed box.
-  - Labels come from MuJoCo rigid-body simulation, not from our formulas: 64 rollouts over hidden friction and weight distribution.
-- **T8a — PIQA.** The public physical-commonsense set: 1,838 two-choice questions.
+Every set above comes from our own engine. The outside tests are written by authors who never saw its code or text, and labelled by MuJoCo rigid-body simulation over hidden physical factors (such as friction and weight distribution):
+- **T8b** — 480 robot moments in a first-person voice: a braking deck, a turning deck, a box released over a stack's edge, and a pushed box.
+- **T9** — a second outside test, built later by a new author.
+- **A4** — the scenes of a fifth author, held out from the four whose scenes v0.7 trains on.
 
-Latest result (v0.3, a research checkpoint), scored as a System 1 on T8b:
+Latest result — robo-jev v0.7, the published model — read as a System 1. Each yes/no or score answer is a call: "safe" below 1/3, "risky" above 2/3, "look again" in between. The truth is clearly low risk, clearly high risk, or unclear (the risk band changes with the physical assumptions, or sits in the middle).
 
-| Model | Risk moves the right way when one fact changes ↑ | Picks the riskier of two actions ↑ | Risk level: low / middle / high ↑ | High and low risk mixed up ↓ | PIQA ↑ |
-|---|---|---|---|---|---|
-| robo-jev v0.3 · 2B | 83 % | 86 % | 0.37 | 26 % | 0.72 |
-| Qwen3.5-2B, untrained | 40 % | 48 % | 0.37 | 15 % | 0.66 |
-| TypeSafe Jev | **87 %** | **89 %** | **0.43** | **13 %** | **0.95** |
-| Liquid d1 | 82 % | 85 % | **0.43** | 16 % | 0.94 |
-| Microsoft-Decision-1 | 80 % | 80 % | 0.38 | 26 % | 0.92 |
+| T8b, short form | Dangerous "safe" calls ↓ | Clear-case accuracy ↑ |
+|---|---|---|
+| **robo-jev v0.7 · 2B** (training seed 0) | 0.514 | **0.468** |
+| robo-jev v0.1 · 2B (previous release) | 0.651 | 0.378 |
+| Qwen3.5-2B, untrained | **0.342** | 0.276 |
 
-Risk level is accuracy over three bands, averaged per band (chance 0.33). High and low risk mixed up = the share of answers in the opposite band. A textbook calculator reading the same text reaches 0.71 on risk level and 2 % mix-ups, so the labels are learnable.
+- **Dangerous "safe" calls:** the share of "safe" calls on questions whose risk is clearly high or unclear.
+- **Clear-case accuracy:** the mean of P("safe" call | clearly low risk) and P("risky" call | clearly high risk).
 
-- **Which way, and which is riskier: now carries.**
-  - v0.3 added training families labelled in MuJoCo, with pairs that change one physical factor. The 2B model went from 40 % to 83 %, close to TypeSafe Jev.
-  - The gain is largest where T8b shares a law with those families. It is smaller on the one law it never trained on (pushing: 44 % → 59 %).
-- **How high: not yet.**
-  - Risk-level accuracy stays near chance (0.33), where the untrained base already was.
-  - It calls a high risk low more often than the untrained base.
-- **Not a release.** v0.3 did not pass our pre-declared gate: risk levels outside, and general reading slipped. It also chose actions less well at home. The published model is still v0.1.
+**Better than v0.1 on both.** v0.7 calls fewer risky moments "safe" and gets more clear cases right.
 
-**Next.** Make risk levels carry, judged on a second sealed outside test (T9) built by a new author.
+**Weak spots.**
+- **Outside "safe" default.** On short-form outside sets, v0.7 makes more dangerous "safe" calls than the untrained base: A4 +0.148, T9 +0.155, T8b +0.127 (both v0.7 training seeds averaged). Outside our engine, training pushes answers toward "safe". This is the main open problem.
+- **Format sensitivity.** On one held-out scene family (the H-set), the same moment written as a long status sheet, or with its facts moved into the question, gets more dangerous "safe" calls than its short form.
+- **Many options.**
+  - Fixed for physics items: accuracy drops by 0.012 from 8 to 17–26 options (0.247 without many-option training).
+  - On general multiple choice (MMLU), answers late in the alphabet stay weaker: a late-letter penalty of 0.128.
+  - Choosing among many *plausible* options is untested. In a handwritten 21-option example, v0.7 prefers to keep holding a plate over the free nests.
+  - More than 26 options is not supported.
+- **Seed choice.** Training seeds give noticeably different models. Seed 0 was chosen on test sets that had already been used, so its internal numbers are mildly optimistic.
+- **Not a pass.** v0.7 did not pass its own pre-declared rule (S REJECTED; guards O, N and F fail). It is released because it is clearly better than the public v0.1.
 
-All models, intervals and the version history are in [docs/results.md](docs/results.md#outside-test-t8).
+**Next.** Make outside calls safe: fewer "safe" calls on risky or unclear moments, without losing the clear cases.
+
+The full v0.7 reading and the version history are in [docs/results.md](docs/results.md#v07-release).
 
 ## Roadmap
 
 | Next | |
 |---|---|
-| Risk levels beyond the simulator | direction and comparison now carry (v0.3); next, how high the risk is, judged on a new sealed outside test (T9) |
+| Safe calls beyond the simulator | v0.7 makes fewer dangerous "safe" calls than v0.1 outside our engine, but more than the untrained base; that default is the next target |
 | General reading | keep the base model's reading while adding physics, including "can't tell" answers |
 | Contact physics | grasping, dynamic tipping, insertion and unexpected contact, simulated in MuJoCo |
 | People and machines | human intent, device and process state |

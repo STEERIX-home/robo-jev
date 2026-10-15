@@ -93,6 +93,7 @@ The same requests went to six decision models on [OpenRouter](https://openrouter
 | **ours v0 (2B)** | 0.777 | 0.048 | 0.019 | 100% | 0.428 | 0.650 | self-hosted |
 | **ours v0.1-main (2B)** | 0.795 | 0.043 | 0.018 | 100% | 0.424 | 0.607 | self-hosted |
 | **ours v0.1-mix (2B)** | 0.795 | 0.043 | 0.019 | 100% | 0.790 | 0.677 | self-hosted |
+| **ours v0.7 (2B)** | 0.811 | 0.038 | 0.019 | 100% | 0.791 | 0.712 | self-hosted |
 | liquid/d1 | 0.167 | 0.138 | 0.122 | 100% | 0.778 | 0.926 | 0.040 |
 | microsoft/microsoft-decision-1 | 0.044 | 0.162 | 0.136 | 100% | 0.787 | 0.915 | 0.042 |
 | openai/gpt-6-luna-decisions | -0.020 | 0.194 | 0.118 | 76% | 0.768 | 0.863 | 0.100 |
@@ -101,11 +102,12 @@ The same requests went to six decision models on [OpenRouter](https://openrouter
 | upstage/solar-decide | -0.150 | 0.144 | 0.230 | 100% | 0.769 | 0.864 | 0.050 |
 
 - **Physics (T2–T4).** These sets come from our own engine — home ground.
-  - The trained 2B models predict the simulated outcomes far better than any OpenRouter model: physics skill 0.78–0.80, against 0.28 for the best (Jev).
+  - The trained 2B models predict the simulated outcomes far better than any OpenRouter model: physics skill 0.78–0.81, against 0.28 for the best (Jev).
   - Most OpenRouter models score near "always answer 0.5", like the untrained 2B.
-- **Public reading (G2).** The OpenRouter models lead: 0.86–0.93, against 0.61–0.68 for ours.
+- **Public reading (G2).** The OpenRouter models lead: 0.86–0.93, against 0.61–0.71 for ours.
   - The 2B backbone starts lower (0.74).
-  - Physics training has cost part of that so far; see [v0.1](#v01-result).
+  - Physics training has cost part of that so far; see [v0.1](#v01-result). v0.7 (0.71) is the closest yet.
+- **v0.7** was added on 2026-10-16 from its own predictions on the same records (training seed 0, scored on its H100 pod with the same tool, prompt and balanced orders); the OpenRouter answers are the 2026-10-12 ones.
 - **Refusals.** GPT-6 Luna Decisions declined about a fifth of the physics requests (507 of 2,390, "refused to answer") and none of the reading requests; its scores cover the rest.
 - **How each side was asked.**
   - OpenRouter models were asked once each, in the stored option order. Ours are averaged over balanced option orders.
@@ -222,3 +224,66 @@ robo-jev is a System 1: it should know which way risk moves, which action is ris
 - **Not gating:** action choice on the home sets fell 6–14 points against v0.1-mix.
 
 T8 has now served as a gate, so the next version will be judged on a new, independently built outside test (T9).
+
+## v0.7 release
+
+v0.7 (training seed 0) is the second published model, after v0.1. It was chosen on 2026-10-16 so that the [robojev](https://robo-jev.dev) bench can send choice questions with more than 8 options. **v0.7 did not pass its own pre-declared rule (S REJECTED; guards O, N and F fail). It is released because it is clearly better than the public v0.1.**
+
+### Versions since v0.1
+
+Each version changed the previous version's training data on purpose and was judged by a rule written before its data existed. Only v0.1 and v0.7 were published.
+
+| Version | What changed in training | Its pre-declared rule |
+|---|---|---|
+| v0.1 | 6–10 wordings per question; fact order shuffled in half the texts; v0.1-mix adds 2.7 % non-robot reading | did not pass (in-distribution action regret rose); **published** |
+| v0.2 | a broader general-reading mix from licensed public training sets, in two doses; the original wordings back in half the picks | the 25 % dose passed; not published |
+| v0.3 | MuJoCo-labelled physical-factor families with one-factor pairs, and System-1 questions (risk bands, comparisons) | did not pass: outside direction rose (0.40 → 0.83 on T8b), risk levels and general reading did not hold |
+| v0.4 | the MuJoCo part recomposed into laws × scenes, with two scenes held out (the H-set); two seeds | partial: small level gains on new scenes, large seed spread |
+| v0.5 | "clarity" labels: prior-dependent MuJoCo labels pulled toward 0.5 | partial (the seeds disagreed); not kept |
+| v0.6 | the MuJoCo scenes written by four independent authors, a fifth held out (A4); v0.4's labels | rejected |
+| v0.7 | request shape: long status sheets, 9–26 options, facts in the questions; labels unchanged | rejected; **published** |
+
+### v0.7 against its rule
+
+Written on 2026-10-15 before any v0.7 data existed and applied by `scripts/verdict_v07.py`. Comparisons use seed means (v0.7's two training seeds against v0.6's two) with a paired cluster bootstrap (2,000 draws).
+
+| Part | Reading | Result |
+|---|---|---|
+| S-a — long status sheets (M2g: an independent author's sheet styles, unseen in training) | v0.6's gap between sheets and the short form stayed under the +0.05 bar that makes the test active: +0.040 (2k), +0.023 (4k), +0.018 (8k), +0.026 (reassuring tone) | not testable |
+| S-b — many options (M1g: the same item at 8, 21 and 26 options) | accuracy drop from 8 to 17–26 options 0.052 [0.040, 0.065], against ≤ 0.05 | fail |
+| O — outside dangerous "safe" calls vs v0.6, short form (≤ +0.02 each) | A4 +0.0203, T9 −0.024, T8b −0.046 | fail (A4) |
+| N — outside direction and comparison vs v0.6 (lower bound > −0.05) | A4 direction −0.012 [−0.050, +0.027] | fail |
+| F — A4 high risk called low, against the untrained base | 0.126 vs 0.104 | fail |
+| R — no regression vs v0.1 on T1, T3, T4, T5, T7 (each seed) | within every margin | pass |
+| G — public reading (G2) vs v0.6 | +0.006 [−0.010, +0.023] | pass |
+
+S-b failed while S-a could not be tested, so S is REJECTED.
+
+### Outside tests (short form, single order)
+
+Each yes/no or score answer is read as a call ("safe" below 1/3, "risky" above 2/3, "look again" between), against truth classes that hold under three physical priors. Dangerous "safe" calls (DC) are "safe" calls on questions whose risk is clearly high or unclear; clear-case accuracy (CA) is the mean of P("safe" | clearly low) and P("risky" | clearly high).
+
+| Set | DC v0.7 seed 0 | DC v0.7, two seeds | DC untrained base | v0.7 − base, two seeds | CA v0.7 seed 0 | CA untrained base |
+|---|---|---|---|---|---|---|
+| T8b | 0.514 | 0.469 | 0.342 | +0.127 | 0.468 | 0.276 |
+| T9 | 0.455 | 0.475 | 0.320 | +0.155 | 0.321 | 0.247 |
+| A4 | 0.558 | 0.506 | 0.357 | +0.148 | 0.362 | 0.351 |
+
+On T8b with the same truth classes, v0.1 has DC 0.651 and CA 0.378. v0.7 improves on v0.1 on both, but on every outside set it makes more dangerous "safe" calls than the untrained base.
+
+### Many options (M1g)
+
+| | Accuracy drop, 8 → 17–26 options | Late-letter penalty (A–H minus Q–Z, 17+ options) |
+|---|---|---|
+| physics items (held-out scenes and authors), v0.7 | 0.012 | 0.029 |
+| physics items, v0.6 | 0.247 | 0.433 |
+| general multiple choice (MMLU, 760 items), v0.7 | 0.070 [0.052, 0.088] | 0.128 |
+| MMLU, v0.6 | 0.060 | 0.113 |
+| MMLU, untrained base | 0.084 | 0.270 |
+
+All values are seed means. Physics is fixed; general multiple choice is not, and S-b's miss is entirely the general part. The physics distractors are other questions' options, so choices among many *plausible* candidates remain untested. On two handwritten requests (`tests/fixtures/decisions/many-options.jsonl`, not a test set), v0.7 put 0.53 on keeping hold of a plate (21 options) and 0.64 on carrying a carton on (26 options), with almost nothing on the free places. v0.1 spreads its weight over plausible places, and the untrained base puts most on the clear staging spot for the carton.
+
+### Request shape
+
+- **Long status sheets (M2g).** The pooled gate stayed under its activity bar, but the effect is set-specific. On the H-set, v0.6's calls drift toward "safe" in a sheet (+0.074 to +0.109), and v0.7 roughly halves that (+0.046 to +0.056); A4 shows none. Reassuring boilerplate moves no model more than neutral boilerplate does.
+- **Facts in the questions (M2g-F, a secondary reading written before the gate existed).** No harm: v0.7's gap is −0.011 and its clear-case accuracy changes by −0.037 (v0.6: −0.086). The H-set again shows the drift (v0.6 +0.107, v0.7 +0.058).
