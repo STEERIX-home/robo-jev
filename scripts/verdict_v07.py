@@ -137,7 +137,7 @@ BASE_SPARK = {"A4": V06_SPARK / "A4-base-2b.predictions.jsonl", "T9": ARTIFACTS 
 IFACE = ARTIFACTS / "iface"
 PIPELINE_OUT = ARTIFACTS / "scratch" / "v07b" / "pipeline" / "verdict-pipeline.json"
 #: The gate prediction files' scoring conditions (the Spark chain): M2g on the standard path with seeded orders, M1g on the many-option path.
-M2G_CONDITIONS = {"mode": "direct", "format": "chat", "prompt_version": "v0c-p3", "orders": "seeded", "shuffle_seed": 1, "batch": 1}
+M2G_CONDITIONS = {"mode": "direct", "format": "chat", "prompt_version": "v0c-p3", "orders": "seeded", "shuffle_seed": 1, "batch": 1, "limit": None}
 M1G_CONDITIONS = {"mode": "direct", "format": "chat", "prompt_version": "v0c-p3", "batch": 1, "lift_option_cap": True, "limit_items": None}
 #: Outputs never go here.
 NEVER_WRITE = (ARTIFACTS / "reports" / "v04", ARTIFACTS / "reports" / "v05", ARTIFACTS / "reports" / "v06", ARTIFACTS / "t8", ARTIFACTS / "t9",
@@ -977,6 +977,9 @@ def _gate_inputs(args: argparse.Namespace, *, pipeline: bool, problems: list[str
             sources[f"{m} M2g {c}"] = src
             problems += [f"{m} M2g {c}: {p}" for p in src["problems"]]
             m2_preds[m][c] = _read(path)
+            missing = {str(r["id"]) for r in conditions[c]} - {str(x["id"]) for x in m2_preds[m][c]}
+            if missing:
+                problems.append(f"{m} M2g {c}: {len(missing)} records without a prediction (first {sorted(missing)[:3]})")
     m1_records = _read(M1G_FILE)
     m1_preds = {}
     for m in GATE_MODELS:
@@ -984,6 +987,9 @@ def _gate_inputs(args: argparse.Namespace, *, pipeline: bool, problems: list[str
         sources[f"{m} M1g"] = src
         problems += [f"{m} M1g: {p}" for p in src["problems"]]
         m1_preds[m] = _read(paths["M1g"][m])
+        missing = {str(r["id"]) for r in m1_records} - {str(x["id"]) for x in m1_preds[m]}
+        if missing:
+            problems.append(f"{m} M1g: {len(missing)} listings without a prediction (first {sorted(missing)[:3]})")
     return conditions, m2_preds, m1_records, m1_preds, sources
 
 
