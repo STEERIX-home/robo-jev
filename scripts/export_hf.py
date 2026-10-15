@@ -3,9 +3,9 @@
 the original scoring path, upload them privately, and verify the uploaded copies from a clean cache.
 
     # hero chart PNGs (cairosvg through uv — not a project dependency)
-    uv run python scripts/export_hf.py figures --out artifacts/hf/figures-v0.7
+    uv run python scripts/export_hf.py figures --out artifacts/scratch/rel07/figures-card
     # adapter + merged folders (CPU unit: loads the base in float32 for the merge); the data manifests default to v0.7's (--manifest)
-    uv run python scripts/export_hf.py export --checkpoint <run>/checkpoint.pt --out artifacts/hf/v0.7 --base-files <dir> --figures artifacts/hf/figures-v0.7
+    uv run python scripts/export_hf.py export --checkpoint <run>/checkpoint.pt --out artifacts/hf/v0.7 --base-files <dir> --figures artifacts/scratch/rel07/figures-card
     # equivalence (GPU unit): (i) the original path writes reference predictions, then (ii) adapter and (iii) merged are scored and compared;
     # the sample is hf0's (50 T1, 25 T2, 25 G2) plus --many-options records with 9–26 options from the v0.7 training input (read in code only)
     uv run python scripts/export_hf.py sample --out artifacts/scratch/rel07/equiv-140.jsonl
