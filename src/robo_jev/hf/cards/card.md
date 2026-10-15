@@ -185,6 +185,8 @@ answers = model.decide(state, questions)
 
 {{MANY_OPTIONS_OUTPUT}}
 
+The request is answered, but not well: v0.7 puts about half its probability on keeping hold of the plate and almost none on the free, level nests. Choosing among many *plausible* options is a weak spot (see [Limitations](#limitations)).
+
 ### With the robo-jev package
 
 ```bash
@@ -252,6 +254,7 @@ All numbers, intervals and caveats: [docs/results.md](https://github.com/STEERIX
 - **Format sensitivity.** On one held-out scene family (the H-set), the same moment written as a long status sheet, or with its facts moved into the question, gets more dangerous "safe" calls than its short form.
 - **Late-letter penalty.** On general multiple choice with many options, answers late in the alphabet are weaker: a late-letter penalty of 0.128.
 - **More than 26 options is not supported.** The runners refuse a choice question with 27 or more options.
+- **Many plausible options are untested.** The many-option training and test items pad a question with distractors taken from other questions. Choosing among many plausible candidates has not been measured, and in the 21-option example above v0.7 prefers to keep holding the plate over the free nests.
 - **Seed choice.** Training seeds give noticeably different models. Seed 0 was chosen on test sets that had already been used, so its internal numbers are mildly optimistic.
 - **Home ground.** Every bench-v0 physics number comes from our own simulation engine. Real robots will differ, and no real robot data was used.
 - **General reading is weaker.** On BoolQ + MultiNLI it scores 0.71, below its untrained base (0.74) and the general decision models (0.86–0.93). Do not use it as a general-purpose judge.

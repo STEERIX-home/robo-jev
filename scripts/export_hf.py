@@ -442,13 +442,18 @@ def _equivalence(args: argparse.Namespace) -> int:
 
 
 def _load_standalone(path: Path) -> Any:
-    """Import a ``robo_jev_decide.py`` file as its own module (the copy shipped in an export folder or downloaded from the Hub)."""
+    """Import a ``robo_jev_decide.py`` file as its own module (the copy shipped in an export folder or downloaded from the Hub), without
+    writing bytecode next to it."""
     import importlib.util
 
     spec = importlib.util.spec_from_file_location(f"robo_jev_decide_{abs(hash(str(path)))}", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    previous, sys.dont_write_bytecode = sys.dont_write_bytecode, True  # no __pycache__ next to the shipped file (it would be uploaded)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
     return module
 
 

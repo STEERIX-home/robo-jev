@@ -165,6 +165,13 @@ def test_check_no_pickle_refuses_pickles(tmp_path):
     (tmp_path / "hidden.json").write_bytes(b"PK\x03\x04")
     with pytest.raises(ValueError, match="pickle or zip"):
         E.check_no_pickle(tmp_path)
+    (tmp_path / "hidden.json").unlink()
+    (tmp_path / "__pycache__").mkdir()
+    (tmp_path / "__pycache__" / "robo_jev_decide.cpython-311.pyc").write_bytes(b"\xa7\r\r\n")
+    with pytest.raises(ValueError, match="bytecode"):
+        E.check_no_pickle(tmp_path)
+    with pytest.raises(ValueError, match=r"robo_jev_decide.cpython-311.pyc \(not UTF-8 text\)"):
+        E.check_public_text(tmp_path)
 
 
 def _original_path(state):
@@ -421,3 +428,12 @@ def test_the_release_tag_reports_the_commit_it_resolves_to():
         "tag": "v0.1", "commit": "head-commit", "main": "head-commit", "created": True}
     assert api.created == [("v0.1", "robo-jev v0.1", None)]
     assert H.tag_release(api, "Steerix-org/robo-jev-2b", "v0.1", message="robo-jev v0.1")["created"] is False and len(api.created) == 1
+
+
+def test_the_shipped_runner_is_imported_without_bytecode(tmp_path):
+    import shutil
+
+    shutil.copyfile(E.STANDALONE, tmp_path / "robo_jev_decide.py")
+    module = export_script()._load_standalone(tmp_path / "robo_jev_decide.py")
+    assert module.LIMITS["choice_options"] == (2, 26)
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["robo_jev_decide.py"]  # no __pycache__ to upload

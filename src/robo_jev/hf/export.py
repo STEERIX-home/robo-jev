@@ -95,7 +95,7 @@ GITHUB = "https://github.com/STEERIX-home/robo-jev"
 #: PEFT parameter name = this prefix + the training key (training keys are relative to the text model, ``Qwen3_5ForCausalLM.model``).
 PEFT_PREFIX = "base_model.model.model."
 #: File endings that are (or may be) pickles — never in an export.
-FORBIDDEN_SUFFIXES = (".bin", ".pt", ".pth", ".pkl", ".pickle", ".ckpt", ".joblib", ".npy", ".npz")
+FORBIDDEN_SUFFIXES = (".bin", ".pt", ".pth", ".pkl", ".pickle", ".ckpt", ".joblib", ".npy", ".npz", ".pyc", ".pyo")
 STANDALONE = Path(__file__).with_name("robo_jev_decide.py")
 _TRAINING_KEY = re.compile(r"^layers\.\d+\.(self_attn|linear_attn|mlp)\.[a-z_]+\.lora_[AB]\.default\.weight$")
 
@@ -383,8 +383,8 @@ def check_no_pickle(folder: str | Path) -> list[str]:
     """Raise if any file in `folder` is (or may be) a pickle; return the file list."""
     folder = Path(folder)
     files = sorted(str(p.relative_to(folder)) for p in folder.rglob("*") if p.is_file())
-    bad = [f for f in files if f.lower().endswith(FORBIDDEN_SUFFIXES)]
-    _need(not bad, f"{folder}: pickle-type files {bad}")
+    bad = [f for f in files if f.lower().endswith(FORBIDDEN_SUFFIXES) or "__pycache__" in Path(f).parts]
+    _need(not bad, f"{folder}: pickle-type or bytecode files {bad}")
     from safetensors import safe_open
 
     for f in files:  # a pickle can hide behind any name: protocol 2+ pickles start with 0x80, torch's zip archives with PK
@@ -438,7 +438,11 @@ def check_public_text(folder: str | Path) -> dict[str, int]:
         if path.suffix.lower() in (".safetensors", ".png", ".jpg", ".jpeg", ".gif", ".webp"):
             continue
         name = str(path.relative_to(folder))
-        text = path.read_text(encoding="utf-8")
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:  # an export holds no binary file but weights and images
+            hits.append(f"{name} (not UTF-8 text)")
+            continue
         scanned[name] = len(text.encode("utf-8"))
         for kind, pattern in PRIVATE_TEXT.items():
             for match in pattern.finditer(text):
