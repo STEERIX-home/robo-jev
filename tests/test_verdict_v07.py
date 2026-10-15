@@ -1,11 +1,14 @@
 """The v0.7 rule helper (task v0.7b §1-5) — ``scripts/verdict_v07.py``.
 
-The pure rule is pinned on hand-made readings: S-a per length and S-b with every threshold at its bound, the three outcomes of S
-(SUPPORTED, PARTIAL either way, REJECTED), the guards O / N / R / G / F at their bounds, the release line and the pre-declared next step.
-The readings are pinned on synthetic predictions: M2g sheets that push v0.6 to "safe" calls but not v0.7 read S-a PASS (and the same push for
-both arms reads FAIL); M1g listings where v0.7 keeps its N = 8 accuracy at N ≥ 17 read S-b PASS (and v0.6's late-letter loss for both reads
-FAIL); together with passing guards they give SUPPORTED with a release line, PARTIAL and REJECTED. Seed means (an arm's DC is the mean of its
-seeds' DCs on the same questions), the pre-declared exclusions and the gate-file checks are pinned too. No model, no sealed file.
+The pure rule is pinned on hand-made readings: the amended S-a (components len2k, len4k, len8k and cue; each active or inactive by v0.6's gap,
+passing or failing — every threshold at its bound; PASS, FAIL and NOT TESTABLE) and S-b with every threshold at its bound, the outcomes of S
+(SUPPORTED, PARTIAL either way, REJECTED, and with S-a not testable "S-b PASS (S-a not testable)" or REJECTED), the guards O / N / R / G / F at
+their bounds, the release line and the pre-declared next step. The readings are pinned on synthetic predictions: M2g sheets that push v0.6
+to "safe" calls but not v0.7 read S-a PASS (the same push for both arms reads FAIL; no push for v0.6 reads NOT TESTABLE; a push on the
+reassuring sheet only activates the cue component alone; v0.7 creating a gap where v0.6 had none fails that inactive component); M1g listings
+where v0.7 keeps its N = 8 accuracy at N ≥ 17 read S-b PASS (and v0.6's late-letter loss for both reads FAIL); together with passing guards
+they give every outcome of S. Seed means (an arm's DC is the mean of its seeds' DCs on the same questions), the amendment's secondary readings,
+the pre-declared exclusions and the gate-file checks are pinned too. No model, no sealed file.
 """
 
 from __future__ import annotations
@@ -34,12 +37,18 @@ def _d(value=None, low=None, high=None, a=None, b=None) -> dict:
     return {"value": value, "low": low, "high": high, "a": a, "b": b}
 
 
-def _sa(dgap=(-0.10, -0.15, -0.05), gap=0.0) -> dict:
-    return {"dgap": _d(*dgap), "gap_v07": _d(gap)}
+COMPONENTS = ("len2k", "len4k", "len8k", "cue")
 
 
-SA_PASS = {L: _sa() for L in ("2k", "4k", "8k")}
-SA_FAIL = {**SA_PASS, "8k": _sa(dgap=(-0.02, -0.06, 0.02))}
+def _sa(dgap=(-0.10, -0.15, -0.05), gap=0.0, gap6=0.10) -> dict:
+    """One S-a component reading: Δgap (point, low, high), v0.7's gap and v0.6's gap (points)."""
+    return {"dgap": _d(*dgap), "gap_v07": _d(gap), "gap_v06": _d(gap6)}
+
+
+INACTIVE_OK = _sa(dgap=(0.01, -0.02, 0.04), gap=0.01, gap6=0.0)
+SA_PASS = {c: _sa() for c in COMPONENTS}                                      # every component active and passing
+SA_FAIL = {**SA_PASS, "len8k": _sa(dgap=(-0.02, -0.06, 0.02))}                # one active component fails
+SA_NOT_TESTABLE = {c: INACTIVE_OK for c in COMPONENTS}                         # no component active
 SB_PASS = {"drop_v07": _d(0.02), "ddrop": _d(-0.05, -0.08, -0.02), "physics_penalty_minus_base": _d(0.03)}
 SB_FAIL = {**SB_PASS, "drop_v07": _d(0.08)}
 
@@ -63,25 +72,54 @@ def _readings(sa=SA_PASS, sb=SB_PASS, *, o=None, arm=None, home=None, r=None, g=
 # --------------------------------------------------------------------------
 
 
-@pytest.mark.parametrize("entry, key, expected", [
-    (_sa(dgap=(-0.05, -0.1, -0.01)), "dgap_le_-0.05", True),        # exactly −0.05 counts (≤)
-    (_sa(dgap=(-0.0499, -0.1, -0.01)), "dgap_le_-0.05", False),
-    (_sa(dgap=(-0.1, -0.2, 0.0)), "dgap_high_lt_0", False),          # an upper bound of exactly 0 does not (<)
-    (_sa(dgap=(-0.1, -0.2, -1e-9)), "dgap_high_lt_0", True),
-    (_sa(gap=0.03), "gap_v07_le_+0.03", True),                       # exactly +0.03 counts (≤, point)
-    (_sa(gap=0.0301), "gap_v07_le_+0.03", False),
-    ({"dgap": _d(), "gap_v07": _d()}, "dgap_le_-0.05", False),       # a missing reading meets nothing
+@pytest.mark.parametrize("entry, status, passes, key, expected", [
+    (_sa(gap6=0.05), "active", True, None, None),                                      # v0.6's gap exactly +0.05 is active (≥)
+    (_sa(gap6=0.0499, dgap=(0.02, 0.0, 0.04)), "inactive", True, None, None),          # just below: inactive, Δgap not read
+    (_sa(dgap=(-0.05, -0.1, -0.01)), "active", True, "dgap_le_-0.05", True),           # active: Δgap exactly −0.05 counts (≤)
+    (_sa(dgap=(-0.0499, -0.1, -0.01)), "active", False, "dgap_le_-0.05", False),
+    (_sa(dgap=(-0.1, -0.2, 0.0)), "active", False, "dgap_high_lt_0", False),          # an upper bound of exactly 0 does not (<)
+    (_sa(dgap=(-0.1, -0.2, -1e-9)), "active", True, "dgap_high_lt_0", True),
+    (_sa(gap=0.03), "active", True, "gap_v07_le_+0.03", True),                         # v0.7's gap exactly +0.03 counts (≤, point)
+    (_sa(gap=0.0301), "active", False, "gap_v07_le_+0.03", False),
+    (_sa(gap6=0.0, gap=0.03, dgap=(0.03, 0.01, 0.05)), "inactive", True, "gap_v07_le_+0.03", True),    # inactive passes on v0.7's gap alone
+    (_sa(gap6=0.0, gap=0.0301, dgap=(0.03, 0.01, 0.05)), "inactive", False, "gap_v07_le_+0.03", False),  # v0.7 must not create a gap
+    ({"dgap": _d(-0.1, -0.2, -0.05), "gap_v07": _d(0.0), "gap_v06": _d()}, "missing", False, None, None),   # no v0.6 gap: missing, fails
 ])  # fmt: skip
-def test_every_s_a_threshold_at_its_bound(entry, key, expected):
-    result = V().sa_checks({L: entry for L in ("2k", "4k", "8k")})
-    assert result["per_length"]["4k"]["checks"][key] is expected
+def test_each_s_a_component_state_and_threshold_at_its_bound(entry, status, passes, key, expected):
+    component = V().sa_component(entry)
+    assert component["status"] == status and component["pass"] is passes
+    if key is not None:
+        assert component["checks"][key] is expected
+    if status == "inactive":
+        assert set(component["checks"]) == {"gap_v07_le_+0.03"}, "an inactive component is read on v0.7's gap only"
 
 
-def test_s_a_needs_every_length():
-    assert V().sa_checks(SA_PASS)["pass"] is True
-    assert V().sa_checks(SA_FAIL)["pass"] is False and V().sa_checks(SA_FAIL)["per_length"]["8k"]["pass"] is False
-    assert V().sa_checks({"2k": _sa(), "4k": _sa()})["pass"] is False, "a missing length fails"
-    assert V().sa_checks({**SA_PASS, "2k": _sa(gap=0.05)})["pass"] is False, "v0.7's own gap must be near zero too"
+@pytest.mark.parametrize("components, outcome, active", [
+    (SA_PASS, "PASS", list(COMPONENTS)),
+    ({**SA_NOT_TESTABLE, "cue": _sa()}, "PASS", ["cue"]),                                   # one active component suffices
+    ({**SA_NOT_TESTABLE, "len4k": _sa()}, "PASS", ["len4k"]),
+    (SA_FAIL, "FAIL", list(COMPONENTS)),                                                   # an active component fails
+    ({**SA_NOT_TESTABLE, "cue": _sa(), "len2k": _sa(gap6=0.0, gap=0.04)}, "FAIL", ["cue"]),  # an inactive one fails (v0.7 made a gap)
+    ({**SA_NOT_TESTABLE, "cue": _sa(dgap=(-0.04, -0.08, -0.01))}, "FAIL", ["cue"]),
+    (SA_NOT_TESTABLE, "NOT TESTABLE", []),                                                 # none active
+    ({**SA_NOT_TESTABLE, "len8k": _sa(gap6=0.0, gap=0.08)}, "NOT TESTABLE", []),           # none active, even if v0.7 creates a gap
+    ({c: SA_PASS[c] for c in ("len2k", "len4k", "len8k")}, "FAIL", list(COMPONENTS[:3])),  # a missing component fails
+    (None, "FAIL", []),
+])  # fmt: skip
+def test_the_amended_s_a_outcomes(components, outcome, active):
+    result = V().sa_checks(components)
+    assert result["outcome"] == outcome and result["active"] == active
+    assert result["pass"] is (outcome == "PASS") and result["testable"] is (outcome != "NOT TESTABLE")
+    created = [c for c, e in (components or {}).items() if e["gap_v06"]["value"] < 0.05 and e["gap_v07"]["value"] > 0.03]
+    assert result["inactive_failing"] == created, "an inactive component where v0.7 made a gap is listed (reported for NOT TESTABLE)"
+
+
+def test_s_a_reads_only_the_required_components():
+    v = V()
+    three = ("len2k", "len4k", "len8k")
+    assert v.sa_checks({c: SA_PASS[c] for c in three}, required=three)["outcome"] == "PASS"
+    assert v.sa_checks({c: SA_PASS[c] for c in three})["outcome"] == "FAIL" and v.sa_checks({c: SA_PASS[c] for c in three})["missing"] == ["cue"]
+    assert tuple(v.SA_COMPONENTS) == COMPONENTS and v.SA_COMPONENTS["cue"] == "w4k-reassuring" and v.SA_COMPONENTS["len4k"] == "w4k"
 
 
 @pytest.mark.parametrize("change, key, expected", [
@@ -99,6 +137,7 @@ def test_every_s_b_threshold_at_its_bound(change, key, expected):
 
 @pytest.mark.parametrize("sa, sb, outcome", [
     (SA_PASS, SB_PASS, "SUPPORTED"), (SA_PASS, SB_FAIL, "PARTIAL"), (SA_FAIL, SB_PASS, "PARTIAL"), (SA_FAIL, SB_FAIL, "REJECTED"),
+    (SA_NOT_TESTABLE, SB_PASS, "S-b PASS (S-a not testable)"), (SA_NOT_TESTABLE, SB_FAIL, "REJECTED"),
     (None, None, "REJECTED"),
 ])  # fmt: skip
 def test_each_s_outcome(sa, sb, outcome):
@@ -108,10 +147,14 @@ def test_each_s_outcome(sa, sb, outcome):
 
 def test_the_next_step_follows_the_failing_part():
     v = V()
-    assert v.next_step(True, True)["next"] == [v.NEXT["SUPPORTED"]]
-    assert v.next_step(False, True)["next"] == [v.NEXT["S-a"]] and "cue hypothesis" in v.NEXT["S-a"]
-    assert v.next_step(True, False)["next"] == [v.NEXT["S-b"]] and "multi-candidate" in v.NEXT["S-b"]
-    assert v.next_step(False, False)["next"] == [v.NEXT["S-a"], v.NEXT["S-b"]]
+    assert v.next_step("PASS", True)["next"] == [v.NEXT["SUPPORTED"]] and v.next_step(True, True)["branch"] == "SUPPORTED"
+    assert v.next_step("FAIL", True)["next"] == [v.NEXT["S-a"]] and "cue hypothesis" in v.NEXT["S-a"]
+    assert v.next_step("PASS", False)["next"] == [v.NEXT["S-b"]] and "multi-candidate" in v.NEXT["S-b"]
+    assert v.next_step("FAIL", False)["next"] == [v.NEXT["S-a"], v.NEXT["S-b"]]
+    not_testable = v.next_step("NOT TESTABLE", True)
+    assert not_testable["branch"] == "S-b PASS (S-a not testable)" and not_testable["next"] == [v.NEXT["S-a not testable"]]
+    assert "no claim about context robustness" in v.NEXT["S-a not testable"] and v.NEXT["S-a"] not in not_testable["next"]
+    assert v.next_step("NOT TESTABLE", False)["next"] == [v.NEXT["S-a not testable"], v.NEXT["S-b"]]
 
 
 # --------------------------------------------------------------------------
@@ -147,6 +190,12 @@ def test_the_release_line_needs_s_supported_and_every_guard():
     partial = v.decide(_readings(SA_FAIL))
     assert partial["S"]["outcome"] == "PARTIAL" and partial["release_line"] == "not a release candidate: S PARTIAL"
     assert partial["next_step"]["next"] == [v.NEXT["S-a"]]
+    only_b = v.decide(_readings(SA_NOT_TESTABLE))
+    assert only_b["S"]["outcome"] == "S-b PASS (S-a not testable)" and only_b["release_candidate"] is False
+    assert only_b["release_line"] == "not a release candidate: S S-b PASS (S-a not testable)", "release needs S SUPPORTED (unchanged)"
+    assert v.decide(_readings(SA_NOT_TESTABLE, SB_FAIL))["S"]["outcome"] == "REJECTED"
+    three = ("len2k", "len4k", "len8k")
+    assert v.decide(_readings({c: SA_PASS[c] for c in three}), sa_required=three)["S"]["outcome"] == "SUPPORTED"
 
 
 # --------------------------------------------------------------------------
@@ -191,16 +240,26 @@ def _m2g_preds(records: list[dict], safe_share: float, model: str) -> list[dict]
     return out
 
 
+def _share(spec, cond: str) -> float:
+    """``(short, wrapped)`` (every sheet the same) or ``{condition: share}`` (``default`` for the rest)."""
+    if isinstance(spec, dict):
+        return spec.get(cond, spec["default"])
+    return spec[0] if cond == "short" else spec[1]
+
+
 def _m2g(shares: dict) -> dict:
-    """M2g readings for per-model safe shares ``{model: (short, wrapped)}`` (every wrapped condition and tone the same)."""
+    """M2g readings for per-model safe shares ``{model: spec}`` (:func:`_share`)."""
     records = _m2g_records()
     conditions = {c: records for c in V().CONDITIONS}
-    preds = {m: {c: _m2g_preds(records, s if c == "short" else w, m) for c in conditions} for m, (s, w) in shares.items()}
+    preds = {m: {c: _m2g_preds(records, _share(spec, c), m) for c in conditions} for m, spec in shares.items()}
     return V().m2g_readings(conditions, preds, n_boot=300, seed=0)
 
 
 SHARES_V07_FLAT = {"v07s0": (0.25, 0.25), "v07s1": (0.30, 0.30), "v06s0": (0.25, 0.45), "v06s1": (0.25, 0.40), "base": (0.40, 0.45)}
 SHARES_BOTH_PUSHED = {**SHARES_V07_FLAT, "v07s0": (0.25, 0.45), "v07s1": (0.25, 0.40)}
+SHARES_V06_FLAT = {**SHARES_V07_FLAT, "v06s0": (0.25, 0.25), "v06s1": (0.30, 0.30)}                       # no component active
+SHARES_CUE_ONLY = {**SHARES_V06_FLAT, "v06s0": {"default": 0.25, "w4k-reassuring": 0.45}, "v06s1": {"default": 0.30, "w4k-reassuring": 0.48}}
+SHARES_V07_MAKES_A_GAP = {**SHARES_CUE_ONLY, "v07s0": {"default": 0.25, "w8k": 0.40}, "v07s1": {"default": 0.30, "w8k": 0.45}}
 
 
 def test_m2g_sheets_that_push_v06_but_not_v07_read_s_a_pass_and_the_same_push_reads_fail():
@@ -208,11 +267,11 @@ def test_m2g_sheets_that_push_v06_but_not_v07_read_s_a_pass_and_the_same_push_re
     flat = _m2g(SHARES_V07_FLAT)
     assert v.sa_checks(flat["S-a"])["pass"] is True
     for length in ("2k", "4k", "8k"):
-        e = flat["S-a"][length]
+        e = flat["S-a"][f"len{length}"]
         assert e["gap_v07"]["value"] == pytest.approx(0.0, abs=1e-12) and e["dgap"]["value"] < -0.10 and e["dgap"]["high"] < 0
         assert e["gap_v06"]["value"] == pytest.approx((flat["gaps"]["v06s0"][length]["value"] + flat["gaps"]["v06s1"][length]["value"]) / 2)
     pushed = _m2g(SHARES_BOTH_PUSHED)
-    assert v.sa_checks(pushed["S-a"])["pass"] is False and abs(pushed["S-a"]["4k"]["dgap"]["value"]) < 1e-12
+    assert v.sa_checks(pushed["S-a"])["pass"] is False and abs(pushed["S-a"]["len4k"]["dgap"]["value"]) < 1e-12
     for m in ("v07", "v06"):  # seed means: the arm's DC is the mean of its seeds' DCs on the same questions
         seeds = v.ARMS[m]
         assert flat["levels"][m]["short"]["value"] == pytest.approx(sum(flat["levels"][s]["short"]["value"] for s in seeds) / 2)
@@ -220,6 +279,32 @@ def test_m2g_sheets_that_push_v06_but_not_v07_read_s_a_pass_and_the_same_push_re
     tone = flat["tone_panel"]
     assert tone["v06s0"]["reassuring_minus_neutral"]["value"] == pytest.approx(0.0) and "v07_minus_v06" in tone
     assert flat["vs_base"]["short"]["v07"]["pooled"]["value"] < 0, "v0.7's short-form DC is below the base's here"
+    assert set(flat["S-a"]) == set(COMPONENTS) and v.sa_checks(flat["S-a"])["active"] == list(COMPONENTS)
+
+
+@pytest.mark.parametrize("shares, outcome, active", [
+    (SHARES_V06_FLAT, "NOT TESTABLE", []),
+    (SHARES_CUE_ONLY, "PASS", ["cue"]),
+    (SHARES_V07_MAKES_A_GAP, "FAIL", ["cue"]),
+])  # fmt: skip
+def test_m2g_component_activity_follows_v06s_own_gaps(shares, outcome, active):
+    v = V()
+    readings = _m2g(shares)
+    result = v.sa_checks(readings["S-a"])
+    assert result["outcome"] == outcome and result["active"] == active
+    if shares is SHARES_V07_MAKES_A_GAP:
+        assert result["components"]["len8k"]["status"] == "inactive" and result["components"]["len8k"]["pass"] is False
+        assert result["components"]["cue"]["pass"] is True
+
+
+def test_the_amendment_secondary_readings_are_per_arm_and_compared():
+    readings = _m2g({**SHARES_V07_FLAT, "v06s0": {"default": 0.25, "w4k-alarming": 0.10, "w4k-reassuring": 0.45, "w4k": 0.30},
+                     "v06s1": {"default": 0.25, "w4k-alarming": 0.10, "w4k-reassuring": 0.45, "w4k": 0.30}})
+    extra = readings["amendment_secondary"]
+    alarm, reassure = extra["alarming_minus_short"], extra["reassuring_minus_neutral"]
+    assert {"v07", "v06", "v07s0", "base"} <= set(alarm) and alarm["v06"]["value"] < -0.05 and abs(alarm["v07"]["value"]) < 1e-12
+    assert reassure["v06"]["value"] > 0.1 and abs(reassure["v07"]["value"]) < 1e-12
+    assert alarm["v07_minus_v06"]["dgap"]["value"] == pytest.approx(alarm["v07"]["value"] - alarm["v06"]["value"])
 
 
 def test_m2g_exclusions_leave_the_moments_out_of_every_reading():
@@ -227,7 +312,7 @@ def test_m2g_exclusions_leave_the_moments_out_of_every_reading():
     conditions = {c: records for c in V().CONDITIONS}
     preds = {m: {c: _m2g_preds(records, 0.3, m) for c in conditions} for m in SHARES_V07_FLAT}
     out = V().m2g_readings(conditions, preds, n_boot=50, seed=0, exclude={records[0]["id"], records[1]["id"]})
-    assert out["records"]["short"] == len(records) - 2 and out["S-a"]["2k"]["dgap"]["n"] == 3 * (len(records) - 2)
+    assert out["records"]["short"] == len(records) - 2 and out["S-a"]["len2k"]["dgap"]["n"] == 3 * (len(records) - 2)
 
 
 def _m1g_records(items: int = 40, physics_every: int = 4) -> list[dict]:
@@ -289,7 +374,8 @@ def _standard_ok() -> dict:
 
 @pytest.mark.parametrize("shares, m1_v07_wrong, outcome", [
     (SHARES_V07_FLAT, False, "SUPPORTED"), (SHARES_V07_FLAT, True, "PARTIAL"), (SHARES_BOTH_PUSHED, False, "PARTIAL"),
-    (SHARES_BOTH_PUSHED, True, "REJECTED"),
+    (SHARES_BOTH_PUSHED, True, "REJECTED"), (SHARES_V06_FLAT, False, "S-b PASS (S-a not testable)"), (SHARES_V06_FLAT, True, "REJECTED"),
+    (SHARES_CUE_ONLY, False, "SUPPORTED"), (SHARES_V07_MAKES_A_GAP, False, "PARTIAL"),
 ])  # fmt: skip
 def test_synthetic_predictions_give_each_outcome_through_the_whole_rule(shares, m1_v07_wrong, outcome):
     v = V()

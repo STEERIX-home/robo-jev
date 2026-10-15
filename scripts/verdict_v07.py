@@ -10,14 +10,18 @@ the mean of its two seeds' 1/L-weighted listings (:func:`verdict_v06.arm_calls`)
 seeds' item values. Paired cluster bootstrap, 2,000 draws, seed 0 (:func:`robo_jev.bench.system1._draws`): the same draws for every source of
 one reading.
 
-* **S-a (M2g)** — per arm and length L ∈ {2k, 4k, 8k}: gap_L = DC(wrapped_L) − DC(short) on the call view (the M2g moments' yes/no and score
-  questions; v0.5's truth classes; cluster = the moment's generator group). PASS iff for every L: Δgap_L = gap_L(v0.7) − gap_L(v0.6) ≤ −0.05
-  with its upper bound < 0, AND v0.7's gap_L ≤ +0.03 (point). Δgap is read with one bootstrap over the four sources (v0.7 wrapped, v0.7 short,
-  v0.6 wrapped, v0.6 short) on the questions all four answered; ``w4k`` is the neutral sheet (the tone panel's neutral member).
+* **S-a (M2g), as amended before any M2g / M1g prediction existed** (progress.md, "AMENDMENT TO S-a", 2026-10-15 ~11:25 KST): components
+  ``len2k``, ``len4k``, ``len8k`` with gap = DC(neutral wrapped_L) − DC(short), and ``cue`` with gap = DC(w4k-reassuring) − DC(short), on the call
+  view (the M2g moments' yes/no and score questions; v0.5's truth classes; cluster = the moment's generator group). A component is ACTIVE iff
+  v0.6's gap ≥ +0.05 (point). An active component passes iff Δgap = gap(v0.7) − gap(v0.6) ≤ −0.05 with its upper bound < 0 AND v0.7's gap ≤
+  +0.03 (point); an inactive one passes iff v0.7's gap ≤ +0.03 (point — v0.7 must not create a gap). S-a PASS iff every component passes and at
+  least one is active; NOT TESTABLE iff none is active; otherwise FAIL (a missing component fails). Each component is read with one bootstrap
+  over its four sources (v0.7 wrapped, v0.7 short, v0.6 wrapped, v0.6 short) on the questions all four answered; ``w4k`` is the neutral sheet.
 * **S-b (M1g)** — drop = acc(N = 8) − acc(N ≥ 17) (per item: the mean of its N = 8 listings minus the mean of its N = 21 and N = 26
   accuracies). PASS iff v0.7's drop ≤ 0.05 (point) AND the v0.7 − v0.6 Δdrop upper bound < 0 (item bootstrap) AND, on the physics items,
   v0.7's late-letter penalty (A–H minus Q–Z over the N ≥ 17 listings) − the untrained base's < +0.10 (point).
-* **S**: SUPPORTED iff S-a and S-b PASS; PARTIAL iff exactly one; REJECTED iff neither.
+* **S**: SUPPORTED iff S-a and S-b PASS; PARTIAL iff exactly one passes; REJECTED iff neither. If S-a is NOT TESTABLE, S reads on S-b alone
+  and makes no claim about context robustness: "S-b PASS (S-a not testable)", or REJECTED when S-b fails.
 * **Guards**: (O) short-form outside DC on A4, T9 and T8b, v0.7 − v0.6 ≤ +0.02 (point) on each (T8b's truth classes from B2's alternative-prior
   labels, as v0.6); (N) A4 and T9 direction and comparison v0.7 − v0.6 lower bound > −0.05, and per v0.7 seed the T2–T4 balanced band vs
   v0.1-mix lower bound > −0.05 and severe ≤ v0.1-mix + 0.01; (R) v0.2's (C) vs v0.1-mix on T1, T3, T4, T5, T7 per v0.7 seed; (G) G2 v0.7 − v0.6
@@ -25,15 +29,17 @@ one reading.
 * **RELEASE CANDIDATE** iff S SUPPORTED and O, N, R, G, F (the user decides; a release would also raise the option cap to 26 in the
   export / serve code).
 * **Secondary** (reported, never deciding): the tone panel (DC at 4k by boilerplate tone, per arm; predicted v0.6 reassuring > neutral, v0.7
-  flat); DC vs the untrained base on every outside set, short and wrapped; M1g per-letter accuracy (Q, Y); B1 / H-set short-form readings;
-  seed spread. Also the gaps by sheet style and by source set.
+  flat) with, added by the amendment, the alarming component DC(w4k-alarming) − DC(short) per arm (over-reaction check) and reassuring −
+  neutral at 4k per arm; DC vs the untrained base on every outside set, short and wrapped; M1g per-letter accuracy (Q, Y); B1 / H-set
+  short-form readings; seed spread. Also the gaps by sheet style and by source set.
 * **Exclusions**: ``artifacts/v07/gates/overlap-v07.json`` (``scripts/v07_gates_build.py recheck-v07``, run on v0.7's training input before
   the gate is opened) lists M1g items and M2g moments that share text with v0.7's training input; they are left out of every reading
   (pre-declared by task v0.7b). The verdict refuses to read the gates without it (``--no-v07-recheck`` only for a pipeline check).
 
 **Pipeline check** (``--pipeline-check``; writes ``artifacts/scratch/v07b/pipeline/``, says it is not the verdict): the same code on existing
 files with the arms relabelled — "v0.7" = v0.6-s0 + v0.6-s1, "v0.6" = v0.4-s0 + v0.4-s1: task iface's M1 set stands in for M1g and its M2 files for
-M2g (no tone panel), v0.6's and v0.4's pods and Spark files for the standard sets. It reproduces task iface's per-model M1 readings (accuracy at
+M2g (no tone panel, so S-a is read on the three length components only and the cue component is reported as absent), v0.6's and v0.4's pods
+and Spark files for the standard sets. It reproduces task iface's per-model M1 readings (accuracy at
 N = 8 and N ≥ 17, penalty, physics-subset penalty) and M2 DC deltas and levels from ``artifacts/iface/verdict.json``, v0.6's A4 DC per model
 and arm and v0.6 − v0.4 call differences on A4, T9, T8b from ``artifacts/reports/v06/verdict.json`` — every difference is listed.
 """
@@ -71,11 +77,18 @@ RULE = {
              "short vs wrapped at 2k/4k/8k in sheet styles unseen in training, plus a tone panel (neutral / reassuring / alarming boilerplate) at 4k; "
              "M1g = an MC source used in neither training nor M1 (licence-checked) plus physics items from A4/H-set at N in {8, 21, 26}, positions "
              "spread, same item across N.",
-    "S-a": "(M2g) per arm gap_L = DC(wrapped_L) - DC(short) on the call view; PASS iff for every L, v0.7 - v0.6 dgap <= -0.05 with upper bound < 0 "
-           "AND v0.7's gap_L <= +0.03 (point).",
+    "S-a": "AMENDED (written 2026-10-15 ~11:25 KST, BEFORE any M2g or M1g prediction of any model exists; S-b, guards and everything else "
+           "unchanged): components c in {len2k, len4k, len8k} with gap_c = DC(neutral wrapped_L) - DC(short), and c = cue with gap_cue = "
+           "DC(w4k-reassuring) - DC(short). A component is ACTIVE iff v0.6's gap_c >= +0.05 (point). An active component passes iff v0.7 - v0.6 "
+           "dgap_c <= -0.05 with upper bound < 0 AND v0.7's gap_c <= +0.03 (point); an inactive component passes iff v0.7's gap_c <= +0.03 (point; "
+           "v0.7 must not create a gap). S-a PASS iff every component passes and at least one is active; S-a NOT TESTABLE iff no component is "
+           "active (then S reads on S-b alone and makes no claim about context robustness: 'S-b PASS (S-a not testable)' or REJECTED).",
+    "S-a (original, superseded)": "(M2g) per arm gap_L = DC(wrapped_L) - DC(short) on the call view; PASS iff for every L, v0.7 - v0.6 dgap <= "
+                                  "-0.05 with upper bound < 0 AND v0.7's gap_L <= +0.03 (point).",
     "S-b": "(M1g) drop = acc(N = 8) - acc(N >= 17); PASS iff v0.7's drop <= 0.05 (point) AND v0.7 - v0.6 ddrop upper bound < 0, AND on the physics "
            "subset v0.7's late-letter penalty (A-H minus Q-Z at N >= 17) - the untrained base's < +0.10.",
-    "S": "SUPPORTED iff S-a and S-b PASS; PARTIAL iff exactly one; REJECTED iff neither.",
+    "S": "SUPPORTED iff S-a PASS and S-b PASS; PARTIAL iff exactly one of them passes; REJECTED iff neither (or S-b fails while S-a is not "
+         "testable). (Amended; originally: SUPPORTED iff S-a and S-b PASS; PARTIAL iff exactly one; REJECTED iff neither.)",
     "O": "short-form outside DC on A4, T9, T8b: v0.7 - v0.6 <= +0.02 (point) on each",
     "N": "short-form direction and comparison on A4 and T9: v0.7 - v0.6 lower bound > -0.05; T2-T4 balanced band vs v0.1-mix lower bound > -0.05 "
          "and severe <= v0.1-mix + 0.01 (each seed)",
@@ -85,15 +98,17 @@ RULE = {
     "release": "RELEASE CANDIDATE iff S SUPPORTED and O, N, R, G, F (user decides; a release would also raise the option cap to 26 in the "
                "export/serve code)",
     "secondary": "the M2g tone panel (DC by boilerplate tone, v0.6 vs v0.7) [predicted: v0.6 reassuring > neutral, v0.7 flat]; DC vs untrained "
-                 "base on every outside set short and wrapped; M1g per-letter accuracy (Q, Y); B1 / H-set short-form readings; seed spread",
+                 "base on every outside set short and wrapped; M1g per-letter accuracy (Q, Y); B1 / H-set short-form readings; seed spread; added "
+                 "by the amendment: the alarming component DC(w4k-alarming) - DC(short) per arm (over-reaction check) and reassuring - neutral at "
+                 "4k per arm",
     "next": "SUPPORTED -> shape covered; next = the short-form outside 'safe' default (option B: safety-weighted objective / engine labels) or "
             "option C, plus release procedure D. S-a fails -> label-independent context did not stop the cue-driven gap -> test the cue hypothesis "
             "directly (tone ablation, sheet without boilerplate) before more data. S-b fails -> distractor expansion is not enough -> plausible "
             "multi-candidate physics questions or a code-scheme change (e.g. avoid weak letters).",
     "prior": "Controller's prior: S-b more likely than S-a.",
 }
-#: S-a, S-b, (O), (N), (G) bounds.
-SA_DGAP, SA_HIGH, SA_GAP = -0.05, 0.0, 0.03
+#: S-a, S-b, (O), (N), (G) bounds. SA_ACTIVE: a component is active iff v0.6's gap ≥ +0.05 (the amendment).
+SA_DGAP, SA_HIGH, SA_GAP, SA_ACTIVE = -0.05, 0.0, 0.03, 0.05
 SB_DROP, SB_HIGH, SB_PENALTY = 0.05, 0.0, 0.10
 O_POINT = 0.02
 N_LOW, N_SEVERE_SLACK = -0.05, 0.01
@@ -101,6 +116,11 @@ G_POINT, G_LOW = -0.02, -0.045
 SEEDS = (0, 1)
 ARMS = {"v07": ("v07s0", "v07s1"), "v06": ("v06s0", "v06s1")}
 LENGTHS = ("2k", "4k", "8k")
+#: The amended S-a's components: name → the wrapped condition read against ``short`` (``w4k`` is the neutral 4k sheet).
+SA_COMPONENTS = {"len2k": "w2k", "len4k": "w4k", "len8k": "w8k", "cue": "w4k-reassuring"}
+#: S-a outcomes and the S label when S-a is not testable and S-b passes.
+SA_PASS, SA_FAIL, SA_NOT_TESTABLE = "PASS", "FAIL", "NOT TESTABLE"
+SB_ONLY = "S-b PASS (S-a not testable)"
 TONES = {"neutral": "w4k", "reassuring": "w4k-reassuring", "alarming": "w4k-alarming"}
 CONDITIONS = ("short", "w2k", "w4k", "w8k", "w4k-reassuring", "w4k-alarming")
 O_SETS = ("A4", "T9", "T8b")
@@ -196,18 +216,39 @@ def _le(value: float | None, bound: float) -> bool:
     return value is not None and value <= bound
 
 
-def sa_checks(per_length: Mapping[str, Mapping[str, Any]] | None) -> dict[str, Any]:
-    """S-a: per length, Δgap ≤ −0.05 (point), its upper bound < 0, and v0.7's gap ≤ +0.03 (point); PASS iff every length of
-    :data:`LENGTHS` passes (a missing length or reading fails)."""
-    per_length = per_length or {}
-    out: dict[str, Any] = {}
-    for length in LENGTHS:
-        entry = per_length.get(length) or {}
-        dgap, gap = entry.get("dgap") or {}, entry.get("gap_v07") or {}
-        checks = {"dgap_le_-0.05": _le(dgap.get("value"), SA_DGAP), "dgap_high_lt_0": _lt(dgap.get("high"), SA_HIGH),
-                  "gap_v07_le_+0.03": _le(gap.get("value"), SA_GAP)}
-        out[length] = {"checks": checks, "pass": all(checks.values())}
-    return {"per_length": out, "pass": all(e["pass"] for e in out.values())}
+def sa_component(entry: Mapping[str, Any] | None) -> dict[str, Any]:
+    """One amended S-a component from its reading (``dgap``, ``gap_v07``, ``gap_v06`` — points and the Δgap interval): ACTIVE iff v0.6's gap
+    ≥ +0.05 (point); an active component passes iff Δgap ≤ −0.05 with its upper bound < 0 AND v0.7's gap ≤ +0.03 (point); an inactive one
+    passes iff v0.7's gap ≤ +0.03 (point). A component without v0.6's gap is ``missing`` and fails."""
+    entry = entry or {}
+    dgap, gap7, gap6 = entry.get("dgap") or {}, entry.get("gap_v07") or {}, entry.get("gap_v06") or {}
+    if gap6.get("value") is None:
+        return {"status": "missing", "checks": {}, "pass": False}
+    active = gap6["value"] >= SA_ACTIVE
+    checks = {"gap_v07_le_+0.03": _le(gap7.get("value"), SA_GAP)}
+    if active:
+        checks = {"dgap_le_-0.05": _le(dgap.get("value"), SA_DGAP), "dgap_high_lt_0": _lt(dgap.get("high"), SA_HIGH), **checks}
+    return {"status": "active" if active else "inactive", "gap_v06": gap6["value"], "checks": checks, "pass": all(checks.values())}
+
+
+def sa_checks(components: Mapping[str, Mapping[str, Any]] | None, *, required: Sequence[str] = tuple(SA_COMPONENTS)) -> dict[str, Any]:
+    """The amended S-a over the `required` components (:data:`SA_COMPONENTS`): PASS iff every component passes and at least one is active;
+    NOT TESTABLE iff every component is read and none is active; otherwise FAIL (a missing component fails)."""
+    components = components or {}
+    per = {name: sa_component(components.get(name)) for name in required}
+    active = [n for n, c in per.items() if c["status"] == "active"]
+    missing = [n for n, c in per.items() if c["status"] == "missing"]
+    if missing:
+        outcome = SA_FAIL
+    elif not active:
+        outcome = SA_NOT_TESTABLE
+    elif all(c["pass"] for c in per.values()):
+        outcome = SA_PASS
+    else:
+        outcome = SA_FAIL
+    inactive_failing = [n for n, c in per.items() if c["status"] == "inactive" and not c["pass"]]
+    return {"components": per, "active": active, "missing": missing, "inactive_failing": inactive_failing, "required": list(required),
+            "outcome": outcome, "pass": outcome == SA_PASS, "testable": outcome != SA_NOT_TESTABLE}
 
 
 def sb_checks(sb: Mapping[str, Any] | None) -> dict[str, Any]:
@@ -220,6 +261,10 @@ def sb_checks(sb: Mapping[str, Any] | None) -> dict[str, Any]:
 
 
 def s_outcome(sa: Mapping[str, Any], sb: Mapping[str, Any]) -> str:
+    """S as amended: SUPPORTED iff S-a PASS and S-b PASS; PARTIAL iff exactly one passes; REJECTED iff neither. If S-a is NOT TESTABLE, S reads
+    on S-b alone: "S-b PASS (S-a not testable)" or REJECTED."""
+    if sa.get("outcome") == SA_NOT_TESTABLE:
+        return SB_ONLY if sb.get("pass") else "REJECTED"
     passes = int(bool(sa.get("pass"))) + int(bool(sb.get("pass")))
     return {2: "SUPPORTED", 1: "PARTIAL", 0: "REJECTED"}[passes]
 
@@ -263,21 +308,30 @@ NEXT = {
     "S-a": "label-independent context did not stop the cue-driven gap -> test the cue hypothesis directly (tone ablation, sheet without "
            "boilerplate) before more data",
     "S-b": "distractor expansion is not enough -> plausible multi-candidate physics questions or a code-scheme change (e.g. avoid weak letters)",
+    "S-a not testable": "S-a not testable (no component active: v0.6 showed no gap of +0.05 on any sheet component) -> the rule makes no claim "
+                        "about context robustness and pre-declares no step for it",
 }
 
 
-def next_step(sa_pass: bool, sb_pass: bool) -> dict[str, Any]:
-    """The pre-declared next step: SUPPORTED's, else the step of each failing part (both when REJECTED)."""
+def next_step(sa_outcome: str | bool, sb_pass: bool) -> dict[str, Any]:
+    """The pre-declared next step: SUPPORTED's; else the step of each failing part (both when both fail). S-a NOT TESTABLE adds no S-a step
+    (no claim about context robustness); with S-b failing the S-b step applies. ``sa_outcome`` may also be a bool (True = PASS)."""
+    sa_outcome = (SA_PASS if sa_outcome else SA_FAIL) if isinstance(sa_outcome, bool) else str(sa_outcome)
+    if sa_outcome == SA_NOT_TESTABLE:
+        return {"branch": SB_ONLY if sb_pass else "S-b fails (S-a not testable)",
+                "next": [NEXT["S-a not testable"]] + ([] if sb_pass else [NEXT["S-b"]])}
+    sa_pass = sa_outcome == SA_PASS
     if sa_pass and sb_pass:
         return {"branch": "SUPPORTED", "next": [NEXT["SUPPORTED"]]}
     failing = [part for part, ok in (("S-a", sa_pass), ("S-b", sb_pass)) if not ok]
     return {"branch": " and ".join(f"{p} fails" for p in failing), "next": [NEXT[p] for p in failing]}
 
 
-def decide(readings: Mapping[str, Any]) -> dict[str, Any]:
-    """The whole rule on computed readings: ``S-a`` (per length), ``S-b``, ``O``, ``N`` (``arm`` and ``home`` per seed), ``R`` per seed
-    (v0.4's helper reads it), ``G`` and ``F``."""
-    sa, sb = sa_checks(readings.get("S-a")), sb_checks(readings.get("S-b"))
+def decide(readings: Mapping[str, Any], *, sa_required: Sequence[str] = tuple(SA_COMPONENTS)) -> dict[str, Any]:
+    """The whole rule on computed readings: ``S-a`` (per component — the amended rule), ``S-b``, ``O``, ``N`` (``arm`` and ``home`` per seed),
+    ``R`` per seed (v0.4's helper reads it), ``G`` and ``F``. `sa_required` = the S-a components read (all four; the pipeline check's stand-in
+    data has no tone panel, so it reads the three length components)."""
+    sa, sb = sa_checks(readings.get("S-a"), required=sa_required), sb_checks(readings.get("S-b"))
     outcome = s_outcome(sa, sb)
     r = {int(seed): V4().r_checks(entry) for seed, entry in (readings.get("R") or {}).items()}
     parts = {"O": o_check(readings.get("O")),
@@ -289,7 +343,7 @@ def decide(readings: Mapping[str, Any]) -> dict[str, Any]:
     failing = ([f"S {outcome}"] if outcome != "SUPPORTED" else []) + [f"{p} fails" for p, good in ok.items() if not good]
     return {"S": {"outcome": outcome, "S-a": sa, "S-b": sb}, "parts": parts, "passes": ok, "release_candidate": release,
             "release_line": "RELEASE CANDIDATE (the user decides; a release would also raise the option cap to 26 in the export / serve code)"
-            if release else "not a release candidate: " + ", ".join(failing), "next_step": next_step(bool(sa["pass"]), bool(sb["pass"]))}
+            if release else "not a release candidate: " + ", ".join(failing), "next_step": next_step(sa["outcome"], bool(sb["pass"]))}
 
 
 # --------------------------------------------------------------------------
@@ -390,12 +444,11 @@ def m2g_readings(conditions: Mapping[str, Sequence[Mapping[str, Any]]], preds: M
                 calls[(arm, cond)] = V6().arm_calls(calls[(first, cond)], calls[(second, cond)])
     out: dict[str, Any] = {"records": {cond: len(rows) for cond, rows in records.items()}, "excluded_ids": sorted(exclude)}
     lengths = [length for length in LENGTHS if f"w{length}" in records]
-    # S-a (arms)
+    # S-a (arms; the amended rule's components — a component whose condition is absent is left out)
     sa = {}
-    for length in lengths:
-        cond = f"w{length}"
-        if all((arm, c) in calls for arm in ARMS for c in (cond, "short")):
-            sa[length] = dgap_reading(calls[("v07", cond)], calls[("v07", "short")], calls[("v06", cond)], calls[("v06", "short")], n_boot=n_boot, seed=seed)
+    for name, cond in SA_COMPONENTS.items():
+        if cond in records and all((arm, c) in calls for arm in ARMS for c in (cond, "short")):
+            sa[name] = dgap_reading(calls[("v07", cond)], calls[("v07", "short")], calls[("v06", cond)], calls[("v06", "short")], n_boot=n_boot, seed=seed)
     out["S-a"] = sa
     # per model and arm: gap by length, DC levels
     models = [m for m in (*GATE_MODELS, *ARMS) if (m, "short") in calls]
@@ -431,6 +484,16 @@ def m2g_readings(conditions: Mapping[str, Sequence[Mapping[str, Any]]], preds: M
                                                                          calls[("v06", "w4k")], n_boot=n_boot, seed=seed)
                                      for t in ("reassuring", "alarming")}
     out["tone_panel"] = tone
+    # added by the amendment (secondary): the alarming component DC(w4k-alarming) − DC(short) per arm (over-reaction check) and reassuring −
+    # neutral at 4k per arm (also per model; the arms' difference v0.7 − v0.6 for each)
+    amended: dict[str, Any] = {}
+    for name, (cond, ref) in (("alarming_minus_short", ("w4k-alarming", "short")), ("reassuring_minus_neutral", ("w4k-reassuring", "w4k"))):
+        if cond in records and ref in records:
+            amended[name] = {m: gap_reading(calls[(m, cond)], calls[(m, ref)], n_boot=n_boot, seed=seed) for m in models if (m, cond) in calls and (m, ref) in calls}
+            if all((arm, c) in calls for arm in ARMS for c in (cond, ref)):
+                amended[name]["v07_minus_v06"] = dgap_reading(calls[("v07", cond)], calls[("v07", ref)], calls[("v06", cond)], calls[("v06", ref)],
+                                                              n_boot=n_boot, seed=seed)
+    out["amendment_secondary"] = amended
     # DC vs the untrained base per condition (pooled and by source set)
     vs_base: dict[str, Any] = {}
     for cond in records:
@@ -633,7 +696,7 @@ def gate_spread(m2g: Mapping[str, Any], m1g: Mapping[str, Any]) -> dict[str, Any
 
 def assemble(m2g: Mapping[str, Any], m1g: Mapping[str, Any], standard: Mapping[str, Any]) -> dict[str, Any]:
     """The rule's readings from the three parts (the input of :func:`decide`)."""
-    return {"S-a": {length: entry for length, entry in (m2g.get("S-a") or {}).items() if entry},
+    return {"S-a": {name: entry for name, entry in (m2g.get("S-a") or {}).items() if entry},
             "S-b": m1g.get("S-b"), "O": standard.get("O"), "N": standard.get("N"), "R": standard.get("R"), "G": standard.get("G"), "F": standard.get("F")}
 
 
@@ -794,16 +857,23 @@ def render(result: Mapping[str, Any]) -> str:
     lines += [f"Rule written {RULE['written']}. Applied by `scripts/verdict_v07.py` ({SCRIPT_VERSION}, git {result.get('git')}); {result['n_boot']} paired "
               f"cluster-bootstrap draws (seed {result['seed']}); single order; **seed means** (arm v0.7 = s0 + s1 vs arm v0.6 = s0 + s1).", ""]
     m2 = r["M2g"]
-    lines += ["## S-a — M2g: gap = DC(wrapped) − DC(short), v0.7 − v0.6 (arm means)", "",
-              "| length | gap v0.7 [95 %] | gap v0.6 [95 %] | Δgap [95 %] | Δgap ≤ −0.05 | upper < 0 | gap v0.7 ≤ +0.03 | pass |", "|---|---|---|---|---|---|---|---|"]
-    for length in LENGTHS:
-        e = (m2.get("S-a") or {}).get(length) or {}
-        c = (s["S-a"]["per_length"].get(length) or {})
+    sa = s["S-a"]
+    lines += ["## S-a (amended) — M2g components: gap = DC(sheet) − DC(short), v0.7 − v0.6 (arm means)", "",
+              "A component is active iff v0.6's gap ≥ +0.05; active: Δgap ≤ −0.05 with upper < 0 and v0.7's gap ≤ +0.03; inactive: v0.7's gap ≤ +0.03.", "",
+              "| component (sheet) | gap v0.6 [95 %] | status | gap v0.7 [95 %] | Δgap [95 %] | Δgap ≤ −0.05 | upper < 0 | gap v0.7 ≤ +0.03 | pass |",
+              "|---|---|---|---|---|---|---|---|---|"]
+    for name in sa["required"]:
+        e = (m2.get("S-a") or {}).get(name) or {}
+        c = sa["components"].get(name) or {}
         ch = c.get("checks") or {}
-        lines.append(f"| {length} | {_cid(e.get('gap_v07'))} | {_cid(e.get('gap_v06'))} | {_cid(e.get('dgap'))} | {ch.get('dgap_le_-0.05')} | "
-                     f"{ch.get('dgap_high_lt_0')} | {ch.get('gap_v07_le_+0.03')} | {c.get('pass')} |")
-    lines += ["", f"**S-a: {'PASS' if s['S-a']['pass'] else 'FAIL'}** (questions per length: " + ", ".join(
-        f"{L} {((m2.get('S-a') or {}).get(L) or {}).get('dgap', {}).get('n')}" for L in LENGTHS) + ")", ""]
+        lines.append(f"| {name} ({SA_COMPONENTS[name]}) | {_cid(e.get('gap_v06'))} | {c.get('status')} | {_cid(e.get('gap_v07'))} | {_cid(e.get('dgap'))} | "
+                     f"{ch.get('dgap_le_-0.05', '—')} | {ch.get('dgap_high_lt_0', '—')} | {ch.get('gap_v07_le_+0.03', '—')} | {c.get('pass')} |")
+    absent = [n for n in SA_COMPONENTS if n not in sa["required"]]
+    if sa["outcome"] == SA_NOT_TESTABLE and sa["inactive_failing"]:
+        lines += [f"Reported, not deciding: no component is active, and v0.7 created a gap (> +0.03) on {', '.join(sa['inactive_failing'])}.", ""]
+    lines += ["", f"**S-a: {sa['outcome']}** (active: {', '.join(sa['active']) or 'none'}" + (f"; missing: {', '.join(sa['missing'])}" if sa["missing"] else "")
+              + (f"; not read here: {', '.join(absent)}" if absent else "") + "; questions per component: " + ", ".join(
+        f"{n} {((m2.get('S-a') or {}).get(n) or {}).get('dgap', {}).get('n')}" for n in sa["required"]) + ")", ""]
     m1 = r["M1g"]
     sb = m1.get("S-b") or {}
     c = s["S-b"]["checks"]
@@ -853,6 +923,17 @@ def render(result: Mapping[str, Any]) -> str:
         d = (diff.get(f"{t}_minus_neutral") or {}).get("dgap")
         if d:
             lines.append(f"\n{t} − neutral, v0.7 − v0.6: {_cid(d)} (predicted: v0.6 reassuring > neutral, v0.7 flat).")
+    amended = m2.get("amendment_secondary") or {}
+    if amended:
+        lines += ["", "Added by the amendment: the alarming component DC(w4k-alarming) − DC(short) (over-reaction check) and reassuring − neutral at 4k:",
+                  "", "| model / arm | alarming − short [95 %] | reassuring − neutral [95 %] |", "|---|---|---|"]
+        names = [m for m in (*GATE_MODELS, *ARMS) if m in (amended.get("alarming_minus_short") or {}) or m in (amended.get("reassuring_minus_neutral") or {})]
+        for m in names:
+            lines.append(f"| {MODELS.get(m, m)} | {_cid((amended.get('alarming_minus_short') or {}).get(m))} | {_cid((amended.get('reassuring_minus_neutral') or {}).get(m))} |")
+        for name in ("alarming_minus_short", "reassuring_minus_neutral"):
+            d = ((amended.get(name) or {}).get("v07_minus_v06") or {}).get("dgap")
+            if d:
+                lines.append(f"\n{name.replace('_', ' ')}, v0.7 − v0.6: {_cid(d)}.")
     lines += ["", "### M2g gaps per model (DC wrapped − short) and levels", "", "| model / arm | DC short | gap 2k | gap 4k | gap 8k |", "|---|---|---|---|---|"]
     for m, gaps in (m2.get("gaps") or {}).items():
         short = ((m2.get("levels") or {}).get(m) or {}).get("short") or {}
@@ -1045,12 +1126,15 @@ def main(argv: list[str] | None = None) -> int:
     _log("standard readings")
     standard = standard_readings(sets, preds, n_boot=args.n_boot, seed=args.seed, compare_override=override)
     readings = {"M2g": m2g, "M1g": m1g, "standard": standard, "gate_spread": gate_spread(m2g, m1g)}
-    verdict = decide(assemble(m2g, m1g, standard))
+    sa_required = tuple(SA_COMPONENTS) if not pipeline else tuple(n for n in SA_COMPONENTS if n != "cue")
+    verdict = decide(assemble(m2g, m1g, standard), sa_required=sa_required)
     pipeline_note = None
     if pipeline:
         pipeline_note = "existing files with the arms relabelled (v0.7 := v0.6, v0.6 := v0.4); iface M1/M2 stand in for M1g/M2g"
         readings["reproduction"] = pipeline_reproduction(m2g, m1g, standard)
         notes.insert(0, "PIPELINE CHECK ONLY — this is not the v0.7 verdict.")
+        notes.insert(1, "PIPELINE CHECK: iface's M2 has no tone panel, so the amended S-a is read on len2k, len4k and len8k only (the cue component "
+                        "needs w4k-reassuring); the real verdict reads all four components.")
     notes += ["Seed means: an arm's item = the mean of its two seeds' item values (call distributions: each seed's listings weighted 1/L), on the "
               "items both seeds answered; arm comparisons pair the questions both arms have; Δgap reads the four sources (each arm wrapped and short) "
               "on the questions all four answered, with one cluster bootstrap.",
