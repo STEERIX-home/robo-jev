@@ -12,8 +12,10 @@ Command line (answers print as JSON)::
     python robo_jev_decide.py --model Steerix-org/robo-jev-2b-lora --request request.json --orders balanced
 
 ``request.json`` follows the OpenRouter Decisions API: ``{"state": "...", "questions": {"name": {"type": "noul" | "choice" | "score",
-"instructions": "...", "criteria": ...}}}`` — choice criteria map option keys to descriptions (2–8 options); score criteria is a list
-of strings saying what 0 and 1 mean; noul (yes/no) has no criteria. A JSONL file of such requests (``--requests``) prints one line each.
+"instructions": "...", "criteria": ...}}}`` — choice criteria map option keys to descriptions (2–26 options, shown as the letters A–Z);
+score criteria is a list of strings saying what 0 and 1 mean; noul (yes/no) has no criteria. A JSONL file of such requests
+(``--requests``) prints one line each. Limits (``LIMITS``): state ≤ 16,000 characters, 1–12 questions, 2–26 options per choice question; a
+request outside them is refused whole (``ValueError``).
 
 Python::
 
@@ -30,7 +32,8 @@ bias, n× the cost. The order depends on ``key`` (default: the first 16 hex digi
 
 Speed and exactness: the scored runs used the ``flash-linear-attention`` kernels for Qwen3.5's linear-attention layers
 (``pip install flash-linear-attention``); without them ``transformers`` falls back to a slower PyTorch path whose results can differ
-in the last bits. Long states: keep the state under 16,000 characters and 1–12 questions per request, as the Decisions API does.
+in the last bits. Long states cost more time; the limits above follow the Decisions API, except that a choice question may have up to 26
+options (one answer letter each).
 """
 
 from __future__ import annotations
@@ -44,7 +47,7 @@ import re
 import sys
 from typing import Any
 
-__all__ = ["RoboJevRunner", "build_prompts", "default_key", "load"]
+__all__ = ["LIMITS", "RoboJevRunner", "build_prompts", "default_key", "load"]
 
 PROMPT_VERSION = "v0c-p3"
 SYSTEM_TEXT = (
@@ -57,6 +60,12 @@ ANSWER_CUE = "Answer:"
 SCORE_ANCHORS = tuple(round(i / 10, 1) for i in range(11))
 NOUL_LINES = (("yes", "Yes"), ("no", "No"))
 CODES = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+MAX_STATE_CHARS = 16_000
+MAX_QUESTIONS = 12
+#: Choice options per question: at least 2, at most one per answer letter (A–Z).
+MIN_OPTIONS, MAX_OPTIONS = 2, len(CODES)
+#: The request limits (module docstring) — a request outside them is refused whole.
+LIMITS = {"state_chars": MAX_STATE_CHARS, "questions": (1, MAX_QUESTIONS), "choice_options": (MIN_OPTIONS, MAX_OPTIONS)}
 ORDERS = ("single", "balanced")
 DEFAULT_SEED = 1
 _NAME = re.compile(r"^[A-Za-z0-9_]{1,40}$")
@@ -154,10 +163,10 @@ def _verify_codes(tokenizer: Any, count: int) -> tuple[list[str], list[int]]:
 def _check_request(state: Any, questions: Any) -> None:
     if not isinstance(state, str) or not state.strip():
         raise ValueError("state must be a non-empty string")
-    if len(state) > 16_000:
-        raise ValueError(f"state has {len(state)} characters (max 16,000)")
-    if not isinstance(questions, dict) or not 1 <= len(questions) <= 12:
-        raise ValueError("questions must map 1..12 names to questions")
+    if len(state) > MAX_STATE_CHARS:
+        raise ValueError(f"state has {len(state)} characters (max {MAX_STATE_CHARS:,})")
+    if not isinstance(questions, dict) or not 1 <= len(questions) <= MAX_QUESTIONS:
+        raise ValueError(f"questions must map 1..{MAX_QUESTIONS} names to questions")
     for name, question in questions.items():
         if not _NAME.match(str(name)):
             raise ValueError(f"question name {name!r} must match {_NAME.pattern}")
@@ -167,8 +176,10 @@ def _check_request(state: Any, questions: Any) -> None:
             raise ValueError(f"question {name!r}: instructions must be a non-empty string")
         if question["type"] == "choice":
             criteria = question.get("criteria")
-            if not (isinstance(criteria, dict) and 2 <= len(criteria) <= 8):
-                raise ValueError(f"question {name!r}: choice criteria must map 2..8 option keys to descriptions")
+            if not (isinstance(criteria, dict) and MIN_OPTIONS <= len(criteria) <= MAX_OPTIONS):
+                count = len(criteria) if isinstance(criteria, dict) else type(criteria).__name__
+                raise ValueError(f"question {name!r}: choice criteria must map {MIN_OPTIONS}..{MAX_OPTIONS} option keys to descriptions "
+                                 f"(got {count})")
             bad = [key for key in criteria if not _NAME.match(str(key))]
             if bad:
                 raise ValueError(f"question {name!r}: option keys {bad} must match {_NAME.pattern}")

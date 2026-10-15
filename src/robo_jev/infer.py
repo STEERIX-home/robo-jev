@@ -13,6 +13,9 @@ module only loads the published weights and turns the readout into answers.
 * :meth:`RoboJev.decide` — ``(state, questions)`` in the OpenRouter Decisions API shape → ``{name: answer}``:
   choice ``{"type": "choice", "choice", "probabilities"}``, noul ``{"type": "noul", "noul": p}``, score
   ``{"type": "score", "score": value in [0, 1], "probabilities": {anchor: p}}`` (anchors ``"0.0"`` … ``"1.0"``).
+* **Limits** (the Hub runner ``robo_jev_decide.py`` has the same): state ≤ 16,000 characters, 1–12 questions, 2–26 options per choice
+  question (the answer letters A–Z). Since the v0.7 release (Task rel07) a served request is validated under the many-option opt-in of
+  :func:`robo_jev.decisions.records.option_range_for` — the records' own default stays 2–8 unless a record opts in.
 * **Orders.** ``orders="single"`` (default — the deployed condition, one forward pass per question) shows each question's options in
   one seeded order. ``orders="balanced"`` averages over the counterbalanced listings (every choice option in every position once; yes/no
   and score scales both ways) — less position bias, n× the cost. The order is seeded by ``key`` (default: a hash of the state text, so
@@ -29,9 +32,10 @@ from typing import Any
 
 from robo_jev.decisions.metrics import average_answers
 from robo_jev.decisions.prompt import PROMPT_VERSION, answer_from_codes, build_prompts, check_displayed_lines, fixed_text_digest
-from robo_jev.decisions.records import validate_record
+from robo_jev.decisions.records import OPTION_RANGE_MARK, SCHEMA, WIDE_OPTION_RANGE, validate_record
 
 __all__ = [
+    "CHOICE_OPTIONS",
     "DEFAULT_SEED",
     "FORMAT",
     "METADATA_FILE",
@@ -52,6 +56,8 @@ ORDERS = {"single": "seeded", "balanced": "counterbalanced"}
 DEFAULT_SEED = 1
 #: The export's metadata file (prompt, answer codes, tokenizer hash, training summary).
 METADATA_FILE = "robo_jev.json"
+#: Choice options a served request may have (module docstring) — the records' many-option opt-in range.
+CHOICE_OPTIONS = WIDE_OPTION_RANGE
 
 
 def default_key(state: str) -> str:
@@ -182,7 +188,8 @@ class RoboJev:
         if orders not in ORDERS:
             raise ValueError(f"orders: one of {sorted(ORDERS)} (got {orders!r})")
         request = {"state": state, "questions": questions}
-        problems = validate_record({"schema": "simgen-request/0", "id": "request", "request": request}, require_labels=False)
+        served = {"schema": SCHEMA, "id": "request", "request": request, "meta": {"option_range": dict(OPTION_RANGE_MARK)}}  # 2..26 options
+        problems = validate_record(served, require_labels=False)
         if problems:
             raise ValueError(f"not a valid decision request: {problems[:5]}")
         prompts = build_prompts(

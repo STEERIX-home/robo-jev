@@ -2,7 +2,9 @@
 
 * :func:`scatter_svg` — 그림 1: 모델 하나 = 점 하나. x = 처음 보는 물리(T2+T3+T4)의 결과 예측 skill(1 − Brier / Brier(언제나 0.5),
   noul·score 질문), y = 일반 읽기 G2 정확도. 우리 모델은 파랑(slot 1), OpenRouter 모델은 주황(slot 2), 학습 없는 2B는 속이 빈
-  회색 고리(기준점). 학습 없는 2B → v0 → v0.1의 이동을 화살표로 잇는다. 점마다 이름표(겹치면 밀고 끌줄을 단다).
+  회색 고리(기준점). 학습 없는 2B → v0 → v0.1 → v0.7의 이동을 화살표로 잇는다. 점마다 이름표(겹치면 밀고 끌줄을 단다).
+* :func:`hero_svg` — the README/model-card hero: one bar per model (physics skill T2–T4); our released version solid blue, the previous
+  release an outlined blue bar (:data:`RELEASE_TAG`, :data:`PREVIOUS_TAG` — Task rel07: v0.7 and v0.1), other versions of ours left out.
 * :func:`bars_svg` — 그림 2: 행 = 모델, 열 = 세트(T1~T7 예/아니오 Brier — 낮을수록 좋다, G1·G2 정확도 — 높을수록 좋다). 열마다
   작은 막대(0에서 시작), 열 안의 가장 좋은 값에만 수를 단다.
 * 색 — 데이터 시각화 기술(dataviz)의 기준 팔레트: 밝은 판·어두운 판을 따로 고른 값(slot 1·2, 둘 다 all-pairs 검사 통과), 글자는
@@ -16,7 +18,8 @@ import math
 from typing import Any, Iterable
 from xml.sax.saxutils import escape
 
-__all__ = ["DISPLAY_NAMES", "THEMES", "bars_svg", "figure_rows", "hero_rows", "hero_svg", "readme_snippet", "scatter_points", "scatter_svg"]
+__all__ = ["DISPLAY_NAMES", "PREVIOUS_TAG", "RELEASE_TAG", "THEMES", "bars_svg", "figure_rows", "hero_rows", "hero_svg", "readme_snippet",
+           "scatter_points", "scatter_svg"]
 
 FONT = 'system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif'
 THEMES: dict[str, dict[str, str]] = {
@@ -195,7 +198,8 @@ def scatter_svg(results: dict[str, Any], *, theme_name: str = "light", width: in
     marker = f"arrow-{theme_name}"
     out.append(f'<defs><marker id="{marker}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">'
                f'<path d="M0,0 L10,5 L0,10 z" fill="{theme["muted"]}"/></marker></defs>')
-    for a, b in (("qwen3.5-2b", "robojev-v0"), ("robojev-v0", "robojev-v0.1-main"), ("robojev-v0", "robojev-v0.1-mix")):
+    for a, b in (("qwen3.5-2b", "robojev-v0"), ("robojev-v0", "robojev-v0.1-main"), ("robojev-v0", "robojev-v0.1-mix"),
+                 ("robojev-v0.1-mix", "robojev-v0.7")):
         if a in by_tag and b in by_tag:
             ax, ay, bx, by = sx(by_tag[a]["x"]), sy(by_tag[a]["y"]), sx(by_tag[b]["x"]), sy(by_tag[b]["y"])
             length = math.hypot(bx - ax, by - ay)
@@ -384,23 +388,32 @@ DISPLAY_NAMES = {
 }
 
 
-def hero_rows(results: dict[str, Any], *, ours_tag: str = "robojev-v0.1-mix", ours_label: str = "robo-jev v0.1 · 2B (ours)",
-              base_label: str = "Qwen3.5-2B untrained (our base)") -> list[dict[str, Any]]:
-    """One row per model: our chosen version, every API model and the untrained base, sorted by physics skill on T2–T4."""
+#: The released model the hero shows, and the previous release kept beside it (outlined bar) — Task rel07: v0.7, previously v0.1.
+RELEASE_TAG, RELEASE_LABEL = "robojev-v0.7", "robo-jev v0.7 · 2B (ours)"
+PREVIOUS_TAG, PREVIOUS_LABEL = "robojev-v0.1-mix", "robo-jev v0.1 · 2B (previous release)"
+
+
+def hero_rows(results: dict[str, Any], *, ours_tag: str = RELEASE_TAG, ours_label: str = RELEASE_LABEL, previous_tag: str | None = PREVIOUS_TAG,
+              previous_label: str = PREVIOUS_LABEL, base_label: str = "Qwen3.5-2B untrained (our base)") -> list[dict[str, Any]]:
+    """One row per model: our released version (role ``ours``), the previous release (role ``previous``; none when `previous_tag` is None),
+    every API model and the untrained base, sorted by physics skill on T2–T4. Other versions of ours are left out."""
     rows = []
     for model in results["models"]:
         role = model.get("role", "api")
-        if role == "ours" and model.get("tag") != ours_tag:
-            continue
-        unseen = (model.get("pooled") or {}).get("unseen") or {}
-        if unseen.get("skill") is None:
-            continue
         if role == "ours":
-            label = ours_label
+            if model.get("tag") == ours_tag:
+                label = ours_label
+            elif previous_tag is not None and model.get("tag") == previous_tag:
+                role, label = "previous", previous_label
+            else:
+                continue
         elif role == "baseline":
             label = base_label
         else:
             label = DISPLAY_NAMES.get(str(model.get("model_id") or model["label"]), str(model["label"]))
+        unseen = (model.get("pooled") or {}).get("unseen") or {}
+        if unseen.get("skill") is None:
+            continue
         rows.append({"label": label, "role": role, "skill": float(unseen["skill"]), "coverage": unseen.get("coverage")})
     rows.sort(key=lambda r: -r["skill"])
     return rows
@@ -436,13 +449,19 @@ def hero_svg(results: dict[str, Any], *, theme_name: str = "light", width: int =
     out.append(f'<text x="{sx(0) + 5:.1f}" y="{top + 2}" font-size="11" fill="{theme["muted"]}">always 50 %</text>')
     for index, row in enumerate(rows):
         y = head + index * row_h
-        color = theme["mark"] if row["role"] == "baseline" else theme[row["role"]]
         x0, x1 = sx(0), sx(row["skill"])
         bar_x, bar_w = min(x0, x1), max(abs(x1 - x0), 1.5)
         weight = ' font-weight="700"' if row["role"] == "ours" else ""
         ink = theme["ink"] if row["role"] == "ours" else theme["ink2"]
+        if row["role"] == "previous":  # the previous release: our hue as an outline, so the released bar stays the one solid blue
+            paint = f'fill="{theme["surface"]}" stroke="{theme["ours"]}" stroke-width="1.5"'
+            bar_x, bar_w = bar_x + 0.75, max(bar_w - 1.5, 1.5)
+            box_y, box_h = y + 2.75, row_h - 13.5
+        else:
+            paint = f'fill="{theme["mark"] if row["role"] == "baseline" else theme[row["role"]]}"'
+            box_y, box_h = y + 2, row_h - 12
         out.append(f'<text x="{left - 12}" y="{y + 15}" text-anchor="end" font-size="13"{weight} fill="{ink}">{_t(row["label"])}</text>')
-        out.append(f'<rect x="{bar_x:.1f}" y="{y + 2}" width="{bar_w:.1f}" height="{row_h - 12}" rx="4" fill="{color}">'
+        out.append(f'<rect x="{bar_x:.1f}" y="{box_y}" width="{bar_w:.1f}" height="{box_h}" rx="4" {paint}>'
                    f'<title>{_t(row["label"])}: {row["skill"]:.3f}</title></rect>')
         value = f"{row['skill']:.2f}".replace("-", "−")
         if row.get("coverage") is not None and row["coverage"] < 0.995:
@@ -451,8 +470,8 @@ def hero_svg(results: dict[str, Any], *, theme_name: str = "light", width: int =
             out.append(f'<text x="{x1 + 6:.1f}" y="{y + 15}" font-size="12.5"{weight} fill="{ink}">{value}</text>')
         else:
             out.append(f'<text x="{x0 + 6:.1f}" y="{y + 15}" font-size="12.5"{weight} fill="{ink}">{value}</text>')
-    out.append(f'<text x="24" y="{height - 26}" font-size="11" fill="{theme["muted"]}">bench-v0 · 2026-10-12 · outcome probabilities from our physics simulator '
-               f'(home ground) · OpenRouter models via the Decisions API, one call per request</text>')
+    out.append(f'<text x="24" y="{height - 26}" font-size="11" fill="{theme["muted"]}">bench-v0 · labels from our physics simulator '
+               f'(home ground) · OpenRouter models via the Decisions API (2026-10-12), one call per request</text>')
     out.append(f'<text x="24" y="{height - 11}" font-size="11" fill="{theme["muted"]}">skill = 1 − Brier / Brier(always 0.5) over the yes/no and score questions '
                f'of T2–T4 · details: docs/results.md</text>')
     if results.get("fake"):

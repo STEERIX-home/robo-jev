@@ -1,9 +1,10 @@
 """The many-option opt-in (Task v0.7a) — `robo_jev.decisions.records.option_range_for` and its readers.
 
-The choice range stays 2–8 for every record and every request (the serving path included); only a record whose ``meta.option_range`` is
-exactly :data:`OPTION_RANGE_MARK` may carry 2–26 options; any other value under that key is a problem, never a silent default. The trainer
-reads the opt-in from the data (its loader validates every record), and the prompt, the target and the loss handle 26 codes (A–Z, each a
-single token at the answer boundary).
+The choice range stays 2–8 for every record; only a record whose ``meta.option_range`` is exactly :data:`OPTION_RANGE_MARK` may carry
+2–26 options; any other value under that key is a problem, never a silent default. The trainer reads the opt-in from the data (its loader
+validates every record), and the prompt, the target and the loss handle 26 codes (A–Z, each a single token at the answer boundary). The
+serving path (:mod:`robo_jev.infer` and the Hub runner) validates a served request under the opt-in since the v0.7 release (Task rel07;
+tests/test_infer.py).
 """
 
 from __future__ import annotations
@@ -75,8 +76,9 @@ def test_any_other_value_under_the_key_is_a_problem_and_keeps_the_default(mark):
     assert option_range_for(_record(3, mark=mark))[0] == OPTION_RANGE and option_range_for(_record(3, mark=mark))[1]
 
 
-def test_a_request_without_meta_the_serving_path_always_gets_two_to_eight():
-    """robo_jev.infer validates a bare request ({schema, id, request}, no labels, no meta) — the opt-in cannot reach it."""
+def test_a_bare_request_without_meta_gets_two_to_eight():
+    """A bare request ({schema, id, request}, no labels, no meta) keeps the records' default 2–8 — the opt-in is the record's own. (The
+    serving path, robo_jev.infer, adds the opt-in to a served request since the v0.7 release: tests/test_infer.py.)"""
     record = _record(12, mark=dict(OPTION_RANGE_MARK))
     bare = {"schema": "simgen-request/0", "id": "request", "request": record["request"]}
     assert validate_record(bare, require_labels=False) == ["question 'pick': choice needs 2..8 options (has 12)"]
