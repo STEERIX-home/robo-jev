@@ -35,6 +35,18 @@ and M2g moments to leave out of the readings, the share of M2g filler shingles f
 
 **check** — the Spark chain's gate: the sealed files are unchanged (sha256 as recorded) and ``overlap-v07.json`` was computed on the input
 the given v0.7 runs trained on (their ``metrics.json``).
+
+**build-facts** (task v0.7f) — gate M2g-F (:mod:`robo_jev.bench.gates_v07f`) from the sealed ``m2g/M2g-short.jsonl`` (read only) into
+``m2gf/``: every record checked (verbatim, ids, questions and labels, ``validate_record``), the pair's added text byte-identical, templates and
+status lines balanced per set × scene, the seeded option order of every question equal to M2g-short's (the diagnosis prompt path, CPU),
+prompt tokens F vs short, and every fixed template / status piece of 2+ words and every 8-word shingle touching added text against every
+training input (``TRAINING_INPUTS`` and ``train-v07.jsonl``; counts only — no training text is kept, printed or written; the page cache of each
+input is dropped as it is read). No existing gate file is written (sha256 of each recorded before and after).
+
+**check-facts** (task v0.7f) — the M2g-F chain's gate: the sealed facts file has the sha256 its manifest recorded and was built from the sealed
+M2g-short; every record passes its checks again (pure, no tokenizer: the seeded option order through the prompt code's order function); the
+overlap scan of the manifest found nothing and read the ``train-v07.jsonl`` on disk and the input the given v0.7 runs trained on. ``check``
+is unchanged.
 """
 
 from __future__ import annotations
@@ -43,6 +55,7 @@ import argparse
 import datetime as dt
 import hashlib
 import json
+import os
 import stat
 import subprocess
 import sys
@@ -709,6 +722,481 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 2 if problems else 0
 
 
+# --------------------------------------------------------------------------
+# Task v0.7f — M2g-F: the M2g moments with the facts moved into each question's instructions
+# --------------------------------------------------------------------------
+
+FACTS_SCRIPT_VERSION = "v07f-facts-build-1"
+#: The sealed registry name of the facts file (:data:`robo_jev.data.sealed.SEALED_RECORD_FILES`).
+FACTS_REGISTRY = "v07-m2g-facts"
+#: The M2g-F scoring (``artifacts/scratch/v07f/score_facts.sh``): M2g's command — the standard diagnosis path with seeded orders, shuffle
+#: seed 1, chat, direct, v0c-p3, batch 1 — for these five models.
+FACTS_SCORING = {"script": "scripts/diagnose_decisions.py", "orders": "seeded", "shuffle_seed": 1, "format": "chat", "mode": "direct",
+                 "prompt_version": "v0c-p3", "batch": 1}
+FACTS_MODELS = ("v07s0-2b", "v07s1-2b", "v06s0-2b", "v06s1-2b", "base-2b")
+#: A model load on the Spark (task v0.7b's smoke test: 21 s).
+LOAD_SECONDS = 21.0
+#: The prompt fields that fix what the model is shown as options and in which order (the order proof compares them).
+ORDER_FIELDS = ("question", "type", "listing", "n_listings", "options", "option_lines", "values", "codes", "code_ids")
+#: Common phrases the scan must find in the training inputs (a sensitivity control; reported, never deciding).
+CONTROL_PIECES = ("of the", "the robot")
+
+
+def _drop_cache(handle: Any) -> None:
+    """Drop the page cache of an open file (the Spark chain's next GPU unit needs free unified memory)."""
+    try:
+        os.posix_fadvise(handle.fileno(), 0, 0, os.POSIX_FADV_DONTNEED)
+    except (AttributeError, OSError):
+        pass
+
+
+def sha256_dropped(path: Path, *, drop_every: int = 256 << 20) -> str:
+    """sha256 of a file, dropping its page cache as it is read."""
+    digest = hashlib.sha256()
+    with Path(path).open("rb") as handle:
+        since = 0
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+            since += len(block)
+            if since >= drop_every:
+                _drop_cache(handle)
+                since = 0
+        _drop_cache(handle)
+    return digest.hexdigest()
+
+
+def facts_scan(files: list[Path], pieces: list[str], grams: set[str], *, chunk_chars: int = 48_000_000, drop_every: int = 256 << 20) -> dict[str, Any]:
+    """The training inputs against M2g-F's added text — counts only (no training text is kept beyond the current chunk, printed or written).
+
+    * `pieces`: every training record's state and question instructions (each distinct text once, whitespace runs collapsed to one space)
+      — per piece the number of occurrences, exact (case-sensitive, with its punctuation) and case-folded.
+    * `grams`: the 8-word shingles (:func:`robo_jev.bench.iface.shingles`) of every distinct training text — state, instructions, options
+      (:func:`_texts`, as task v0.7b's scan) — per gram the number of texts holding it.
+
+    Each file is read once (its sha256 computed on the way) and its page cache dropped as it is read."""
+    from robo_jev.bench.iface import shingles
+
+    exact = {p: 0 for p in pieces}
+    folded = {p: 0 for p in pieces}
+    lowered = [(p, p.lower()) for p in pieces]
+    gram_hits: Counter = Counter()
+    seen_pieces: set[int] = set()
+    seen_grams: set[int] = set()
+    buffer: list[str] = []
+    size = 0
+
+    def flush() -> None:
+        nonlocal buffer, size
+        if buffer:
+            chunk = "\x00".join(buffer)
+            low = chunk.lower()
+            for piece, folded_piece in lowered:
+                exact[piece] += chunk.count(piece)
+                folded[piece] += low.count(folded_piece)
+        buffer, size = [], 0
+
+    per_file: dict[str, Any] = {}
+    for path in files:
+        started, records = time.perf_counter(), 0
+        digest = hashlib.sha256()
+        with Path(path).open("rb") as handle:
+            since = 0
+            for raw in handle:
+                digest.update(raw)
+                since += len(raw)
+                if since >= drop_every:
+                    _drop_cache(handle)
+                    since = 0
+                if not raw.strip():
+                    continue
+                record = json.loads(raw)
+                records += 1
+                request = record.get("request") or {}
+                own = [str(request.get("state") or "")] + [str((q or {}).get("instructions") or "") for q in (request.get("questions") or {}).values()]
+                for text in own:
+                    h = hash(text)
+                    if h in seen_pieces:
+                        continue
+                    seen_pieces.add(h)
+                    flat = " ".join(text.split())
+                    buffer.append(flat)
+                    size += len(flat)
+                    if size >= chunk_chars:
+                        flush()
+                if grams:
+                    for text in _texts(record):
+                        h = hash(text)
+                        if h in seen_grams:
+                            continue
+                        seen_grams.add(h)
+                        for gram in grams.intersection(shingles(text)):
+                            gram_hits[gram] += 1
+            _drop_cache(handle)
+        flush()
+        try:
+            rel = str(Path(path).relative_to(ARTIFACTS))
+        except ValueError:
+            rel = str(path)
+        per_file[rel] = {"records": records, "sha256": digest.hexdigest(), "seconds": round(time.perf_counter() - started, 1)}
+        _log(f"facts scan {Path(path).name}: {records} records ({per_file[rel]['seconds']} s); pieces with an exact hit so far "
+             f"{sum(1 for v in exact.values() if v)}, shingle hits so far {sum(gram_hits.values())}")
+    return {"files": per_file, "pieces": {p: {"exact": exact[p], "folded": folded[p]} for p in pieces}, "grams": len(grams),
+            "gram_hits": dict(gram_hits), "distinct_texts": {"pieces": len(seen_pieces), "shingles": len(seen_grams)}}
+
+
+def _gate_file_hashes(out: Path) -> dict[str, str]:
+    """sha256 of every existing gate file under `out` except ``m2gf/`` (recorded before and after the facts build)."""
+    found = {}
+    for path in sorted(Path(out).rglob("*")):
+        rel = path.relative_to(out)
+        if path.is_file() and rel.parts[0] != "m2gf":
+            found[str(rel)] = sha256_dropped(path)
+    return found
+
+
+def _stats(values: list[int]) -> dict[str, Any]:
+    values = sorted(values)
+    return {"n": len(values), "min": values[0], "median": values[len(values) // 2], "mean": round(sum(values) / len(values), 1), "max": values[-1]} if values else {"n": 0}
+
+
+def build_facts(short: list[dict[str, Any]], *, seed: int) -> dict[str, Any]:
+    """M2g-F from M2g-short (module docstring of :mod:`robo_jev.bench.gates_v07f`): the records, every check, the assignment and its balance,
+    the truth-class mix per template and status line, the lengths. Refuses (SystemExit) on any problem."""
+    from robo_jev.bench import gates_v07f as F
+    from robo_jev.bench.gates_v07 import sentences
+    from robo_jev.decisions.records import pair_groups, shuffle_key
+
+    found = F.text_problems()
+    if found:
+        raise SystemExit(f"the gate's own text fails its checks: {found}")
+    groups = pair_groups(short)
+    if any(len(g) != 2 for g in groups) or len({str(r["id"]) for r in short}) != len(short):
+        raise SystemExit("M2g-short: every record must be one of a whole one-fact pair, ids unique")
+    strata: dict[str, list[str]] = defaultdict(list)
+    for group in groups:
+        key = shuffle_key(group[0])
+        if shuffle_key(group[1]) != key:
+            raise SystemExit(f"{group[0]['id']}: the pair does not share its order key")
+        meta = group[0].get("meta") or {}
+        strata[f"{(meta.get('source') or {}).get('set')}:{meta.get('scene')}"].append(key)
+    assignment = F.assign(strata, seed=seed)
+    problems: dict[str, list[str]] = {}
+    records = []
+    for record in short:
+        chosen = assignment[shuffle_key(record)]
+        f = F.facts_record(record, template=chosen["template"], status=chosen["status"])
+        bad = F.facts_problems(f, record)
+        if bad:
+            problems[str(record["id"])] = bad
+        records.append(f)
+    by_id = {str(r["id"]): r for r in records}
+    identical = 0
+    for a, b in groups:
+        fa, fb = by_id[str(a["id"])], by_id[str(b["id"])]
+        if {k: fa["meta"]["gate"][k] for k in F.ADDED_GATE_KEYS} != {k: fb["meta"]["gate"][k] for k in F.ADDED_GATE_KEYS}:
+            problems.setdefault(f"pair {shuffle_key(a)}", []).append("the pair's template or status line differ")
+        elif F.added_text(fa, a) != F.added_text(fb, b):
+            problems.setdefault(f"pair {shuffle_key(a)}", []).append("the pair's added text differs")
+        else:
+            identical += 1
+    balance = {}
+    for stratum, keys in sorted(strata.items()):
+        templates = Counter(assignment[k]["template"] for k in keys)
+        status = Counter(assignment[k]["status"] for k in keys)
+        cells = Counter(f"{assignment[k]['template']}|{assignment[k]['status']}" for k in keys)
+        balance[stratum] = {"pairs": len(keys), "templates": {t: templates.get(t, 0) for t in F.TEMPLATES}, "status": {s: status.get(s, 0) for s in F.STATUS_FORMS},
+                            "cells": {f"{t}|{s}": cells.get(f"{t}|{s}", 0) for t in F.TEMPLATES for s in F.STATUS_FORMS}}
+        for name in ("templates", "status", "cells"):
+            counts = balance[stratum][name]
+            if max(counts.values()) - min(counts.values()) > 1:
+                problems.setdefault(f"stratum {stratum}", []).append(f"{name} not balanced: {counts}")
+    if problems:
+        raise SystemExit(f"M2g-F: {len(problems)} records / pairs / strata fail their checks; first {list(problems.items())[:3]}")
+    truth: dict[str, Counter] = defaultdict(Counter)
+    for r in records:
+        classes = _truth_classes(r)
+        truth[f"template:{r['meta']['gate']['template']}"].update(classes)
+        truth[f"status:{r['meta']['gate']['status']}"].update(classes)
+        truth["all"].update(classes)
+    lengths = {"state_chars": _stats([len(r["request"]["state"]) for r in records]),
+               "facts_chars_short_state": _stats([len(" ".join(sentences(r["request"]["state"]))) for r in short]),
+               "instructions_chars": {t: _stats([len(q["instructions"]) for r in records if r["meta"]["gate"]["template"] == t
+                                                for q in r["request"]["questions"].values()]) for t in F.TEMPLATES},
+               "short_instructions_chars": _stats([len(q["instructions"]) for r in short for q in r["request"]["questions"].values()])}
+    return {"records": records, "assignment": assignment, "balance": balance, "pairs_identical": identical, "pairs": len(groups),
+            "crossing": {t: dict(Counter(r["meta"]["gate"]["status"] for r in records if r["meta"]["gate"]["template"] == t)) for t in F.TEMPLATES},
+            "truth_classes": {k: dict(v) for k, v in sorted(truth.items())},
+            "counts": {"records": len(records), "questions": sum(len(r["request"]["questions"]) for r in records),
+                       "templates": dict(Counter(r["meta"]["gate"]["template"] for r in records)),
+                       "status": dict(Counter(r["meta"]["gate"]["status"] for r in records))},
+            "lengths": lengths}
+
+
+def order_proof(short: list[dict[str, Any]], facts: list[dict[str, Any]], tokenizer: Any) -> dict[str, Any]:
+    """The seeded option order through the diagnosis prompt path (:func:`robo_jev.decisions.prompt.record_prompts` with M2g's settings —
+    ``scripts/diagnose_decisions.py --orders seeded``, shuffle seed 1, chat, direct, v0c-p3): every prompt of every M2g-F record shows the
+    same options, lines, values and codes in the same order as M2g-short's; and what the model reads — the question line holds every
+    original sentence in order and the instruction, the situation holds none of them. Also the prompt tokens of both forms."""
+    from robo_jev.bench.gates_v07 import sentences
+    from robo_jev.decisions.prompt import PROMPT_VERSION, record_prompts
+
+    by_id = {str(r["id"]): r for r in short}
+    mismatched, shown, prompts = [], [], 0
+    tokens: dict[str, list[int]] = {"short": [], "facts": []}
+    template_tokens: dict[str, list[int]] = defaultdict(list)
+    for f in facts:
+        s = by_id[str(f["id"])]
+        settings = {"seed": FACTS_SCORING["shuffle_seed"], "fmt": FACTS_SCORING["format"], "mode": FACTS_SCORING["mode"],
+                    "orders": FACTS_SCORING["orders"], "version": PROMPT_VERSION}
+        ps, pf = record_prompts(s, tokenizer, **settings), record_prompts(f, tokenizer, **settings)
+        if [[json.dumps(p[k]) for k in ORDER_FIELDS] for p in ps] != [[json.dumps(p[k]) for k in ORDER_FIELDS] for p in pf]:
+            mismatched.append(str(f["id"]))
+        prompts += len(pf)
+        tokens["short"] += [len(p["tokens"]) for p in ps]
+        tokens["facts"] += [len(p["tokens"]) for p in pf]
+        template_tokens[f["meta"]["gate"]["template"]] += [len(p["tokens"]) for p in pf]
+        units = sentences(s["request"]["state"])
+        for p in pf:
+            situation, question = p["text"][: p["prefix_chars"]], p["text"][p["prefix_chars"]:]
+            position = 0
+            for unit in units:
+                hit = question.find(unit, position)
+                if hit < 0:
+                    shown.append(f"{f['id']} {p['question']}: a sentence is not shown in order")
+                    break
+                position = hit + len(unit)
+            if f["request"]["questions"][p["question"]]["instructions"] not in question:
+                shown.append(f"{f['id']} {p['question']}: the instructions are not shown as stored")
+            if any(len(u.split()) >= 3 and u in situation for u in units):
+                shown.append(f"{f['id']} {p['question']}: an original sentence is shown in the situation")
+    return {"records": len(facts), "prompts": prompts, "order_mismatches": mismatched, "shown_problems": shown,
+            "tokens": {k: _stats(v) | {"total": sum(v)} for k, v in tokens.items()},
+            "tokens_by_template": {k: _stats(v) | {"total": sum(v)} for k, v in sorted(template_tokens.items())}}
+
+
+def facts_gpu_estimate(total_tokens: int) -> dict[str, Any]:
+    """Expected Spark time of M2g-F: task v0.7b's measured seconds per prompt token (LoRA 0.20 ms, base 0.12 ms) plus one model load per
+    unit; the chain scores four LoRA models and the base."""
+    lora = total_tokens * SECONDS_PER_TOKEN["lora"] + LOAD_SECONDS
+    base = total_tokens * SECONDS_PER_TOKEN["base"] + LOAD_SECONDS
+    return {"seconds_per_token": SECONDS_PER_TOKEN, "load_seconds": LOAD_SECONDS, "prompt_tokens_per_model": total_tokens,
+            "per_lora_model_s": round(lora), "base_s": round(base), "five_models_s": round(4 * lora + base),
+            "five_models_min": round((4 * lora + base) / 60, 1)}
+
+
+def _short_source(out: Path) -> tuple[Path, str]:
+    """The sealed M2g-short file and its sha256 as task v0.7b's manifest recorded it."""
+    m2 = json.loads((out / "m2g" / "m2g.manifest.json").read_text(encoding="utf-8"))
+    return REPO / m2["files"]["short"]["path"], m2["files"]["short"]["sha256"]
+
+
+def cmd_build_facts(args: argparse.Namespace) -> int:
+    """Build gate M2g-F into ``<out-dir>/m2gf/`` (module docstring)."""
+    from robo_jev.bench import gates_v07f as F
+    from robo_jev.decisions.records import read_records
+
+    started = time.perf_counter()
+    out = Path(args.out_dir)
+    target = refuse_write(out / "m2gf")
+    before = _gate_file_hashes(out)
+    short_path, short_sha = _short_source(out)
+    if sha256_dropped(short_path) != short_sha:
+        raise SystemExit(f"{short_path}: not the sealed M2g-short (sha256 {short_sha[:12]} in m2g.manifest.json)")
+    short = read_records(short_path)
+    built = build_facts(short, seed=args.seed)
+    records = built["records"]
+    _log(f"M2g-F: {len(records)} records, {built['counts']['questions']} questions, every record checked; pairs identical outside their labels "
+         f"{built['pairs_identical']} of {built['pairs']}")
+    tokens: dict[str, Any] = {"skipped": True}
+    tokenizer_info = None
+    if not args.skip_tokens:
+        from robo_jev.model.tokenizer import available_tokenizer, describe_tokenizer, load_tokenizer
+
+        tokenizer_id = available_tokenizer()[0]
+        tokenizer_info = describe_tokenizer(tokenizer_id)
+        tokens = order_proof(short, records, load_tokenizer(tokenizer_id))
+        if tokens["order_mismatches"] or tokens["shown_problems"]:
+            raise SystemExit(f"order or display proof fails: {tokens['order_mismatches'][:3]} {tokens['shown_problems'][:3]}")
+        _log(f"order proof: {tokens['prompts']} prompts of {tokens['records']} records — the seeded option order equals M2g-short's everywhere; "
+             f"mean prompt tokens short {tokens['tokens']['short']['mean']} vs facts {tokens['tokens']['facts']['mean']}")
+    pieces = [p for p in F.fixed_pieces() if p["words"] >= 2]
+    grams: set[str] = set()
+    by_id = {str(r["id"]): r for r in short}
+    for r in records:
+        grams |= F.touching_shingles(r, by_id[str(r["id"])])
+    # sensitivity controls (reported, never deciding): two common phrases, and the 8-word shingles of M2g-short's own instructions (the
+    # H-set's and B1's question wording is their generators', shared with training by design) — the scan must find these
+    from robo_jev.bench.iface import shingles
+    from robo_jev.data.general_sets import normalize
+
+    control_pieces = [p for p in CONTROL_PIECES if p not in {q["text"] for q in pieces}]
+    control_grams = {g for r in short for q in r["request"]["questions"].values() for g in shingles(str(q["instructions"]))
+                     if len(normalize(str(q["instructions"])).split()) >= 8} - grams
+    files = [ARTIFACTS / f for f in TRAINING_INPUTS] + [ARTIFACTS / TRAIN_V07]
+    missing = [str(f) for f in files if not f.is_file()]
+    if args.skip_overlap:
+        scan_result: dict[str, Any] = {"skipped": True, "files": {}, "pieces": {p["text"]: {"exact": None, "folded": None} for p in pieces},
+                                       "grams": len(grams), "gram_hits": {}}
+        controls: dict[str, Any] = {"skipped": True}
+    else:
+        if missing:
+            raise SystemExit(f"training inputs missing: {missing}")
+        found = facts_scan(files, [p["text"] for p in pieces] + control_pieces, grams | control_grams)
+        scan_result = {**found, "pieces": {p["text"]: found["pieces"][p["text"]] for p in pieces},
+                       "gram_hits": {g: n for g, n in found["gram_hits"].items() if g in grams}, "grams": len(grams)}
+        controls = {"pieces": {p: found["pieces"][p] for p in control_pieces},
+                    "instruction_shingles": len(control_grams), "instruction_shingles_found": sum(1 for g in found["gram_hits"] if g in control_grams),
+                    "note": "the scan's sensitivity: common phrases and M2g-short's own question wording (shared with training generators for the H-set "
+                            "and B1 by design) are found; reported, never deciding"}
+        hits = {p: v for p, v in scan_result["pieces"].items() if v["exact"]}
+        if hits or scan_result["gram_hits"]:
+            raise SystemExit(f"added text occurs in a training input: {len(hits)} pieces ({sorted(hits)}), {len(scan_result['gram_hits'])} shingles")
+        if not controls["instruction_shingles_found"] or not all(v["exact"] for v in controls["pieces"].values()):
+            raise SystemExit(f"the scan's sensitivity controls were not found — the scan is not reading the training text: {controls}")
+    v07_rel = str(Path(TRAIN_V07))
+    overlap = {"method": "every fixed run of the templates and status lines with 2+ words (between slots, with its punctuation) against every "
+                         "training record's state and question instructions (whitespace collapsed; exact and case-folded occurrence counts); "
+                         "every 8-word shingle of an M2g-F text (state, each instruction) holding a word of added text against the 8-word "
+                         "shingles of every training text (state, instructions, options); counts only",
+               "skipped": bool(scan_result.get("skipped")), "inputs": scan_result["files"],
+               "train_v07": {"path": f"artifacts/{v07_rel}", "sha256": (scan_result["files"].get(v07_rel) or {}).get("sha256")},
+               "pieces": [{**p, **scan_result["pieces"][p["text"]]} for p in pieces],
+               "pieces_with_exact_hits": sum(1 for v in scan_result["pieces"].values() if v["exact"]),
+               "pieces_with_folded_hits": sum(1 for v in scan_result["pieces"].values() if v["folded"]),
+               "shingles": len(grams), "shingles_found": len(scan_result["gram_hits"]),
+               "distinct_texts": scan_result.get("distinct_texts"), "sensitivity_controls": controls}
+    # files
+    target.mkdir(parents=True, exist_ok=True)
+    path = target / F.FILE_NAME
+    sha = _write_jsonl(path, records)
+    examples = []
+    for template in F.TEMPLATES:
+        example = next(r for r in records if r["meta"]["gate"]["template"] == template)
+        name = next(iter(example["request"]["questions"]))
+        text = (f"[{example['id']} · template {template} · status {example['meta']['gate']['status']} · question {name}]\n\nstate:\n"
+                f"{example['request']['state']}\n\ninstructions:\n{example['request']['questions'][name]['instructions']}\n\nM2g-short state:\n"
+                f"{by_id[str(example['id'])]['request']['state']}\n")
+        example_path = refuse_write(target / "examples" / f"{template}-{example['id']}.txt")
+        example_path.parent.mkdir(parents=True, exist_ok=True)
+        example_path.write_text(text, encoding="utf-8")
+        examples.append(_rel(example_path))
+    _seal([path])
+    after = _gate_file_hashes(out)
+    if after != before:
+        changed = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+        raise SystemExit(f"existing gate files changed during the build: {changed}")
+    gpu = facts_gpu_estimate(tokens["tokens"]["facts"]["total"]) if not tokens.get("skipped") else None
+    manifest = {
+        "kind": "v07-m2g-facts", "script_version": FACTS_SCRIPT_VERSION, "git": _git(), "seed": args.seed, "set": F.M2G_SET, "prefix": F.M2G_PREFIX,
+        "condition": F.CONDITION, "registry": {"name": FACTS_REGISTRY, "path": _rel(path)},
+        "rule": "PRE-DECLARED v0.7 SECONDARY READING - FACTS IN INSTRUCTIONS, gate M2g-F (progress.md, 2026-10-15 ~19:57 KST)",
+        "source": {"path": _rel(short_path), "sha256": short_sha, "records": len(short), "manifest": _rel(out / "m2g" / "m2g.manifest.json")},
+        "file": {"path": _rel(path), "sha256": sha, "records": len(records), "questions": built["counts"]["questions"], "mode": "0444"},
+        "design": {"status_forms": F.STATUS_FORMS, "templates": F.TEMPLATES, "slots": list(F.SLOTS),
+                   "facts": "the original state's sentences (robo_jev.bench.gates_v07.sentences), verbatim and in order, joined by one space",
+                   "split": "split = the first half of the facts: the sentences of the first ceil(L/2) lines of a state of L >= 2 lines, else "
+                            "ceil(n/2) of its n sentences (the same cut for both records of a pair)",
+                   "assignment": "template and status line per pair order key: within each set x scene stratum, the keys in a seeded order take "
+                                 "the 9 (template, status) cells of a Latin order (every block of 3 cells holds each template and each status "
+                                 "line once; templates and status lines in seeded orders) in turn from a seeded block - templates, status lines "
+                                 "and cells each balanced to +-1 per stratum",
+                   "added_gate_keys": list(F.ADDED_GATE_KEYS)},
+        "counts": built["counts"], "crossing_template_x_status": built["crossing"], "balance_by_stratum": built["balance"],
+        "truth_classes": built["truth_classes"], "lengths_chars": built["lengths"],
+        "proofs": {"records_checked": len(records), "records_failing": 0, "pairs_added_text_identical": f"{built['pairs_identical']} of {built['pairs']}",
+                   "order": {k: tokens.get(k) for k in ("records", "prompts")} | {"mismatches": len(tokens.get("order_mismatches") or []),
+                                                                                "display_problems": len(tokens.get("shown_problems") or []),
+                                                                                "settings": FACTS_SCORING} if not tokens.get("skipped") else "skipped",
+                   "checks": ["facts_problems on every record: the state is the pair's status line and holds no original sentence of 3+ words, no fact or "
+                              "tone word; every original sentence verbatim and in order in every question's instructions; the original instruction "
+                              "exactly once; the instructions equal the template's rendering and are one single-spaced line; questions (names, order, "
+                              "types, criteria), labels and every other field equal M2g-short's; validate_record passes",
+                              "both records of every pair: the same template and status line, and byte-identical added text (original sentences and "
+                              "instructions cut out)", "templates, status lines and their 9 cells balanced within every set x scene stratum "
+                              "(max - min <= 1)",
+                              "order: every prompt's options, lines, values and codes equal M2g-short's (record_prompts, M2g's settings)",
+                              "existing gate files unchanged (sha256 before and after)"]},
+        "prompt_tokens": tokens.get("tokens") if not tokens.get("skipped") else "skipped",
+        "prompt_tokens_by_template": tokens.get("tokens_by_template") if not tokens.get("skipped") else "skipped",
+        "tokenizer": tokenizer_info, "gpu_estimate": gpu, "scoring": {**FACTS_SCORING, "models": list(FACTS_MODELS)},
+        "overlap": overlap, "existing_gate_files_sha256": {"before": before, "after": after, "unchanged": after == before},
+        "examples": examples, "seconds": round(time.perf_counter() - started, 1),
+        "created": dt.datetime.now().astimezone().isoformat(timespec="seconds"),
+    }
+    _write_json(target / "manifest.json", manifest)
+    _log(f"done in {manifest['seconds']} s → {_rel(path)} (sha256 {sha[:12]}); overlap: {overlap['pieces_with_exact_hits']} pieces with an exact hit, "
+         f"{overlap['shingles_found']} of {overlap['shingles']} shingles found" + (f"; GPU ≈ {gpu['five_models_min']} min for five models" if gpu else ""))
+    return 0
+
+
+def check_facts(out: Path, runs: list[Path] | list[str]) -> list[str]:
+    """Every problem of the sealed M2g-F gate (``check-facts``, module docstring); empty = the gate may be opened."""
+    from robo_jev.bench import gates_v07f as F
+    from robo_jev.decisions.prompt import PROMPT_VERSION, _listings
+    from robo_jev.decisions.records import pair_groups, read_records, shuffle_key
+
+    problems: list[str] = []
+    manifest_path = Path(out) / "m2gf" / "manifest.json"
+    if not manifest_path.is_file():
+        return [f"{_rel(manifest_path)} is missing — run build-facts"]
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    facts_path, short_path = REPO / manifest["file"]["path"], REPO / manifest["source"]["path"]
+    if not facts_path.is_file() or sha256_dropped(facts_path) != manifest["file"]["sha256"]:
+        return [f"{manifest['file']['path']}: missing or not the sealed file (sha256 {manifest['file']['sha256'][:12]})"]
+    if stat.S_IMODE(facts_path.stat().st_mode) & 0o222:
+        problems.append(f"{manifest['file']['path']} is writable (sealed files are 0444)")
+    m2 = json.loads((Path(out) / "m2g" / "m2g.manifest.json").read_text(encoding="utf-8"))
+    if m2["files"]["short"]["sha256"] != manifest["source"]["sha256"] or not short_path.is_file() or sha256_dropped(short_path) != manifest["source"]["sha256"]:
+        problems.append("M2g-F was not built from the sealed M2g-short (sha256 differs from m2g.manifest.json or the file on disk)")
+        return problems
+    facts, short = read_records(facts_path), read_records(short_path)
+    if [str(r["id"]) for r in facts] != [str(r["id"]) for r in short]:
+        problems.append("the ids (or their order) differ from M2g-short's")
+        return problems
+    failing = {str(f["id"]): bad for f, s in zip(facts, short) if (bad := F.facts_problems(f, s))}
+    if failing:
+        problems.append(f"{len(failing)} records fail their checks (first {list(failing.items())[:2]})")
+    by_id = {str(r["id"]): r for r in facts}
+    for a, b in pair_groups(short):
+        fa, fb = by_id[str(a["id"])], by_id[str(b["id"])]
+        try:
+            same = F.added_text(fa, a) == F.added_text(fb, b) and fa["meta"]["gate"] == fb["meta"]["gate"]
+        except (KeyError, ValueError) as error:
+            same = False
+            problems.append(f"pair {shuffle_key(a)}: {error}")
+        if not same:
+            problems.append(f"pair {shuffle_key(a)}: the two records differ outside their labels in the added text")
+    orders = 0
+    for f, s in zip(facts, short):
+        for name, question in s["request"]["questions"].items():
+            settings = {"seed": FACTS_SCORING["shuffle_seed"], "orders": FACTS_SCORING["orders"], "version": PROMPT_VERSION}
+            mine = _listings(name, f["request"]["questions"][name], key=shuffle_key(f), **settings)
+            if mine != _listings(name, question, key=shuffle_key(s), **settings):
+                problems.append(f"{f['id']} {name}: the seeded option order differs from M2g-short's")
+            orders += 1
+    overlap = manifest.get("overlap") or {}
+    if overlap.get("skipped") or overlap.get("pieces_with_exact_hits") != 0 or overlap.get("shingles_found") != 0:
+        problems.append("the manifest's overlap scan was skipped or found added text in a training input")
+    scanned = (overlap.get("train_v07") or {}).get("sha256")
+    on_disk = ARTIFACTS / TRAIN_V07
+    if on_disk.is_file() and sha256_dropped(on_disk) != scanned:
+        problems.append(f"{TRAIN_V07} changed since the facts overlap scan ({str(scanned)[:12]}) — rebuild")
+    for run in runs:
+        metrics = Path(run) / "metrics.json"
+        got = ((json.loads(metrics.read_text(encoding="utf-8")).get("manifest") or {}).get("data") or {}).get("file_sha256") if metrics.is_file() else None
+        if got != scanned:
+            problems.append(f"{run}: trained on {str(got)[:12]}, the facts overlap scan read {str(scanned)[:12]}")
+    _log(f"check-facts: {len(facts)} records, {orders} question orders checked, {len(problems)} problems")
+    return problems
+
+
+def cmd_check_facts(args: argparse.Namespace) -> int:
+    """Before the M2g-F gate is opened (``artifacts/scratch/v07f/score_facts.sh``): :func:`check_facts`. Prints the problems; 2 if any."""
+    problems = check_facts(args.out_dir, args.runs)
+    print(json.dumps({"problems": problems}, indent=1))
+    return 2 if problems else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -729,8 +1217,17 @@ def main(argv: list[str] | None = None) -> int:
     c = sub.add_parser("check")
     c.add_argument("--out-dir", type=Path, default=OUT)
     c.add_argument("--runs", nargs="*", default=[], help="v0.7 run directories (…-fetched/runs/v07-s<seed>-2b) whose training input must match")
+    bf = sub.add_parser("build-facts", help="task v0.7f: gate M2g-F from the sealed M2g-short")
+    bf.add_argument("--out-dir", type=Path, default=OUT)
+    bf.add_argument("--seed", type=int, default=SEED)
+    bf.add_argument("--skip-overlap", action="store_true", help="tests only: skip the training-input scan")
+    bf.add_argument("--skip-tokens", action="store_true", help="tests only: no tokenizer (no order proof through the prompt path, no token counts)")
+    cf = sub.add_parser("check-facts", help="task v0.7f: the M2g-F chain's gate")
+    cf.add_argument("--out-dir", type=Path, default=OUT)
+    cf.add_argument("--runs", nargs="*", default=[], help="v0.7 run directories (…-fetched/runs/v07-s<seed>-2b) whose training input must match")
     args = parser.parse_args(argv)
-    return {"build": cmd_build, "recheck-v07": cmd_recheck, "check": cmd_check}[args.command](args)
+    return {"build": cmd_build, "recheck-v07": cmd_recheck, "check": cmd_check, "build-facts": cmd_build_facts,
+            "check-facts": cmd_check_facts}[args.command](args)
 
 
 if __name__ == "__main__":

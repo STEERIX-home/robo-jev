@@ -40,6 +40,11 @@ SEALED_RECORD_PREFIXES.update({"v07-m2g": "v07m2g-", "v07-m1g": "v07m1g-"})
 SEALED_RECORD_FILES.update({"v07-m2g": "artifacts/v07/gates/m2g/M2g-all-conditions.jsonl", "v07-m1g": "artifacts/v07/gates/m1g/M1g.jsonl"})
 NEVER_SENT_SETS += ("v07-m2g", "v07-m1g")
 
+#: Task v0.7f: M2g-F — the M2g moments with the situation facts moved into each question's instructions. Its records keep M2g's ids, set and
+#: prefix (``v07-m2g`` / ``v07m2g-``), so they are already sealed and never sent; the file is registered under its own name so that the
+#: training-input assembly also checks ids and whole states against it (:mod:`robo_jev.bench.gates_v07f`).
+SEALED_RECORD_FILES.update({"v07-m2g-facts": "artifacts/v07/gates/m2gf/M2g-facts.jsonl"})
+
 
 def sealed_record_set(record: dict[str, Any]) -> str | None:
     """The sealed outside test a Decisions record belongs to (:data:`SEALED_RECORD_SETS`), else None."""
