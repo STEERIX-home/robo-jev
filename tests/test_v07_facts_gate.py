@@ -88,7 +88,10 @@ def test_the_gate_text_is_free_of_fact_and_tone_words_and_places_the_facts_befor
     assert {t["placement"] for t in F.TEMPLATES.values()} == {"before", "after", "around"}
     for line in F.STATUS_FORMS.values():
         assert G._word_hits(line, G.FACT_WORDS, G.FACT_STEMS) == [] and G._word_hits(line, G.TONE_WORDS, G.TONE_STEMS) == []
+        assert G._word_hits(line, F.POINTER_WORDS) == [], "a status line never points to where the situation is"
+        assert not any(w in line.lower() for w in ("question", "particular", "instruction", "detail")), line
         assert len(line) <= 120 and "\n" not in line, "a status line is tiny and one line"
+    assert list(F.STATUS_FORMS) == ["role", "json", "kv"], "the names (and so the assignment) are the first version's"
     pieces = F.fixed_pieces()
     assert {p["source"] for p in pieces} == {*(f"template:{t}" for t in F.TEMPLATES), *(f"status:{s}" for s in F.STATUS_FORMS)}
     assert {p["text"]: p["words"] for p in pieces if p["source"] == "template:tail"} == {"(Judge it from the unit's account:": 6, ")": 0}
@@ -99,6 +102,9 @@ def test_text_problems_catch_a_fact_word_a_tone_word_and_a_slot_glued_to_a_lette
     monkeypatch.setitem(F.STATUS_FORMS, "role", "Judgment desk: the load is fine.")
     found = F.text_problems()
     assert any("fact words" in p for p in found) and any("tone words" in p for p in found)
+    for pointing in ("Judgment desk; particulars are written into each question.", '{"desk": "judgment", "details": "see below"}'):
+        monkeypatch.setitem(F.STATUS_FORMS, "role", pointing)
+        assert any("pointer words" in p for p in F.text_problems()), pointing
     monkeypatch.setitem(F.STATUS_FORMS, "role", "Judgment desk.")
     monkeypatch.setitem(F.TEMPLATES, "lead", {"placement": "before", "text": "Account:{facts}x Desk query: {instruction}"})
     assert any("touches a letter" in p for p in F.text_problems())
@@ -198,6 +204,9 @@ def test_the_checker_catches_a_dropped_an_altered_and_a_moved_sentence(pair):
     toned = copy.deepcopy(f)
     toned["request"]["state"] = "All good: the load is fine."
     assert any("status line" in p for p in F.facts_problems(toned, original)) and any("tone words" in p for p in F.facts_problems(toned, original))
+    pointing = copy.deepcopy(f)
+    pointing["request"]["state"] = "Judgment desk: the particulars are in each question."
+    assert any("pointer words" in p for p in F.facts_problems(pointing, original))
 
 
 def test_both_records_of_a_pair_get_byte_identical_added_text(pair):

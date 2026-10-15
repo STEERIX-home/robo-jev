@@ -12,7 +12,8 @@ from the audit's description only.
   field of M2g-short (so the option-order key — the pair's smaller id — and the seeded option order are M2g-short's); ``meta.gate`` gains
   ``condition`` = ``facts``, ``template`` and ``status``.
 * *State*: the pair's status line (:data:`STATUS_FORMS` — a role line, a JSON-like status, a key=value line), which carries no fact: no word of
-  :data:`robo_jev.bench.gates_v07.FACT_WORDS` or :data:`~robo_jev.bench.gates_v07.TONE_WORDS`, nothing about the moment, nothing evaluative.
+  :data:`robo_jev.bench.gates_v07.FACT_WORDS` or :data:`~robo_jev.bench.gates_v07.TONE_WORDS`, nothing about the moment, nothing evaluative,
+  and no pointer to where the situation is (no word of :data:`POINTER_WORDS` — real tiny states never say "see the question").
 * *Instructions*: every question's instructions are the pair's template (:data:`TEMPLATES`) filled with the original state's sentences
   (:func:`robo_jev.bench.gates_v07.sentences` — verbatim, in order, joined by one space, which equals the state with its line breaks shown as
   spaces) and the question's original instruction (verbatim). The templates differ in where the facts sit: before the instruction (``lead``),
@@ -24,7 +25,8 @@ from the audit's description only.
   only — within every stratum (set × scene) the templates, the status lines and their 9 combinations are each balanced to ±1 (a seeded Latin
   order) — so both records of a pair (which differ in their labels) get the same added text (:func:`added_text` cuts the original sentences
   and instructions out of a record; the pair's two cuts are byte-identical).
-* *Proofs* (:func:`facts_problems`): the state is the pair's status line and holds no original sentence of 3 or more words; every original
+* *Proofs* (:func:`facts_problems`): the state is the pair's status line, holds no original sentence of 3 or more words and no fact, tone or
+  pointer word; every original
   sentence is found verbatim and in order in every question's instructions, the original instruction exactly once, and the instructions are
   exactly the template's rendering; questions, options and labels equal M2g-short's; ``validate_record`` passes.
 * *Overlap* (:func:`fixed_pieces`, :func:`touching_shingles`): every fixed run of the templates and status lines with 2 or more words, and every
@@ -44,7 +46,7 @@ from robo_jev.data.general_sets import normalize
 from robo_jev.decisions.records import validate_record
 
 __all__ = [
-    "ADDED_GATE_KEYS", "CONDITION", "FILE_NAME", "PLACEMENTS", "SLOTS", "STATUS_FORMS", "TEMPLATES", "added_text", "assign", "facts_problems",
+    "ADDED_GATE_KEYS", "CONDITION", "FILE_NAME", "PLACEMENTS", "POINTER_WORDS", "SLOTS", "STATUS_FORMS", "TEMPLATES", "added_text", "assign", "facts_problems",
     "facts_record", "facts_split", "fixed_pieces", "latin_cells", "piece_words", "render", "template_parts", "text_problems", "touching_shingles",
 ]
 
@@ -57,12 +59,19 @@ ADDED_GATE_KEYS = ("condition", "template", "status")
 SLOTS = ("facts", "facts_a", "facts_b", "instruction")
 PLACEMENTS = ("before", "after", "around")
 
-#: Minimal status lines (the whole state of an M2g-F record). Written for this gate; no fact, no tone word, nothing evaluative.
+#: Minimal status lines (the whole state of an M2g-F record). Written for this gate; no fact, no tone word, nothing evaluative, and no
+#: pointer to where the situation is (revised after the controller's review, before any M2g-F prediction existed: the first version said
+#: "particulars are written into each question" — a hint real tiny states never give).
 STATUS_FORMS = {
-    "role": "Judgment desk — inbound query from a deployed unit; particulars are written into each question.",
-    "json": '{"desk": "judgment", "sender": "deployed unit", "particulars": "in each question"}',
-    "kv": "desk=judgment | sender=deployed-unit | particulars=in-question",
+    "role": "Judgment desk — inbound query from a deployed unit.",
+    "json": '{"desk": "judgment", "sender": "deployed unit"}',
+    "kv": "desk=judgment | sender=deployed-unit",
 }
+#: Words a status line must not use — they would point to where the situation is (whole words, also with a plain ending).
+POINTER_WORDS = frozenset("""
+    question instruction particular detail fact context situation report account body text attached inside within below above see each
+    here following note info information
+""".split())
 #: Templates of every question's instructions (``str.format`` fields from :data:`SLOTS`) and where the facts sit relative to the instruction.
 TEMPLATES = {
     "lead": {"placement": "before", "text": "Unit's account, as relayed: {facts} Desk query: {instruction}"},
@@ -107,8 +116,8 @@ def fixed_pieces() -> list[dict[str, Any]]:
 def text_problems() -> list[str]:
     """Checks of the gate's own text: at least 3 status lines and 3 templates; the templates place the facts before, after and around the
     instruction, each holds the instruction once and the facts once (whole, or both halves in order); no status line and no template literal
-    uses a fact word or a tone word (:mod:`robo_jev.bench.gates_v07`'s lists and matching); every slot is set off from its neighbours by a
-    space or punctuation (word boundaries survive)."""
+    uses a fact word or a tone word (:mod:`robo_jev.bench.gates_v07`'s lists and matching) and no status line a pointer word
+    (:data:`POINTER_WORDS`); every slot is set off from its neighbours by a space or punctuation (word boundaries survive)."""
     problems = []
     if len(STATUS_FORMS) < 3 or len(TEMPLATES) < 3:
         problems.append("fewer than 3 status lines or templates")
@@ -134,7 +143,7 @@ def text_problems() -> list[str]:
             if hits:
                 problems.append(f"template {name!r} uses {what} words {hits}")
     for name, line in STATUS_FORMS.items():
-        for words, stems, what in ((FACT_WORDS, FACT_STEMS, "fact"), (TONE_WORDS, TONE_STEMS, "tone")):
+        for words, stems, what in ((FACT_WORDS, FACT_STEMS, "fact"), (TONE_WORDS, TONE_STEMS, "tone"), (POINTER_WORDS, (), "pointer")):
             hits = _word_hits(line, words, stems)
             if hits:
                 problems.append(f"status {name!r} uses {what} words {hits}")
@@ -228,7 +237,7 @@ def facts_problems(record: Mapping[str, Any], original: Mapping[str, Any]) -> li
     left = [s for s in facts if len(s.split()) >= 3 and s in state]
     if left:
         problems.append(f"{len(left)} original sentence(s) of 3+ words left in the state (first {left[0][:40]!r})")
-    for words, stems, what in ((FACT_WORDS, FACT_STEMS, "fact"), (TONE_WORDS, TONE_STEMS, "tone")):
+    for words, stems, what in ((FACT_WORDS, FACT_STEMS, "fact"), (TONE_WORDS, TONE_STEMS, "tone"), (POINTER_WORDS, (), "pointer")):
         hits = _word_hits(state, words, stems)
         if hits:
             problems.append(f"the state uses {what} words {hits}")

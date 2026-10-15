@@ -726,7 +726,7 @@ def cmd_check(args: argparse.Namespace) -> int:
 # Task v0.7f — M2g-F: the M2g moments with the facts moved into each question's instructions
 # --------------------------------------------------------------------------
 
-FACTS_SCRIPT_VERSION = "v07f-facts-build-1"
+FACTS_SCRIPT_VERSION = "v07f-facts-build-2"
 #: The sealed registry name of the facts file (:data:`robo_jev.data.sealed.SEALED_RECORD_FILES`).
 FACTS_REGISTRY = "v07-m2g-facts"
 #: The M2g-F scoring (``artifacts/scratch/v07f/score_facts.sh``): M2g's command — the standard diagnosis path with seeded orders, shuffle
@@ -1092,7 +1092,10 @@ def cmd_build_facts(args: argparse.Namespace) -> int:
         "rule": "PRE-DECLARED v0.7 SECONDARY READING - FACTS IN INSTRUCTIONS, gate M2g-F (progress.md, 2026-10-15 ~19:57 KST)",
         "source": {"path": _rel(short_path), "sha256": short_sha, "records": len(short), "manifest": _rel(out / "m2g" / "m2g.manifest.json")},
         "file": {"path": _rel(path), "sha256": sha, "records": len(records), "questions": built["counts"]["questions"], "mode": "0444"},
-        "design": {"status_forms": F.STATUS_FORMS, "templates": F.TEMPLATES, "slots": list(F.SLOTS),
+        "design": {"status_forms": F.STATUS_FORMS, "pointer_words": sorted(F.POINTER_WORDS), "templates": F.TEMPLATES, "slots": list(F.SLOTS),
+                   "revision": "status lines revised after the controller's review, before any M2g-F prediction existed: the first version's lines "
+                               "pointed to where the situation is ('particulars are written into each question'); templates, assignment and "
+                               "everything else unchanged",
                    "facts": "the original state's sentences (robo_jev.bench.gates_v07.sentences), verbatim and in order, joined by one space",
                    "split": "split = the first half of the facts: the sentences of the first ceil(L/2) lines of a state of L >= 2 lines, else "
                             "ceil(n/2) of its n sentences (the same cut for both records of a pair)",
@@ -1107,8 +1110,8 @@ def cmd_build_facts(args: argparse.Namespace) -> int:
                    "order": {k: tokens.get(k) for k in ("records", "prompts")} | {"mismatches": len(tokens.get("order_mismatches") or []),
                                                                                 "display_problems": len(tokens.get("shown_problems") or []),
                                                                                 "settings": FACTS_SCORING} if not tokens.get("skipped") else "skipped",
-                   "checks": ["facts_problems on every record: the state is the pair's status line and holds no original sentence of 3+ words, no fact or "
-                              "tone word; every original sentence verbatim and in order in every question's instructions; the original instruction "
+                   "checks": ["facts_problems on every record: the state is the pair's status line and holds no original sentence of 3+ words, no fact, "
+                              "tone or pointer word; every original sentence verbatim and in order in every question's instructions; the original instruction "
                               "exactly once; the instructions equal the template's rendering and are one single-spaced line; questions (names, order, "
                               "types, criteria), labels and every other field equal M2g-short's; validate_record passes",
                               "both records of every pair: the same template and status line, and byte-identical added text (original sentences and "
