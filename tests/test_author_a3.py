@@ -239,9 +239,12 @@ def test_assembled_records_match_the_contract(scene):
     assert records[0]["request"]["questions"] == records[1]["request"]["questions"]
 
 
-def test_infamily_readers_run_on_a3_records():
+def test_infamily_readers_run_on_a3_records(monkeypatch):
     from robo_jev.bench import infamily, system1
 
+    # register on copies, so A3's families do not stay in the shared tables for later tests (test_b1_verdict checks them)
+    monkeypatch.setattr(infamily, "EVENT", dict(infamily.EVENT))
+    monkeypatch.setattr(infamily, "PLAN_KEY", dict(infamily.PLAN_KEY))
     a3.register_infamily()
     records = []
     for g in range(4):
