@@ -32,6 +32,14 @@ SEALED_RECORD_FILES = {"T9": "artifacts/t9/T9.jsonl", "v04a-scene-holdout": "art
 #: Sets that are never sent to any API (OpenRouter, the narration rewriter, …).
 NEVER_SENT_SETS = ("T9", "v06-a4")
 
+#: Task v0.7b: the sealed v0.7 shape gates — M2g (held-out moments, short and wrapped in sheet styles unseen in training; one file holds all
+#: six conditions, so ids repeat in it) and M1g (an unused licensed multiple-choice source plus physics items at N = 8, 21, 26). Built by an
+#: author who never sees the v0.7 training sheet generator; never trained on, never sent anywhere (:mod:`robo_jev.bench.gates_v07`).
+SEALED_RECORD_SETS += ("v07-m2g", "v07-m1g")
+SEALED_RECORD_PREFIXES.update({"v07-m2g": "v07m2g-", "v07-m1g": "v07m1g-"})
+SEALED_RECORD_FILES.update({"v07-m2g": "artifacts/v07/gates/m2g/M2g-all-conditions.jsonl", "v07-m1g": "artifacts/v07/gates/m1g/M1g.jsonl"})
+NEVER_SENT_SETS += ("v07-m2g", "v07-m1g")
+
 
 def sealed_record_set(record: dict[str, Any]) -> str | None:
     """The sealed outside test a Decisions record belongs to (:data:`SEALED_RECORD_SETS`), else None."""
