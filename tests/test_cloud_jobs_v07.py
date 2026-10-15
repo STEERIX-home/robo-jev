@@ -31,7 +31,7 @@ SETS = {**TESTS, "G1": "artifacts/simgen/probes/G1.jsonl", "G2": "artifacts/simg
 ORDER = ["T2", "T3", "T4", "G2", "T1", "T5", "T7", "T8a", "G1", "T6"]
 SPARK_ONLY = ("artifacts/t9/", "artifacts/t8/T8b", "artifacts/b1/", "scene-holdout", "artifacts/v06/", "artifacts/iface/", "artifacts/v07/")
 CONTEXT = {"python": "python", "uv": "uv", "repo": "/r", "run_dir": "/r/run", "runs": "/r/run/runs", "reports": "/r/run/reports", "run_id": "x"}
-HOURLY, RUN_CAP = 3.99, 35.0
+HOURLY, RUN_CAP = 3.99, 40.0  # raised from $35 on 2026-10-15 with the phase cap ($450): a slow pod gets 400 min of training
 
 
 @functools.lru_cache(maxsize=None)
@@ -70,8 +70,9 @@ def test_each_v07_job_is_the_v06_job_of_its_seed_with_the_v07_input_and_more_tra
         train = next(s for s in block["job"]["steps"] if s["name"] == "train")
         train.pop("est_minutes"), train.pop("max_minutes")
         block["budget"].pop("max_wall_hours")
+        block["budget"].pop("phase")  # v0.7's jobs carry the phase cap raised to $450 on 2026-10-15 (checked below)
         block["estimate"].pop("assumption")
-    assert mine == want, "only the input, the run name and its names, the train step's time, the wall cap and the estimate text differ"
+    assert mine == want, "only the input, the run name and its names, the train step's time, the wall cap, the phase cap and the estimate text differ"
     config, v06 = _train(JOBS[seed]), _train(V06_JOBS[seed])
     assert config["train_input"] == TRAIN_INPUT and config["run_name"] == RUN_NAME[seed] and config["seed"] == seed
     assert sorted(k for k in config if config[k] != v06[k]) == ["run_name", "train_input"], "the recipe is v0.6's"
@@ -89,8 +90,8 @@ def test_the_train_step_and_wall_cap_fit_the_estimate_and_the_run_cap(seed):
     wall = spec["budget"]["max_wall_hours"]
     total = work + spec["estimate"]["boot_minutes"] + spec["estimate"]["fetch_minutes"]
     assert wall * 60 - total >= 30, "≥ 30 min of slack in the plan"
-    assert wall * HOURLY <= RUN_CAP, "a run's cap within the brief's $35"
-    assert spec["budget"]["hourly_usd"] == HOURLY and spec["budget"]["phase"] == {"name": "cloud-phase-1", "cap_usd": 350}
+    assert wall * HOURLY <= RUN_CAP, "a run's cap within $40 (raised from the brief's $35 on 2026-10-15)"
+    assert spec["budget"]["hourly_usd"] == HOURLY and spec["budget"]["phase"] == {"name": "cloud-phase-1", "cap_usd": 450}
 
 
 @pytest.mark.parametrize("seed", [0, 1])
