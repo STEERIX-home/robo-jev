@@ -3,8 +3,9 @@
 * :func:`scatter_svg` — 그림 1: 모델 하나 = 점 하나. x = 처음 보는 물리(T2+T3+T4)의 결과 예측 skill(1 − Brier / Brier(언제나 0.5),
   noul·score 질문), y = 일반 읽기 G2 정확도. 우리 모델은 파랑(slot 1), OpenRouter 모델은 주황(slot 2), 학습 없는 2B는 속이 빈
   회색 고리(기준점). 학습 없는 2B → v0 → v0.1 → v0.7의 이동을 화살표로 잇는다. 점마다 이름표(겹치면 밀고 끌줄을 단다).
-* :func:`hero_svg` — the README/model-card hero: one bar per model (physics skill T2–T4); our released version solid blue, the previous
-  release an outlined blue bar (:data:`RELEASE_TAG`, :data:`PREVIOUS_TAG` — Task rel07: v0.7 and v0.1), other versions of ours left out.
+* :func:`hero_svg` — the README/model-card hero: one bar per model (physics skill T2–T4); our released version solid blue
+  (:data:`RELEASE_TAG` — Task rel07: v0.7), against the decision models and the untrained base; a previous release, when asked for, an
+  outlined blue bar; other versions of ours left out.
 * :func:`bars_svg` — 그림 2: 행 = 모델, 열 = 세트(T1~T7 예/아니오 Brier — 낮을수록 좋다, G1·G2 정확도 — 높을수록 좋다). 열마다
   작은 막대(0에서 시작), 열 안의 가장 좋은 값에만 수를 단다.
 * 색 — 데이터 시각화 기술(dataviz)의 기준 팔레트: 밝은 판·어두운 판을 따로 고른 값(slot 1·2, 둘 다 all-pairs 검사 통과), 글자는
@@ -388,9 +389,10 @@ DISPLAY_NAMES = {
 }
 
 
-#: The released model the hero shows, and the previous release kept beside it (outlined bar) — Task rel07: v0.7, previously v0.1.
+#: The released model the hero shows (Task rel07: v0.7). A previous release can be kept beside it as an outlined bar by passing its tag
+#: (`previous_tag`, e.g. "robojev-v0.1-mix"); by default the hero shows the release against the decision models and the base only.
 RELEASE_TAG, RELEASE_LABEL = "robojev-v0.7", "robo-jev v0.7 · 2B (ours)"
-PREVIOUS_TAG, PREVIOUS_LABEL = "robojev-v0.1-mix", "robo-jev v0.1 · 2B (previous release)"
+PREVIOUS_TAG, PREVIOUS_LABEL = None, "robo-jev v0.1 · 2B (previous release)"
 
 
 def hero_rows(results: dict[str, Any], *, ours_tag: str = RELEASE_TAG, ours_label: str = RELEASE_LABEL, previous_tag: str | None = PREVIOUS_TAG,
@@ -473,7 +475,7 @@ def hero_svg(results: dict[str, Any], *, theme_name: str = "light", width: int =
     out.append(f'<text x="24" y="{height - 26}" font-size="11" fill="{theme["muted"]}">bench-v0 · labels from our physics simulator '
                f'(home ground) · OpenRouter models via the Decisions API (2026-10-12), one call per request</text>')
     out.append(f'<text x="24" y="{height - 11}" font-size="11" fill="{theme["muted"]}">skill = 1 − Brier / Brier(always 0.5) over the yes/no and score questions '
-               f'of T2–T4 · details: docs/results.md</text>')
+               f'of T2–T4, held out from training</text>')
     if results.get("fake"):
         out.append(_watermark(width, height, theme))
     out.append("</svg>")

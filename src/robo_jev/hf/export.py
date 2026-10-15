@@ -346,7 +346,8 @@ CARD_TEMPLATE = Path(__file__).with_name("cards") / "card.md"
 _HF = "https://huggingface.co"
 CARD_FIELDS: dict[str, dict[str, str]] = {
     "merged": {
-        "TITLE": f"robo-jev 2B — {TAG}", "RELATION": "finetune", "LIBRARY": "transformers", "REPO": MERGED_REPO, "PIP_EXTRA": "", "LOAD_NOTE": "",
+        "TITLE": f"robo-jev 2B — {TAG}", "RELATION": "finetune", "LIBRARY": "transformers", "REPO": MERGED_REPO, "PIP_EXTRA": "", "PIP_EXTRA_NOTE": "",
+        "LOAD_NOTE": "",
         "VARIANT_NOTE": (
             f"This repository holds the **merged weights**: Qwen3.5-2B with the robo-jev {TAG} LoRA adapter merged in, saved in bfloat16 as a "
             "text-only `Qwen3_5ForCausalLM` (the base's vision tower is not part of robo-jev and is left out). The adapter alone is at "
@@ -356,6 +357,7 @@ CARD_FIELDS: dict[str, dict[str, str]] = {
     },
     "adapter": {
         "TITLE": f"robo-jev 2B LoRA — {TAG}", "RELATION": "adapter", "LIBRARY": "peft", "REPO": ADAPTER_REPO, "PIP_EXTRA": "peft",
+        "PIP_EXTRA_NOTE": " and `peft`",
         "LOAD_NOTE": f" — fetches {BASE_ID} at revision {BASE_REVISION[:7]} and applies the adapter",
         "VARIANT_NOTE": (
             "This repository holds the **LoRA adapter** (r 32, α 64, 31 M parameters, bfloat16) for "
@@ -367,10 +369,10 @@ CARD_FIELDS: dict[str, dict[str, str]] = {
 }
 
 
-def render_card(variant: str, *, example_output: str = "", many_options_output: str = "") -> str:
-    """The model card (``README.md``) of `variant` (``merged`` | ``adapter``) from the shared template; `example_output` and
-    `many_options_output` are the real answers of the card's two examples (``scripts/export_hf.py cards --equivalence``)."""
-    fields = {**CARD_FIELDS[variant], "EXAMPLE_OUTPUT": example_output.strip(), "MANY_OPTIONS_OUTPUT": many_options_output.strip()}
+def render_card(variant: str, *, example_output: str = "") -> str:
+    """The model card (``README.md``) of `variant` (``merged`` | ``adapter``) from the shared template; `example_output` is the real
+    answer of the card's example (``scripts/export_hf.py cards --equivalence``)."""
+    fields = {**CARD_FIELDS[variant], "EXAMPLE_OUTPUT": example_output.strip()}
     text = CARD_TEMPLATE.read_text(encoding="utf-8")
     for name, value in fields.items():
         text = text.replace("{{" + name + "}}", value)

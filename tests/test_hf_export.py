@@ -238,11 +238,14 @@ def test_from_pretrained_refuses_a_folder_with_another_prompt_or_tokenizer(expor
 
 @pytest.mark.parametrize("variant", ["merged", "adapter"])
 def test_the_model_cards(variant):
-    card = E.render_card(variant, example_output="Example output.", many_options_output="Many-option output.")
-    assert card.startswith("---\n") and "{{" not in card and "Example output." in card and "Many-option output." in card
-    assert f"# robo-jev 2B{' LoRA' if variant == 'adapter' else ''} — v0.7" in card and "2–26 options" in card
-    assert "did not pass its own pre-declared rule" in card and "S REJECTED; guards O, N and F fail" in card
-    assert "clearly better than the public v0.1" in card
+    card = E.render_card(variant, example_output="Example output.")
+    assert card.startswith("---\n") and "{{" not in card and "Example output." in card
+    assert f"# robo-jev 2B{' LoRA' if variant == 'adapter' else ''} — v0.7" in card and "fast, single-pass 2B System 1" in card
+    assert "2–26 options; 1–12 questions per request; state text ≤ 16,000 characters" in card  # the limits
+    for row in ("| **robo-jev v0.7 · 2B** | **0.81** | 0.71 |", "| TypeSafe Jev | 0.28 | 0.91 |", "| Qwen3.5-2B, untrained | −0.15 | 0.74 |"):
+        assert row in card  # the comparison with the decision models
+    assert "held-out situations" in card and "never saw in training" in card and "Research preview" in card and "robo-jev.dev" in card
+    assert "pre-declared" not in card and "REJECTED" not in card  # a promotional page (user, 2026-10-16): no experiment verdicts
     meta = yaml.safe_load(card.split("---\n")[1])
     assert meta["license"] == "apache-2.0" and meta["base_model"] == "Qwen/Qwen3.5-2B" and meta["language"] == ["en", "ko"]
     assert (meta["base_model_relation"], meta["library_name"]) == (("finetune", "transformers") if variant == "merged" else ("adapter", "peft"))
@@ -338,14 +341,6 @@ def test_the_comparison_counts_changed_decisions():
     result = module.compare_to_reference(reference, moved)
     assert not result["byte_identical"] and result["by_type"]["noul"]["decisions_changed"] == 1 and result["by_type"]["noul"]["argmax_flips"] == 1
     assert result["by_type"]["choice"]["decisions_changed"] == 0
-
-
-def test_the_many_option_card_example_shows_the_top_options():
-    module = export_script()
-    answers = {"move": {"type": "choice", "choice": "b", "probabilities": {k: p for k, p in zip("abcdefg", (0.1, 0.4, 0.05, 0.2, 0.1, 0.1, 0.05))}},
-               "spill": {"type": "noul", "noul": 0.87654}}
-    text = module.many_options_markdown(answers, variant="merged", top=3)
-    assert '"probabilities (top 3 of 7)": {"b": 0.4, "d": 0.2, "a": 0.1}' in text and '"noul": 0.877' in text and "the merged weights" in text
 
 
 def test_the_token_file_must_be_private_and_is_never_echoed(tmp_path):

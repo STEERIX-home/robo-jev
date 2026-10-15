@@ -199,39 +199,16 @@ def example_markdown(answers: dict[str, Any], *, variant: str) -> str:
             "```json\n{\n " + ",\n ".join(lines) + "\n}\n```")
 
 
-def many_options_markdown(answers: dict[str, Any], *, variant: str, top: int = 5) -> str:
-    """The card's many-option example: the real answers of this repo's weights through the shipped ``robo_jev_decide.py`` (``equivalence``'s
-    bundle check), each choice cut to its `top` most likely options for reading."""
-    shown = {}
-    for name, answer in answers.items():
-        if answer.get("type") == "choice":
-            ranked = sorted(answer["probabilities"].items(), key=lambda item: -item[1])
-            shown[name] = {"type": "choice", "choice": answer["choice"],
-                           f"probabilities (top {top} of {len(ranked)})": {key: round(p, 3) for key, p in ranked[:top]}}
-        elif answer.get("type") == "noul":
-            shown[name] = {"type": "noul", "noul": round(answer["noul"], 3)}
-        else:
-            shown[name] = {"type": "score", "score": round(answer["score"], 3)}
-    lines = [json.dumps({name: answer}, ensure_ascii=False)[1:-1] for name, answer in shown.items()]
-    weights = "the merged weights" if variant == "merged" else "Qwen/Qwen3.5-2B + this adapter"
-    return (f"The answers ({weights} through `robo_jev_decide.py`, bfloat16, one GPU, `orders=\"single\"`; the full answer has all "
-            "probabilities, cut here to the most likely options and rounded):\n\n```json\n{\n " + ",\n ".join(lines) + "\n}\n```")
-
-
 def _cards(args: argparse.Namespace) -> int:
     from robo_jev.hf.export import check_no_pickle, check_public_text, render_card
 
-    report = json.loads(args.equivalence.read_text(encoding="utf-8")) if args.equivalence is not None else {}
-    examples, bundle = report.get("examples", {}), report.get("bundle", {})
+    examples = json.loads(args.equivalence.read_text(encoding="utf-8")).get("examples", {}) if args.equivalence is not None else {}
     for variant, folder in (("adapter", args.root / ADAPTER_DIR), ("merged", args.root / MERGED_DIR)):
         example = example_markdown(examples[variant]["single"], variant=variant) if variant in examples else ""
-        many_record = ((bundle.get(variant) or {}).get("records") or {}).get(args.many_options_example) or {}
-        many = many_options_markdown(many_record["bundle"], variant=variant) if many_record.get("bundle") else ""
-        (folder / "README.md").write_text(render_card(variant, example_output=example, many_options_output=many), encoding="utf-8")
+        (folder / "README.md").write_text(render_card(variant, example_output=example), encoding="utf-8")
         check_no_pickle(folder)
         check_public_text(folder)
-        _log(f"{folder}/README.md written ({'with' if example else 'without'} the example output, {'with' if many else 'without'} the "
-             f"many-option output); public-text scan clean")
+        _log(f"{folder}/README.md written ({'with' if example else 'without'} the example output); public-text scan clean")
     return 0
 
 
@@ -678,8 +655,7 @@ def _parser() -> argparse.ArgumentParser:
                    help="the simulated part's stats (domain, phenomena, style, body shares; Korean share)")
     p = sub.add_parser("cards", help="re-render README.md (model cards) in an existing export")
     p.add_argument("--root", type=Path, required=True)
-    p.add_argument("--equivalence", type=Path, default=None, help="the equivalence report with the examples' answers per variant")
-    p.add_argument("--many-options-example", default="fx-m21", help="the bundle-check record shown as the card's many-option example")
+    p.add_argument("--equivalence", type=Path, default=None, help="the equivalence report with the example's answers per variant")
     p = sub.add_parser("sample", help="the equivalence records (50 T1, 25 T2, 25 G2, plus many-option training records)")
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--seed", type=int, default=0)
