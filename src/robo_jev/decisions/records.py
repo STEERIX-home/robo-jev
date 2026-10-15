@@ -7,6 +7,12 @@
 * :func:`validate_record` — Decisions 제약(상태 ≤ 16,000자, 질문 1~12개, 이름 ``^[A-Za-z0-9_]{1,40}$``, choice 선택지 2~8개,
   score의 criteria는 문자열 목록)과 정답의 모양(choice 확률이 키를 정확히 덮고 합 1 ± 1e-6, noul·score는 [0, 1])을 본다.
   문제 문장의 목록을 돌려준다(빈 목록 = 통과). 진단 스크립트는 문제 있는 기록을 세고 건너뛴다.
+* **The many-option opt-in (Task v0.7a)** — :func:`option_range_for`. The choice range stays :data:`OPTION_RANGE` (2–8) for every
+  record, unless the record itself opts in: ``meta.option_range`` equal to :data:`OPTION_RANGE_MARK` exactly allows
+  :data:`WIDE_OPTION_RANGE` (2–26 — the codes A–Z, each a single token at the answer boundary,
+  :func:`robo_jev.model.zero_shot.verify_codes`). Any other value under ``meta.option_range`` is a problem (never a silent default), and a
+  request without ``meta`` (the serving path, :mod:`robo_jev.infer`) always gets 2–8. The trainer reads the opt-in from the data through
+  :func:`validate_record` — no config key.
 * :func:`select_records` — 무작위 표본(seed 고정)을 **쌍 단위로** 뽑는다. 사실 하나만 바꾼 쌍(``meta.pair``)은 짝이 함께
   들어와야 쌍 분석이 된다(레코드 단위로 300/2,000을 뽑으면 짝이 같이 뽑히는 쌍이 몇 개 안 된다). 묶음을 섞은 순서대로
   개수가 `limit`에 닿을 때까지 통째로 담으므로 마지막 묶음이 쌍이면 `limit`보다 하나 많을 수 있고(쌍을 깨지 않는다),
@@ -32,9 +38,12 @@ __all__ = [
     "MAX_STATE_CHARS",
     "NAME_RE",
     "OPTION_RANGE",
+    "OPTION_RANGE_MARK",
     "QUESTION_TYPES",
     "SCHEMA",
+    "WIDE_OPTION_RANGE",
     "file_sha256",
+    "option_range_for",
     "pair_groups",
     "pair_of",
     "read_records",
@@ -48,6 +57,10 @@ NAME_RE = re.compile(r"^[A-Za-z0-9_]{1,40}$")
 MAX_STATE_CHARS = 16_000
 MAX_QUESTIONS = 12
 OPTION_RANGE = (2, 8)
+#: The opt-in range (module docstring): 2..26 choice options, only for a record that carries :data:`OPTION_RANGE_MARK`.
+WIDE_OPTION_RANGE = (2, 26)
+#: ``meta.option_range`` of a record that opts in to :data:`WIDE_OPTION_RANGE` — exactly this dict (Task v0.7a).
+OPTION_RANGE_MARK = {"version": "options-26-1", "max": 26}
 QUESTION_TYPES = ("choice", "noul", "score")
 LABEL_SUM_TOL = 1e-6
 #: choice 정답의 kind — 없음, v0a 엔진의 action·state·rule, 일반 능력 시험 G1의 probe(Task v0.1b — 지표에서 ``choice/other``로 따로 묶인다).
@@ -76,7 +89,19 @@ def _is_unit(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(float(value)) and 0.0 <= float(value) <= 1.0
 
 
-def _validate_question(name: str, question: Any) -> list[str]:
+def option_range_for(record: dict[str, Any]) -> tuple[tuple[int, int], list[str]]:
+    """(the record's choice option range, problems): :data:`OPTION_RANGE` unless ``meta.option_range`` is :data:`OPTION_RANGE_MARK` exactly
+    (then :data:`WIDE_OPTION_RANGE`); any other value under ``meta.option_range`` is a problem and the range stays the default."""
+    meta = record.get("meta") if isinstance(record.get("meta"), dict) else {}
+    mark = meta.get("option_range")
+    if mark is None:
+        return OPTION_RANGE, []
+    if isinstance(mark, dict) and mark == OPTION_RANGE_MARK:
+        return WIDE_OPTION_RANGE, []
+    return OPTION_RANGE, [f"meta.option_range {mark!r} is not the many-option opt-in {OPTION_RANGE_MARK!r}"]
+
+
+def _validate_question(name: str, question: Any, option_range: tuple[int, int] = OPTION_RANGE) -> list[str]:
     if not isinstance(question, dict):
         return [f"question {name!r}: not an object"]
     problems = []
@@ -89,7 +114,7 @@ def _validate_question(name: str, question: Any) -> list[str]:
         criteria = question.get("criteria")
         if not isinstance(criteria, dict):
             return problems + [f"question {name!r}: choice criteria must be an object of option key -> description"]
-        low, high = OPTION_RANGE
+        low, high = option_range
         if not low <= len(criteria) <= high:
             problems.append(f"question {name!r}: choice needs {low}..{high} options (has {len(criteria)})")
         for key, description in criteria.items():
@@ -157,10 +182,12 @@ def validate_record(record: dict[str, Any], *, require_labels: bool = True) -> l
     if not 1 <= len(questions) <= MAX_QUESTIONS:
         problems.append(f"request.questions needs 1..{MAX_QUESTIONS} questions (has {len(questions)})")
     labels = record.get("labels") if isinstance(record.get("labels"), dict) else {}
+    option_range, range_problems = option_range_for(record)
+    problems.extend(range_problems)
     for name, question in questions.items():
         if not NAME_RE.match(str(name)):
             problems.append(f"question name {name!r} does not match {NAME_RE.pattern}")
-        own = _validate_question(str(name), question)
+        own = _validate_question(str(name), question, option_range)
         problems.extend(own)
         if require_labels and not own:
             problems.extend(_validate_label(str(name), question, labels.get(name)))
