@@ -838,8 +838,8 @@ def facts_scan(files: list[Path], pieces: list[str], grams: set[str], *, chunk_c
         except ValueError:
             rel = str(path)
         per_file[rel] = {"records": records, "sha256": digest.hexdigest(), "seconds": round(time.perf_counter() - started, 1)}
-        _log(f"facts scan {Path(path).name}: {records} records ({per_file[rel]['seconds']} s); pieces with an exact hit so far "
-             f"{sum(1 for v in exact.values() if v)}, shingle hits so far {sum(gram_hits.values())}")
+        _log(f"facts scan {Path(path).name}: {records} records ({per_file[rel]['seconds']} s); so far {sum(1 for v in exact.values() if v)} of "
+             f"{len(pieces)} scanned pieces and {len(gram_hits)} of {len(grams)} scanned shingles found (the caller's sensitivity controls included)")
     return {"files": per_file, "pieces": {p: {"exact": exact[p], "folded": folded[p]} for p in pieces}, "grams": len(grams),
             "gram_hits": dict(gram_hits), "distinct_texts": {"pieces": len(seen_pieces), "shingles": len(seen_grams)}}
 
