@@ -45,6 +45,19 @@ NEVER_SENT_SETS += ("v07-m2g", "v07-m1g")
 #: training-input assembly also checks ids and whole states against it (:mod:`robo_jev.bench.gates_v07f`).
 SEALED_RECORD_FILES.update({"v07-m2g-facts": "artifacts/v07/gates/m2gf/M2g-facts.jsonl"})
 
+#: Task v0.8b: the sealed v0.8 gates — B8 (fresh bench-shaped requests from robo-jev-web's own builders; their option tags were frozen before
+#: any scoring) and M8g (many options, N = 6…255: MMLU items in neither training nor M1g, plus fresh physics items). Built by an author who
+#: never sees the v0.8 training input; never trained on, never sent anywhere (:mod:`robo_jev.bench.gates_v08`, :mod:`robo_jev.bench.b8_v08`).
+SEALED_RECORD_SETS += ("v08-b8", "v08-m8g")
+SEALED_RECORD_PREFIXES.update({"v08-b8": "v08b8-", "v08-m8g": "v08m8g-"})
+SEALED_RECORD_FILES.update({"v08-b8": "artifacts/v08/gates/b8/B8.jsonl", "v08-m8g": "artifacts/v08/gates/m8g/M8g.jsonl"})
+NEVER_SENT_SETS += ("v08-b8", "v08-m8g")
+#: R14 — robo-jev-web's collected bench requests (2026-10-14; a reported v0.8 set, :mod:`robo_jev.bench.r14_v08`): sealed for training (never
+#: trained on) but NOT never-sent — the bench has already sent them.
+SEALED_RECORD_SETS += ("v08-r14",)
+SEALED_RECORD_PREFIXES.update({"v08-r14": "v08r14-"})
+SEALED_RECORD_FILES.update({"v08-r14": "artifacts/v08/r14/R14-all.jsonl"})
+
 
 def sealed_record_set(record: dict[str, Any]) -> str | None:
     """The sealed outside test a Decisions record belongs to (:data:`SEALED_RECORD_SETS`), else None."""
