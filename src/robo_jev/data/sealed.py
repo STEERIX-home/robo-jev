@@ -57,6 +57,11 @@ NEVER_SENT_SETS += ("v08-b8", "v08-m8g")
 SEALED_RECORD_SETS += ("v08-r14",)
 SEALED_RECORD_PREFIXES.update({"v08-r14": "v08r14-"})
 SEALED_RECORD_FILES.update({"v08-r14": "artifacts/v08/r14/R14-all.jsonl"})
+#: Task v0.8c: A16 (the arm's servo decisions) and S16 (soccer) — robo-jev-web's requests of 2026-10-16, reported v0.8 sets
+#: (:mod:`robo_jev.bench.r16_v08`): sealed for training (never trained on) but NOT never-sent — the bench has already sent them.
+SEALED_RECORD_SETS += ("v08-a16", "v08-s16")
+SEALED_RECORD_PREFIXES.update({"v08-a16": "v08a16-", "v08-s16": "v08s16-"})
+SEALED_RECORD_FILES.update({"v08-a16": "artifacts/v08/r16/A16.jsonl", "v08-s16": "artifacts/v08/r16/S16.jsonl"})
 
 
 def sealed_record_set(record: dict[str, Any]) -> str | None:
