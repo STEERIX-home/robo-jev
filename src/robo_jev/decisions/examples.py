@@ -10,6 +10,10 @@
 순서(정렬한 키의 seed 순열), 예/아니오 순서, 점수 구간 방향을 무작위로 정한다. 목표 분포는 **보이는 순서로** 만든다(정답이 선택지와
 함께 옮겨진다). 증강을 끄면(`augment=False`) 순서 seed는 :data:`FIXED_ORDER_SEED` (= 진단의 shuffle seed 1, 균형 배치의 0번 배치)다.
 
+**Assigned codes (Task v0.8a).** A record's ``meta.codes`` (question name → pool codes in display order,
+:mod:`robo_jev.decisions.codes`) reaches the prompt of each chosen question, so position j shows ``codes[j]`` whatever option the order seed
+puts there; the target is built in display order as always. A record without it is trained exactly as before.
+
 **정답 → 코드 분포** (:func:`code_target`, 보이는 순서):
 
 * choice — 정답 확률 그대로(키로 옮긴다; 합 1 ± 1e-6을 정확히 1로 나눠 맞춘다).
@@ -48,6 +52,7 @@ import random
 import statistics
 from typing import Any, Sequence
 
+from robo_jev.decisions.codes import assigned_codes
 from robo_jev.decisions.prompt import FORMATS, PROMPT_VERSION, PROMPT_VERSIONS, build_prompts, check_displayed_lines, record_prompts, score_values
 from robo_jev.decisions.records import shuffle_key
 
@@ -269,7 +274,9 @@ def build_examples(
     if unknown:
         raise ValueError(f"{record.get('id')}: 요청에 없는 질문 {unknown}")
     sub = {"state": request["state"], "questions": {name: questions[name] for name in names}}
-    prompts = build_prompts(sub, tokenizer, key=shuffle_key(record), seed=int(order_seed), fmt=fmt, mode="direct", orders="seeded", version=version)
+    assigned = {name: codes for name, codes in assigned_codes(record).items() if name in sub["questions"]}  # Task v0.8a: meta.codes
+    prompts = build_prompts(sub, tokenizer, key=shuffle_key(record), seed=int(order_seed), fmt=fmt, mode="direct", orders="seeded", version=version,
+                            codes=assigned or None)
     out = []
     for prompt in prompts:
         prompt["record_id"] = str(record.get("id") or "")

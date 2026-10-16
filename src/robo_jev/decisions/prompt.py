@@ -40,6 +40,14 @@
 :func:`check_displayed_lines` 는 글에 보이는 ``X. …`` 줄을 다시 읽어 기록된 ``options``·``values``와 맞는지 본다(리뷰 1 I5 —
 섞기와 되돌리기가 같은 목록을 쓰므로 그것만으로는 어긋남이 안 보인다). 진단은 채점 전에 모든 프롬프트를 이것으로 검사한다.
 
+**Codes past Z and assigned codes (Task v0.8a).** The codes come from the pool :data:`robo_jev.decisions.codes.CODE_POOL` (A–Z, then
+two-letter codes AA, AB, …). A question with up to 26 options and no assigned codes shows A, B, … exactly as before (the same
+:func:`~robo_jev.model.zero_shot.verify_codes` path — byte-identical prompts). A choice question with more than 26 options (only a record
+that opts in to 255 options has one) shows the pool codes in order. ``codes`` (:func:`build_prompts`; a record's ``meta.codes`` through
+:func:`record_prompts` and the trainer's examples) gives a choice question **assigned codes**: one pool code per shown position, in display
+order — position j of every listing shows ``codes[j]`` — and the readout reads those codes' rows. Each code is checked to be one token at the
+answer boundary (:func:`~robo_jev.decisions.codes.verify_pool_codes`). The fixed text and the prompt version are unchanged.
+
 고정 문구(지시·설명 지시·구간·기준점 이름 등)는 판마다 고정한다 — 문구를 바꾸면 판을 올린다(검사가 판마다
 :func:`fixed_text_digest` 를 고정해 둔다). :data:`PROMPT_VERSION` 은 지금의 기본 판(진단·학습·평가 — p3)이고, 모든 함수가
 ``version``으로 다른 판(p2 재현)을 받는다. 프롬프트 dict의 ``version``이 그 프롬프트를 만든 판이다.
@@ -51,8 +59,9 @@ import hashlib
 import json
 import random
 import re
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
+from robo_jev.decisions.codes import LETTERS, assigned_codes, sequential_codes, verify_pool_codes
 from robo_jev.decisions.records import shuffle_key
 from robo_jev.model.zero_shot import verify_codes
 
@@ -119,7 +128,7 @@ _CHAT_END = "<|im_end|>\n"
 _CHAT_ASSISTANT = "<|im_start|>assistant\n"
 _THINK_EMPTY = "<think>\n\n</think>\n\n"
 _OPTIONS_HEAD = "\nOptions:\n"
-_OPTION_LINE = re.compile(r"^([A-Z])\. (.*)$")
+_OPTION_LINE = re.compile(r"^([A-Z]{1,2})\. (.*)$")  # one or two capital letters (codes past Z, Task v0.8a)
 _BIN_LINE = re.compile(r"^(\d+\.\d) to (\d+\.\d)$")
 _ANCHOR_LINE = re.compile(r"^(\d\.\d)$")
 
@@ -271,15 +280,32 @@ def reasoning_close(fmt: str) -> str:
     return "\n" + ANSWER_CUE
 
 
+def _question_codes(name: str, question: dict, count: int, tokenizer: Any, assigned: Sequence[str] | None) -> tuple[list[str], list[int]]:
+    """The codes a question shows at its `count` positions and their token ids (module docstring, "Codes past Z and assigned codes"):
+    the assigned codes, else A, B, … (≤ 26: the letters' path, unchanged), else the pool codes in order."""
+    if assigned is not None:
+        if question.get("type") != "choice":
+            raise ValueError(f"question {name!r}: assigned codes are only for choice questions (type {question.get('type')!r})")
+        assigned = [str(c) for c in assigned]
+        if len(assigned) != count or len(set(assigned)) != count:
+            raise ValueError(f"question {name!r}: {len(assigned)} assigned codes (distinct: {len(set(assigned))}) for {count} options")
+        return assigned, verify_pool_codes(tokenizer, assigned)
+    if count <= len(LETTERS):
+        return verify_codes(tokenizer, count)
+    codes = sequential_codes(count)
+    return codes, verify_pool_codes(tokenizer, codes)
+
+
 def build_prompts(
     request: dict[str, Any], tokenizer: Any, *, key: str, seed: int | None, fmt: str = "plain", mode: str = "direct", orders: str = "seeded",
-    version: str = PROMPT_VERSION,
+    version: str = PROMPT_VERSION, codes: Mapping[str, Sequence[str]] | None = None,
 ) -> list[dict[str, Any]]:
     """요청(``state``·``questions``만 있는 dict) → 질문 × 배치마다 프롬프트 dict (요청의 질문 순서, 질문 안에서는 배치 순서).
 
     각 dict: ``question``, ``type``, ``listing``·``n_listings``(배치 번호·수), ``options``(보이는 순서의 키), ``option_lines``,
     ``values``(score 중앙값; 아니면 None), ``codes``, ``code_ids``, ``tokens``(접두 토큰 + 질문 토큰), ``prefix_tokens``, ``text``,
-    ``prefix_chars``, ``format``, ``mode``, ``version``(만든 판). `key`·`seed`·`orders`는 선택지 순서만 정한다.
+    ``prefix_chars``, ``format``, ``mode``, ``version``(만든 판). `key`·`seed`·`orders`는 선택지 순서만 정한다. `codes` (Task v0.8a): question
+    name → assigned codes in display order (module docstring); every name must be a choice question of the request.
     """
     _check_version(version)
     if fmt not in FORMATS:
@@ -289,6 +315,10 @@ def build_prompts(
     if not isinstance(request, dict) or set(request) - _REQUEST_KEYS or not _REQUEST_KEYS <= set(request):
         extra = sorted(set(request) - _REQUEST_KEYS) if isinstance(request, dict) else type(request).__name__
         raise ValueError(f"build_prompts는 요청(state·questions)만 받는다 — 다른 키: {extra}")
+    codes = dict(codes or {})
+    unknown = sorted(set(map(str, codes)) - set(map(str, request["questions"])))
+    if unknown:
+        raise ValueError(f"assigned codes for questions the request does not ask: {unknown}")
     prefix = _prefix(str(request["state"]), fmt)
     prefix_ids = list(tokenizer.encode(prefix, add_special_tokens=False).ids)
     if orders not in ORDERS:
@@ -296,15 +326,16 @@ def build_prompts(
     out = []
     for name, question in request["questions"].items():
         listings = _listings(str(name), question, key=key, seed=seed, orders=orders, version=version)
+        shown_codes, shown_ids = _question_codes(str(name), question, len(listings[0]["options"]), tokenizer, codes.get(str(name)))
         for index, shown in enumerate(listings):
-            codes, code_ids = verify_codes(tokenizer, len(shown["options"]))
-            suffix = _suffix(_question_block(question, codes, shown["lines"], version), fmt, mode)
+            codes_here, code_ids = list(shown_codes), list(shown_ids)
+            suffix = _suffix(_question_block(question, codes_here, shown["lines"], version), fmt, mode)
             suffix_ids = list(tokenizer.encode(suffix, add_special_tokens=False).ids)
             out.append(
                 {
                     "question": str(name), "type": question["type"], "listing": index, "n_listings": len(listings),
                     "options": list(shown["options"]), "option_lines": list(shown["lines"]),
-                    "values": list(shown["values"]) if shown["values"] is not None else None, "codes": codes, "code_ids": code_ids,
+                    "values": list(shown["values"]) if shown["values"] is not None else None, "codes": codes_here, "code_ids": code_ids,
                     "tokens": prefix_ids + suffix_ids, "prefix_tokens": len(prefix_ids), "text": prefix + suffix, "prefix_chars": len(prefix),
                     "format": fmt, "mode": mode, "version": version,
                 }
@@ -316,11 +347,12 @@ def record_prompts(
     record: dict[str, Any], tokenizer: Any, *, seed: int | None, fmt: str = "plain", mode: str = "direct", orders: str = "seeded",
     version: str = PROMPT_VERSION,
 ) -> list[dict[str, Any]]:
-    """기록 → 프롬프트들. 모델 입력은 ``record["request"]``뿐이고, id·``meta.pair``는 순서의 열쇠(:func:`shuffle_key`)로만 쓴다."""
+    """기록 → 프롬프트들. 모델 입력은 ``record["request"]``뿐이고, id·``meta.pair``는 순서의 열쇠(:func:`shuffle_key`)로만 쓴다. A record's
+    ``meta.codes`` (Task v0.8a) gives its choice questions assigned codes (module docstring); without it the prompts are unchanged."""
     request = record["request"]
     prompts = build_prompts(
         {"state": request["state"], "questions": request["questions"]}, tokenizer, key=shuffle_key(record), seed=seed, fmt=fmt, mode=mode, orders=orders,
-        version=version,
+        version=version, codes=assigned_codes(record) or None,
     )
     for p in prompts:
         p["record_id"] = str(record.get("id") or "")

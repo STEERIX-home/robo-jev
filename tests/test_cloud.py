@@ -241,13 +241,17 @@ RAISED_PHASE_JOBS = ("decisions-v04-s0-h100.yaml", "decisions-v04-s1-h100.yaml",
 PHASE_350_JOBS = ("decisions-v06-s0-h100.yaml", "decisions-v06-s1-h100.yaml")
 #: Jobs written after the third raise to $450 (2026-10-15, recorded in the ledger's history; v0.7's jobs with 400 min of training).
 PHASE_450_JOBS = ("decisions-v07-s0-h100.yaml", "decisions-v07-s1-h100.yaml")
+#: v0.8's four jobs (Task v0.8a) carry the phase cap their launch needs, $500: the ledger's $321.44 spent + four caps of $41.90 = $489.02.
+#: The ledger stays at $450 until the user raises it (`launch_run.py ledger --set-phase-cap 500 --reason …`); until then it refuses them.
+PHASE_500_JOBS = ("decisions-v08f-s0-h100.yaml", "decisions-v08f-s1-h100.yaml", "decisions-v08p-s0-h100.yaml", "decisions-v08p-s1-h100.yaml")
 
 
 def test_the_default_phase_is_150_dollars_and_the_shipped_configs_agree():
     assert DEFAULT_PHASE["cap_usd"] == 150.0
     for path in sorted((REPO / "configs" / "cloud").glob("*.yaml")):
         phase = (yaml.safe_load(path.read_text(encoding="utf-8")).get("budget") or {}).get("phase")
-        cap = 450 if path.name in PHASE_450_JOBS else 350 if path.name in PHASE_350_JOBS else 250 if path.name in RAISED_PHASE_JOBS else 150
+        cap = (500 if path.name in PHASE_500_JOBS else 450 if path.name in PHASE_450_JOBS else 350 if path.name in PHASE_350_JOBS
+               else 250 if path.name in RAISED_PHASE_JOBS else 150)
         assert phase == {"name": "cloud-phase-1", "cap_usd": cap}, f"{path.name}: 단계 상한은 ${cap}"
 
 

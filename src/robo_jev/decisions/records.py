@@ -14,6 +14,12 @@
   record without the mark gets 2–8. The trainer reads the opt-in from the data through :func:`validate_record` — no config key. The serving
   path (:mod:`robo_jev.infer`) accepts 2–26 since the v0.7 release (Task rel07): it validates a served request under the opt-in. (The Hub
   runner ``robo_jev_decide.py`` takes up to 466 since Task rel071, with two-letter codes past Z; it does not use this module.)
+* **The 255-option opt-in (Task v0.8a)** — ``meta.option_range`` equal to :data:`OPTION_RANGE_MARK_255` exactly (``{"version":
+  "options-255-1", "max": 255}``) allows :data:`POOL_OPTION_RANGE` (2–255 — one code each of the pool
+  :data:`robo_jev.decisions.codes.CODE_POOL`: A–Z, then two-letter codes). The 26-option mark keeps its meaning; the default stays 2–8.
+* **Assigned codes (Task v0.8a)** — ``meta.codes`` (question name → one pool code per shown position, in display order) makes the prompt
+  show those codes instead of A, B, … (:mod:`robo_jev.decisions.codes`). :func:`validate_record` checks it: an object whose names are choice
+  questions of the request, each a list of as many distinct pool codes as the question has options. A record without it is unchanged.
 * :func:`select_records` — 무작위 표본(seed 고정)을 **쌍 단위로** 뽑는다. 사실 하나만 바꾼 쌍(``meta.pair``)은 짝이 함께
   들어와야 쌍 분석이 된다(레코드 단위로 300/2,000을 뽑으면 짝이 같이 뽑히는 쌍이 몇 개 안 된다). 묶음을 섞은 순서대로
   개수가 `limit`에 닿을 때까지 통째로 담으므로 마지막 묶음이 쌍이면 `limit`보다 하나 많을 수 있고(쌍을 깨지 않는다),
@@ -40,6 +46,8 @@ __all__ = [
     "NAME_RE",
     "OPTION_RANGE",
     "OPTION_RANGE_MARK",
+    "OPTION_RANGE_MARK_255",
+    "POOL_OPTION_RANGE",
     "QUESTION_TYPES",
     "SCHEMA",
     "WIDE_OPTION_RANGE",
@@ -62,6 +70,10 @@ OPTION_RANGE = (2, 8)
 WIDE_OPTION_RANGE = (2, 26)
 #: ``meta.option_range`` of a record that opts in to :data:`WIDE_OPTION_RANGE` — exactly this dict (Task v0.7a).
 OPTION_RANGE_MARK = {"version": "options-26-1", "max": 26}
+#: The 255-option opt-in (module docstring, Task v0.8a): 2..255 choice options — one code each of the code pool.
+POOL_OPTION_RANGE = (2, 255)
+#: ``meta.option_range`` of a record that opts in to :data:`POOL_OPTION_RANGE` — exactly this dict (Task v0.8a).
+OPTION_RANGE_MARK_255 = {"version": "options-255-1", "max": 255}
 QUESTION_TYPES = ("choice", "noul", "score")
 LABEL_SUM_TOL = 1e-6
 #: choice 정답의 kind — 없음, v0a 엔진의 action·state·rule, 일반 능력 시험 G1의 probe(Task v0.1b — 지표에서 ``choice/other``로 따로 묶인다).
@@ -92,14 +104,37 @@ def _is_unit(value: Any) -> bool:
 
 def option_range_for(record: dict[str, Any]) -> tuple[tuple[int, int], list[str]]:
     """(the record's choice option range, problems): :data:`OPTION_RANGE` unless ``meta.option_range`` is :data:`OPTION_RANGE_MARK` exactly
-    (then :data:`WIDE_OPTION_RANGE`); any other value under ``meta.option_range`` is a problem and the range stays the default."""
+    (then :data:`WIDE_OPTION_RANGE`) or :data:`OPTION_RANGE_MARK_255` exactly (then :data:`POOL_OPTION_RANGE`); any other value under
+    ``meta.option_range`` is a problem and the range stays the default."""
     meta = record.get("meta") if isinstance(record.get("meta"), dict) else {}
     mark = meta.get("option_range")
     if mark is None:
         return OPTION_RANGE, []
     if isinstance(mark, dict) and mark == OPTION_RANGE_MARK:
         return WIDE_OPTION_RANGE, []
-    return OPTION_RANGE, [f"meta.option_range {mark!r} is not the many-option opt-in {OPTION_RANGE_MARK!r}"]
+    if isinstance(mark, dict) and mark == OPTION_RANGE_MARK_255:
+        return POOL_OPTION_RANGE, []
+    return OPTION_RANGE, [f"meta.option_range {mark!r} is not a many-option opt-in ({OPTION_RANGE_MARK!r} or {OPTION_RANGE_MARK_255!r})"]
+
+
+def _codes_problems(record: dict[str, Any], questions: dict[str, Any]) -> list[str]:
+    """The problems of ``meta.codes`` (module docstring) — none when the record has no such key."""
+    meta = record.get("meta") if isinstance(record.get("meta"), dict) else {}
+    if "codes" not in meta:
+        return []
+    from robo_jev.decisions.codes import codes_problems
+
+    codes = meta["codes"]
+    if not isinstance(codes, dict) or not codes:
+        return [f"meta.codes must be a non-empty object of question name -> codes (got {type(codes).__name__})"]
+    problems = []
+    for name, value in codes.items():
+        question = questions.get(name)
+        if not isinstance(question, dict) or question.get("type") != "choice" or not isinstance(question.get("criteria"), dict):
+            problems.append(f"meta.codes names {name!r}, which is not a choice question of the request")
+            continue
+        problems.extend(f"meta.codes {name!r}: {p}" for p in codes_problems(value, len(question["criteria"])))
+    return problems
 
 
 def _validate_question(name: str, question: Any, option_range: tuple[int, int] = OPTION_RANGE) -> list[str]:
@@ -185,6 +220,7 @@ def validate_record(record: dict[str, Any], *, require_labels: bool = True) -> l
     labels = record.get("labels") if isinstance(record.get("labels"), dict) else {}
     option_range, range_problems = option_range_for(record)
     problems.extend(range_problems)
+    problems.extend(_codes_problems(record, questions))
     for name, question in questions.items():
         if not NAME_RE.match(str(name)):
             problems.append(f"question name {name!r} does not match {NAME_RE.pattern}")

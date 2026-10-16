@@ -11,6 +11,11 @@
 step 손실 = Σ 예 (w_type · KL + λ · (−log 코드 질량)) / 예 수 — 종류별 가중치(`type_weights`, 기본 모두 1)는 KL 항에만 곱하는 배수이고 보조 항은
 모든 예에 같다(형식의 문제라서).
 
+**H-prior loss weights (Task v0.8a, opt-in: ``label_prior_weights: true``).** Each example's KL term is multiplied, besides its type
+weight, by its label class's weight within its question family (:mod:`robo_jev.decisions.prior_weights`: every class of a family carries
+equal total weight over the epoch plan's examples, mean weight 1 per family, capped at ``label_prior_cap``). The code-mass term and the dev
+loss are not weighted. Off (the default), nothing of it runs: the losses and gradients are byte-identical to the unweighted trainer's.
+
 **두 방식** (`mode`):
 
 * ``lora`` (기본) — 저장소의 :func:`robo_jev.train.attach_lora` (peft 0.21 ``inject_adapter_in_model``, adapter는 fp32, 나머지 고정)로
@@ -195,7 +200,11 @@ DEFAULTS: dict[str, Any] = {
     "dtype": "bfloat16",
     "tiny_seed": 4,
     "allow_large_activations": False,  # 메모리 추정이 울타리의 90 %를 넘어도 시작한다 (명시적 확인 — 보통은 거절)
+    "label_prior_weights": False,  # Task v0.8a: H-prior loss weights (module docstring) — off by default
+    "label_prior_cap": 5.0,  # the cap of an H-prior weight (robo_jev.decisions.prior_weights.DEFAULT_CAP)
 }
+#: Keys added after earlier runs were saved: a checkpoint without them was trained with these defaults (resume compares them so).
+LATER_KEYS = {"label_prior_weights": False, "label_prior_cap": 5.0}
 #: 재개할 때 체크포인트의 설정과 달라도 되는 키 — 중단·예산 밖의 운영 값·경로뿐이다(입력 파일은 경로가 아니라 내용 digest로 대조한다).
 RESUME_FREE_KEYS = (
     "train_input", "out_dir", "run_name", "checkpoint_every", "save_checkpoints", "metrics_every", "max_wall_hours", "stop_after_steps",
@@ -266,8 +275,10 @@ def resolve_config(config: dict[str, Any]) -> dict[str, Any]:
         isinstance(out["mix"], list) and not out["mix"],
         "mix: 일반 능력 보호용 데이터 섞기는 자리만 있다(Task v0d) — 지금은 빈 목록이어야 한다 (섞는 방식은 그 데이터가 생길 때 정한다)",
     )
-    for key in ("augment", "gradient_checkpointing", "save_checkpoints", "keep_best", "allow_large_activations"):
+    for key in ("augment", "gradient_checkpointing", "save_checkpoints", "keep_best", "allow_large_activations", "label_prior_weights"):
         _need(isinstance(out[key], bool), f"{key}: true/false")
+    _need(_is_number(out["label_prior_cap"]) and out["label_prior_cap"] >= 1.0, "label_prior_cap: a number of at least 1")
+    out["label_prior_cap"] = float(out["label_prior_cap"])
     return out
 
 
@@ -683,6 +694,10 @@ class DecisionTrainer:
         self.best: dict[str, Any] | None = None
         self.status = "running"
         self._plan_cache: tuple[int, list[tuple[int, str, int]]] | None = None
+        self._prior_cache: tuple[int, list[float], dict[str, Any]] | None = None
+        if cfg["label_prior_weights"]:  # Task v0.8a: the H-prior weights of the epoch-0 plan, recorded before any step
+            table = self._prior(0)[1]
+            self.manifest["objective"]["label_prior_weights"] = _prior_summary(table)
         self._started = time.perf_counter()
         if resume is not None:
             self._load(resume)
@@ -714,16 +729,29 @@ class DecisionTrainer:
             self._plan_cache = (epoch, plan + self.mix_plan(epoch))
         return self._plan_cache[1]
 
+    def _prior(self, epoch: int) -> tuple[list[float], dict[str, Any]]:
+        """The H-prior weight of every entry of the epoch's plan and the weight table (Task v0.8a; only with ``label_prior_weights``)."""
+        if self._prior_cache is None or self._prior_cache[0] != epoch:
+            from robo_jev.decisions.prior_weights import plan_weights
+
+            weights, table = plan_weights(self.train_records, self._plan(epoch), cap=self.config["label_prior_cap"])
+            self._prior_cache = (epoch, weights, table)
+        return self._prior_cache[1], self._prior_cache[2]
+
     def step_examples(self, step: int) -> list[dict[str, Any]]:
-        """step 번호 → 그 step의 학습 예들 (epoch 계획의 `batch_examples`개 조각; 토큰은 여기서 만든다)."""
+        """step 번호 → 그 step의 학습 예들 (epoch 계획의 `batch_examples`개 조각; 토큰은 여기서 만든다). With ``label_prior_weights`` each
+        example also carries its H-prior weight (``prior_weight``)."""
         epoch, index = divmod(int(step), self.steps_per_epoch)
         size = self.config["batch_examples"]
         chunk = self._plan(epoch)[index * size : (index + 1) * size]
+        prior = self._prior(epoch)[0][index * size : (index + 1) * size] if self.config["label_prior_weights"] else None
         out = []
-        for record_index, name, order_seed in chunk:
+        for position, (record_index, name, order_seed) in enumerate(chunk):
             out.extend(build_examples(self.train_records[record_index], [name], self.tokenizer, order_seed=order_seed, fmt=self.config["format"],
                                       version=self.config["prompt_version"]))
             out[-1]["epoch"] = epoch
+            if prior is not None:
+                out[-1]["prior_weight"] = prior[position]
         return out
 
     # -- 학습 step --
@@ -733,6 +761,8 @@ class DecisionTrainer:
 
         예별 값: ``kl``·``ce``·``code_mass``; 합: ``kl_loss``(Σ w·KL / n)·``aux_loss``(λ · Σ −log m / n) — ``kl_loss + aux_loss`` = 손실."""
         weights = [self.config["type_weights"][e["type"]] for e in examples]
+        if self.config["label_prior_weights"]:  # Task v0.8a: the KL term only (the code-mass term stays unweighted)
+            weights = [w * float(e["prior_weight"]) for w, e in zip(weights, examples)]
         lam = float(self.config["code_mass_weight"])
         groups = pack_micro_batches([len(e["tokens"]) for e in examples], self.config["micro_batch_tokens"])
         kl: list[float] = [0.0] * len(examples)
@@ -786,6 +816,8 @@ class DecisionTrainer:
             "seconds": seconds, "tokens_per_second": tokens / seconds if seconds > 0 else None,
             "peak_allocated_bytes": int(torch.cuda.max_memory_allocated()) if self.backbone.device.type == "cuda" else None,
         }
+        if self.config["label_prior_weights"]:
+            metrics["prior_weight_mean"] = statistics.fmean(float(e["prior_weight"]) for e in examples) if examples else None
         self.step += 1
         self.history.append(metrics)
         return metrics
@@ -897,7 +929,7 @@ class DecisionTrainer:
         state = load_checkpoint(path)
         manifest = state.get("manifest") or {}
         _need(manifest.get("kind") == TRAIN_KIND, f"resume: {path}는 {TRAIN_KIND} 체크포인트가 아니다 (kind {manifest.get('kind')!r})")
-        saved = {k: v for k, v in (state.get("config") or {}).items() if k not in RESUME_FREE_KEYS}
+        saved = {k: v for k, v in {**LATER_KEYS, **(state.get("config") or {})}.items() if k not in RESUME_FREE_KEYS}
         current = {k: v for k, v in self.config.items() if k not in RESUME_FREE_KEYS}
         different = sorted(k for k in set(saved) | set(current) if saved.get(k) != current.get(k))
         _need(not different, f"resume: 체크포인트의 설정과 다르다: {different} (달라도 되는 것: {list(RESUME_FREE_KEYS)})")
@@ -955,6 +987,18 @@ class DecisionTrainer:
 # --------------------------------------------------------------------------
 # 평가 적재
 # --------------------------------------------------------------------------
+
+
+def _prior_summary(table: dict[str, Any]) -> dict[str, Any]:
+    """The run manifest's record of the H-prior weights (Task v0.8a): version, cap and the epoch-0 table's totals — the per-family table is
+    written by the training-input assembly's report."""
+    families = table["families"].values()
+    return {"version": table["version"], "cap": table["cap"], "epoch": 0, "families": table["n_families"], "examples": table["examples"],
+            "capped_classes": table["capped_classes"], "min_weight": min((f["min"] for f in families), default=None),
+            "max_weight": max((f["max"] for f in families), default=None),
+            "ess_share": (sum(f["ess"] for f in families) / table["examples"]) if table["examples"] else None,
+            "rule": "within each question family (source x question name) every label class carries equal total weight over the epoch plan, "
+                    "mean weight 1 per family, capped (robo_jev.decisions.prior_weights); the KL term only"}
 
 
 def apply_checkpoint(backbone: Any, path: str | Path, *, tokenizer_sha256: str | None, prompt_version: str = PROMPT_VERSION) -> dict[str, Any]:
