@@ -43,7 +43,7 @@ model = load("Steerix-org/robo-jev-2b")
 answers = model.decide(state, questions)   # {"action": {"type": "choice", "choice": …, "probabilities": {…}}, "spill": {"type": "noul", "noul": …}, …}
 ```
 
-**Limits:** `choice` questions with 2–466 options; 1–12 questions per request; state text ≤ 16,000 characters. Options past the 26th get two-letter codes (AA, AB, …) that were not part of training, so those answers are less reliable.
+**Limits:** `choice` questions with 2–466 options; 1–12 questions per request; state text ≤ 16,000 characters. Options past the 26th get two-letter codes (AA, AB, …) that were not part of training, and the model almost never picks them in the default order; `orders="balanced"` lets every option compete, at one forward pass per option.
 
 *Research preview, tuned on simulated physical judgment; less reliable outside simulation, and not a safety system.*
 

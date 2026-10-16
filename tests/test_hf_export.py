@@ -250,7 +250,7 @@ def test_the_model_cards(variant):
     assert card.startswith("---\n") and "{{" not in card and "Example output." in card
     assert f"# robo-jev 2B{' LoRA' if variant == 'adapter' else ''} — v0.7" in card and "fast, single-pass 2B System 1" in card
     assert "2–466 options; 1–12 questions per request; state text ≤ 16,000 characters" in card  # the limits
-    assert "two-letter codes (AA, AB, …) that were not part of training, so those answers are less reliable" in card
+    assert "two-letter codes (AA, AB, …) that were not part of training, and the model almost never picks them in the default order" in card
     assert "With the robo-jev package (up to 26 options)" in card
     for row in ("| **robo-jev v0.7 · 2B** | **0.81** | 0.71 |", "| TypeSafe Jev | 0.28 | 0.91 |", "| Qwen3.5-2B, untrained | −0.15 | 0.74 |"):
         assert row in card  # the comparison with the decision models
