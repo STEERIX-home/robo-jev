@@ -1,4 +1,5 @@
-"""Training checkpoint → Hugging Face folders: the PEFT adapter and the merged model (Task hf0 §1; the v0.7 release: Task rel07).
+"""Training checkpoint → Hugging Face folders: the PEFT adapter and the merged model (Task hf0 §1; the v0.7 release: Task rel07; its
+runner with up to 466 choice options: Task rel071).
 
 **Adapter.** :func:`lora_config` rebuilds the training LoRA (r, alpha, dropout, targets, no bias) as a ``peft`` ``LoraConfig`` with
 ``task_type="CAUSAL_LM"`` and the pinned base (``Qwen/Qwen3.5-2B`` @ revision). :func:`build_peft_model` wraps the real base model with
@@ -14,7 +15,8 @@ model and are not saved) with ``save_pretrained(safe_serialization=True)``.
 **Next to the weights** (:func:`write_common_files`): the training tokenizer (``tokenizer.json`` byte for byte — sha256 checked), the
 base's ``tokenizer_config.json`` and ``chat_template.jinja`` (pinned revision), ``robo_jev.json`` (:func:`build_metadata` — prompt
 version and digest, answer-code scheme and token ids, score anchors, readout, request limits, the release, training summary, source
-checkpoint sha256, git sha, base revision), the standalone runner ``robo_jev_decide.py``, the model card and figures.
+checkpoint sha256, git sha, base revision), the standalone runner ``robo_jev_decide.py``, the model card and figures. The answer codes and
+the request limits in ``robo_jev.json`` are the runner's (its ``CODES`` and ``LIMITS``: A–Z, then two-letter codes, up to 466 options).
 :func:`check_no_pickle` refuses pickle files.
 
 **Public text only.** :func:`public_paths` turns absolute paths into a local checkout (the data manifests record them) into repo-relative
@@ -46,7 +48,8 @@ from robo_jev.decisions.prompt import (
     fixed_text_digest,
 )
 from robo_jev.decisions.records import MAX_QUESTIONS, MAX_STATE_CHARS
-from robo_jev.infer import CHOICE_OPTIONS, DEFAULT_SEED, FORMAT, METADATA_FILE, MODE, file_sha256
+from robo_jev.hf import robo_jev_decide as hub_runner
+from robo_jev.infer import DEFAULT_SEED, FORMAT, METADATA_FILE, MODE, file_sha256
 
 __all__ = [
     "ADAPTER_REPO",
@@ -94,8 +97,9 @@ RELEASE = {
 #: rule or its verdict. :func:`strip_verdicts` drops such strings from ``robo_jev.json``; :func:`check_no_verdicts` refuses a folder whose
 #: README.md or robo_jev.json still has one.
 VERDICT_TEXT = re.compile(r"pre-?declared|verdict|pre-?registered|\bREJECTED\b|not passed|clearly better than", re.IGNORECASE)
-#: The request limits of both runners (the package's :class:`robo_jev.infer.RoboJev` and the Hub's ``robo_jev_decide.py``).
-LIMITS = {"state_chars": MAX_STATE_CHARS, "questions": [1, MAX_QUESTIONS], "choice_options": list(CHOICE_OPTIONS)}
+#: The request limits ``robo_jev.json`` records: those of the runner both repos ship, ``robo_jev_decide.py`` (its ``LIMITS``). The package's
+#: :class:`robo_jev.infer.RoboJev` has the same, except that it takes 2–26 choice options (:data:`robo_jev.infer.CHOICE_OPTIONS`, Task rel071).
+LIMITS = {"state_chars": MAX_STATE_CHARS, "questions": [1, MAX_QUESTIONS], "choice_options": list(hub_runner.LIMITS["choice_options"])}
 GITHUB = "https://github.com/STEERIX-home/robo-jev"
 #: PEFT parameter name = this prefix + the training key (training keys are relative to the text model, ``Qwen3_5ForCausalLM.model``).
 PEFT_PREFIX = "base_model.model.model."
@@ -223,21 +227,32 @@ def _git_sha(repo: Path) -> dict[str, Any]:
 
 
 def _code_scheme(tokenizer: Any) -> dict[str, Any]:
-    from robo_jev.model.zero_shot import CODES, verify_codes
+    """The runner's answer codes (``robo_jev_decide.CODES``: A–Z, then two-letter codes) with their token ids, each checked by the runner's
+    own rule; the first 26 are the training letters A–Z with the package's ids (:func:`robo_jev.model.zero_shot.verify_codes`)."""
+    from robo_jev.model.zero_shot import CODES as LETTERS, verify_codes
 
-    low, high = CHOICE_OPTIONS
-    codes, ids = verify_codes(tokenizer, max(high, len(SCORE_ANCHORS)))  # every code a request can show: A–Z (choice up to 26 options)
-    _need(len(set(ids)) == len(ids) == len(CODES) == high, f"answer codes {codes} → ids {ids}: not 26 distinct single tokens")
+    low, high = LIMITS["choice_options"]
+    codes, ids = hub_runner._verify_codes(tokenizer, high)  # every code a request can show
+    _need(len(set(ids)) == len(ids) == len(hub_runner.CODES) == high > len(SCORE_ANCHORS), f"answer codes: {len(set(ids))} distinct of {high}")
+    letters, letter_ids = verify_codes(tokenizer, len(LETTERS))
+    _need((codes[:26], ids[:26]) == (list(letters), list(letter_ids)) == (list("ABCDEFGHIJKLMNOPQRSTUVWXYZ"), ids[:26]),
+          "the first 26 answer codes are not the training letters A–Z")
     return {
-        "codes": "one capital letter per shown option, A, B, C, … in the shown order",
+        "codes": (
+            "one code per shown option, in the shown order: the capital letters A, B, C, … Z (the codes the model was trained with), then "
+            "two-letter codes AA, AB, … for options past the 26th (not part of training, so less reliable)"
+        ),
         "token_ids": dict(zip(codes, ids)),
-        "rule": "each code is one token alone (' A') and right after the answer cue ('Answer: A'); the prompt ends with the cue",
+        "rule": (
+            "each code is one token alone (' A', ' AB') and right after the answer cue ('Answer: A'); the prompt ends with the cue; "
+            "two-letter codes that are common English words or abbreviations are left out"
+        ),
         "readout": (
             "the last position's hidden state (after the final RMSNorm) times the LM-head rows of the shown codes, in float32; "
             "softmax over the shown codes only"
         ),
-        "options": {"choice": f"{low}-{high} (the request's keys, shown as '<code>. <key>: <description>', codes A-Z)", "noul": "2 (Yes, No)",
-                    "score": f"{len(SCORE_ANCHORS)} anchors"},
+        "options": {"choice": f"{low}-{high} (the request's keys, shown as '<code>. <key>: <description>'; codes A-Z, then AA, AB, …)",
+                    "noul": "2 (Yes, No)", "score": f"{len(SCORE_ANCHORS)} anchors"},
     }
 
 

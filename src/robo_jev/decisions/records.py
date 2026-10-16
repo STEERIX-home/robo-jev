@@ -12,8 +12,8 @@
   :data:`WIDE_OPTION_RANGE` (2–26 — the codes A–Z, each a single token at the answer boundary,
   :func:`robo_jev.model.zero_shot.verify_codes`). Any other value under ``meta.option_range`` is a problem (never a silent default), and a
   record without the mark gets 2–8. The trainer reads the opt-in from the data through :func:`validate_record` — no config key. The serving
-  path (:mod:`robo_jev.infer`, and the Hub runner ``robo_jev_decide.py``) accepts 2–26 since the v0.7 release (Task rel07): it validates a
-  served request under the opt-in.
+  path (:mod:`robo_jev.infer`) accepts 2–26 since the v0.7 release (Task rel07): it validates a served request under the opt-in. (The Hub
+  runner ``robo_jev_decide.py`` takes up to 466 since Task rel071, with two-letter codes past Z; it does not use this module.)
 * :func:`select_records` — 무작위 표본(seed 고정)을 **쌍 단위로** 뽑는다. 사실 하나만 바꾼 쌍(``meta.pair``)은 짝이 함께
   들어와야 쌍 분석이 된다(레코드 단위로 300/2,000을 뽑으면 짝이 같이 뽑히는 쌍이 몇 개 안 된다). 묶음을 섞은 순서대로
   개수가 `limit`에 닿을 때까지 통째로 담으므로 마지막 묶음이 쌍이면 `limit`보다 하나 많을 수 있고(쌍을 깨지 않는다),
