@@ -97,7 +97,7 @@ answers = model.decide(state, questions)   # {"action": {"type": "choice", "choi
 
 {{EXAMPLE_OUTPUT}}
 
-**Limits:** `choice` questions with 2–26 options; 1–12 questions per request; state text ≤ 16,000 characters. With the robo-jev package: `RoboJev.from_pretrained("{{REPO}}").decide(state, questions)`.
+**Limits:** `choice` questions with 2–466 options; 1–12 questions per request; state text ≤ 16,000 characters. Options past the 26th get two-letter codes (AA, AB, …) that were not part of training, so those answers are less reliable. With the robo-jev package (up to 26 options): `RoboJev.from_pretrained("{{REPO}}").decide(state, questions)`.
 
 *Research preview, tuned on simulated physical judgment; less reliable outside simulation, and not a safety system.*
 

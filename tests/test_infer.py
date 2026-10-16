@@ -6,16 +6,22 @@ On the small random Qwen (CPU, the torch reference kernels) with the real tokeni
   key, seed and order — both the single order (``seeded``) and the balanced one (``counterbalanced``);
 * the answers have the Decisions API shape;
 * the standalone runner builds the same prompts token for token and gives the same answers, and imports nothing from this package;
-* (Task rel07) both runners take choice questions with 2–26 options and refuse 27: the 26 answer letters are single tokens with the pinned
-  tokenizer, a 9–26-option request gets the training and diagnosis prompts of a record that opts in to many options
-  (``meta.option_range``), and the handwritten 21- and 26-option requests get byte-identical answers from both runners.
+* (Task rel07) both runners take choice questions with 2–26 options: the 26 answer letters are single tokens with the pinned tokenizer,
+  a 9–26-option request gets the training and diagnosis prompts of a record that opts in to many options (``meta.option_range``), and the
+  handwritten 21- and 26-option requests get byte-identical answers from both runners. The package refuses 27.
+* (Task rel071) the standalone runner takes up to 466 options: its codes are A–Z, then the two-letter codes AA…ZZ that pass the answer-code
+  rule with the pinned tokenizer, in order, less its stoplist (common words and abbreviations); each is one distinct token at the answer
+  boundary; 27, 46, 100 and 466 options are answered and 467 refused; and up to 26 options its prompts and answers are byte-identical to
+  the released v0.7 runner (tests/fixtures/hf/robo_jev_decide_v07.py).
 """
 
 import ast
 import functools
 import importlib.util
+import itertools
 import json
 import math
+import string
 import sys
 
 import pytest
@@ -34,6 +40,9 @@ REQUESTS = FIXTURES / "decisions" / "requests.jsonl"
 MANY_OPTIONS = FIXTURES / "decisions" / "many-options.jsonl"
 DIAGNOSE = REPO / "scripts" / "diagnose_decisions.py"
 STANDALONE = REPO / "src" / "robo_jev" / "hf" / "robo_jev_decide.py"
+#: The runner released with v0.7 (``git show 870b7b5:src/robo_jev/hf/robo_jev_decide.py`` — the file on the Hub at tag v0.7).
+V07_RUNNER = FIXTURES / "hf" / "robo_jev_decide_v07.py"
+V07_RUNNER_SHA256 = "df8c0b0ac70f54ce1bd538588bbca49f188c6fdef6b2a9fbef691739da6e509b"
 ORDERS = {"single": "seeded", "balanced": "counterbalanced"}
 #: The tokenizer every robo-jev checkpoint was trained with (Qwen/Qwen3.8-27B tokenizer.json; the training manifests' sha256).
 TRAINING_TOKENIZER_SHA256 = "0997f410c57a1f4e53b09e4be8f4a172d90edd9564368fb0847030937229b9f3"
@@ -66,6 +75,11 @@ def diagnose():
 @functools.lru_cache(maxsize=1)
 def standalone():
     return _load(STANDALONE, "robo_jev_decide_standalone")
+
+
+@functools.lru_cache(maxsize=1)
+def v07_runner():
+    return _load(V07_RUNNER, "robo_jev_decide_v07")
 
 
 def records():
@@ -204,16 +218,17 @@ def test_the_standalone_runner_validates_requests():
         runner.build_prompts("A state.", {}, tokenizer())
     with pytest.raises(ValueError, match="1..12"):
         runner.build_prompts("A state.", {f"q{i}": {"type": "noul", "instructions": "Is it?"} for i in range(13)}, tokenizer())
-    with pytest.raises(ValueError, match=r"2\.\.26 option keys to descriptions \(got 1\)"):
+    with pytest.raises(ValueError, match=r"2\.\.466 option keys to descriptions \(got 1\)"):
         runner.build_prompts("A state.", {"q": {"type": "choice", "instructions": "Pick.", "criteria": {"a": "only one"}}}, tokenizer())
     with pytest.raises(ValueError, match="max 16,000"):
         runner.build_prompts("x" * 16_001, {"q": {"type": "noul", "instructions": "Is it?"}}, tokenizer())
     assert runner.build_prompts("x" * 16_000, {"q": {"type": "noul", "instructions": "Is it?"}}, tokenizer())
-    assert runner.LIMITS == {"state_chars": 16_000, "questions": (1, 12), "choice_options": (2, 26)} and CHOICE_OPTIONS == (2, 26)
+    assert runner.LIMITS == {"state_chars": 16_000, "questions": (1, 12), "choice_options": (2, 466)} and CHOICE_OPTIONS == (2, 26)
+    assert runner.MAX_OPTIONS == len(runner.CODES) == 466
 
 
 # --------------------------------------------------------------------------
-# Many options (Task rel07): 2..26 in both runners
+# Many options (Task rel07): 2..26 in both runners; (Task rel071) up to 466 in the standalone runner
 # --------------------------------------------------------------------------
 
 
@@ -242,8 +257,7 @@ def test_the_26_answer_letters_are_single_tokens_with_the_pinned_tokenizer():
     for code, token in zip(codes, ids):
         assert tokenizer().encode(" " + code, add_special_tokens=False).ids == [token]
         assert tokenizer().encode("Answer: " + code, add_special_tokens=False).ids[-1] == token
-    with pytest.raises(ValueError, match="more than 26 codes"):
-        standalone()._verify_codes(tokenizer(), 27)
+    assert standalone().CODES[:26] == v07_runner().CODES == tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")  # the first 26 codes stay A–Z
 
 
 @pytest.mark.parametrize("n", [9, 21, 26])
@@ -285,12 +299,13 @@ def test_both_runners_answer_up_to_26_options_identically(n):
             assert a["place"]["choice"] == max(a["place"]["probabilities"], key=a["place"]["probabilities"].get)
 
 
-def test_both_runners_refuse_27_options():
+def test_the_package_refuses_27_options_and_the_standalone_runner_takes_them():
     request = many_option_record(27)["request"]
-    with pytest.raises(ValueError, match=r"2\.\.26 option keys to descriptions \(got 27\)"):
-        standalone().build_prompts(request["state"], request["questions"], tokenizer())
     with pytest.raises(ValueError, match=r"choice needs 2\.\.26 options \(has 27\)"):
         RoboJev(tiny_model(), tokenizer()).decide(request["state"], request["questions"])
+    assert [p["codes"][-1] for p in standalone().build_prompts(request["state"], request["questions"], tokenizer()) if p["type"] == "choice"] == ["AA"]
+    with pytest.raises(ValueError, match=r"2\.\.26 option keys to descriptions \(got 27\)"):
+        v07_runner().build_prompts(request["state"], request["questions"], tokenizer())  # the v0.7 runner stopped at 26
 
 
 def test_the_handwritten_21_and_26_option_requests_get_the_same_answers_from_both_runners():
@@ -307,3 +322,109 @@ def test_the_handwritten_21_and_26_option_requests_get_the_same_answers_from_bot
                 a = ours.decide(request["state"], request["questions"], key=key)
                 b = theirs.decide(request["state"], request["questions"], key=key)
                 assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+# --------------------------------------------------------------------------
+# Task rel071: the standalone runner's codes past Z
+# --------------------------------------------------------------------------
+
+
+def _passes_the_code_rule(code: str) -> bool:
+    """The runner's answer-code rule: one token alone (" AB") and the last token of "Answer: AB"."""
+    alone = tokenizer().encode(" " + code, add_special_tokens=False).ids
+    boundary = tokenizer().encode("Answer: " + code, add_special_tokens=False).ids
+    return len(alone) == 1 and boundary[-1] == alone[0]
+
+
+def test_the_codes_are_a_to_z_then_the_rule_s_two_letter_codes_in_order_less_the_stoplist():
+    assert file_sha256(available_tokenizer()[1]) == TRAINING_TOKENIZER_SHA256
+    letters = string.ascii_uppercase
+    two_letter = ["".join(pair) for pair in itertools.product(letters, repeat=2)]  # AA, AB, … ZZ: lexicographic
+    passing = [code for code in two_letter if _passes_the_code_rule(code)]
+    assert len(passing) == 544 and all("A" + letter in passing for letter in letters)
+    runner = standalone()
+    assert runner.CODES == tuple(letters) + tuple(code for code in passing if code not in set(runner.CODE_STOPLIST))
+    assert len(runner.CODES) == runner.MAX_OPTIONS == 466 and runner.LIMITS["choice_options"] == (2, 466)
+
+
+def test_every_code_is_one_distinct_token_at_the_answer_boundary():
+    runner = standalone()
+    codes, ids = runner._verify_codes(tokenizer(), runner.MAX_OPTIONS)
+    assert tuple(codes) == runner.CODES and len(set(codes)) == len(set(ids)) == len(ids) == 466
+    for code, token in zip(codes, ids):
+        assert tokenizer().encode(" " + code, add_special_tokens=False).ids == [token]
+        assert tokenizer().encode("Answer: " + code, add_special_tokens=False).ids[-1] == token
+    assert (codes[:26], ids[:26]) == tuple(verify_codes(tokenizer(), 26))  # the training letters, with the training ids
+    with pytest.raises(ValueError, match="467 options — more than 466 codes"):
+        runner._verify_codes(tokenizer(), 467)
+
+
+def test_the_stoplist_is_absent_and_each_entry_would_pass_the_rule():
+    runner = standalone()
+    stop = set(runner.CODE_STOPLIST)
+    assert len(stop) == len(runner.CODE_STOPLIST) == 104
+    assert {"NO", "OK", "IT", "AI", "US"} <= stop  # robo-jev-serve's examples
+    assert not stop & set(runner.CODES)
+    assert all(len(code) == 2 and code.isascii() and code.isupper() and _passes_the_code_rule(code) for code in stop)  # each removes a code
+
+
+@pytest.mark.parametrize("n", [27, 46, 100, 466])
+def test_the_standalone_runner_shows_more_than_26_options_with_two_letter_codes(n):
+    runner = standalone()
+    request = many_option_record(n)["request"]
+    prompts = [p for p in runner.build_prompts(request["state"], request["questions"], tokenizer()) if p["type"] == "choice"]
+    assert len(prompts) == 1
+    prompt = prompts[0]
+    assert prompt["codes"] == list(runner.CODES[:n]) and len(set(prompt["code_ids"])) == n
+    assert sorted(prompt["options"]) == sorted(request["questions"]["place"]["criteria"])
+    shown = prompt["text"].split("\nOptions:\n", 1)[1].split("<|im_end|>", 1)[0].split("\n")
+    assert [line.split(". ", 1)[0] for line in shown] == list(runner.CODES[:n])
+    assert prompt["text"].endswith("Answer:")
+
+
+def test_the_standalone_runner_refuses_one_option_more_than_its_codes():
+    runner = standalone()
+    request = many_option_record(runner.MAX_OPTIONS + 1)["request"]
+    with pytest.raises(ValueError, match=r"choice criteria must map 2\.\.466 option keys to descriptions \(got 467\)"):
+        runner.build_prompts(request["state"], request["questions"], tokenizer())
+
+
+@pytest.mark.parametrize("n, orders", [(27, "balanced"), (46, "single"), (100, "single")])
+def test_the_standalone_runner_answers_more_than_26_options(n, orders):
+    request = many_option_record(n)["request"]
+    with torch_reference_kernels():
+        answers = standalone().RoboJevRunner(tiny_model(), tokenizer()).decide(request["state"], request["questions"], orders=orders)
+    probabilities = answers["place"]["probabilities"]
+    assert list(probabilities) == list(request["questions"]["place"]["criteria"])
+    assert all(math.isfinite(p) and p >= 0.0 for p in probabilities.values())
+    assert math.isclose(sum(probabilities.values()), 1.0, abs_tol=1e-6)
+    assert answers["place"]["choice"] == max(probabilities, key=probabilities.get)
+
+
+def test_the_v07_runner_fixture_is_the_released_file():
+    assert file_sha256(V07_RUNNER) == V07_RUNNER_SHA256
+    assert v07_runner().CODES == tuple(string.ascii_uppercase) and v07_runner().LIMITS["choice_options"] == (2, 26)
+
+
+@pytest.mark.parametrize("orders", sorted(ORDERS))
+def test_prompts_up_to_26_options_are_byte_identical_to_the_v07_runner(orders):
+    old, new = v07_runner(), standalone()
+    requests = [r["request"] for r in records()] + [r["request"] for r in read_records(MANY_OPTIONS)]
+    requests += [many_option_record(n)["request"] for n in range(2, 27)]
+    for request in requests:
+        for key, seed in ((None, 1), ("k", 7), (None, None)):
+            a = old.build_prompts(request["state"], request["questions"], tokenizer(), key=key, seed=seed, orders=orders)
+            b = new.build_prompts(request["state"], request["questions"], tokenizer(), key=key, seed=seed, orders=orders)
+            assert a == b  # every field: question, listing, options, values, codes, code ids, text and tokens
+
+
+@pytest.mark.parametrize("n", [2, 8, 9, 21, 26])
+def test_answers_up_to_26_options_are_byte_identical_to_the_v07_runner(n):
+    request = many_option_record(n)["request"]
+    with torch_reference_kernels():
+        old = v07_runner().RoboJevRunner(tiny_model(), tokenizer())
+        new = standalone().RoboJevRunner(tiny_model(), tokenizer())
+        for orders in sorted(ORDERS):
+            a = old.decide(request["state"], request["questions"], orders=orders)
+            b = new.decide(request["state"], request["questions"], orders=orders)
+            assert json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)

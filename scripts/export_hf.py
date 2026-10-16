@@ -1,6 +1,6 @@
 #!/usr/bin/env python
-"""Tasks hf0 and rel07 — export a robo-jev release (now v0.7, :data:`robo_jev.hf.export.TAG`) to Hugging Face folders, check them against
-the original scoring path, upload them privately, and verify the uploaded copies from a clean cache.
+"""Tasks hf0, rel07 and rel071 — export a robo-jev release (now v0.7, :data:`robo_jev.hf.export.TAG`) to Hugging Face folders, check them
+against the original scoring path, upload them privately, and verify the uploaded copies from a clean cache.
 
     # hero chart PNGs (cairosvg through uv — not a project dependency)
     uv run python scripts/export_hf.py figures --out artifacts/scratch/rel07/figures-card
@@ -15,9 +15,12 @@ the original scoring path, upload them privately, and verify the uploaded copies
     # model cards with the equivalence run's real example answers; robo_jev.json alone re-written in place (weights untouched)
     uv run python scripts/export_hf.py cards --root artifacts/hf/v0.7 --equivalence <equiv.json>
     uv run python scripts/export_hf.py metadata --root artifacts/hf/v0.7 --checkpoint <run>/checkpoint.pt --out <metadata.json>
+    # a new standalone runner for an existing export (rel071: up to 466 options): copied in as the export does, robo_jev.json re-written
+    uv run python scripts/export_hf.py metadata --root artifacts/hf/v0.7 --checkpoint <run>/checkpoint.pt --runner --out <metadata.json>
     # upload (private repos only) + the release tag
     uv run python scripts/export_hf.py upload --root artifacts/hf/v0.7 --out <upload.json>
-    # clean-cache download + RoboJev.decide() and the standalone script vs the local folders, incl. the 21- and 26-option requests (GPU unit)
+    # clean-cache download + RoboJev.decide() and the standalone script vs the local folders, incl. the 21- and 26-option requests (GPU unit);
+    # --revision main checks an upload made after the release tag (the tag stays on the release's first upload)
     uv run python scripts/export_hf.py verify-hub --root artifacts/hf/v0.7 --input tests/fixtures/decisions/requests.jsonl --limit 5 --out <verify.json>
 
 GPU commands put the memory fence (``--gpu-memory-fraction``, default 0.6) up before the first CUDA allocation and check the free memory
@@ -46,7 +49,7 @@ sys.path.insert(0, str(REPO / "src"))
 
 from robo_jev.gpu import DEFAULT_FRACTION, limit_gpu_memory, memory_report, require_free  # noqa: E402
 
-SCRIPT_VERSION = "rel07-export-1"
+SCRIPT_VERSION = "rel071-export-1"
 FIGURES = ("bench-v0-physics-light", "bench-v0-physics-dark")
 MERGED_DIR, ADAPTER_DIR = "robo-jev-2b", "robo-jev-2b-lora"
 #: Free unified memory to require before loading one 2B model (the scoring tools' value for 2B).
@@ -210,10 +213,11 @@ def json_changes(old: Any, new: Any, path: str = "") -> list[dict[str, Any]]:
 def _metadata(args: argparse.Namespace) -> int:
     """Re-write ``robo_jev.json`` in both folders of an existing export from the checkpoint with the current tooling. Nothing else in the
     folders is touched: the weights block is carried over after checking that the weight files still have its sizes, and the card, the
-    tokenizer files, the runner and the figures stay as they are. The folders are scanned afterwards (pickles and bytecode, private text,
+    tokenizer files and the figures stay as they are — and the runner too, unless ``--runner`` copies the package's
+    ``robo_jev_decide.py`` in (as the export does; Task rel071). The folders are scanned afterwards (pickles and bytecode, private text,
     experiment verdicts)."""
     from robo_jev.hf.export import (
-        build_metadata, check_no_pickle, check_no_verdicts, check_public_text, read_training_checkpoint,
+        STANDALONE, build_metadata, check_no_pickle, check_no_verdicts, check_public_text, read_training_checkpoint,
     )
     from robo_jev.infer import METADATA_FILE, file_sha256
     from robo_jev.model.tokenizer import available_tokenizer, describe_tokenizer, load_tokenizer
@@ -238,18 +242,23 @@ def _metadata(args: argparse.Namespace) -> int:
         if on_disk != weights["bytes"]:
             raise SystemExit(f"{folder}: the weight files ({on_disk} B) do not match robo_jev.json's weights block ({weights['bytes']} B)")
         hashes = {name: file_sha256(folder / name) for name in names}
+        runner = {"before": file_sha256(folder / STANDALONE.name)}
+        if getattr(args, "runner", False):
+            shutil.copyfile(STANDALONE, folder / STANDALONE.name)
+        runner["after"] = file_sha256(folder / STANDALONE.name)
         new = build_metadata(state, variant=variant, checkpoint_path=args.checkpoint, checkpoint_sha256=checkpoint_sha, tokenizer=tokenizer,
                              tokenizer_sha256=tokenizer_info["sha256"], repo=REPO, weights=weights, data_manifests=data_manifests)
         path.write_text(json.dumps(new, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
         if {name: file_sha256(folder / name) for name in names} != hashes:
             raise SystemExit(f"{folder}: a weight file changed")  # never: only robo_jev.json is written
         report["folders"][variant] = {
-            "folder": str(folder), "weights_sha256": hashes, "robo_jev_json_sha256": file_sha256(path),
+            "folder": str(folder), "weights_sha256": hashes, "robo_jev_json_sha256": file_sha256(path), "runner_sha256": runner,
             "changes": [c for c in json_changes(old, new) if c["path"] not in (".source.exported", ".source.export_git.commit", ".source.export_git.dirty")],
             "export_git": new["source"]["export_git"], "files": check_no_pickle(folder), "public_text_scanned": check_public_text(folder),
             "no_verdicts": check_no_verdicts(folder),
         }
-        _log(f"{variant}: robo_jev.json rewritten ({len(report['folders'][variant]['changes'])} content changes); weights untouched; scans clean")
+        _log(f"{variant}: robo_jev.json rewritten ({len(report['folders'][variant]['changes'])} content changes); "
+             f"runner {'copied' if runner['before'] != runner['after'] else 'unchanged'}; weights untouched; scans clean")
     _write_json(args.out, report)
     _log(f"→ {args.out}")
     return 0
@@ -546,7 +555,7 @@ def run_bundle(label: str, folder: Path, records: list[dict[str, Any]], package:
 def _upload(args: argparse.Namespace) -> int:
     from huggingface_hub import HfApi
 
-    from robo_jev.hf.export import ADAPTER_REPO, MERGED_REPO, TAG, check_no_pickle, check_no_verdicts, check_public_text
+    from robo_jev.hf.export import ADAPTER_REPO, LIMITS, MERGED_REPO, TAG, check_no_pickle, check_no_verdicts, check_public_text
     from robo_jev.hf.hub import ensure_private_repo, load_token, redact, remote_listing, tag_release, upload
 
     for folder in (args.root / ADAPTER_DIR, args.root / MERGED_DIR):  # before any network call
@@ -567,8 +576,9 @@ def _upload(args: argparse.Namespace) -> int:
             result["repos"][repo_id] = {"repo": ensure_private_repo(api, repo_id, allow_existing_public=args.allow_existing_public)}
             was_private = result["repos"][repo_id]["repo"]["private"]
             _log(f"{repo_id}: {'private' if was_private else 'existing public'} repo ready ({result['repos'][repo_id]['repo']})")
+            low, high = LIMITS["choice_options"]
             message = args.message or (f"robo-jev {TAG} (training seed 0): weights, tokenizer, robo_jev.json, model card, standalone runner "
-                                       "(choice questions with 2-26 options)")
+                                       f"(choice questions with {low}-{high} options)")
             result["repos"][repo_id]["upload"] = upload(api, repo_id, folder, message=message)
             _log(f"{repo_id}: uploaded {folder}")
             result["repos"][repo_id]["tag"] = tag_release(api, repo_id, TAG, message=f"robo-jev {TAG}")
@@ -629,8 +639,9 @@ def _verify_hub(args: argparse.Namespace) -> int:
     args.cache_parent.mkdir(parents=True, exist_ok=True)
     cache = Path(tempfile.mkdtemp(prefix=f"{TAG}-clean-cache-", dir=args.cache_parent))
     token = load_token(args.token_file)
+    revision = args.revision or TAG  # the release tag stays on the release's first upload; later uploads are on main (Task rel071)
     report: dict[str, Any] = {"records": [r["id"] for r in records], "many_option_records": [r["id"] for r in many], "cache": str(cache), "tag": TAG,
-                              "runs": {}}
+                              "revision": revision, "runs": {}}
 
     def ready(what: str) -> None:
         dropped = drop_page_cache(cache, args.root, args.base_model)
@@ -655,8 +666,8 @@ def _verify_hub(args: argparse.Namespace) -> int:
             "adapter": run_robojev("local adapter", str(args.root / ADAPTER_DIR), base_model=args.base_model),
         }
         hub = {
-            "merged": run_robojev("hub merged", MERGED_REPO, revision=TAG, token=token, cache_dir=cache),
-            "adapter": run_robojev("hub adapter", ADAPTER_REPO, revision=TAG, token=token, cache_dir=cache),
+            "merged": run_robojev("hub merged", MERGED_REPO, revision=revision, token=token, cache_dir=cache),
+            "adapter": run_robojev("hub adapter", ADAPTER_REPO, revision=revision, token=token, cache_dir=cache),
         }
         requests = cache / "requests.jsonl"
         requests.write_text("".join(json.dumps({"id": r["id"], "key": shuffle_key(r), "request": r["request"]}, ensure_ascii=False) + "\n"
@@ -664,19 +675,20 @@ def _verify_hub(args: argparse.Namespace) -> int:
         standalone = {}
         for variant, repo_id in (("merged", MERGED_REPO), ("adapter", ADAPTER_REPO)):
             ready(f"standalone {variant}")
-            script = Path(hub_snapshot(repo_id, cache, token)) / "robo_jev_decide.py"
+            script = Path(hub_snapshot(repo_id, cache, token, revision=revision)) / "robo_jev_decide.py"
             # the standalone script, as a user would run it — in a child process with the same fence, the clean cache and the token in its env
             launcher = (f"import runpy, sys, torch; torch.cuda.set_per_process_memory_fraction({args.gpu_memory_fraction}); "
                         f"sys.argv = [{str(script)!r}] + sys.argv[1:]; runpy.run_path({str(script)!r}, run_name='__main__')")
             env = {**os.environ, "HF_HOME": str(cache / "home"), "HF_HUB_CACHE": str(cache), "HF_TOKEN": token, "PYTHONPATH": ""}
             started = time.perf_counter()
-            done = subprocess.run([sys.executable, "-c", launcher, "--model", repo_id, "--revision", TAG, "--requests", str(requests), "--key-field", "key",
+            done = subprocess.run([sys.executable, "-c", launcher, "--model", repo_id, "--revision", revision, "--requests", str(requests), "--key-field", "key",
                                    "--orders", args.orders], capture_output=True, text=True, env=env, cwd=str(cache))
             if done.returncode != 0:
                 raise RuntimeError(f"standalone {variant} failed: {redact(done.stderr[-2000:])}")
             standalone[variant] = {line["id"]: line["answers"] for line in map(json.loads, done.stdout.splitlines()) if line}
             report["runs"][f"standalone {variant}"] = {"seconds": round(time.perf_counter() - started, 1), "script": str(script),
-                                                       "script_sha256": file_sha256(script)}
+                                                       "script_sha256": file_sha256(script),
+                                                       "local_script_sha256": file_sha256(args.root / (MERGED_DIR if variant == "merged" else ADAPTER_DIR) / "robo_jev_decide.py")}
             _log(f"standalone {variant}: {len(standalone[variant])} records in {report['runs'][f'standalone {variant}']['seconds']} s")
     except Exception as error:  # noqa: BLE001
         raise SystemExit(f"verify failed: {redact(error)}") from None
@@ -684,6 +696,8 @@ def _verify_hub(args: argparse.Namespace) -> int:
     for variant in ("merged", "adapter"):
         checks[f"hub {variant} RoboJev == local"] = all(_answers_equal(hub[variant][k], local[variant][k]) for k in local[variant])
         checks[f"hub {variant} standalone == local"] = all(_answers_equal(standalone[variant][k], local[variant][k]) for k in local[variant])
+        run = report["runs"][f"standalone {variant}"]
+        checks[f"hub {variant} runner file == local"] = run["script_sha256"] == run["local_script_sha256"]
         for record in many:  # every option of the many-option choices got a probability, from the fresh download, in both runners
             rid = str(record["id"])
             for runner, answers in (("RoboJev", hub[variant]), ("standalone", standalone[variant])):
@@ -702,12 +716,12 @@ def _verify_hub(args: argparse.Namespace) -> int:
     return 0 if report["passed"] else 1
 
 
-def hub_snapshot(repo_id: str, cache: Path, token: str) -> str:
+def hub_snapshot(repo_id: str, cache: Path, token: str, *, revision: str | None = None) -> str:
     from huggingface_hub import snapshot_download
 
     from robo_jev.hf.export import TAG
 
-    return snapshot_download(repo_id, revision=TAG, token=token, cache_dir=cache)
+    return snapshot_download(repo_id, revision=revision or TAG, token=token, cache_dir=cache)
 
 
 # --------------------------------------------------------------------------
@@ -735,6 +749,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--out", type=Path, required=True, help="a report: the changed fields, the new sha256s, the scans")
     p.add_argument("--manifest", action="append", default=None, metavar="LABEL=PATH", help="as for export")
     p.add_argument("--data-stats", type=Path, default=REPO / "artifacts/simgen/v02/train-50k.stats.json", help="as for export")
+    p.add_argument("--runner", action="store_true", help="also copy the package's robo_jev_decide.py into both folders (as the export does)")
     p = sub.add_parser("cards", help="re-render README.md (model cards) in an existing export")
     p.add_argument("--root", type=Path, required=True)
     p.add_argument("--equivalence", type=Path, default=None, help="the equivalence report with the example's answers per variant")
@@ -767,6 +782,7 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--token-file", type=Path, default=DEFAULT_TOKEN_FILE)
     p.add_argument("--cache-parent", type=Path, default=REPO / "artifacts/scratch/rel07")
     p.add_argument("--keep-cache", action="store_true")
+    p.add_argument("--revision", default=None, help="the Hub revision to check (default: the release tag; 'main' for an upload made after it)")
     p = sub.add_parser("upload", help="private repos + upload + tag")
     p.add_argument("--root", type=Path, required=True)
     p.add_argument("--out", type=Path, required=True)

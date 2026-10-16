@@ -13,9 +13,10 @@ module only loads the published weights and turns the readout into answers.
 * :meth:`RoboJev.decide` — ``(state, questions)`` in the OpenRouter Decisions API shape → ``{name: answer}``:
   choice ``{"type": "choice", "choice", "probabilities"}``, noul ``{"type": "noul", "noul": p}``, score
   ``{"type": "score", "score": value in [0, 1], "probabilities": {anchor: p}}`` (anchors ``"0.0"`` … ``"1.0"``).
-* **Limits** (the Hub runner ``robo_jev_decide.py`` has the same): state ≤ 16,000 characters, 1–12 questions, 2–26 options per choice
-  question (the answer letters A–Z). Since the v0.7 release (Task rel07) a served request is validated under the many-option opt-in of
-  :func:`robo_jev.decisions.records.option_range_for` — the records' own default stays 2–8 unless a record opts in.
+* **Limits**: state ≤ 16,000 characters, 1–12 questions, 2–26 options per choice question (the answer letters A–Z). Since the v0.7
+  release (Task rel07) a served request is validated under the many-option opt-in of :func:`robo_jev.decisions.records.option_range_for`
+  — the records' own default stays 2–8 unless a record opts in. The Hub runner ``robo_jev_decide.py`` has the same limits, except that
+  it takes up to 466 options (two-letter codes past Z, which training never showed; Task rel071); up to 26 both answer byte-identically.
 * **Orders.** ``orders="single"`` (default — the deployed condition, one forward pass per question) shows each question's options in
   one seeded order. ``orders="balanced"`` averages over the counterbalanced listings (every choice option in every position once; yes/no
   and score scales both ways) — less position bias, n× the cost. The order is seeded by ``key`` (default: a hash of the state text, so

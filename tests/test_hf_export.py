@@ -9,6 +9,9 @@
 * (Task rel07) the v0.7 release: the tag and version, all 26 answer letters in ``robo_jev.json``, the request limits (same in both runners),
   local paths made repo-relative and a scan that refuses local paths and secrets, the many-option equivalence sample and the
   decision-level comparison.
+* (Task rel071) ``robo_jev.json`` records the standalone runner's 466 answer codes (A–Z first, with the training ids) and its limits
+  (2–466 options; the package stays at 2–26); the cards say so; ``metadata --runner`` copies a new runner into an existing export and
+  touches nothing else but ``robo_jev.json``; the upload's default message names the new maximum.
 """
 
 import functools
@@ -137,13 +140,16 @@ def test_the_export_writes_safetensors_and_metadata_only(exported):
     assert exported["weights"]["adapter"]["dtype"] == "bfloat16" and exported["weights"]["adapter"]["tensors"] == len(exported["state"]["model"])
     meta = json.loads((merged / "robo_jev.json").read_text(encoding="utf-8"))
     assert meta["prompt"]["version"] == PROMPT_VERSION and meta["prompt"]["digest"] == fixed_text_digest(PROMPT_VERSION)
-    codes, ids = verify_codes(tokenizer(), 26)
+    codes, ids = E.hub_runner._verify_codes(tokenizer(), 466)
     assert meta["answer_codes"]["token_ids"] == dict(zip(codes, ids)) and meta["score_anchors"] == [i / 10 for i in range(11)]
-    assert list(meta["answer_codes"]["token_ids"]) == list("ABCDEFGHIJKLMNOPQRSTUVWXYZ") and meta["answer_codes"]["options"]["choice"].startswith("2-26 ")
+    assert list(meta["answer_codes"]["token_ids"]) == list(E.hub_runner.CODES) and len(E.hub_runner.CODES) == 466
+    assert list(meta["answer_codes"]["token_ids"].items())[:26] == list(zip(*verify_codes(tokenizer(), 26)))  # A–Z with the training ids
+    assert meta["answer_codes"]["options"]["choice"].startswith("2-466 ") and "not part of training" in meta["answer_codes"]["codes"]
     assert (meta["name"], meta["version"], meta["release"]["tag"], meta["release"]["previous"]) == ("robo-jev v0.7", "v0.7", "v0.7", "v0.1")
     assert set(meta["release"]) == {"tag", "previous", "model"} and meta["training"]["selection"] == "final checkpoint"
     assert not E.VERDICT_TEXT.search(json.dumps(meta, ensure_ascii=False))  # no experiment verdict or rule text (user, 2026-10-16)
-    assert {k: meta["limits"][k] for k in ("state_chars", "questions", "choice_options")} == {"state_chars": 16_000, "questions": [1, 12], "choice_options": [2, 26]}
+    assert {k: meta["limits"][k] for k in ("state_chars", "questions", "choice_options")} == {"state_chars": 16_000, "questions": [1, 12], "choice_options": [2, 466]}
+    assert (meta["format"], meta["prompt"]["version"]) == ("robo-jev-hf/1", "v0c-p3")
     for folder in (adapter, merged):
         assert set(E.check_public_text(folder)) >= {"README.md", "robo_jev.json", "robo_jev_decide.py", "tokenizer.json"}
         assert E.check_no_verdicts(folder) == ["README.md", "robo_jev.json"]
@@ -243,7 +249,9 @@ def test_the_model_cards(variant):
     card = E.render_card(variant, example_output="Example output.")
     assert card.startswith("---\n") and "{{" not in card and "Example output." in card
     assert f"# robo-jev 2B{' LoRA' if variant == 'adapter' else ''} — v0.7" in card and "fast, single-pass 2B System 1" in card
-    assert "2–26 options; 1–12 questions per request; state text ≤ 16,000 characters" in card  # the limits
+    assert "2–466 options; 1–12 questions per request; state text ≤ 16,000 characters" in card  # the limits
+    assert "two-letter codes (AA, AB, …) that were not part of training, so those answers are less reliable" in card
+    assert "With the robo-jev package (up to 26 options)" in card
     for row in ("| **robo-jev v0.7 · 2B** | **0.81** | 0.71 |", "| TypeSafe Jev | 0.28 | 0.91 |", "| Qwen3.5-2B, untrained | −0.15 | 0.74 |"):
         assert row in card  # the comparison with the decision models
     assert "held-out situations" in card and "never saw in training" in card and "Research preview" in card and "robo-jev.dev" in card
@@ -277,10 +285,12 @@ def export_script():
     return _load_script(REPO / "scripts" / "export_hf.py", "export_hf_for_tests")
 
 
-def test_both_runners_and_the_metadata_share_the_request_limits():
+def test_the_metadata_records_the_standalone_runner_s_limits_and_the_package_stays_at_26():
+    from robo_jev.infer import CHOICE_OPTIONS
+
     bundle = _load_script(E.STANDALONE, "robo_jev_decide_for_limits")
     assert {k: list(v) if isinstance(v, tuple) else v for k, v in bundle.LIMITS.items()} == E.LIMITS
-    assert E.LIMITS == {"state_chars": 16_000, "questions": [1, 12], "choice_options": [2, 26]}
+    assert E.LIMITS == {"state_chars": 16_000, "questions": [1, 12], "choice_options": [2, 466]} and CHOICE_OPTIONS == (2, 26)
 
 
 def test_local_paths_become_repo_relative_and_urls_stay():
@@ -444,7 +454,7 @@ def test_the_shipped_runner_is_imported_without_bytecode(tmp_path):
 
     shutil.copyfile(E.STANDALONE, tmp_path / "robo_jev_decide.py")
     module = export_script()._load_standalone(tmp_path / "robo_jev_decide.py")
-    assert module.LIMITS["choice_options"] == (2, 26)
+    assert module.LIMITS["choice_options"] == (2, 466)
     assert sorted(p.name for p in tmp_path.iterdir()) == ["robo_jev_decide.py"]  # no __pycache__ to upload
 
 
@@ -473,7 +483,8 @@ def test_the_metadata_command_rewrites_only_robo_jev_json(exported, tmp_path):
         meta["release"] = {**meta["release"], "pre_declared_rule": "not passed: S REJECTED", "why_released": "clearly better than the public v0.1"}
         (root / name / "robo_jev.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     before = {p.relative_to(root): file_sha256(p) for p in root.rglob("*") if p.is_file()}
-    args = argparse.Namespace(root=root, checkpoint=exported["root"] / "checkpoint.pt", out=tmp_path / "metadata.json", manifest=[], data_stats=None)
+    args = argparse.Namespace(root=root, checkpoint=exported["root"] / "checkpoint.pt", out=tmp_path / "metadata.json", manifest=[], data_stats=None,
+                              runner=False)
     assert export_script()._metadata(args) == 0
     after = {p.relative_to(root): file_sha256(p) for p in root.rglob("*") if p.is_file()}
     assert {k for k in before if before[k] != after[k]} == {Path("robo-jev-2b-lora/robo_jev.json"), Path("robo-jev-2b/robo_jev.json")}
@@ -482,3 +493,67 @@ def test_the_metadata_command_rewrites_only_robo_jev_json(exported, tmp_path):
         removed = {c["path"] for c in report["folders"][variant]["changes"] if c["change"] == "removed"}
         assert {".release.pre_declared_rule", ".release.why_released"} <= removed
         assert report["folders"][variant]["no_verdicts"] == ["README.md", "robo_jev.json"]
+
+
+def test_the_metadata_command_copies_a_new_runner_in_on_request(exported, tmp_path):
+    import argparse
+    import shutil
+    from pathlib import Path
+
+    old_runner = FIXTURES / "hf" / "robo_jev_decide_v07.py"  # the runner the v0.7 upload shipped
+    root = tmp_path / "export"
+    for variant, name in (("adapter", "robo-jev-2b-lora"), ("merged", "robo-jev-2b")):
+        shutil.copytree(exported["folders"][variant], root / name)
+        shutil.copyfile(old_runner, root / name / "robo_jev_decide.py")
+        meta = json.loads((root / name / "robo_jev.json").read_text(encoding="utf-8"))
+        meta["limits"]["choice_options"] = [2, 26]
+        meta["answer_codes"]["token_ids"] = dict(list(meta["answer_codes"]["token_ids"].items())[:26])
+        (root / name / "robo_jev.json").write_text(json.dumps(meta, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    before = {p.relative_to(root): file_sha256(p) for p in root.rglob("*") if p.is_file()}
+    args = argparse.Namespace(root=root, checkpoint=exported["root"] / "checkpoint.pt", out=tmp_path / "metadata.json", manifest=[], data_stats=None,
+                              runner=True)
+    assert export_script()._metadata(args) == 0
+    after = {p.relative_to(root): file_sha256(p) for p in root.rglob("*") if p.is_file()}
+    assert {k for k in before if before[k] != after[k]} == {Path(f"{name}/{file}") for name in ("robo-jev-2b-lora", "robo-jev-2b")
+                                                            for file in ("robo_jev.json", "robo_jev_decide.py")}
+    assert set(before) == set(after)  # nothing added (no bytecode), nothing removed
+    report = json.loads((tmp_path / "metadata.json").read_text(encoding="utf-8"))
+    for variant, name in (("adapter", "robo-jev-2b-lora"), ("merged", "robo-jev-2b")):
+        assert (root / name / "robo_jev_decide.py").read_bytes() == E.STANDALONE.read_bytes()
+        assert report["folders"][variant]["runner_sha256"] == {"before": file_sha256(old_runner), "after": file_sha256(E.STANDALONE)}
+        changed = {c["path"]: c for c in report["folders"][variant]["changes"]}
+        assert changed[".limits.choice_options"]["new"] == [2, 466] and len(json.loads((root / name / "robo_jev.json").read_text())["answer_codes"]["token_ids"]) == 466
+        assert report["folders"][variant]["no_verdicts"] == ["README.md", "robo_jev.json"]
+
+
+def test_the_upload_message_names_the_runner_s_maximum(monkeypatch, tmp_path):
+    import argparse
+
+    seen = {}
+
+    class Api:
+        def __init__(self, token):
+            pass
+
+        def whoami(self):
+            return {"name": "someone", "orgs": [{"name": "Steerix-org"}]}
+
+        def list_models(self, author):
+            return []
+
+    monkeypatch.setattr("huggingface_hub.HfApi", Api)
+    monkeypatch.setattr(H, "load_token", lambda path: "hf_" + "x" * 12)
+    monkeypatch.setattr(H, "ensure_private_repo", lambda api, repo_id, allow_existing_public=False: {"repo_id": repo_id, "private": True, "created": False})
+    monkeypatch.setattr(H, "upload", lambda api, repo_id, folder, message: seen.setdefault(repo_id, message) and {"commit": "c", "url": None})
+    monkeypatch.setattr(H, "tag_release", lambda api, repo_id, tag, message: {"tag": tag, "commit": "first", "main": "c", "created": False})
+    monkeypatch.setattr(H, "remote_listing", lambda api, repo_id: {"private": True, "files": []})
+    root = tmp_path / "export"
+    for name in ("robo-jev-2b-lora", "robo-jev-2b"):
+        (root / name).mkdir(parents=True)
+        (root / name / "robo_jev.json").write_text(json.dumps({"version": E.TAG}), encoding="utf-8")
+        (root / name / "README.md").write_text("# robo-jev\n", encoding="utf-8")
+    args = argparse.Namespace(root=root, out=tmp_path / "upload.json", token_file=tmp_path / "token", message=None, allow_existing_public=False)
+    assert export_script()._upload(args) == 0
+    assert set(seen.values()) == {"robo-jev v0.7 (training seed 0): weights, tokenizer, robo_jev.json, model card, standalone runner "
+                                  "(choice questions with 2-466 options)"}
+    assert all(r["tag"]["created"] is False for r in json.loads((tmp_path / "upload.json").read_text())["repos"].values())  # the tag stays

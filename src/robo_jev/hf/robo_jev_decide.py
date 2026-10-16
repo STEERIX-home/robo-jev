@@ -3,8 +3,9 @@
 
 robo-jev is a decision model for robots: it reads a short text of what a robot senses and answers decision questions with calibrated
 probabilities. It does not generate text. For each question it builds one fixed prompt (prompt version v0c-p3), runs one forward pass
-and reads the probabilities of the shown answer letters at the answer position. This file is a self-contained copy of the prompt
-builder and the readout of the robo-jev package (``robo_jev.infer.RoboJev``), tested to give byte-identical answers.
+and reads the probabilities of the shown answer codes at the answer position. This file is a self-contained copy of the prompt
+builder and the readout of the robo-jev package (``robo_jev.infer.RoboJev``), tested to give byte-identical answers (up to 26 options;
+the package stops there).
 
 Command line (answers print as JSON)::
 
@@ -12,10 +13,10 @@ Command line (answers print as JSON)::
     python robo_jev_decide.py --model Steerix-org/robo-jev-2b-lora --request request.json --orders balanced
 
 ``request.json`` follows the OpenRouter Decisions API: ``{"state": "...", "questions": {"name": {"type": "noul" | "choice" | "score",
-"instructions": "...", "criteria": ...}}}`` — choice criteria map option keys to descriptions (2–26 options, shown as the letters A–Z);
-score criteria is a list of strings saying what 0 and 1 mean; noul (yes/no) has no criteria. A JSONL file of such requests
-(``--requests``) prints one line each. Limits (``LIMITS``): state ≤ 16,000 characters, 1–12 questions, 2–26 options per choice question; a
-request outside them is refused whole (``ValueError``).
+"instructions": "...", "criteria": ...}}}`` — choice criteria map option keys to descriptions (2–466 options, shown as A–Z, then the
+two-letter codes AA, AB, … of ``CODES``); score criteria is a list of strings saying what 0 and 1 mean; noul (yes/no) has no criteria. A
+JSONL file of such requests (``--requests``) prints one line each. Limits (``LIMITS``): state ≤ 16,000 characters, 1–12 questions, 2–466
+options per choice question; a request outside them is refused whole (``ValueError``).
 
 Python::
 
@@ -32,8 +33,14 @@ bias, n× the cost. The order depends on ``key`` (default: the first 16 hex digi
 
 Speed and exactness: the scored runs used the ``flash-linear-attention`` kernels for Qwen3.5's linear-attention layers
 (``pip install flash-linear-attention``); without them ``transformers`` falls back to a slower PyTorch path whose results can differ
-in the last bits. Long states cost more time; the limits above follow the Decisions API, except that a choice question may have up to 26
-options (one answer letter each).
+in the last bits. Long states and long option lists cost more time; the limits above follow the Decisions API, except that a choice
+question may have up to 466 options (one answer code each).
+
+Many options: the model was trained with up to 26 options, shown as the letters A–Z. Options past the 26th get two-letter codes (AA, AB,
+…), which were not part of training, so answers with more than 26 options are less reliable. In the default single order the model puts
+nearly all of its probability on the options shown with A–Z: an option shown with a two-letter code is all but never chosen, even when
+it is the only fitting one. ``orders="balanced"`` shows every option with a letter in 26 of its n listings, at the cost of n forward
+passes.
 """
 
 from __future__ import annotations
@@ -59,10 +66,49 @@ SCORE_ANCHOR_TEXT = "Pick the value closest to your estimate."
 ANSWER_CUE = "Answer:"
 SCORE_ANCHORS = tuple(round(i / 10, 1) for i in range(11))
 NOUL_LINES = (("yes", "Yes"), ("no", "No"))
-CODES = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ")
+#: The answer codes, in the order the options are shown. First the capital letters A–Z, the codes the model was trained with. Then the
+#: two-letter codes AA … ZZ in lexicographic order that pass the answer-code rule with the training tokenizer — one token alone (" AB")
+#: and the last token of "Answer: AB" (544 of the 676) — less :data:`CODE_STOPLIST`: 440 more, 466 codes in all. Hard-coded, so the codes
+#: never depend on the tokenizer at hand; :func:`_verify_codes` checks every code a prompt shows. The two-letter codes were not part of
+#: training: answers with more than 26 options are less reliable.
+CODES = tuple("ABCDEFGHIJKLMNOPQRSTUVWXYZ") + tuple("""
+    AA AB AE AF AG AJ AK AL AO AP AQ AR AU AV AZ
+    BA BB BD BF BG BH BI BJ BK BL BM BN BO BP BR BT BU BV BW BX
+    CA CB CC CE CF CG CH CI CJ CK CL CN CP CR CS CT CU CV CW CX CY CZ
+    DA DD DE DF DG DH DI DK DL DM DN DP DS DT DU DV DW DX DY
+    EA EB EC ED EE EF EI EJ EK EL EM EN EO EP EQ ER ES ET EW EX EZ
+    FA FB FC FD FE FF FG FH FI FK FL FM FN FO FP FR FS FW FX FY
+    GA GC GD GE GF GG GH GI GK GL GM GN GP GR GS GT GU GV GW GX
+    HB HC HD HF HG HH HK HL HN HS HT HU HV HW HY
+    IA IB IC IG IH II IK IL IM IO IU IV IW IX
+    JA JB JC JD JE JJ JK JL JM JO JP JS JT JU JV JW
+    KA KC KD KE KF KH KI KK KL KO KP KR KS KT KU KV KY
+    LC LD LE LF LG LH LI LJ LL LM LN LO LP LR LS LT LU LV LW LX LY LZ
+    MC MF MH MI MJ MK MN MO MP MQ MT MU MV MW MX
+    NA NB NC ND NE NF NG NH NI NJ NK NL NN NP NR NS NT NU NV NW NX NZ
+    OA OB OC OD OE OG OL OM OO OP OT OU OV
+    PB PD PE PF PG PI PJ PK PL PN PO PP PQ PT PU PV PW PX PY
+    QB QC QE QL QQ QR QS QT QU
+    RA RB RC RD RF RG RH RI RJ RK RL RM RN RO RP RR RS RT RU RV RW RX
+    SA SB SC SD SE SF SG SH SI SJ SK SL SM SN SP SQ SR SS SU SV SW SX SY SZ
+    TA TC TD TE TF TG TH TI TJ TK TL TM TN TP TR TS TT TU TW TX TY TZ
+    UA UB UC UD UE UF UL UR UT UU UW
+    VA VB VC VD VE VF VG VH VI VK VL VM VN VO VT VW VX
+    WA WB WC WD WF WG WH WI WK WL WM WN WO WP WR WS WT WV WW WX
+    XB XC XD XF XI XK XL XM XO XP XR XS XT XU XV XX XY
+    YM YT YY
+    ZA ZE ZO ZX ZZ
+""".split())
+#: Two-letter codes that pass the rule but are left out, so that no option label reads as a word or a term: common English two-letter
+#: words and interjections (first row), and very common abbreviations, titles and units (the rest).
+CODE_STOPLIST = tuple("""
+    AD AH AM AN AS AT AW AX AY BE BY DO EH GO HA HE HI HM HO IF IN IS IT MA ME MY NO OF OH OK ON OR OW PA SO TO UM UP US WE YA YE YO
+    AC AI BC BS CD CM CO DB DC DJ DR EG EU EV FT FU GB HP HQ HR ID IE IP IQ IR JR KB KG KM KN KW LA LB MB MD MG ML MM MR MS NM NY
+    OS PC PH PM PR PS QA RE ST TB TV UI UK UN UV UX VP VR VS
+""".split())
 MAX_STATE_CHARS = 16_000
 MAX_QUESTIONS = 12
-#: Choice options per question: at least 2, at most one per answer letter (A–Z).
+#: Choice options per question: at least 2, at most one per answer code (466).
 MIN_OPTIONS, MAX_OPTIONS = 2, len(CODES)
 #: The request limits (module docstring) — a request outside them is refused whole.
 LIMITS = {"state_chars": MAX_STATE_CHARS, "questions": (1, MAX_QUESTIONS), "choice_options": (MIN_OPTIONS, MAX_OPTIONS)}
@@ -146,7 +192,7 @@ def _question_block(question: dict, codes: list[str], lines: list[str]) -> str:
 
 
 def _verify_codes(tokenizer: Any, count: int) -> tuple[list[str], list[int]]:
-    """The first `count` answer letters, each one token both alone (" A") and after the answer cue ("Answer: A")."""
+    """The first `count` answer codes, each one token both alone (" A") and after the answer cue ("Answer: A")."""
     if count > len(CODES):
         raise ValueError(f"{count} options — more than {len(CODES)} codes")
     codes, ids = [], []
