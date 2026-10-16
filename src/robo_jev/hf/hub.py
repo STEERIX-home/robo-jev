@@ -54,9 +54,13 @@ def load_token(path: str | Path = DEFAULT_TOKEN_FILE) -> str:
     raise ValueError(f"{path}: no {_TOKEN_NAME}=… line")
 
 
-def ensure_private_repo(api: Any, repo_id: str) -> dict[str, Any]:
+def ensure_private_repo(api: Any, repo_id: str, *, allow_existing_public: bool = False) -> dict[str, Any]:
     """Create `repo_id` as a private model repo (or find it) and confirm it is private; raise otherwise. Returns ``{repo_id, private,
-    created}``."""
+    created}``.
+
+    ``allow_existing_public`` accepts a repo that ALREADY exists and that its owner has made public (the owner's decision, taken on the
+    Hub; user 2026-10-16: "A로 진행해, 업로드 도구 고쳐"): the upload then goes to that public repo. A missing repo is still created
+    private, and the visibility is never changed here."""
     from huggingface_hub.utils import RepositoryNotFoundError
 
     try:
@@ -67,6 +71,8 @@ def ensure_private_repo(api: Any, repo_id: str) -> dict[str, Any]:
         info = api.model_info(repo_id)
         created = True
     if info.private is not True:
+        if allow_existing_public and not created:
+            return {"repo_id": repo_id, "private": False, "created": False}
         raise PermissionError(f"{repo_id} exists and is not private — refusing to upload (making repos public is the owner's decision)")
     return {"repo_id": repo_id, "private": True, "created": created}
 

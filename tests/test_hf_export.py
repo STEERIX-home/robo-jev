@@ -393,6 +393,18 @@ def test_repos_are_created_private_and_a_public_repo_stops_the_upload():
         H.ensure_private_repo(_FakeApi({"Steerix-org/robo-jev-2b": False}), "Steerix-org/robo-jev-2b")
 
 
+def test_an_existing_public_repo_is_accepted_only_with_the_opt_in_and_a_missing_repo_is_still_created_private():
+    public = _FakeApi({"Steerix-org/robo-jev-2b": False})
+    with pytest.raises(PermissionError, match="not private"):
+        H.ensure_private_repo(public, "Steerix-org/robo-jev-2b")
+    assert H.ensure_private_repo(public, "Steerix-org/robo-jev-2b", allow_existing_public=True) == {
+        "repo_id": "Steerix-org/robo-jev-2b", "private": False, "created": False}
+    assert public.created == []
+    missing = _FakeApi()
+    assert H.ensure_private_repo(missing, "Steerix-org/robo-jev-2b-lora", allow_existing_public=True)["private"] is True
+    assert missing.created == ["Steerix-org/robo-jev-2b-lora"] and missing.existing["Steerix-org/robo-jev-2b-lora"] is True
+
+
 class _Ref:
     def __init__(self, name, target_commit):
         self.name, self.target_commit = name, target_commit

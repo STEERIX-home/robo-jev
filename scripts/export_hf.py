@@ -564,17 +564,19 @@ def _upload(args: argparse.Namespace) -> int:
         result: dict[str, Any] = {"user": me.get("name"), "orgs": orgs, "tag": TAG, "repos": {}}
         for repo_id, folder in ((ADAPTER_REPO, args.root / ADAPTER_DIR), (MERGED_REPO, args.root / MERGED_DIR)):
             check_no_pickle(folder)
-            result["repos"][repo_id] = {"repo": ensure_private_repo(api, repo_id)}
-            _log(f"{repo_id}: private repo ready ({result['repos'][repo_id]['repo']})")
+            result["repos"][repo_id] = {"repo": ensure_private_repo(api, repo_id, allow_existing_public=args.allow_existing_public)}
+            was_private = result["repos"][repo_id]["repo"]["private"]
+            _log(f"{repo_id}: {'private' if was_private else 'existing public'} repo ready ({result['repos'][repo_id]['repo']})")
             message = args.message or (f"robo-jev {TAG} (training seed 0): weights, tokenizer, robo_jev.json, model card, standalone runner "
                                        "(choice questions with 2-26 options)")
             result["repos"][repo_id]["upload"] = upload(api, repo_id, folder, message=message)
             _log(f"{repo_id}: uploaded {folder}")
             result["repos"][repo_id]["tag"] = tag_release(api, repo_id, TAG, message=f"robo-jev {TAG}")
             result["repos"][repo_id]["remote"] = remote_listing(api, repo_id)
-            if result["repos"][repo_id]["remote"]["private"] is not True:
-                raise SystemExit(f"{repo_id} is not private after upload")
-            _log(f"{repo_id}: tag {result['repos'][repo_id]['tag']} · {len(result['repos'][repo_id]['remote']['files'])} files, private")
+            if result["repos"][repo_id]["remote"]["private"] is not was_private:
+                raise SystemExit(f"{repo_id}: visibility changed during the upload (private was {was_private})")
+            _log(f"{repo_id}: tag {result['repos'][repo_id]['tag']} · {len(result['repos'][repo_id]['remote']['files'])} files, "
+                 f"{'private' if was_private else 'public (as the owner set it)'}")
         leftovers = [m.id for m in api.list_models(author=me.get("name")) if "robo-jev" in m.id]
         result["user_namespace_robo_jev_repos"] = leftovers
         _log(f"robo-jev repos under {me.get('name')}: {leftovers or 'none'}")
@@ -770,6 +772,8 @@ def _parser() -> argparse.ArgumentParser:
     p.add_argument("--out", type=Path, required=True)
     p.add_argument("--token-file", type=Path, default=DEFAULT_TOKEN_FILE)
     p.add_argument("--message", default=None, help="the Hub commit message (default: names the release tag)")
+    p.add_argument("--allow-existing-public", action="store_true",
+                   help="upload into repos the owner has ALREADY made public (never creates a public repo, never changes visibility)")
     return parser
 
 
