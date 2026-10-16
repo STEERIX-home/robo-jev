@@ -233,11 +233,14 @@ MUJOCO_SETS = ("v03b-mujoco-train",)
 
 
 def part_of(record: dict[str, Any], *, mujoco_sets: tuple[str, ...] | list[str] = MUJOCO_SETS) -> str:
-    """Which part of a v0.3 training input a record belongs to: engine · mujoco · d1 · general (else ``other``)."""
+    """Which part of a v0.3 training input a record belongs to: engine · mujoco · d1 · general · numeric (Task v0.9a's measurement-literacy
+    records, ``meta.set`` ``v09-numeric``) (else ``other``)."""
     from robo_jev.data.general_sets import SOURCES
     from robo_jev.decisions.single_probe import MIX_SPLITS
 
     meta = record.get("meta") or {}
+    if meta.get("set") == "v09-numeric":
+        return "numeric"
     if meta.get("set") in tuple(mujoco_sets):
         return "mujoco"
     if isinstance(meta.get("source"), dict) and meta["source"].get("set") in SOURCES:

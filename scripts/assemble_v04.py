@@ -436,6 +436,8 @@ def _part(record: dict[str, Any], mujoco_sets: set[str]) -> str:
     from robo_jev.decisions.single_probe import MIX_SPLITS
 
     meta = record.get("meta") or {}
+    if meta.get("set") == "v09-numeric":  # Task v0.9a: the measurement-literacy records
+        return "numeric"
     if meta.get("set") in mujoco_sets:
         return "mujoco"
     if isinstance(meta.get("source"), dict) and meta["source"].get("set") in SOURCES:
