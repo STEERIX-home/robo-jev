@@ -262,7 +262,8 @@ def transform_record(v06: Mapping[str, Any], v07: Mapping[str, Any], plan: Plan)
     if codes:
         meta["codes"] = codes
     meta["format"] = {"version": F.FORMAT_VERSION,
-                      "expanded": {n: {k: e[k] for k in ("family", "from", "drawn", "to", "short", "rekeyed")} for n, e in event["expanded"].items()},
+                      "expanded": {n: {**{k: e[k] for k in ("family", "from", "drawn", "to", "short", "rekeyed")},
+                                       **({"keys": dict(e["mapping"])} if e.get("rekeyed") else {})} for n, e in event["expanded"].items()},
                       "codes": sorted(codes)}
     return new, event
 
@@ -327,6 +328,9 @@ def record_problems(v06: Mapping[str, Any], v07: Mapping[str, Any], new: Mapping
         drawn_norms = [_norm_option(k, b["criteria"][k]) for k in extra]
         if len(set(drawn_norms)) != len(drawn_norms) or own_norms & set(drawn_norms):
             problems.append(f"{name}: a distractor repeats an option's text")
+    for name, e in ((new_meta.get("format") or {}).get("expanded") or {}).items():
+        if e.get("rekeyed") and e.get("keys") != (expanded.get(name) or {}).get("mapping"):
+            problems.append(f"{name}: meta.format does not record the re-keying")
     codes = new_meta.get("codes") or {}
     if sorted(codes) != sorted(event.get("codes") or []):
         problems.append("meta.codes differs from the transform's record")

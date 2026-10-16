@@ -234,6 +234,11 @@ def test_an_expanded_general_item_is_re_expanded_and_re_keyed_with_its_label():
     gold = max(new["labels"]["q_general"]["probabilities"], key=lambda k: new["labels"]["q_general"]["probabilities"][k])
     assert criteria[gold] == v06["request"]["questions"]["q_general"]["criteria"]["o2"] and new["labels"]["q_general"]["probabilities"][gold] == 1.0
     assert "zqold one two three" not in criteria.values(), "v0.7's distractors are replaced"
+    keys = new["meta"]["format"]["expanded"]["q_general"]["keys"]
+    assert set(keys) == {"o1", "o2", "o3", "o4"} and keys["o2"] == gold, "meta.format records each own option's original → shown key"
+    from robo_jev.decisions.prior_weights import label_class
+
+    assert label_class(new, "q_general") == "key:o2", "the H-prior class stays the original answer key"
     assert new["meta"]["option_range"] == OPTION_RANGE_MARK_255 and new["meta"]["shape"] == v07["meta"]["shape"]
     assert validate_record(new) == []
 

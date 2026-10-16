@@ -128,6 +128,17 @@ def test_the_classes_follow_the_brief():
     assert W.label_class(_q("v0b-1", questions, {**labels, "touch": {"p_yes": 1 / 3}}, meta=meta), "touch") == "middle"
 
 
+def test_a_rekeyed_general_item_keeps_its_original_answer_key_as_its_class():
+    criteria = {f"o{i}": f"text {i}" for i in range(1, 41)}
+    probabilities = {k: 0.0 for k in criteria} | {"o37": 1.0}
+    record = _q("hellaswag-train-1", {"q_general": {"type": "choice", "instructions": "?", "criteria": criteria}},
+                {"q_general": {"type": "choice", "kind": "probe", "probabilities": probabilities}},
+                meta={"source": {"set": "hellaswag"}, "format": {"expanded": {"q_general": {"rekeyed": True, "keys": {"o1": "o12", "o2": "o37", "o3": "o5", "o4": "o20"}}}}})
+    assert W.label_class(record, "q_general") == "key:o2"
+    del record["meta"]["format"]
+    assert W.label_class(record, "q_general") == "key:o37"
+
+
 # -- action kinds ----------------------------------------------------------------------------------------------------------------------
 
 

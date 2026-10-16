@@ -19,7 +19,8 @@ question                                            class
 yes/no (``noul``) and score                         the label's band: ``low`` (< 1/3), ``middle`` (1/3–2/3), ``high`` (> 2/3)
 level questions (choice ``s1_band*``)               the best level (the label's argmax key: low / medium / high)
 action questions (choice, label kind ``action``)    the kind of the best option (:func:`action_kind`): ``hold`` / ``continue`` / ``move``
-other choice questions                              the answer key (the label's argmax key)
+other choice questions                              the answer key (the label's argmax key; for a v0.8 re-keyed general item its
+                                                    original key, ``meta.format.expanded[q].keys``)
 =================================================  ========================================================================
 
 The best option is the label's argmax (ties: the smallest key, as the v0.7 LOCAL PLAN rule).
@@ -263,6 +264,11 @@ def label_class(record: Mapping[str, Any], name: str) -> str:
         return f"level:{best}"
     if is_action_question(record, name):
         return f"action:{action_kind(record, name, best)}"
+    meta = record.get("meta") if isinstance(record.get("meta"), Mapping) else {}
+    keys = (((meta.get("format") or {}).get("expanded") or {}).get(name) or {}).get("keys") if isinstance(meta.get("format"), Mapping) else None
+    if isinstance(keys, Mapping):  # a re-keyed item (Task v0.8a): its answer key is the key it had before
+        original = {str(shown): str(old) for old, shown in keys.items()}
+        return f"key:{original.get(str(best), best)}"
     return f"key:{best}"
 
 

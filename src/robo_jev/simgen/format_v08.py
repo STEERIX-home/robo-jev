@@ -19,7 +19,9 @@ labels unchanged (the PRE-DECLARED v0.8 VERDICT RULE, progress.md 2026-10-16). P
   Distractors get probability 0 (and, where the label stores expected costs, the worst own option's cost, as in v0.7).
 * **General items are re-keyed** (:func:`rekey`): v0.7 gave the own options their keys ``o1``…``oK`` (K ≤ 8) and the distractors ``o9``…,
   so a key past ``o8`` was never correct — a shortcut that grows with N. v0.8 gives all N options of an expanded general item the keys
-  ``o1``…``oN`` in a seeded random order; the label moves with its option (same texts, same probabilities).
+  ``o1``…``oN`` in a seeded random order; the label moves with its option (same texts, same probabilities). ``meta.format.expanded[q].keys``
+  records each own option's original key → its shown key (the H-prior class of the item stays its original answer key,
+  :func:`robo_jev.decisions.prior_weights.label_class`).
 * **Random codes** — about 25 % of ALL choice questions (:data:`CODES_SHARE`; any N, the ordinary 2–8-option ones included, every part,
   English and Korean) show codes drawn at random without replacement from the 255-code pool (:func:`draw_codes`, in the drawn order —
   ``meta.codes[question]``, one code per shown position, :mod:`robo_jev.decisions.codes`). The trainer's order augmentation moves the correct
