@@ -1,0 +1,145 @@
+# v0.9 arm C, seed 1 (one pod): v0.8 F's job decisions-v08f-s1-h100 with the order-consistency option — Task v0.9a §1.3. Arm C trains v0.8's input
+# unchanged (artifacts/simgen/v08/train-v08.jsonl, sha256 bffd74941495…) with the order-consistency loss: a choice question picked by a fixed seed
+# (30 %) is also run as two permuted copies (a cyclic shift by ceil(N/2) and the reverse, the record's own codes by position) and 0.5 × the mean
+# Jensen–Shannon divergence between the original's and each copy's distributions over the option contents joins the loss; the target loss stays on
+# the original. Training config otherwise v0.8 F's (decisions-v0-lora-h100: 2B LoRA bf16 + fp32 master, λ 0.2, prompt v0c-p3, 1 epoch, final
+# checkpoint, questions_per_request 2). The other arm (decisions-v09cn-s1-h100) has the same option; the two arms differ only by the input. It is
+# the seed-0 job of this arm with the training seed 1 (`--set seed=1`: LoRA init, data order, question picks and option-order augmentation; the
+# consistency questions are picked by a fixed salt, the same in both seeds) and its own run name — nothing else differs.
+#   python scripts/assemble_v09.py all --out-dir artifacts/simgen/v09
+# Diagnoses on the job's own checkpoint (after-v09c-s1-2b-*), v0.8's order: T2, T3, T4, G2, T1, T5, T7, then T8a, G1 and, last, T6. NOT on the pod:
+# N9g, A16s, A16, M8g, B8, R14, A4, T9, T8b, the H-set, B1 — scored on Spark, none of them uploaded. Train time from scripts/assemble_v09.py
+# exposure: every epoch-0 step's padded tokens simulated with the trainer's own packing (micro_batch_tokens 16,384; each picked example packed with
+# its copies) × v0.8 F's measured seconds per padded token (6.14e-5 s), + v0.8 F's dev and load minutes, + 10 %: s0 277 min, s1 277 min (padded
+# tokens ×1.231 / ×1.228 v0.8 F's measured) → est 280 min, step cap 420 min. Expected pod ≈ 7.88 / 7.69 h ≈ $31.44 / $30.70 (v0.8 F's measured pods
+# + the longer train step). Wall cap 11.5 h: the plan + ≥ 90 min of slack; cap $45.89 at $3.99/h (≤ $48). Phase cloud-phase-1 at $650: the four v0.9
+# runs' caps on top of what the ledger has spent (the controller raises it at launch).
+kind: robojev-cloud-job-v0
+name: decisions-v09c-s1-h100
+job:
+  kind: decisions
+  model: Qwen/Qwen3.5-2B
+  inputs:
+    - artifacts/simgen/v08/train-v08.jsonl
+    - artifacts/simgen/probes/G2.jsonl
+    - artifacts/simgen/probes/G2.manifest.json
+    - artifacts/simgen/v0b/tests/T1.jsonl
+    - artifacts/simgen/v0b/tests/T2.jsonl
+    - artifacts/simgen/v0b/tests/T3.jsonl
+    - artifacts/simgen/v0b/tests/T4.jsonl
+    - artifacts/simgen/v0b/tests/T5.jsonl
+    - artifacts/simgen/v0b/tests/T6.jsonl
+    - artifacts/simgen/v0b/tests/T7.jsonl
+    - artifacts/simgen/v0b/tests/manifest.json
+    - artifacts/t8/T8a.jsonl
+    - artifacts/t8/T8a.manifest.json
+    - artifacts/simgen/probes/G1.jsonl
+    - artifacts/simgen/probes/G1.manifest.json
+  runtime:
+    env:
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      HF_HUB_DISABLE_TELEMETRY: "1"
+  setup:
+    - name: sync
+      argv: ["{uv}", "sync", "--frozen", "--group", "backbone"]
+      fallback: ["{uv}", "sync", "--frozen", "--group", "backbone", "--no-install-package", "evdev"]
+      max_minutes: 15
+      est_minutes: 1.5
+      env: {UV_LINK_MODE: copy, UV_PYTHON_DOWNLOADS: automatic}
+  steps:
+    - name: env
+      argv: ["{python}", "-m", "robo_jev.launch.envprobe", "--out", "{reports}/env.json"]
+      max_minutes: 3
+      est_minutes: 0.3
+    - name: weights
+      argv: ["{python}", "scripts/fetch_backbone.py", "--from-manifest", "artifacts/models/manifest.json", "--id", "{model}"]
+      max_minutes: 10
+      est_minutes: 0.5
+    - name: train
+      argv: ["{python}", "scripts/train_decisions.py", "train", "--config", "configs/train/decisions-v0-lora-h100.yaml",
+             "--set", "train_input=artifacts/simgen/v08/train-v08.jsonl", "--set", "out_dir={runs}", "--set", "run_name=v09c-s1-2b",
+             "--set", "seed=1",
+             "--set", "consistency={share: 0.3, lambda: 0.5, copies: [shift, reverse], divergence: js}",
+             "--gpu-memory-fraction", "0.92"]
+      wall_set: max_wall_hours
+      max_minutes: 420
+      est_minutes: 280
+    - name: after-T2
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v09c-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T2.jsonl", "--out", "{reports}/after-v09c-s1-2b-T2.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 27
+      optional: true
+    - name: after-T3
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v09c-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T3.jsonl", "--out", "{reports}/after-v09c-s1-2b-T3.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 26
+      optional: true
+    - name: after-T4
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v09c-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T4.jsonl", "--out", "{reports}/after-v09c-s1-2b-T4.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 15
+      optional: true
+    - name: after-G2
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v09c-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/probes/G2.jsonl", "--out", "{reports}/after-v09c-s1-2b-G2.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 20
+      est_minutes: 3
+      optional: true
+    - name: after-T1
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v09c-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T1.jsonl", "--out", "{reports}/after-v09c-s1-2b-T1.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 27
+      optional: true
+    - name: after-T5
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v09c-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T5.jsonl", "--out", "{reports}/after-v09c-s1-2b-T5.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 14
+      optional: true
+    - name: after-T7
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v09c-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T7.jsonl", "--out", "{reports}/after-v09c-s1-2b-T7.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 60
+      est_minutes: 27
+      optional: true
+    - name: after-T8a
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v09c-s1-2b/checkpoint.pt", "--input", "artifacts/t8/T8a.jsonl", "--out", "{reports}/after-v09c-s1-2b-T8a.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 30
+      est_minutes: 5
+      optional: true
+    - name: after-G1
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v09c-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/probes/G1.jsonl", "--out", "{reports}/after-v09c-s1-2b-G1.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 45
+      est_minutes: 10
+      optional: true
+    - name: after-T6
+      argv: ["{python}", "scripts/diagnose_decisions.py", "--model", "{model}", "--checkpoint", "{runs}/v09c-s1-2b/checkpoint.pt", "--input", "artifacts/simgen/v0b/tests/T6.jsonl", "--out", "{reports}/after-v09c-s1-2b-T6.json", "--gpu-memory-fraction", "0.92"]
+      max_minutes: 90
+      est_minutes: 54
+      optional: true
+  fetch:
+    - runs/*/metrics.json
+    - runs/*/config.yaml
+    - runs/*/checkpoint.pt
+    - reports/*
+provider:
+  name: runpod
+  gpu_type: NVIDIA H100 80GB HBM3
+  gpu_count: 1
+  cloud: SECURE
+  image: runpod/base:1.4.0-cuda1300-ubuntu2404
+  min_cuda_version: "13.0"
+  disk_gb: 100
+  boot_timeout_minutes: 15
+  fetch_reserve_minutes: 8
+  delete_margin_minutes: 2
+  start_grace_minutes: 30
+  done_grace_minutes: 30
+budget:
+  hourly_usd: 3.99
+  max_wall_hours: 11.5
+  max_usd: null
+  price_source: "RunPod v2 카탈로그 (launch 직전 대조)"
+  phase: {name: cloud-phase-1, cap_usd: 650}
+estimate:
+  boot_minutes: 3
+  uplink_mbps: 5
+  fetch_minutes: 3
+  assumption: "Train from the padded-token simulation of this input with the consistency copies (scripts/assemble_v09.py exposure → train-v09.exposure.json `time_and_budget`, share 0.3): v0.8 F's pods measured 11,642 / 11,650 s of training steps for 189.48 / 189.58 M padded tokens (+ 11 min of dev passes and 2 min of loading); this arm's epoch-0 steps hold ×1.231 / ×1.228 the padded tokens (65,576 / 65,611 copy rows for 33,683 / 33,699 picked choice examples), so train ≈ 277 / 277 min including a 10 % margin, rounded up to 280; the dev passes read v0.8's 300 dev records. Upload at 5 Mbit/s (v0.8's pods). Diagnoses = v0.8 F's job (measured: T2 24, T3 23, T4 13, G2 2, T1 23, T5 12, T7 23, T8a 3, G1 8, T6 46 min; the estimates keep v0.7's rounded-up values). No N9g, A16s, A16, M8g, B8, R14, A4, T9, T8b, B1 or H-set on the pod (Spark). The 11.5 h wall cap keeps ≥ 90 min of slack for a slow pod; the train step may run 420 min; cap $45.89."
