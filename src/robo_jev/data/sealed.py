@@ -62,6 +62,11 @@ SEALED_RECORD_FILES.update({"v08-r14": "artifacts/v08/r14/R14-all.jsonl"})
 SEALED_RECORD_SETS += ("v08-a16", "v08-s16")
 SEALED_RECORD_PREFIXES.update({"v08-a16": "v08a16-", "v08-s16": "v08s16-"})
 SEALED_RECORD_FILES.update({"v08-a16": "artifacts/v08/r16/A16.jsonl", "v08-s16": "artifacts/v08/r16/S16.jsonl"})
+#: Task v0.8d: A16s — the arm's distance sweep, synthetic requests derived from A16 (:mod:`robo_jev.bench.a16s_v08`): eval-only, sealed for
+#: training (never trained on); not never-sent (derived from requests the bench has already sent).
+SEALED_RECORD_SETS += ("v08-a16s",)
+SEALED_RECORD_PREFIXES.update({"v08-a16s": "v08a16s-"})
+SEALED_RECORD_FILES.update({"v08-a16s": "artifacts/v08/a16s/A16s.jsonl"})
 
 
 def sealed_record_set(record: dict[str, Any]) -> str | None:

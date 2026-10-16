@@ -436,6 +436,126 @@ def test_r16_rendered_sections():
     assert out["readings"]["A16"]["models"]["F"]["summary"]["agreement"]["value"] == pytest.approx(9.5 / 12)
 
 
+# --------------------------------------------------------------------------
+# A16s — the arm's distance sweep (task v0.8d; reported only)
+# --------------------------------------------------------------------------
+
+A16S_ARM = ("The gripper still has to travel {d} cm along {a}{up}. Choose this update's step along {a}: plus for a positive distance, minus for a "
+            "negative one. Take the largest step that does not overshoot: far (20) when the distance is at least 20 cm, mid (8) when at least 8, "
+            "near (3) when at least 3, small (1) when at least 1, fine (0.4) when between 0.2 and 1 cm, and stay when it is within 0.2 cm.")
+
+
+def a16s_records() -> list[dict]:
+    """The sweep built from two A16-like templates (intent, x, y with " (up is plus)", z, fingers)."""
+    from robo_jev.bench import a16s_v08 as S
+
+    templates = []
+    for i in range(2):
+        questions = {"intent": {"type": "choice", "instructions": "Name the stage. Facts: remaining travel x +0.9, y -35.5, z +82 cm.",
+                                "criteria": {"look": "Look.", "grasp": "Grasp."}}}
+        questions.update({a: {"type": "choice", "instructions": A16S_ARM.format(d=d, a=a, up=" (up is plus)" if a == "y" else ""),
+                              "criteria": {k: k for k in AXIS_KEYS}} for a, d in (("x", "+0.9"), ("y", "-35.5"), ("z", "+82"))})
+        questions["fingers"] = {"type": "choice", "instructions": "Fingers.", "criteria": {"open": "Open.", "close": "Close."}}
+        templates.append({"id": f"v08a16-{i:04d}", "meta": {"set": "v08-a16"}, "request": {"state": "servo", "questions": questions}})
+    return S.build_records(templates, seed=3)
+
+
+def a16s_answers(records: list[dict], pick) -> dict:
+    """Both order seeds: choice = pick(label, distance, reading)."""
+    out: dict = {}
+    for r in records:
+        for axis in "xyz":
+            sweep = r["meta"]["sweep"][axis]
+            for reading in V.A16S_READINGS:
+                choice = pick(sweep["label"], sweep["distance"], reading)
+                probs = {k: (0.55 if k == choice else 0.045) for k in AXIS_KEYS}
+                out.setdefault(r["id"], {}).setdefault(axis, {})[reading] = {"choice": choice, "probabilities": probs}
+    return out
+
+
+def far_only(label: str, d: float, reading: str) -> str:
+    """v0.7's pattern as robo-jev-serve saw it: right at >= 25 cm, otherwise stay."""
+    return label if abs(d) >= 25 else "stay"
+
+
+def test_a16s_readings_per_model_arm_with_seed_curves_and_the_figure():
+    import xml.etree.ElementTree as ET
+
+    records = a16s_records()
+    right = a16s_answers(records, lambda lab, d, reading: lab)
+    seed2_differs = a16s_answers(records, lambda lab, d, reading: lab if reading == "single-s1" or d < 0 else "stay")
+    scores = {"v08Fs0": {"answers": right}, "v08Fs1": {"answers": seed2_differs}, "base": {"answers": a16s_answers(records, far_only)}}
+    out = V.a16s_readings(records, scores)
+    assert out["records"] == 108 and out["axis_questions"] == 324 and set(out["models"]) == {"v08Fs0", "v08Fs1", "base", "F"}
+    assert out["models"]["v08Fs0"]["summary"]["total"]["accuracy"]["value"] == 1.0
+    assert out["models"]["v08Fs1"]["summary"]["by_band"]["3-8|+"]["flips"]["value"] == 1.0  # seed 2 stays on every positive move
+    assert out["models"]["v08Fs1"]["summary"]["by_band"]["3-8|-"]["flips"]["value"] == 0.0
+    base = out["models"]["base"]["summary"]["by_band"]
+    assert base[">=25"]["accuracy"]["value"] == 1.0 and base["8-20"]["stay"]["value"] == 1.0 and base["20-25"]["accuracy"]["value"] == 0.0
+    assert base["3-8|web"]["p_correct"]["value"] == pytest.approx(0.045)
+    arm = out["models"]["F"]
+    assert arm["summary"]["by_band"]["3-8|+"]["flips"]["value"] == pytest.approx(0.5) and len(arm["seed_curves"]) == 2
+    assert arm["summary"]["by_band"]["3-8"]["flips"]["value"] == pytest.approx(0.25), "+ rows flip in one seed of two, − rows never"
+    assert arm["summary"]["total"]["accuracy"]["value"] == 1.0, "the arm reads order seed 1 of each seed (both right there)"
+    svg = V.a16s_figure(out)
+    root = ET.fromstring(svg)
+    assert "untrained base" in svg and "v0.8 F (format)" in svg and "v0.8 FP" not in svg
+    assert any(e.get("class") == "c-base" and e.get("stroke-dasharray") for e in root.iter("{http://www.w3.org/2000/svg}polyline"))
+    assert V.a16s_figure({"models": {"v08Fs0": out["models"]["v08Fs0"]}}) is None, "no arm and no base: no figure"
+
+
+def _a16s_tree(tmp_path: Path) -> tuple[Path, Path, dict]:
+    spark, directory = tmp_path / "spark", tmp_path / "a16s"
+    spark.mkdir()
+    directory.mkdir()
+    (directory / "A16s.jsonl").write_text("".join(json.dumps(r) + "\n" for r in a16s_records()), encoding="utf-8")
+    frozen = {"files": {"A16s.jsonl": _sha(directory / "A16s.jsonl")}, "frozen": "2026-10-16T16:27:26+09:00"}
+    (directory / "frozen-before-scoring.json").write_text(json.dumps(frozen), encoding="utf-8")
+    V._sha.cache_clear()
+    return spark, directory, frozen
+
+
+def test_a16s_loading_exclusions_and_the_freeze_refusing_only_a16s(tmp_path):
+    spark, directory, frozen = _a16s_tree(tmp_path)
+    records = a16s_records()
+    good = {"kind": "v08-bench-scores", "set": "A16s", "tag": "v08Fs0-2b", "input_sha256": _sha(directory / "A16s.jsonl"),
+            "readings": {r: {} for r in V.A16S_READINGS}, "frozen": frozen, "checkpoint": None, "answers": a16s_answers(records, far_only)}
+    (spark / "A16s-v08Fs0-2b.json").write_text(json.dumps(good), encoding="utf-8")
+    (spark / "A16s-v08Fs1-2b.json").write_text(json.dumps({**good, "tag": "v08Fs1-2b", "readings": {"single-s1": {}}}), encoding="utf-8")
+    (spark / "A16s-base-2b.json").write_text(json.dumps({**good, "tag": "base-2b", "frozen": {"files": {}}}), encoding="utf-8")
+    notes: list = []
+    loaded = V.load_a16s(spark, {"v08Fs0": None, "v08Fs1": None, "base": None}, notes, directory=directory, exclude=["v08a16s-0000"])
+    assert list(loaded["scores"]) == ["v08Fs0"] and len(loaded["records"]) == 107 and loaded["excluded"] == ["v08a16s-0000"]
+    assert any("readings missing" in p for p in loaded["left_out"]) and any("frozen" in p for p in loaded["left_out"])
+    assert any("A16s-v07s0-2b.json" in n for n in notes), "absent files are noted"
+    part = V.a16s_part(loaded)["A16s"]
+    assert part["axis_questions"] == 321 and part["models"]["v08Fs0"]["summary"]["rows"] == 321 and "neither P1, P2, FORMAT" in part["note"]
+    assert V.load_a16s(spark, {}, [], directory=tmp_path / "nothing") is None and V.a16s_part(None) == {"A16s": {"absent": "no frozen A16s file"}}
+    (directory / "A16s.jsonl").write_text("{}\n", encoding="utf-8")
+    refused = V.load_a16s(spark, {}, [], directory=directory)
+    assert refused == {"refused": ["A16s.jsonl changed after it was frozen"]}
+    out = scenario(p1=True, p2=True, a16s=refused)
+    assert out["readings"]["A16s"] == {"refused": refused["refused"]} and out["verdict"]["outcome"] == "SUPPORTED"  # only A16s is refused
+    assert "A16s" not in out["verdict"]["consistency"]["sources"]
+
+
+def test_a16s_rendered_section_and_the_exclusions_it_reads(tmp_path):
+    records = a16s_records()
+    scores = {m: {"answers": a16s_answers(records, far_only)} for m in ("v08Fs0", "v08Fs1", "base")}
+    a16s = {"records": records, "scores": scores, "frozen": {"frozen": "t"}, "left_out": [], "excluded": []}
+    out = scenario(p1=True, p2=True, a16s=a16s)
+    md = V.render({**out, "n_boot": 200, "seed": 0, "git": None, "notes": [], "figures": {"A16s": "artifacts/reports/v08/a16s-curves.svg"}})
+    for needle in ("### A16s — the arm's distance sweep (reported only)", "neither P1, P2, FORMAT nor the amended condition",
+                   "The curves: `artifacts/reports/v08/a16s-curves.svg`", "**Accuracy (top = the rule's option) by band**", "**Stay rate by band**",
+                   "| F (arm, seed mean) | 0.33 / 0.33 | 0.00 / 0.00 | 0.00 / 0.00 | 0.00 / 0.00 | 0.00 / 0.00 | 1.00 / 1.00 | 0.19 |",
+                   "| 40 | far | 1.00 / 1.00 · 0.55 / 0.55 | 1.00 / 1.00 · 0.55 / 0.55 |", "| 0.15 | stay |"):
+        assert needle in md, needle
+    assert "A16s" in md.split("## Reported, not deciding")[-1], "a reported section"
+    overlap = tmp_path / "overlap-v08.json"
+    overlap.write_text(json.dumps({"excluded_a16s": ["v08a16s-0007"], "train_v08": {"sha256": "abc"}}), encoding="utf-8")
+    assert V.read_exclusions(overlap)["a16s"] == ["v08a16s-0007"]
+
+
 def test_r14_readings_on_a_tiny_set():
     units = V.r14_units(R14_TAGS, ["v08r14-lab-0000", "v08r14-cafe-0000"])
     assert [(u["env"], u["question"], u["level"], u["planner"]) for u in units] == [("lab", "move", False, "lower"), ("lab", "offset", True, None),
@@ -649,7 +769,7 @@ def m8g_preds(records: list[dict], *, two_ok: bool, small_ok: bool = True, kind:
 
 
 def scenario(*, p1: bool, p2: bool, format_ok: bool = True, flips: bool = False, of_ok: bool = True, n_boot: int = 200, flip_bins: set | None = None,
-             b8_flip: bool = False, r14_flips: int | None = None, r14_refused: bool = False, r16: dict | None = None) -> dict:
+             b8_flip: bool = False, r14_flips: int | None = None, r14_refused: bool = False, r16: dict | None = None, a16s: dict | None = None) -> dict:
     sets = {s: call_set(s) for s in ("A4", "T9", "T8b")}
     preds: dict[str, dict] = {}
     for model in V.MODELS:
@@ -679,7 +799,8 @@ def scenario(*, p1: bool, p2: bool, format_ok: bool = True, flips: bool = False,
         r14 = {"tags": r14_tag, "record_ids": [r["id"] for r in r14_tag["requests"]], "left_out": [], "check": None, "frozen": {"frozen": "t"},
                "scores": {m: r14_scores(20, r14_flips if m.startswith("v08Fs") else 0) for m in V.MODELS}}
     return V.compute(sets, preds, pod_sets, pod_preds, {"tags": tags, "records": records, "scores": scores},
-                     {"records": m8, "preds": m8_preds}, r14=r14, r16=r16, posthoc=Path("/nonexistent/estimate.json"), n_boot=n_boot, seed=0)
+                     {"records": m8, "preds": m8_preds}, r14=r14, r16=r16, a16s=a16s, posthoc=Path("/nonexistent/estimate.json"), n_boot=n_boot,
+                     seed=0)
 
 
 # --------------------------------------------------------------------------

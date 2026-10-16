@@ -64,6 +64,13 @@ boundary sensitivity (±0.2 read as stay), v0.7's stored endpoint answers as a r
 plus)") next to the same model's y readings; S16 — soccer, movement (15 options) and gaze (6 options) separately: the flip rate across serve's
 three orders, the top-probability spread and the pick-rate RStd, with v0.7's stored answers' spread as a reference.
 
+**A16s** (reported only — the arm's distance sweep, :mod:`robo_jev.bench.a16s_v08`: 108 synthetic requests from A16's, 324 x / y / z
+questions, 54 signed distances from 0.1 to 40 cm × 3 axes × 2 number formats; it enters neither P1, P2, FORMAT nor the amended condition):
+per model and arm (seed means), accuracy and mean P(the rule's option) per signed distance and per band (< 1, 1–3, 3–8, 8–20, 20–25,
+≥ 25 cm), by sign and by number format; the stay rate per band; sign errors; flips between order seeds 1 and 2; the curves as a table and
+as ``a16s-curves.svg`` next to verdict.json (the arms and the untrained base, dashed). Whether threshold comparison is a 2B limit or a
+training effect is read off the base's curve against the trained arms'.
+
 **Exclusions**: ``artifacts/v08/gates/overlap-v08.json`` (``scripts/v08_gates_build.py recheck-v08``, run on v0.8's training input before
 the gates are opened) lists M8g items and B8 requests that share text with v0.8's training input; they are left out of every reading. The
 verdict refuses to read the gates without it (``--no-v08-recheck`` only for tests and pipeline checks).
@@ -170,6 +177,13 @@ RULE = {
         "endpoint (stored)', and the y-phrase ablation (y agreement and sign errors without ' (up is plus)' next to the same model's with it; "
         "serve's reported v0.7 change: agreement 27 -> 50 of 90, sign errors 27 -> 4). S16: per group the flip rate across serve's three orders, "
         "the top-probability spread and the label-free pick-rate RStd, with v0.7's stored answers' spread as a reference.",
+    "A16s (controller, relayed for task v0.8d on 2026-10-16 ~16:20 KST; file built and frozen 16:27 KST)": "a REPORTED synthetic set - the "
+        "arm's distance sweep, derived from A16's requests (constant state; x, y, z set to sweep values, the intent facts rewritten, y without "
+        "' (up is plus)', wrist and fingers as recorded): 27 magnitudes 0.1-40 cm x both signs (no exact boundary 0.2 / 1 / 3 / 8 / 20) x 3 "
+        "axes x 2 number formats ('+12' / '12.0') = 324 axis questions in 108 requests, labelled by each question's own rule; scored under "
+        "serve's conditions on all seven models, single order seed 1 plus seed 2 for flips. It enters neither P1, P2, FORMAT nor the amended "
+        "flip condition. Why: robo-jev-serve saw v0.7 right on an A16 y question only at >= 25 cm, mostly 'stay' over -20..+15 cm and P(correct) "
+        "0.26-0.31 at -25..-40 cm (z the same); the curves of all seven models, the untrained base included, tell a 2B limit from a training effect.",
     "RELEASE": "the user decides (arm and seed). The bundle takes CODES[:255] with MAX_OPTIONS = 255; requests with <= 26 options keep "
                "identical prompts; format, weights.class and prompt v0c-p3 are unchanged.",
     "CONTROLLER'S PRIOR": "FORMAT likely passes; P1 uncertain; P2 more likely than P1.",
@@ -218,6 +232,12 @@ R16_READINGS = {A16: (A16_READING,), A16Y: (A16_READING,), S16: R14_READINGS}
 SERVE_A16_ABLATION = "serve's reported v0.7 change with ' (up is plus)' removed from the y question: agreement 27 -> 50 of 90, sign errors 27 -> 4"
 R16_SEPARATE = ("A16 and S16 (robo-jev-web's 2026-10-16 requests) are reported separately: they enter neither P1, P2, FORMAT nor this condition, "
                 "whose third source stays R14 (the 10-14 requests)")
+#: A16s (the arm's distance sweep, task v0.8d; reported only): the score files' set and readings, and the figure written next to verdict.json.
+A16S = "A16s"
+A16S_READINGS = ("single-s1", "single-s2")
+A16S_SVG = "a16s-curves.svg"
+A16S_SEPARATE = ("A16s (the arm's distance sweep: 108 synthetic requests from A16's, 324 x / y / z questions) is reported separately: it enters "
+                 "neither P1, P2, FORMAT nor the amended condition")
 #: The shown position of an answer code (A = 0, …, Z = 25, then the runner's two-letter codes).
 CODE_POSITION = {code: i for i, code in enumerate(G8.RUNNER_CODES)}
 M8G_KINDS = {"order": "M8g", "seed2": "M8g-seed2", "balanced": "M8g-balanced"}
@@ -1423,6 +1443,82 @@ def a16_readings(records: Sequence[Mapping[str, Any]], scores: Mapping[str, Mapp
     return out
 
 
+def load_a16s(spark_dir: Path, cks: Mapping[str, Path | None], notes: list[str], *, directory: Path | None = None,
+              exclude: Iterable[str] = ()) -> dict[str, Any] | None:
+    """A16s's frozen file and the score files ``A16s-<tag>.json``: None when the frozen record is absent; ``{"refused": problems}`` when the
+    file changed (:func:`robo_jev.bench.a16s_v08.check_frozen`) — only A16s is refused; a score file that fails its checks (set, scored file,
+    both readings, the frozen record, checkpoint) is left out and listed. ``exclude`` = the overlap recheck's A16s record ids."""
+    from robo_jev.bench import a16s_v08
+
+    directory = Path(directory) if directory is not None else Path(a16s_v08.A16S_DIR)
+    if not (directory / "frozen-before-scoring.json").is_file():
+        return None
+    problems = a16s_v08.check_frozen(directory)
+    if problems:
+        return {"refused": problems}
+    frozen = json.loads((directory / "frozen-before-scoring.json").read_text(encoding="utf-8"))
+    excluded = {str(x) for x in exclude}
+    records = [r for r in _read(directory / "A16s.jsonl") if str(r["id"]) not in excluded]
+    scores: dict[str, Any] = {}
+    left_out = []
+    for model in MODELS:
+        path = Path(spark_dir) / f"{A16S}-{SPARK_TAGS[model]}.json"
+        if not path.is_file():
+            notes.append(f"absent: {path}")
+            continue
+        data, found = check_bench_source(path, set_name=A16S, tag=SPARK_TAGS[model], input_path=directory / "A16s.jsonl", checkpoint=cks.get(model),
+                                         readings=A16S_READINGS, frozen=frozen)
+        if found:
+            left_out += [f"{A16S} {model}: {p}" for p in found]
+            continue
+        scores[model] = data
+    return {"records": records, "scores": scores, "frozen": frozen, "left_out": left_out, "excluded": sorted(excluded)}
+
+
+def a16s_readings(records: Sequence[Mapping[str, Any]], scores: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    """A16s per model and arm (an arm's rows = :func:`robo_jev.bench.a16s_v08.seed_mean_rows` of its seeds'): the band readings
+    (:func:`~robo_jev.bench.a16s_v08.sweep_summary` — accuracy, mean P(the rule's option), the stay rate, sign errors and flips between order
+    seeds 1 and 2, per band, by sign, by number format) and the curves per signed distance (:func:`~robo_jev.bench.a16s_v08.curves`); an arm
+    also keeps its seeds' curves (drawn thin in the figure)."""
+    from robo_jev.bench import a16s_v08 as S
+
+    rows = {m: S.sweep_rows(records, s.get("answers") or {}, reading=A16S_READINGS[0], second=A16S_READINGS[1]) for m, s in scores.items()}
+    out: dict[str, Any] = {"records": len(records), "axis_questions": len(records) * len(S.AXES), "bands": [name for name, _, _ in S.READ_BANDS],
+                           "models": {}}
+    for model in [m for m in MODELS if m in rows]:
+        out["models"][model] = {"summary": S.sweep_summary(rows[model]), "curves": S.curves(rows[model])}
+    for arm, (first, second) in ARMS.items():
+        if first in rows and second in rows:
+            mean = S.seed_mean_rows(rows[first], rows[second])
+            out["models"][arm] = {"summary": S.sweep_summary(mean), "curves": S.curves(mean),
+                                  "seed_curves": [out["models"][first]["curves"], out["models"][second]["curves"]]}
+    return out
+
+
+def a16s_part(a16s: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The A16s readings (reported only; they enter neither P1, P2, FORMAT nor the amended condition)."""
+    if not a16s:
+        return {A16S: {"absent": "no frozen A16s file"}}
+    if a16s.get("refused"):
+        return {A16S: {"refused": a16s["refused"]}}
+    common = {"left_out": a16s.get("left_out") or [], "frozen": (a16s.get("frozen") or {}).get("frozen"), "excluded": a16s.get("excluded") or [],
+              "note": A16S_SEPARATE}
+    return {A16S: {**a16s_readings(a16s["records"], a16s.get("scores") or {}), **common}}
+
+
+def a16s_figure(reading: Mapping[str, Any] | None) -> str | None:
+    """The curves (:func:`robo_jev.bench.a16s_v08.curves_svg`): the three arms' seed means (their seeds thin) and the untrained base, dashed;
+    None when none of them was scored."""
+    from robo_jev.bench import a16s_v08 as S
+
+    models = (reading or {}).get("models") or {}
+    series = {key: models[name]["curves"] for key, name in (("F", "F"), ("FP", "FP"), ("v07", "v07"), ("base", "base")) if name in models}
+    if not series:
+        return None
+    seeds = {key: models[key]["seed_curves"] for key in ("F", "FP", "v07") if key in models and models[key].get("seed_curves")}
+    return S.curves_svg(series, seeds=seeds, title="A16s — the arm's distance sweep (v0.8 verdict, reported)")
+
+
 def _spread(values: Sequence[float]) -> dict[str, Any] | None:
     if not values:
         return None
@@ -1662,6 +1758,7 @@ def read_exclusions(path: Path = G8.OVERLAP_V08) -> dict[str, list[str]]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     return {"items": [str(x) for x in data.get("excluded_items") or []], "b8": [str(x) for x in data.get("excluded_b8") or []],
             "a16": [str(x) for x in data.get("excluded_a16") or []], "s16": [str(x) for x in data.get("excluded_s16") or []],
+            "a16s": [str(x) for x in data.get("excluded_a16s") or []],
             "train_sha256": data.get("train_v08", {}).get("sha256") if isinstance(data.get("train_v08"), Mapping) else data.get("train_sha256")}
 
 
@@ -1864,6 +1961,55 @@ def _render_r16(a16: Mapping[str, Any], s16: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _render_a16s(a16s: Mapping[str, Any], figure: str | None = None) -> list[str]:
+    """A16s — the arm's distance sweep (reported only): by band (sign, format), the stay rate, sign errors, flips and the curves table."""
+    from robo_jev.bench import a16s_v08 as S
+
+    lines = ["", "### A16s — the arm's distance sweep (reported only)", "", f"{A16S_SEPARATE}.", ""]
+    if a16s.get("absent") or a16s.get("refused"):
+        reason = a16s.get("absent") or ("**refused**: the frozen file changed — " + "; ".join(a16s["refused"]) + " (listed unread; the rest of the verdict stands)")
+        return lines + [f"A16s: {reason}."]
+    lines.append(f"{a16s.get('records')} requests, {a16s.get('axis_questions')} x / y / z questions; frozen {a16s.get('frozen')}; excluded "
+                 f"{a16s.get('excluded') or 'none'}." + (f" Score files left out: {'; '.join(a16s['left_out'])}." if a16s.get("left_out") else ""))
+    if figure:
+        lines.append(f"The curves: `{figure}` (accuracy and mean P(the rule's option) against the signed distance; the arms' seed means, their "
+                     f"seeds thin, the untrained base dashed).")
+    models = [m for m in ("F", "FP", "v07", "base", *MODELS) if m in (a16s.get("models") or {})]
+    models = list(dict.fromkeys(models))
+    bands = a16s.get("bands") or [name for name, _, _ in S.READ_BANDS]
+
+    def cell(summary: Mapping[str, Any], key: str, metric: str) -> str:
+        return _fmt(((summary.get("by_band") or {}).get(key) or {}).get(metric, {}).get("value"), 2)
+
+    for metric, title in (("accuracy", "Accuracy (top = the rule's option)"), ("p_correct", "Mean P(the rule's option)"), ("stay", "Stay rate")):
+        lines += ["", f"**{title} by band** (single order seed 1; an arm = its seeds' mean; cells + / −):", "",
+                  "| model / arm | " + " | ".join(bands) + " | all |", "|---|" + "---|" * (len(bands) + 1)]
+        for model in models:
+            sm = a16s["models"][model]["summary"]
+            cells = [f"{cell(sm, b + '|+', metric)} / {cell(sm, b + '|-', metric)}" for b in bands]
+            lines.append(f"| {LABELS.get(model, model)} | " + " | ".join(cells) + f" | {_fmt((sm.get('total') or {}).get(metric, {}).get('value'), 2)} |")
+    lines += ["", "**Accuracy by band and number format** (cells web `+12` / plain `12.0`), sign errors (rule and model both move) and flips "
+              "(order seed 1 against 2):", "", "| model / arm | " + " | ".join(bands) + " | sign errors | flips |", "|---|" + "---|" * (len(bands) + 2)]
+    for model in models:
+        sm = a16s["models"][model]["summary"]
+        cells = [f"{cell(sm, b + '|web', 'accuracy')} / {cell(sm, b + '|plain', 'accuracy')}" for b in bands]
+        total = sm.get("total") or {}
+        lines.append(f"| {LABELS.get(model, model)} | " + " | ".join(cells) + f" | {_fmt((total.get('sign_errors') or {}).get('value'), 2)} "
+                     f"({(total.get('sign_errors') or {}).get('n')}) | {_fmt((total.get('flips') or {}).get('value'), 2)} |")
+    shown = [m for m in ("F", "FP", "v07", "base") if m in models]
+    if shown:
+        lines += ["", "**The curves** (per |d|: accuracy + / − · P(the rule's option) + / −; 6 questions per signed point — 3 axes × 2 formats):", "",
+                  "| \\|d\\| cm | rule's step | " + " | ".join(LABELS.get(m, m) for m in shown) + " |", "|---|---|" + "---|" * len(shown)]
+        points = {m: {p["distance"]: p for p in a16s["models"][m]["curves"]["points"]} for m in shown}
+        for magnitude in S.MAGNITUDES:
+            cells = []
+            for m in shown:
+                a, b = points[m].get(magnitude), points[m].get(-magnitude)
+                cells.append("—" if not (a and b) else f"{_fmt(a['accuracy'], 2)} / {_fmt(b['accuracy'], 2)} · {_fmt(a['p_correct'], 2)} / {_fmt(b['p_correct'], 2)}")
+            lines.append(f"| {magnitude:g} | {S.label(magnitude).replace('plus_', '')} | " + " | ".join(cells) + " |")
+    return lines
+
+
 def render(result: Mapping[str, Any]) -> str:
     v, r = result["verdict"], result["readings"]
     lines = [f"# v0.8 pre-declared rule — {v['outcome']} · FORMAT {'PASS' if v['FORMAT']['pass'] else 'FAIL'}", ""]
@@ -1976,6 +2122,7 @@ def render(result: Mapping[str, Any]) -> str:
                          f"{_fmt(prs.get('value'))} | {prb or '—'} |")
     lines += _render_r14(r.get("R14") or {})
     lines += _render_r16(r.get("A16") or {}, r.get("S16") or {})
+    lines += _render_a16s(r.get(A16S) or {}, (result.get("figures") or {}).get(A16S))
     lines += ["", "Long lists:", ""]
     for name, e in (b8.get("long_lists") or {}).items():
         lines.append(f"- {name} ({e['questions']} questions, {e['options']} options): " + "; ".join(_long_list(m, x) for m, x in e["models"].items()))
@@ -2094,11 +2241,12 @@ def pipeline_check(*, n_boot: int, seed: int, out: Path) -> dict[str, Any]:
 def compute(standard_sets: Mapping[str, Sequence], standard_preds: Mapping[str, Mapping[str, Sequence]], pod_sets: Mapping[str, Sequence],
             pod_preds: Mapping[str, Mapping[str, Sequence]], b8: Mapping[str, Any], m8g: Mapping[str, Any], *, jev: Mapping[str, Any] | None = None,
             probes: Mapping[str, Any] | None = None, r14: Mapping[str, Any] | None = None, r16: Mapping[str, Any] | None = None,
-            posthoc: Path | None = None, n_boot: int = 2000, seed: int = 0) -> dict[str, Any]:
+            a16s: Mapping[str, Any] | None = None, posthoc: Path | None = None, n_boot: int = 2000, seed: int = 0) -> dict[str, Any]:
     """Every reading and the verdict from in-memory inputs. `b8` = {tags, records (by id), scores (by model), exclude}; `m8g` = {records,
     preds (model → kind → predictions), exclude}; `jev` = {records, jev_preds, scores}; `probes` = {rows, scores}; `r14` = :func:`load_r14`'s
     result ({tags, record_ids, scores, …}, or {refused} — then R14 is listed unread; None: no R14 score files); `r16` = :func:`load_r16`'s
-    result (A16 / S16, reported only: {records, scores, stored, …}, {refused}, or None when absent)."""
+    result (A16 / S16, reported only: {records, scores, stored, …}, {refused}, or None when absent); `a16s` = :func:`load_a16s`'s result
+    (the arm's distance sweep, reported only)."""
     standard = standard_readings(standard_sets, standard_preds, n_boot=n_boot, seed=seed)
     home = home_readings(pod_sets, pod_preds, n_boot=n_boot, seed=seed)
     g2 = g2_reading(pod_sets.get("G2"), pod_preds, n_boot=n_boot, seed=seed)
@@ -2115,6 +2263,7 @@ def compute(standard_sets: Mapping[str, Sequence], standard_preds: Mapping[str, 
                           "left_out": r14.get("left_out") or [], "check": r14.get("check"), "frozen": (r14.get("frozen") or {}).get("frozen")})
                         if r14 else {"absent": "no R14-<tag>.json score files"}),
                 **r16_part(r16),
+                **a16s_part(a16s),
                 "posthoc": posthoc_reading(posthoc) if posthoc is not None else posthoc_reading()}
     flips = {f"M8g {name}": ((m8r.get("flip_F_by_bin") or {}).get(name) or {}).get("value") for name in BIN_NAMES}
     flips["B8"] = (((b8r.get("flips") or {}).get("pooled") or {}).get("F") or {}).get("value")
@@ -2183,7 +2332,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("missing files the rule reads:\n  " + "\n  ".join(missing))
     notes: list[str] = []
     problems: list[str] = []
-    exclusions = {"items": [], "b8": [], "a16": [], "s16": []}
+    exclusions = {"items": [], "b8": [], "a16": [], "s16": [], "a16s": []}
     if G8.OVERLAP_V08.is_file():
         exclusions = read_exclusions()
         notes.append(f"overlap-v08.json (training input sha256 {str(exclusions.get('train_sha256'))[:12]}): {len(exclusions['items'])} M8g items and "
@@ -2224,6 +2373,9 @@ def main(argv: list[str] | None = None) -> int:
     r16 = load_r16(args.spark_dir, cks, notes, exclude={"a16": exclusions.get("a16") or [], "s16": exclusions.get("s16") or []})
     if r16 and r16.get("refused"):
         notes.append("A16 / S16's frozen files changed — their readings are refused (the rest of the verdict stands): " + "; ".join(r16["refused"]))
+    a16s = load_a16s(args.spark_dir, cks, notes, exclude=exclusions.get("a16s") or [])
+    if a16s and a16s.get("refused"):
+        notes.append("A16s's frozen file changed — its readings are refused (the rest of the verdict stands): " + "; ".join(a16s["refused"]))
     if r14 and r14.get("refused"):
         notes.append("R14's frozen files changed — its readings are refused (the rest of the verdict stands): " + "; ".join(r14["refused"]))
     if problems and not args.allow_mismatch:
@@ -2231,7 +2383,7 @@ def main(argv: list[str] | None = None) -> int:
     _log("computing readings")
     computed = compute(sets, preds, pod_sets, pod_preds, {"tags": tags, "records": b8_records, "scores": b8_scores, "exclude": exclusions["b8"]},
                        {"records": m8g_records, "preds": m8g_preds, "exclude": exclusions["items"]}, jev=jev, probes=probes, r14=r14, r16=r16,
-                       n_boot=args.n_boot, seed=args.seed)
+                       a16s=a16s, n_boot=args.n_boot, seed=args.seed)
     notes += ["Seed means: an arm's call distribution per question = the mean of its seeds' 1/L-weighted listings; every other per-item value = the "
               "mean of its seeds' values, on the items both seeds have; arm comparisons pair the items both arms have.",
               "P1, CA, GAP and O-F: each set drawn by its own pair clusters with draw seed = seed + its index in (A4, T9, T8b) (v0.6's author-gap "
@@ -2245,8 +2397,13 @@ def main(argv: list[str] | None = None) -> int:
               "rule_text": RULE, "n_boot": args.n_boot, "seed": args.seed, "pipeline_check": None, **computed,
               "sources": {**sources, **pod_sources}, "frozen": frozen, "problems": problems, "notes": notes,
               "inputs": {k: str(v) for k, v in vars(args).items() if isinstance(v, Path)}}
+    figure = a16s_figure(computed["readings"].get(A16S))
+    if figure is not None:
+        result["figures"] = {A16S: str(out.with_name(A16S_SVG))}
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(result, indent=1, ensure_ascii=False, default=str) + "\n", encoding="utf-8")
+    if figure is not None:
+        out.with_name(A16S_SVG).write_text(figure, encoding="utf-8")
     md = render(result)
     out.with_suffix(".md").write_text(md, encoding="utf-8")
     print(md.split("## Reported, not deciding")[0])

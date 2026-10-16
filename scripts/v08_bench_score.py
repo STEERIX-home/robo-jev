@@ -46,7 +46,7 @@ BASE = "Qwen/Qwen3.5-2B"
 SERVE_COMMIT = "7b54004bb335c2abdcd3675054221a194166cf3b"
 BUNDLE = REPO / "src" / "robo_jev" / "hf" / "robo_jev_decide.py"
 MIN_FREE = 20 * 2**30
-SETS = ("B8", "Jev", "Probe", "R14", "R14serve", "A16", "A16y", "S16", "Collected", "Other")
+SETS = ("B8", "Jev", "Probe", "R14", "R14serve", "A16", "A16y", "S16", "A16s", "Collected", "Other")
 #: Reported sets frozen in artifacts/v08/r16/ (task v0.8c): sealed for training, already sent by the bench.
 R16_SETS = ("A16", "A16y", "S16")
 _READING = re.compile(r"^(single|balanced)-s(\d+)$|^order-none$|^spaces-(\d)$")
@@ -107,8 +107,10 @@ def serve_adapted(record: dict[str, Any]) -> dict[str, Any]:
     from robo_jev.bench.r14_v08 import model_questions
 
     mq = model_questions(record["request"]["questions"])
-    meta = {**(record.get("meta") or {}), "target": list(mq["asked"]), "serve": {k: mq[k] for k in ("converted", "trivial", "skipped")}}
-    return {**record, "meta": meta, "request": {"state": record["request"]["state"], "questions": dict(mq["asked"])}}
+    own = (record.get("meta") or {}).get("target")  # a record's own target (e.g. A16s: x, y, z) stays: serve's adapter only drops questions
+    target = [name for name in (own or mq["asked"]) if name in mq["asked"]]
+    meta = {**(record.get("meta") or {}), "target": target, "serve": {k: mq[k] for k in ("converted", "trivial", "skipped")}}
+    return {**record, "meta": meta, "request": {"state": record["request"]["state"], "questions": {n: mq["asked"][n] for n in target}}}
 
 
 def targets_of(record: dict[str, Any]) -> list[str]:
@@ -146,6 +148,18 @@ def check_frozen(input_path: Path, frozen_path: Path | None, set_name: str) -> d
             problems.append(f"{input_path} is not one of the frozen A16 / S16 files")
         if problems:
             raise SystemExit(f"refusing to score {set_name}: " + "; ".join(problems))
+        return frozen
+    if set_name == "A16s":  # task v0.8d: the arm's distance sweep, frozen in artifacts/v08/a16s/
+        from robo_jev.bench.a16s_v08 import check_frozen as a16s_frozen
+
+        if frozen_path is None or not Path(frozen_path).is_file():
+            raise SystemExit("A16s is scored only against its frozen file: pass --frozen <artifacts/v08/a16s/frozen-before-scoring.json>")
+        frozen = json.loads(Path(frozen_path).read_text(encoding="utf-8"))
+        problems = a16s_frozen(Path(frozen_path).parent)
+        if sha256(input_path) not in (frozen.get("files") or {}).values():
+            problems.append(f"{input_path} is not the frozen A16s file")
+        if problems:
+            raise SystemExit("refusing to score A16s: " + "; ".join(problems))
         return frozen
     if set_name != "B8":
         return None
@@ -246,7 +260,7 @@ def main(argv: list[str] | None = None) -> int:
         records = records[: args.limit]
     if args.serve_adapter:
         records = [serve_adapted(r) for r in records]
-    if args.set not in ("Probe", "R14", "R14serve", *R16_SETS):
+    if args.set not in ("Probe", "R14", "R14serve", "A16s", *R16_SETS):
         from robo_jev.data.sealed import sealed_record_set
 
         sealed = sorted({sealed_record_set(r) for r in records} - {None})

@@ -660,3 +660,224 @@ def test_the_built_a16_reproduces_serves_stored_v07_agreement_and_is_frozen():
     s = R.arm_summary(R.arm_rows(records, stored, reading="stored"))
     assert [int(s["agreement"]["count"]), *[int(s["agreement_by_axis"][a]["count"]) for a in "xyz"]] == [116, 1, 28, 87]
     assert len(records) == 90 and len(read_records(R.R16_DIR / "S16.jsonl")) == 55
+
+
+# --------------------------------------------------------------------------
+# A16s — the arm's distance sweep (task v0.8d)
+# --------------------------------------------------------------------------
+
+INTENT_TEXT = ("Name the stage the robot is in. Facts: holding=false, target=object_grasp_point, at_target=false, placed=false, height above "
+               "table +55.5 cm, remaining travel x +0.9, y -35.5, z +82 cm.")
+
+
+def _a16s_templates(n: int = 4) -> list[dict]:
+    """A16-like records (the recorded constant state; intent first, then x, y, z with " (up is plus)" on y, then fingers)."""
+    from robo_jev.bench import r16_v08 as R
+
+    out = []
+    for i in range(n):
+        line = _arm_line("+0.9", "-35.5", "+82")
+        intent = {"type": "choice", "instructions": INTENT_TEXT, "criteria": {"look": "Look.", "approach": "Approach.", "grasp": "Grasp."}}
+        line["request"]["questions"] = {"intent": intent, **line["request"]["questions"]}
+        out.append(R.arm_record(i, line, source_line=i + 1))
+    return out
+
+
+def test_a16s_grid_formats_labels_and_bands_follow_the_questions_rule():
+    from robo_jev.bench import a16s_v08 as S
+    from robo_jev.bench import r16_v08 as R
+
+    values = S.sweep_values()
+    assert len(values) == 54 and len(set(values)) == 54 and sorted(values) == sorted(-v for v in values)
+    assert not {abs(v) for v in values} & set(S.BOUNDARIES), "never an exact boundary"
+    assert [S.format_distance(d, "web") for d in (12, -12, 0.15, -0.95, 40)] == ["+12", "-12", "+0.15", "-0.95", "+40"]
+    assert [S.format_distance(d, "plain") for d in (12, -12, 0.15, -0.95, 40)] == ["12.0", "-12.0", "0.15", "-0.95", "40.0"]
+    for d in values:
+        for kind in S.FORMATS:
+            assert float(S.format_distance(d, kind)) == d
+        assert S.label(d) == R.arm_label(d) == R.arm_label(d, boundary_stay=True), "the grid has no value where the two readings differ"
+    with pytest.raises(ValueError):
+        S.format_distance(1.0, "words")
+    cases = {0.1: "stay", -0.15: "stay", 0.3: "plus_fine", -0.95: "minus_fine", 1.05: "plus_small", -2.95: "minus_small", 3.05: "plus_near",
+             7.9: "plus_near", 8.1: "plus_mid", -19.9: "minus_mid", 20.1: "plus_far", -40.0: "minus_far"}
+    assert {d: S.label(d) for d in cases} == cases
+    bands = {0.95: "<1", -0.1: "<1", 1.05: "1-3", 2.95: "1-3", 3.05: "3-8", 7.9: "3-8", 8.1: "8-20", -19.9: "8-20", 20.1: "20-25", 25.0: ">=25",
+             -40.0: ">=25"}
+    assert {d: S.read_band(d) for d in bands} == bands
+
+
+def test_a16s_build_covers_each_value_axis_and_format_once_and_rewrites_only_the_distances():
+    from collections import Counter
+
+    from robo_jev.bench import a16s_v08 as S
+    from robo_jev.bench import r16_v08 as R
+
+    templates = _a16s_templates()
+    records = S.build_records(templates, seed=7)
+    assert len(records) == 108 and [r["id"] for r in records[:2]] == ["v08a16s-0000", "v08a16s-0001"] and records[-1]["id"] == "v08a16s-0107"
+    assert Counter(r["meta"]["format"] for r in records) == {"web": 54, "plain": 54}
+    seen = Counter((r["meta"]["sweep"][a]["distance"], a, r["meta"]["format"]) for r in records for a in S.AXES)
+    assert len(seen) == 324 and set(seen.values()) == {1}
+    for k, record in enumerate(records):
+        template = templates[k % len(templates)]
+        assert record["meta"]["template"] == template["id"] and record["meta"]["target"] == ["x", "y", "z"]
+        assert sealed_record_set(record) == "v08-a16s" and G.gate_problems(record) == []
+        assert record["request"]["state"] == template["request"]["state"]
+        q, tq = record["request"]["questions"], template["request"]["questions"]
+        assert list(q) == list(tq) and q["fingers"] == tq["fingers"]
+        assert q["intent"]["criteria"] == tq["intent"]["criteria"]
+        for axis in S.AXES:
+            sweep = record["meta"]["sweep"][axis]
+            assert R.arm_distance(q[axis]["instructions"]) == (axis, sweep["distance"])
+            assert sweep["text"] == S.format_distance(sweep["distance"], record["meta"]["format"]) and sweep["label"] == S.label(sweep["distance"])
+            assert q[axis]["criteria"] == tq[axis]["criteria"]
+            expected = tq[axis]["instructions"].replace(R.UP_IS_PLUS, "").replace(f"travel {R.arm_distance(tq[axis]['instructions'])[1]:+g} cm",
+                                                                                  f"travel {sweep['text']} cm")
+            assert q[axis]["instructions"] == expected, "only the number (and on y the phrase) changes"
+        assert "(up is plus)" not in q["y"]["instructions"]
+        s = record["meta"]["sweep"]
+        assert q["intent"]["instructions"] == INTENT_TEXT.replace("remaining travel x +0.9, y -35.5, z +82 cm",
+                                                                  f"remaining travel x {s['x']['text']}, y {s['y']['text']}, z {s['z']['text']} cm")
+    assert S.build_records(templates, seed=7) == records
+    assert S.build_records(templates, seed=8) != records
+    broken = json.loads(json.dumps(templates[0]))
+    broken["request"]["questions"]["intent"]["instructions"] = "Name the stage."
+    with pytest.raises(ValueError, match="remaining travel"):
+        S.build_records([broken])
+    no_phrase = json.loads(json.dumps(templates[0]))
+    no_phrase["request"]["questions"]["y"]["instructions"] = no_phrase["request"]["questions"]["y"]["instructions"].replace(R.UP_IS_PLUS, "")
+    with pytest.raises(ValueError, match="up is plus"):
+        S.build_records([no_phrase])
+
+
+def _a16s_answers(records: list[dict], pick, reading: str = "single-s1") -> dict:
+    """answers[id][axis][reading] = {choice, probabilities} with choice = pick(label, distance) and P(choice) = 0.6, P(label) = 0.6 or 0.2."""
+    out: dict = {}
+    for r in records:
+        for axis in ("x", "y", "z"):
+            sweep = r["meta"]["sweep"][axis]
+            choice = pick(sweep["label"], sweep["distance"])
+            probs = {choice: 0.6} if choice == sweep["label"] else {choice: 0.6, sweep["label"]: 0.2}
+            out.setdefault(r["id"], {}).setdefault(axis, {})[reading] = {"choice": choice, "probabilities": probs}
+    return out
+
+
+def test_a16s_readings_count_accuracy_stay_sign_errors_flips_and_curves():
+    from robo_jev.bench import a16s_v08 as S
+
+    records = S.build_records(_a16s_templates(), seed=7)
+    always_stay = _a16s_answers(records, lambda lab, d: "stay")
+    rows = S.sweep_rows(records, always_stay, second=None)
+    assert len(rows) == 324 and all(r["flip"] is None and r["sign_error"] is None for r in rows)
+    s = S.sweep_summary(rows)
+    assert s["rows"] == 324 and s["total"]["stay"]["value"] == 1.0
+    assert s["total"]["accuracy"]["value"] == pytest.approx(24 / 324), "only the 24 stay labels (|d| 0.1 and 0.15) are right"
+    assert s["by_band"]["<1"]["accuracy"]["value"] == pytest.approx(24 / 72) and s["by_band"][">=25"]["accuracy"]["n"] == 36
+    assert {"<1|+", "<1|web", "<1|-|plain", "8-20|+|web"} <= set(s["by_band"])
+    # the far side right, the rest the opposite sign: sign errors on every moving non-far question
+    def pick(lab, d):
+        return lab if abs(d) >= 20 else ("stay" if lab == "stay" else ("minus" if d > 0 else "plus") + lab[lab.index("_"):])
+    first = _a16s_answers(records, pick)
+    second = _a16s_answers(records, lambda lab, d: lab if d > 0 else pick(lab, d), reading="single-s2")
+    both = {rid: {a: {**first[rid][a], **second[rid][a]} for a in first[rid]} for rid in first}
+    rows = S.sweep_rows(records, both)
+    s = S.sweep_summary(rows)
+    assert s["by_band"][">=25"]["accuracy"]["value"] == 1.0 and s["by_band"]["20-25"]["accuracy"]["value"] == 1.0
+    assert s["by_band"]["3-8"]["sign_errors"]["value"] == 1.0 and s["by_band"]["3-8"]["accuracy"]["value"] == 0.0
+    assert s["by_band"]["3-8|+"]["flips"]["value"] == 1.0 and s["by_band"]["3-8|-"]["flips"]["value"] == 0.0
+    assert s["by_band"]["3-8"]["p_correct"]["value"] == pytest.approx(0.2) and s["by_band"][">=25"]["p_correct"]["value"] == pytest.approx(0.6)
+    arm = S.seed_mean_rows(S.sweep_rows(records, first), S.sweep_rows(records, second, reading="single-s2", second=None))
+    by = {(r["distance"], r["axis"], r["format"]): r for r in arm}
+    assert by[(5.0, "x", "web")]["correct"] == 0.5 and by[(5.0, "x", "web")]["sign_error"] == 0.5 and by[(-5.0, "x", "web")]["correct"] == 0.0
+    c = S.curves(rows)["points"]
+    assert len(c) == 54 and {p["n"] for p in c} == {6} and [p["distance"] for p in c] == sorted(S.sweep_values())
+    point = next(p for p in c if p["distance"] == 30.0)
+    assert point["accuracy"] == point["accuracy_web"] == point["accuracy_plain"] == 1.0
+
+
+def test_a16s_curves_svg_is_well_formed_with_the_base_dashed_and_every_point_hoverable():
+    import xml.etree.ElementTree as ET
+
+    from robo_jev.bench import a16s_v08 as S
+
+    records = S.build_records(_a16s_templates(), seed=7)
+    rows = S.sweep_rows(records, _a16s_answers(records, lambda lab, d: lab if abs(d) >= 25 else "stay"), second=None)
+    curve = S.curves(rows)
+    svg = S.curves_svg({"F": curve, "FP": curve, "v07": curve, "base": curve}, seeds={"F": [curve, curve]})
+    root = ET.fromstring(svg)
+    ns = "{http://www.w3.org/2000/svg}"
+    assert "&lt; fine &lt; 1" in svg, "the axis caption's < is escaped"
+    lines = root.findall(f"{ns}polyline")
+    assert any(p.get("class") == "c-base" and p.get("stroke-dasharray") for p in lines) and not any(
+        p.get("class") == "c-F" and p.get("stroke-dasharray") for p in lines)
+    assert len(root.findall(f"{ns}circle")) == 4 * 54 * 2, "a hover target per series, point and panel"
+    texts = [t.text or "" for t in root.iter(f"{ns}text")]
+    assert {"untrained base", "v0.8 F (format)", "v0.7"} <= set(texts), "a legend entry per series"
+    assert "@media (prefers-color-scheme: dark)" in svg
+    single = ET.fromstring(S.curves_svg({"v07": curve}))
+    assert len(single.findall(f"{ns}circle")) == 54 * 2
+
+
+def test_a16s_is_sealed_for_training_and_its_freeze_check_finds_a_changed_file(tmp_path):
+    from robo_jev.bench import a16s_v08 as S
+
+    assert "v08-a16s" in SEALED_RECORD_SETS and SEALED_RECORD_PREFIXES["v08-a16s"] == "v08a16s-"
+    assert SEALED_RECORD_FILES["v08-a16s"] == "artifacts/v08/a16s/A16s.jsonl" and "v08-a16s" not in NEVER_SENT_SETS
+    with pytest.raises(ValueError, match="v08-a16s"):
+        refuse_sealed_records([{"id": "v08a16s-0003", "meta": {}}], where="the trainer")
+    assert S.check_frozen(tmp_path) == [f"missing frozen-before-scoring.json in {tmp_path}"]
+    (tmp_path / "A16s.jsonl").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "frozen-before-scoring.json").write_text(json.dumps({"files": {"A16s.jsonl": S.sha256_file(tmp_path / "A16s.jsonl")}}),
+                                                         encoding="utf-8")
+    assert S.check_frozen(tmp_path) == []
+    (tmp_path / "A16s.jsonl").write_text("{\"x\": 1}\n", encoding="utf-8")
+    assert S.check_frozen(tmp_path) == ["A16s.jsonl changed after it was frozen"]
+
+
+def test_serves_adapter_keeps_a_records_own_target():
+    from robo_jev.bench import a16s_v08 as S
+
+    score = _script("v08_bench_score.py")
+    record = S.build_records(_a16s_templates(), seed=7)[0]
+    adapted = score.serve_adapted(record)
+    assert adapted["meta"]["target"] == ["x", "y", "z"] and list(adapted["request"]["questions"]) == ["x", "y", "z"]
+    assert adapted["request"]["questions"]["y"] == record["request"]["questions"]["y"] and adapted["meta"]["sweep"] == record["meta"]["sweep"]
+    whole = score.serve_adapted({**record, "meta": {k: v for k, v in record["meta"].items() if k != "target"}})
+    assert whole["meta"]["target"] == ["intent", "x", "y", "z", "fingers"], "no own target: every question serve asks"
+
+
+def test_the_a16s_check_reads_serves_pattern_and_writes_the_table_and_figure(tmp_path):
+    import xml.etree.ElementTree as ET
+
+    from robo_jev.bench import a16s_v08 as S
+
+    check = _script("v08_a16s_check.py")
+    records = S.build_records(_a16s_templates(), seed=7)
+    (tmp_path / "A16s.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    (tmp_path / "frozen-before-scoring.json").write_text(json.dumps({"files": {"A16s.jsonl": S.sha256_file(tmp_path / "A16s.jsonl")}}),
+                                                         encoding="utf-8")
+    answers = _a16s_answers(records, lambda lab, d: lab if abs(d) >= 25 else "stay")
+    (tmp_path / "scores.json").write_text(json.dumps({"answers": answers}), encoding="utf-8")
+    assert check.main(["--records", str(tmp_path / "A16s.jsonl"), "--scores", f"v07={tmp_path / 'scores.json'}", "--out", str(tmp_path / "c.json")]) == 0
+    got = json.loads((tmp_path / "c.json").read_text(encoding="utf-8"))["series"]["v07"]["serve_pattern"]
+    assert got["y"]["stay_-20..+15"] == 1.0 and got["y"]["accuracy_>=25"] == 1.0 and got["y"]["p_correct_-25..-40"] == pytest.approx(0.6)
+    ET.parse(tmp_path / "c.svg")
+    assert "| 40 | 1.00 | 1.00 |" in (tmp_path / "c.md").read_text(encoding="utf-8")
+    (tmp_path / "A16s.jsonl").write_text("", encoding="utf-8")
+    with pytest.raises(SystemExit, match="changed after it was frozen"):
+        check.main(["--records", str(tmp_path / "A16s.jsonl"), "--scores", f"v07={tmp_path / 'scores.json'}", "--out", str(tmp_path / "c.json")])
+
+
+@pytest.mark.skipif(not (REPO / "artifacts" / "v08" / "a16s" / "frozen-before-scoring.json").is_file(), reason="A16s is not built here")
+def test_the_built_a16s_is_frozen_complete_and_derived_from_a16():
+    from collections import Counter
+
+    from robo_jev.bench import a16s_v08 as S
+    from robo_jev.bench import r16_v08 as R
+
+    assert S.check_frozen(S.A16S_DIR) == []
+    assert S.sha256_file(S.A16S_DIR / "A16s.jsonl") == "e05ebb9384aef75c199ae6609fbc7346ebda215451f05dd27010dfa38bd0a787"
+    records = read_records(S.A16S_DIR / "A16s.jsonl")
+    assert records == S.build_records(read_records(R.R16_DIR / "A16.jsonl"), seed=S.SEED), "rebuilds byte-for-byte from A16"
+    labels = Counter(r["meta"]["sweep"][a]["label"] for r in records for a in S.AXES)
+    assert len(records) == 108 and sum(labels.values()) == 324 and labels["stay"] == 24 and labels["plus_far"] == labels["minus_far"] == 24
