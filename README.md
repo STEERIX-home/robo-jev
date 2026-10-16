@@ -3,8 +3,8 @@
 **A fast, single-pass 2B System 1 for robots' physical judgment.**
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/bench-v0-physics-dark.svg">
-  <img alt="Physical judgment on robo-jev's benchmark of held-out situations: robo-jev v0.7 (2B) 0.81, TypeSafe Jev 0.28, Liquid d1 0.17, Microsoft-Decision-1 0.04, Together Tev1 4B 0.03, OpenAI GPT-6 Luna Decisions −0.02, Upstage Solar Decide −0.15, untrained Qwen3.5-2B −0.15" src="docs/figures/bench-v0-physics-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/figures/bench-v0-physics-v07-dark.svg">
+  <img alt="Physical judgment on robo-jev's benchmark of held-out situations: robo-jev v0.7 (2B) 0.81, TypeSafe Jev 0.28, Liquid d1 0.17, Microsoft-Decision-1 0.04, Together Tev1 4B 0.03, OpenAI GPT-6 Luna Decisions −0.02, Upstage Solar Decide −0.15, untrained Qwen3.5-2B −0.15" src="docs/figures/bench-v0-physics-v07-light.svg">
 </picture>
 
 robo-jev reads a short text of what a robot senses and answers the questions that matter in the moment — *will the glass tip if I brake now? does the person reach my path first? did the part seat?* — with a probability for every answer.
