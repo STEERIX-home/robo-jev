@@ -549,3 +549,114 @@ def test_every_passive_rule_is_split_into_hold_or_continue_and_no_active_rule_is
     assert set(R.PASSIVE_KIND) == passive and set(R.PASSIVE_KIND.values()) == {"hold", "continue"}
     assert all(R.passive_kind(rid) is None for rid in active)
     assert R.passive_kind("let-the-move-go-on") == "continue" and R.passive_kind("wait") == "hold" and R.passive_kind("call-the-operator") == "hold"
+
+
+# --------------------------------------------------------------------------
+# A16 / S16 — robo-jev-web's requests of 2026-10-16 (task v0.8c)
+# --------------------------------------------------------------------------
+
+ARM_TEXT = ("The gripper still has to travel {d} cm along {a}{up}. Choose this update's step along {a}: plus for a positive distance, minus for a "
+            "negative one. Take the largest step that does not overshoot: far (20) when the distance is at least 20 cm, mid (8) when at least 8, "
+            "near (3) when at least 3, small (1) when at least 1, fine (0.4) when between 0.2 and 1 cm, and stay when it is within 0.2 cm.")
+ARM_OPTIONS = {"plus_far": "+20 cm.", "plus_mid": "+8 cm.", "plus_near": "+3 cm.", "plus_small": "+1 cm.", "plus_fine": "+0.4 cm.", "stay": "No move on this axis.",
+               "minus_far": "-20 cm.", "minus_mid": "-8 cm.", "minus_near": "-3 cm.", "minus_small": "-1 cm.", "minus_fine": "-0.4 cm."}
+
+
+def _arm_line(x: str, y: str, z: str) -> dict:
+    questions = {a: {"type": "choice", "instructions": ARM_TEXT.format(d=d, a=a, up=" (up is plus)" if a == "y" else ""), "criteria": dict(ARM_OPTIONS)}
+                 for a, d in (("x", x), ("y", y), ("z", z))}
+    questions["fingers"] = {"type": "choice", "instructions": "Command the fingers.", "criteria": {"open": "Open.", "close": "Close.", "keep": "Keep."}}
+    return {"env": "arm", "status": 200, "request": {"state": '{"protocol":"robojev_web_servo_v1"}', "questions": questions, "model": "robojev"}}
+
+
+def test_a16_rule_parses_the_distance_and_labels_by_the_thresholds_with_the_boundary_reading():
+    from robo_jev.bench import r16_v08 as R
+
+    assert R.arm_distance(ARM_TEXT.format(d="+0.9", a="x", up="")) == ("x", 0.9)
+    assert R.arm_distance(ARM_TEXT.format(d="-35.5", a="y", up=" (up is plus)")) == ("y", -35.5)
+    assert R.arm_distance(ARM_TEXT.format(d="0", a="z", up="")) == ("z", 0.0)
+    with pytest.raises(ValueError):
+        R.arm_distance("Command the fingers.")
+    cases = {0.0: "stay", 0.19: "stay", 0.2: "plus_fine", -0.2: "minus_fine", 0.9: "plus_fine", 1.0: "plus_small", -2.9: "minus_small",
+             3.0: "plus_near", -7.99: "minus_near", 8.0: "plus_mid", 19.9: "plus_mid", 20.0: "plus_far", -82.0: "minus_far"}
+    for d, want in cases.items():
+        assert R.arm_label(d) == want, d
+    assert R.arm_label(-0.2, boundary_stay=True) == "stay" and R.arm_label(0.21, boundary_stay=True) == "plus_fine"
+    assert [R.arm_band(d) for d in (0.1, 0.2, 1, 3, 8, 20)] == ["<0.2", "0.2-1", "1-3", "3-8", "8-20", ">=20"]
+
+
+def test_a16_records_ablation_and_readings_count_agreement_sign_errors_and_stay():
+    from robo_jev.bench import r16_v08 as R
+
+    lines = [_arm_line("+0.9", "-35.5", "+82"), _arm_line("-0.2", "-2.5", "-30"), _arm_line("0", "-5", "+10")]
+    records = [R.arm_record(i, line, source_line=i + 1) for i, line in enumerate(lines)]
+    assert records[0]["id"] == "v08a16-0000" and sealed_record_set(records[0]) == "v08-a16"
+    assert records[1]["meta"]["rule"]["x"] == {"distance": -0.2, "label": "minus_fine", "label_boundary_stay": "stay", "band": "0.2-1", "sign": "minus"}
+    assert G.gate_problems(records[0]) == []
+    ablated = R.ablate_y(records[0])
+    assert list(ablated["request"]["questions"]) == ["y"] and "(up is plus)" not in ablated["request"]["questions"]["y"]["instructions"]
+    assert ablated["id"] == records[0]["id"] and ablated["request"]["questions"]["y"]["instructions"].startswith("The gripper still has to travel -35.5 cm along y.")
+    with pytest.raises(ValueError):
+        R.ablate_y(ablated | {"request": {"state": "s", "questions": {"y": {"instructions": "no phrase"}}}})
+    tops = {"v08a16-0000": {"x": "stay", "y": "plus_far", "z": "plus_far"},          # x: stay on 0.9 (small); y: sign error; z: agree
+            "v08a16-0001": {"x": "stay", "y": "minus_small", "z": "minus_far"},      # x: stay on -0.2 (agree only with boundary_stay)
+            "v08a16-0002": {"x": "stay", "y": "minus_near", "z": "minus_mid"}}       # x: agree (0 -> stay); z: sign error
+    answers = {rid: {a: {"single-s1": {"choice": c, "probabilities": {c: 0.6}}} for a, c in q.items()} for rid, q in tops.items()}
+    s = R.arm_summary(R.arm_rows(records, answers, reading="single-s1"))
+    assert s["agreement"]["count"] == 5 and s["agreement"]["n"] == 9
+    assert s["sign_errors_by_axis"]["y"]["count"] == 1 and s["sign_errors_by_axis"]["z"]["count"] == 1 and s["sign_errors"]["n"] == 6, "rows where rule and model both move"
+    assert s["stay_rate_small"]["count"] == 2 and s["stay_rate_small"]["n"] == 3, "x 0.9 and -0.2 (0.2-1) stay; y -2.5 (1-3) moves"
+    alt = R.arm_summary(R.arm_rows(records, answers, reading="single-s1", boundary_stay=True))
+    assert alt["agreement_by_axis"]["x"]["count"] == 2
+    other = {rid: {a: {"single-s1": {"choice": "stay", "probabilities": {"stay": 0.5}}} for a in "xyz"} for rid in tops}
+    arm = R.seed_mean_rows(R.arm_rows(records, answers, reading="single-s1"), R.arm_rows(records, other, reading="single-s1"))
+    by = {(r["id"], r["axis"]): r for r in arm}
+    assert by[("v08a16-0000", "y")]["sign_error"] == 1.0 and by[("v08a16-0000", "z")]["agree"] == 0.5 and by[("v08a16-0000", "x")]["top_is_stay"] == 1.0
+
+
+def test_a16_stored_answers_must_be_the_same_calls():
+    from robo_jev.bench import r16_v08 as R
+
+    records = [R.arm_record(0, _arm_line("+0.9", "-35.5", "+82"), source_line=1)]
+    servo = [{"request": {"facts": {"move": {"x": 0.9, "y": -35.5, "z": 82}}}, "answers": {"x": {"choice": "stay", "probabilities": {"stay": 1.0}}}}]
+    assert R.stored_answers(records, servo)["v08a16-0000"]["x"]["stored"]["choice"] == "stay"
+    servo[0]["request"]["facts"]["move"]["y"] = -30.0
+    with pytest.raises(ValueError, match="not the record"):
+        R.stored_answers(records, servo)
+
+
+def test_s16_groups_and_sealing_of_the_2026_10_16_sets():
+    from robo_jev.bench import r16_v08 as R
+
+    line = {"env": "soccer", "request": {"state": "pitch", "questions": {"red1": {"type": "choice", "instructions": "move?", "criteria": {"a": "A", "b": "B"}},
+                                                                        "red1_look": {"type": "choice", "instructions": "look?", "criteria": {"l": "L", "r": "R"}}}}}
+    record = R.soccer_record(3, line, source_line=4)
+    assert record["id"] == "v08s16-0003" and record["meta"]["groups"] == {"red1": "movement", "red1_look": "gaze"}
+    for name, prefix, path in (("v08-a16", "v08a16-", "artifacts/v08/r16/A16.jsonl"), ("v08-s16", "v08s16-", "artifacts/v08/r16/S16.jsonl")):
+        assert name in SEALED_RECORD_SETS and SEALED_RECORD_PREFIXES[name] == prefix and SEALED_RECORD_FILES[name] == path and name not in NEVER_SENT_SETS
+    assert sealed_record_set(record) == "v08-s16"
+    _script("bench.py").refuse_never_sent({"T2": [record]})  # sendable: the bench has already sent these requests
+
+
+def test_the_a16_check_compares_tops_and_reports_serves_numbers(tmp_path):
+    from robo_jev.bench import r16_v08 as R
+
+    check = _script("v08_a16_check.py")
+    records = [R.arm_record(0, _arm_line("+0.9", "-35.5", "+82"), source_line=1)]
+    ours = {"v08a16-0000": {"x": {"single-s1": {"choice": "stay", "probabilities": {"stay": 0.5, "plus_fine": 0.5}}}}}
+    stored = {"v08a16-0000": {"x": {"stored": {"choice": "plus_fine", "probabilities": {"stay": 0.49, "plus_fine": 0.51}}}}}
+    got = check.compare_tops(records, ours, stored, reading="single-s1")
+    assert got["total"] == {"n": 1, "same_top": 0, "max_abs_dp": pytest.approx(0.01)}
+    assert check.SERVE_V07["agreement"]["total"] == [116, 270] and check.SERVE_V07["ablation_y"]["sign_errors"] == {"before": 27, "after": 4}
+
+
+@pytest.mark.skipif(not (REPO / "artifacts" / "v08" / "r16" / "r16.manifest.json").is_file(), reason="A16 / S16 are not built here")
+def test_the_built_a16_reproduces_serves_stored_v07_agreement_and_is_frozen():
+    from robo_jev.bench import r16_v08 as R
+
+    assert R.check_frozen(R.R16_DIR) == []
+    records = read_records(R.R16_DIR / "A16.jsonl")
+    stored = json.loads((R.R16_DIR / "A16-stored-v07.json").read_text(encoding="utf-8"))["answers"]
+    s = R.arm_summary(R.arm_rows(records, stored, reading="stored"))
+    assert [int(s["agreement"]["count"]), *[int(s["agreement_by_axis"][a]["count"]) for a in "xyz"]] == [116, 1, 28, 87]
+    assert len(records) == 90 and len(read_records(R.R16_DIR / "S16.jsonl")) == 55

@@ -686,6 +686,92 @@ def cmd_build_r14(args: argparse.Namespace) -> int:
 
 
 # --------------------------------------------------------------------------
+# build-r16 — the 2026-10-16 requests: A16 (the arm) and S16 (soccer), reported (task v0.8c)
+# --------------------------------------------------------------------------
+
+
+def cmd_build_r16(args: argparse.Namespace) -> int:
+    """A16 and S16 (:mod:`robo_jev.bench.r16_v08`): ``A16.jsonl`` (90 arm requests with the rule's options), ``A16-y-ablation.jsonl`` (the y
+    question with " (up is plus)" removed), ``S16.jsonl`` (55 soccer requests), v0.7's answers stored by the page (``A16-stored-v07.json``,
+    ``S16-stored-v07.json``, score-file shape, reading ``stored``), the manifest and ``frozen-before-scoring.json`` (sha256 of every one of
+    them), written before any scoring; refuses to overwrite frozen files unless ``--force-before-scoring``."""
+    import hashlib
+
+    from robo_jev.bench import r16_v08 as R
+    from robo_jev.bench.gates_v08 import gate_problems
+
+    out = refuse_write(args.out_dir)
+    frozen_path = out / "frozen-before-scoring.json"
+    if frozen_path.is_file() and not args.force_before_scoring:
+        raise SystemExit(f"{frozen_path} exists — A16 / S16 are frozen; pass --force-before-scoring only while no model has been scored on them")
+    zip_path = R.R16_SOURCE.parent / f"{R.R16_SOURCE.name}.zip"
+    zip_sha = hashlib.sha256(zip_path.read_bytes()).hexdigest() if zip_path.is_file() else None
+    if zip_sha is not None and not zip_sha.startswith(R.R16_ZIP_SHA256_PREFIX):
+        raise SystemExit(f"{zip_path}: sha256 {zip_sha[:16]} is not the relayed {R.R16_ZIP_SHA256_PREFIX}")
+
+    def lines_of(name: str) -> list[dict[str, Any]]:
+        return [json.loads(t) for t in (R.R16_SOURCE / name).read_text(encoding="utf-8").splitlines() if t.strip()]
+
+    arm_lines, servo_lines, soccer_lines = lines_of("arm-decisions.jsonl"), lines_of("arm-servo.jsonl"), lines_of("soccer.jsonl")
+    for name, lines in (("arm-decisions", arm_lines), ("soccer", soccer_lines)):
+        keys = [json.dumps(l["request"], sort_keys=True) for l in lines]
+        if len(set(keys)) != len(keys):
+            raise SystemExit(f"{name}: duplicate requests — dedup needed")
+    arm = [R.arm_record(i, line, source_line=i + 1) for i, line in enumerate(arm_lines)]
+    ablation = [R.ablate_y(r) for r in arm]
+    soccer = [R.soccer_record(i, line, source_line=i + 1) for i, line in enumerate(soccer_lines)]
+    stored_arm = R.stored_answers(arm, servo_lines)
+    stored_soccer = {str(r["id"]): {name: {"stored": {"choice": a.get("choice"), "probabilities": a.get("probabilities")}}
+                                    for name, a in (line.get("answers") or {}).items()} for r, line in zip(soccer, soccer_lines)}
+    for name, records in (("A16.jsonl", arm), ("A16-y-ablation.jsonl", ablation), ("S16.jsonl", soccer)):
+        problems = {r["id"]: p for r in records if (p := gate_problems(r))}
+        if problems:
+            raise SystemExit(f"{name}: records fail their checks: {list(problems.items())[:3]}")
+    files = {"A16.jsonl": arm, "A16-y-ablation.jsonl": ablation, "S16.jsonl": soccer}
+    hashes = {name: _write_jsonl(out / name, rows) for name, rows in files.items()}
+    for name, payload in (("A16-stored-v07.json", {"kind": "v08-stored-answers", "set": "A16", "source": "arm-servo.jsonl (the page's calls with robo-jev's "
+                                                    "answers)", "model": "steerix/robo-jev-2b@cc0b99f2 (v0.7, the endpoint)", "readings": {"stored": {}},
+                                                    "answers": stored_arm}),
+                          ("S16-stored-v07.json", {"kind": "v08-stored-answers", "set": "S16", "source": "soccer.jsonl answers",
+                                                   "model": "steerix/robo-jev-2b@cc0b99f2 (v0.7, the endpoint)", "readings": {"stored": {}},
+                                                   "answers": stored_soccer})):
+        _write_json(out / name, payload)
+        hashes[name] = hashlib.sha256((out / name).read_bytes()).hexdigest()
+    from robo_jev.hf.robo_jev_decide import build_prompts
+
+    tok = _tokenizer()
+
+    def tokens(records: list[dict[str, Any]], spaces: tuple[int, ...]) -> int:
+        return sum(len(p["tokens"]) for r in records for k in spaces for p in build_prompts(r["request"]["state"] + " " * k, r["request"]["questions"], tok))
+
+    tok_counts = {"A16 single-s1": tokens(arm, (0,)), "A16y single-s1": tokens(ablation, (0,)), "S16 spaces-0/1/2": tokens(soccer, (0, 1, 2))}
+    labels = {axis: dict(Counter(r["meta"]["rule"][axis]["label"] for r in arm)) for axis in R.AXES}
+    bands = {axis: dict(Counter(("" if r["meta"]["rule"][axis]["label"] == "stay" else ("+" if r["meta"]["rule"][axis]["distance"] > 0 else "-"))
+                                 + r["meta"]["rule"][axis]["band"] for r in arm)) for axis in R.AXES}
+    boundary = {axis: sum(abs(r["meta"]["rule"][axis]["distance"]) == 0.2 for r in arm) for axis in R.AXES}
+    manifest = {"kind": "v08-r16", "script_version": SCRIPT_VERSION, "git": _git(), "sets": {"A16": R.A16_SET, "S16": R.S16_SET},
+                "prefixes": {"A16": R.A16_PREFIX, "S16": R.S16_PREFIX},
+                "source": {"dir": _rel(R.R16_SOURCE), "zip_sha256": zip_sha, "captured": "2026-10-16, robo-jev-web main + the change opening robo-jev "
+                           "everywhere but the tube cell, robo-jev v0.7 (steerix/robo-jev-2b@cc0b99f2) answering (the folder's README)"},
+                "counts": {"A16": len(arm), "S16": len(soccer), "arm_servo_lines": len(servo_lines)}, "files": hashes,
+                "rule": {"parsing": R.DISTANCE.pattern, "thresholds": "|d| >= 20 far, >= 8 mid, >= 3 near, >= 1 small, >= 0.2 fine, below 0.2 stay; "
+                         "the sign picks plus / minus (the controller's reading; it reproduces serve's v0.7 numbers)",
+                         "boundary": f"exactly +-0.2: fine in the main reading, stay under the text's 'within 0.2 cm' (label_boundary_stay); "
+                                     f"distances at exactly 0.2 per axis: {boundary}",
+                         "labels_by_axis": labels, "signed_bands_by_axis": bands},
+                "ablation": {"file": "A16-y-ablation.jsonl", "question": "y", "removed": R.UP_IS_PLUS},
+                "soccer": {"questions_per_request": 12, "groups": dict(Counter(R.soccer_group(n) for n in soccer[0]["request"]["questions"]))},
+                "prompt_tokens_per_model": tok_counts, "gpu_estimate_s_per_model": {k: gpu_seconds(v) for k, v in tok_counts.items()},
+                "sealed": "for training (never trained on); NOT never-sent - the bench has already sent these requests", "created": _now()}
+    _write_json(out / "r16.manifest.json", manifest)
+    _write_json(frozen_path, {"files": hashes, "frozen": _now(), "note": "written before any scoring: the A16 / S16 scorer and the verdict refuse if "
+                                                                         "any of these files changed"})
+    _seal([out / name for name in (*files, "A16-stored-v07.json", "S16-stored-v07.json", "frozen-before-scoring.json")])
+    _log(f"R16: A16 {len(arm)}, S16 {len(soccer)} · labels {json.dumps(labels)} · tokens {json.dumps(tok_counts)}")
+    return 0
+
+
+# --------------------------------------------------------------------------
 # recheck-v08 and check
 # --------------------------------------------------------------------------
 
@@ -717,6 +803,20 @@ def cmd_recheck(args: argparse.Namespace) -> int:
     r14 = read_records(r14_v08.R14_ALL) if r14_v08.R14_ALL.is_file() else []
     for r in r14:  # R14: whole states (exclusions; sealed for training)
         units.setdefault(V7B()._hash(normalize(r["request"]["state"])), set()).add(f"r14:{r['id']}")
+    from robo_jev.bench import r16_v08
+    from robo_jev.data.general_sets import record_units
+
+    r16 = {"a16": read_records(r16_v08.R16_DIR / "A16.jsonl") if (r16_v08.R16_DIR / "A16.jsonl").is_file() else [],
+           "s16": read_records(r16_v08.R16_DIR / "S16.jsonl") if (r16_v08.R16_DIR / "S16.jsonl").is_file() else []}
+    for kind, rows in r16.items():  # A16 / S16 (task v0.8c): text units (exclusions) and 8-word shingles of every question text (reported)
+        for r in rows:
+            for unit in record_units(r):
+                units.setdefault(V7B()._hash(unit), set()).add(f"{kind}:{r['id']}")
+            for question in r["request"]["questions"].values():
+                for text in [str(question.get("instructions") or ""), *[str(v) for v in (question.get("criteria") or {}).values()]]:
+                    if len(text.split()) >= 8:
+                        for gram in shingles(text):
+                            grams.setdefault(gram, set()).add(f"{kind}shingle:{r['id']}")
     found = V7B().scan([train], units, grams, set())
     hits = found["hits"]
     exclude_items = sorted(k for k in hits if k.startswith(("mmlu:", "phys:")) and (not k.startswith("phys:") or hits[k]))
@@ -725,15 +825,22 @@ def cmd_recheck(args: argparse.Namespace) -> int:
                "train_v08": {"path": _rel(train), "sha256": file_sha256(train)}, "files": found["files"],
                "excluded_items": exclude_items, "excluded_b8": exclude_b8,
                "excluded_r14": sorted(k[len("r14:"):] for k in hits if k.startswith("r14:")), "r14_records_checked": len(r14),
+               "excluded_a16": sorted(k[len("a16:"):] for k in hits if k.startswith("a16:")), "a16_records_checked": len(r16["a16"]),
+               "excluded_s16": sorted(k[len("s16:"):] for k in hits if k.startswith("s16:")), "s16_records_checked": len(r16["s16"]),
+               "a16_shingle_hits": sorted(k[len("a16shingle:"):] for k in hits if k.startswith("a16shingle:")),
+               "s16_shingle_hits": sorted(k[len("s16shingle:"):] for k in hits if k.startswith("s16shingle:")),
                "b8_shingle_hits": sorted(k[len("b8shingle:"):] for k in hits if k.startswith("b8shingle:")),
-               "hits": {k: v for k, v in hits.items() if not k.startswith("b8shingle:")},
+               "hits": {k: v for k, v in hits.items() if not k.startswith(("b8shingle:", "a16shingle:", "s16shingle:"))},
                "rule": "pre-declared (task v0.8b, before any v0.8 data): an M8g MMLU item with any unit or shingle hit, an M8g physics item with a "
                        "whole-state or state / correct-option shingle hit, and a B8 or R14 request whose whole state is in train-v08 are left out "
-                       "of every reading; B8 state-line shingle hits are reported",
+                       "of every reading; B8 state-line shingle hits are reported. Task v0.8c (before any v0.8 scoring): an A16 or S16 request "
+                       "with any text unit in train-v08 (its whole state, a state line or an option text of >= 5 words) is left out of its "
+                       "readings; 8-word shingle hits of its question and option texts are reported",
                "created": _now()}
     _write_json(args.out_dir / "overlap-v08.json", payload)
-    _log(f"train-v08: exclude {len(exclude_items)} M8g items, {len(exclude_b8)} B8 requests, {len(payload['excluded_r14'])} R14 requests; "
-         f"B8 shingle hits {len(payload['b8_shingle_hits'])}")
+    _log(f"train-v08: exclude {len(exclude_items)} M8g items, {len(exclude_b8)} B8 requests, {len(payload['excluded_r14'])} R14 requests, "
+         f"{len(payload['excluded_a16'])} A16 and {len(payload['excluded_s16'])} S16 requests; shingle hits B8 {len(payload['b8_shingle_hits'])}, "
+         f"A16 {len(payload['a16_shingle_hits'])}, S16 {len(payload['s16_shingle_hits'])}")
     return 0
 
 
@@ -780,6 +887,9 @@ def gate_check(runs: list[Path], out_dir: Path) -> tuple[list[str], dict[str, An
     from robo_jev.bench import r14_v08
 
     problems += [f"R14: {p}" for p in r14_v08.check_frozen(r14_v08.R14_DIR)]
+    from robo_jev.bench import r16_v08
+
+    problems += [f"A16 / S16: {p}" for p in r16_v08.check_frozen(r16_v08.R16_DIR)]
     if not G.OPTION_RANGE_VERSION_CONFIRMED:
         problems.append(f"the opt-in's version name {G.OPTION_RANGE_VERSION!r} is a placeholder — set task v0.8a's name in gates_v08 and rebuild")
     if manifest.get("option_range") != G.option_range_mark():
@@ -847,12 +957,15 @@ def main(argv: list[str] | None = None) -> int:
     r14.add_argument("--out-dir", type=Path, default=G.ARTIFACTS / "v08" / "r14")
     r14.add_argument("--per-env", type=int, default=40)
     r14.add_argument("--force-before-scoring", action="store_true")
+    r16 = sub.add_parser("build-r16", help="A16 (the arm) and S16 (soccer): robo-jev-web's requests of 2026-10-16 (reported)")
+    r16.add_argument("--out-dir", type=Path, default=G.ARTIFACTS / "v08" / "r16")
+    r16.add_argument("--force-before-scoring", action="store_true")
     c = sub.add_parser("check")
     c.add_argument("--runs", nargs="*", default=[], help="the fetched v0.8 run directories (each with metrics.json)")
     c.add_argument("--out-dir", type=Path, default=G.GATES)
     args = parser.parse_args(argv)
     return {"build-m8g": cmd_build_m8g, "build-probes": cmd_build_probes, "merge-jev": cmd_merge_jev, "recheck-v08": cmd_recheck,
-            "build-r14": cmd_build_r14, "check": cmd_check}[args.command](args)
+            "build-r14": cmd_build_r14, "build-r16": cmd_build_r16, "check": cmd_check}[args.command](args)
 
 
 if __name__ == "__main__":

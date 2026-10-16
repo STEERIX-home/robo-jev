@@ -57,6 +57,13 @@ one-hot (bin 2–10); single against balanced on M8g bins ≤ 60; Jev top-1 agre
 probe cases of rel071; the real long lists (tube cell ``work``, plates ``move``); the teacher label spread; the post-hoc prior-removal
 estimate (``artifacts/v08/posthoc/estimate.json``).
 
+**A16 and S16** (reported only — robo-jev-web's requests of 2026-10-16, :mod:`robo_jev.bench.r16_v08`; they enter neither P1, P2, FORMAT nor
+the amended flip condition, whose third source stays R14, the 10-14 requests): A16 — the arm's servo decisions (single order seed 1, serve's
+conditions): rule agreement (total, per axis, per axis × signed band), sign errors per axis, the stay rate per band and on 0.2–3 cm, the
+boundary sensitivity (±0.2 read as stay), v0.7's stored endpoint answers as a reference row, and the y-phrase ablation (y without " (up is
+plus)") next to the same model's y readings; S16 — soccer, movement (15 options) and gaze (6 options) separately: the flip rate across serve's
+three orders, the top-probability spread and the pick-rate RStd, with v0.7's stored answers' spread as a reference.
+
 **Exclusions**: ``artifacts/v08/gates/overlap-v08.json`` (``scripts/v08_gates_build.py recheck-v08``, run on v0.8's training input before
 the gates are opened) lists M8g items and B8 requests that share text with v0.8's training input; they are left out of every reading. The
 verdict refuses to read the gates without it (``--no-v08-recheck`` only for tests and pipeline checks).
@@ -155,6 +162,14 @@ RULE = {
                   "rel07, counts 'continue unchanged' as passive. (2) M8g per source (general = MMLU against physics = PHYS) in each bin, per "
                   "model and arm: accuracy, acc_two, acc_single, the FORMAT margin acc_two - 0.8 x acc_single, flip rate and NLL (FORMAT "
                   "unchanged). Note: in training, physics questions reach at most about 57-139 options and only general items reach 255.",
+    "A16 and S16 (controller, relayed for task v0.8c on 2026-10-16; files built and frozen 15:12 KST)": "two REPORTED sets of robo-jev-web's "
+        "2026-10-16 requests - A16 (the arm: 90 servo decisions, six questions each; the rule written in every x / y / z question) and S16 "
+        "(soccer: 55 requests, six players' movement (15 options) and gaze (6 options)). They enter neither P1, P2, FORMAT nor the amended flip "
+        "condition - its third source stays R14 (10-14) only. A16: rule agreement (total, per axis, per axis x signed band), sign errors per "
+        "axis, the stay rate per band and on small distances (0.2-3 cm), the boundary sensitivity (+-0.2 read as stay), the reference row 'v0.7 "
+        "endpoint (stored)', and the y-phrase ablation (y agreement and sign errors without ' (up is plus)' next to the same model's with it; "
+        "serve's reported v0.7 change: agreement 27 -> 50 of 90, sign errors 27 -> 4). S16: per group the flip rate across serve's three orders, "
+        "the top-probability spread and the label-free pick-rate RStd, with v0.7's stored answers' spread as a reference.",
     "RELEASE": "the user decides (arm and seed). The bundle takes CODES[:255] with MAX_OPTIONS = 255; requests with <= 26 options keep "
                "identical prompts; format, weights.class and prompt v0c-p3 are unchanged.",
     "CONTROLLER'S PRIOR": "FORMAT likely passes; P1 uncertain; P2 more likely than P1.",
@@ -195,6 +210,14 @@ R14 = "R14"
 #: R14 (robo-jev-web's collected bench requests, :mod:`robo_jev.bench.r14_v08`): serve's three order seeds — 0, 1, 2 spaces after the state.
 R14_READINGS = ("spaces-0", "spaces-1", "spaces-2")
 R14_INPUT = "R14-v08-sample.jsonl"
+#: A16 / S16 (robo-jev-web's 2026-10-16 requests; reported only): the scored files and each score file's readings.
+A16, A16Y, S16 = "A16", "A16y", "S16"
+A16_READING = "single-s1"
+R16_FILES = {A16: "A16.jsonl", A16Y: "A16-y-ablation.jsonl", S16: "S16.jsonl"}
+R16_READINGS = {A16: (A16_READING,), A16Y: (A16_READING,), S16: R14_READINGS}
+SERVE_A16_ABLATION = "serve's reported v0.7 change with ' (up is plus)' removed from the y question: agreement 27 -> 50 of 90, sign errors 27 -> 4"
+R16_SEPARATE = ("A16 and S16 (robo-jev-web's 2026-10-16 requests) are reported separately: they enter neither P1, P2, FORMAT nor this condition, "
+                "whose third source stays R14 (the 10-14 requests)")
 #: The shown position of an answer code (A = 0, …, Z = 25, then the runner's two-letter codes).
 CODE_POSITION = {code: i for i, code in enumerate(G8.RUNNER_CODES)}
 M8G_KINDS = {"order": "M8g", "seed2": "M8g-seed2", "balanced": "M8g-balanced"}
@@ -376,7 +399,8 @@ def consistency_check(flips: Mapping[str, Any] | None, *, r14_provided: bool) ->
     over = [name for name, value in read.items() if value > FLIP_LIMIT]
     status = "TRIGGERED" if over else ("UNREAD" if unread else "NOT TRIGGERED")
     return {"status": status, "triggered": bool(over), "over": over, "read": read, "unread": unread, "sources": sources,
-            "r14": "scored" if r14_provided else "absent (no R14-<tag>.json: the condition reads on M8g and B8 only)"}
+            "r14": "scored" if r14_provided else "absent (no R14-<tag>.json: the condition reads on M8g and B8 only)",
+            "reported_separately": R16_SEPARATE}
 
 
 def next_steps(p1_pass: bool, p2_pass: bool, format_pass: bool, consistency: Mapping[str, Any] | None,
@@ -1292,6 +1316,157 @@ def load_r14(spark_dir: Path, cks: Mapping[str, Path | None], notes: list[str], 
 
 
 # --------------------------------------------------------------------------
+# A16 and S16 — robo-jev-web's 2026-10-16 requests (reported only)
+# --------------------------------------------------------------------------
+
+
+def a16_check_summary(*places: Path) -> list[str]:
+    """The A16 pipeline check (scripts/v08_a16_check.py: v0.7's stored answers against the rule and serve's numbers, our v0.7-s0 scoring, the
+    y-phrase ablation) — its summary lines, if ``a16-check.json`` is present."""
+    for place in places:
+        path = Path(place) / "a16-check.json"
+        if not path.is_file():
+            continue
+        data = json.loads(path.read_text(encoding="utf-8"))
+        lines = []
+        stored = (data.get("stored") or {}).get("main") or {}
+        if stored:
+            lines.append(f"stored v0.7 answers: agreement {stored.get('total')} (x {stored.get('x')}, y {stored.get('y')}, z {stored.get('z')}); "
+                         f"sign errors {stored.get('sign_errors')}; reproduces serve's numbers: {(data.get('stored') or {}).get('reproduces_serve')}")
+        ours = (data.get("ours") or {}).get("main") or {}
+        if ours:
+            lines.append(f"our scoring ({(data.get('ours') or {}).get('model')}): agreement {ours.get('total')} (x {ours.get('x')}, y {ours.get('y')}, "
+                         f"z {ours.get('z')}); sign errors {ours.get('sign_errors')}")
+        after = (data.get("ablation_y") or {}).get("after") or {}
+        if after:
+            lines.append(f"y without ' (up is plus)' ({(data.get('ablation_y') or {}).get('before_source')} before): agreement {after.get('y')}, "
+                         f"y sign errors {(after.get('sign_errors') or {}).get('y')}")
+        return [f"{path}: " + line for line in lines]
+    return []
+
+
+def load_r16(spark_dir: Path, cks: Mapping[str, Path | None], notes: list[str], *, directory: Path | None = None,
+             exclude: Mapping[str, Iterable[str]] | None = None) -> dict[str, Any] | None:
+    """A16 / S16's frozen files, v0.7's stored answers and the score files (``A16-<tag>.json``, ``A16y-<tag>.json``, ``S16-<tag>.json``): None
+    when the frozen directory is absent; ``{"refused": problems}`` when its files changed (:func:`robo_jev.bench.r16_v08.check_frozen`) — only
+    these two sets are refused; a score file that fails its checks (set, scored file, readings, the frozen record, checkpoint) is left out and
+    listed. ``exclude`` = the overlap recheck's ``a16`` / ``s16`` record ids."""
+    from robo_jev.bench import r16_v08
+
+    directory = Path(directory) if directory is not None else Path(r16_v08.R16_DIR)
+    if not (directory / "frozen-before-scoring.json").is_file():
+        return None
+    problems = r16_v08.check_frozen(directory)
+    if problems:
+        return {"refused": problems}
+    frozen = json.loads((directory / "frozen-before-scoring.json").read_text(encoding="utf-8"))
+    exclude = {k: {str(x) for x in v} for k, v in (exclude or {}).items()}
+    records = {name: [r for r in _read(directory / R16_FILES[name]) if str(r["id"]) not in exclude.get("s16" if name == S16 else "a16", set())]
+               for name in R16_FILES}
+    scores: dict[str, dict[str, Any]] = {name: {} for name in R16_FILES}
+    left_out = []
+    for name, readings in R16_READINGS.items():
+        for model in MODELS:
+            path = Path(spark_dir) / f"{name}-{SPARK_TAGS[model]}.json"
+            if not path.is_file():
+                notes.append(f"absent: {path}")
+                continue
+            data, found = check_bench_source(path, set_name=name, tag=SPARK_TAGS[model], input_path=directory / R16_FILES[name], checkpoint=cks.get(model),
+                                             readings=readings, frozen=frozen)
+            if found:
+                left_out += [f"{name} {model}: {p}" for p in found]
+                continue
+            scores[name][model] = data
+    stored = {name: json.loads((directory / f"{name}-stored-v07.json").read_text(encoding="utf-8")).get("answers") or {} for name in (A16, S16)}
+    return {"records": records, "scores": scores, "stored": stored, "frozen": frozen, "left_out": left_out,
+            "excluded": {k: sorted(v) for k, v in exclude.items()}, "check": a16_check_summary(Path(spark_dir), directory)}
+
+
+def a16_readings(records: Sequence[Mapping[str, Any]], scores: Mapping[str, Mapping[str, Any]], ablation: Mapping[str, Mapping[str, Any]],
+                 stored: Mapping[str, Any]) -> dict[str, Any]:
+    """A16 per model and arm (an arm's rows = :func:`robo_jev.bench.r16_v08.seed_mean_rows` of its seeds'): the rule's readings
+    (:func:`~robo_jev.bench.r16_v08.arm_summary` — agreement total, per axis and per axis × signed band, sign errors per axis, the stay rate per
+    band and on 0.2–3 cm), the boundary sensitivity (±0.2 read as stay) per axis, the stored v0.7 endpoint answers as a reference row, and the
+    y-phrase ablation: y agreement and y sign errors without " (up is plus)" next to the same model's with it."""
+    from robo_jev.bench import r16_v08 as R
+
+    def with_arms(rows: dict[str, list]) -> dict[str, list]:
+        for arm, (first, second) in ARMS.items():
+            if first in rows and second in rows:
+                rows[arm] = R.seed_mean_rows(rows[first], rows[second])
+        return rows
+
+    main = with_arms({m: R.arm_rows(records, s.get("answers") or {}, reading=A16_READING) for m, s in scores.items()})
+    edge = with_arms({m: R.arm_rows(records, s.get("answers") or {}, reading=A16_READING, boundary_stay=True) for m, s in scores.items()})
+    without = with_arms({m: R.arm_rows(records, s.get("answers") or {}, reading=A16_READING, axes=("y",)) for m, s in ablation.items()})
+    out: dict[str, Any] = {"records": len(records), "models": {}, "serve_ablation_v07": SERVE_A16_ABLATION}
+
+    def boundary(rows: list) -> dict[str, Any]:
+        summary = R.arm_summary(rows)
+        return {"agreement": summary["agreement"], "agreement_by_axis": summary["agreement_by_axis"]}
+
+    for model in [m for m in (*MODELS, *ARMS) if m in main or m in without]:
+        entry: dict[str, Any] = {}
+        if model in main:
+            entry["summary"] = R.arm_summary(main[model])
+            entry["boundary_stay"] = boundary(edge[model])
+        if model in without:
+            after = R.arm_summary(without[model])
+            before = (entry.get("summary") or {})
+            entry["ablation_y"] = {"with_phrase": {"agreement": (before.get("agreement_by_axis") or {}).get("y"),
+                                                   "sign_errors": (before.get("sign_errors_by_axis") or {}).get("y")},
+                                   "without_phrase": {"agreement": after["agreement_by_axis"].get("y"), "sign_errors": after["sign_errors_by_axis"].get("y")}}
+        out["models"][model] = entry
+    stored_rows = R.arm_rows(records, stored, reading="stored")
+    out["reference_v07_stored"] = {"summary": R.arm_summary(stored_rows),
+                                   "boundary_stay": boundary(R.arm_rows(records, stored, reading="stored", boundary_stay=True))}
+    return out
+
+
+def _spread(values: Sequence[float]) -> dict[str, Any] | None:
+    if not values:
+        return None
+    return {"mean": float(np.mean(values)), "median": float(np.median(values)), "q25": float(np.percentile(values, 25)),
+            "q75": float(np.percentile(values, 75)), "n": len(values)}
+
+
+def s16_units(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """S16's questions (every question of every request): the group (movement / gaze — ``meta.groups``) stands where R14 has the environment,
+    the option order is the record's criteria order; no tags, no planner."""
+    out = []
+    for record in records:
+        groups = (record.get("meta") or {}).get("groups") or {}
+        for name, question in record["request"]["questions"].items():
+            order = [str(k) for k in (question.get("criteria") or {})]
+            if question.get("type") != "choice" or len(order) < 2:
+                continue
+            out.append({"id": str(record["id"]), "env": str(groups.get(name) or ("gaze" if str(name).endswith("_look") else "movement")),
+                        "question": name, "order": order, "level": False, "tags": {k: None for k in order}, "kinds": {}, "planner": None,
+                        "n": len(order), "bin": G8.bin_of(len(order))})
+    return out
+
+
+def s16_readings(records: Sequence[Mapping[str, Any]], scores: Mapping[str, Mapping[str, Any]], stored: Mapping[str, Any]) -> dict[str, Any]:
+    """S16 per model and arm, pooled and per group (movement, 15 options; gaze, 6): the flip rate across serve's three orders, the
+    top-probability spread over question × order and the pick-rate RStd (R14's readings); and the stored v0.7 answers' top-probability spread
+    (one order) as a reference."""
+    units = s16_units(records)
+    base = r14_readings(units, scores)
+    out: dict[str, Any] = {"questions": len(units), "requests": len({u["id"] for u in units}), "per_group_questions": dict(Counter(u["env"] for u in units)),
+                           "models": {m: {"pooled": v["pooled"], "per_group": v["per_env"]} for m, v in base["models"].items()}}
+    ref: dict[str, list[float]] = defaultdict(list)
+    for u in units:
+        answer = (((stored.get(u["id"]) or {}).get(u["question"]) or {}).get("stored")) or {}
+        probs = answer.get("probabilities") if isinstance(answer, Mapping) else None
+        if isinstance(probs, Mapping) and probs:
+            top = argmax_key(probs, u["order"])
+            ref[u["env"]].append(float(probs.get(top, 0.0)))
+            ref["pooled"].append(float(probs.get(top, 0.0)))
+    out["reference_v07_stored_top_prob"] = {group: _spread(values) for group, values in sorted(ref.items())}
+    return out
+
+
+# --------------------------------------------------------------------------
 # Jev, probes, post-hoc estimate (reported)
 # --------------------------------------------------------------------------
 
@@ -1486,6 +1661,7 @@ def check_bench_source(path: Path, *, set_name: str, tag: str, input_path: Path 
 def read_exclusions(path: Path = G8.OVERLAP_V08) -> dict[str, list[str]]:
     data = json.loads(Path(path).read_text(encoding="utf-8"))
     return {"items": [str(x) for x in data.get("excluded_items") or []], "b8": [str(x) for x in data.get("excluded_b8") or []],
+            "a16": [str(x) for x in data.get("excluded_a16") or []], "s16": [str(x) for x in data.get("excluded_s16") or []],
             "train_sha256": data.get("train_v08", {}).get("sha256") if isinstance(data.get("train_v08"), Mapping) else data.get("train_sha256")}
 
 
@@ -1631,6 +1807,63 @@ def _render_r14(r14: Mapping[str, Any]) -> list[str]:
     return lines
 
 
+def _rate_cell(d: Mapping[str, Any] | None) -> str:
+    d = d or {}
+    return "—" if d.get("value") is None else f"{_fmt(d['value'])} ({_fmt(d.get('count'), 1)}/{d.get('n')})"
+
+
+def _render_r16(a16: Mapping[str, Any], s16: Mapping[str, Any]) -> list[str]:
+    """A16 and S16 — robo-jev-web's 2026-10-16 requests (reported only)."""
+    lines = ["", "### A16 and S16 — robo-jev-web's 2026-10-16 requests (reported only)", "", f"{R16_SEPARATE}.", ""]
+    if a16.get("absent") or a16.get("refused"):
+        reason = a16.get("absent") or ("**refused**: the frozen files changed — " + "; ".join(a16["refused"]) + " (listed unread; the rest of the verdict stands)")
+        return lines + [f"A16 / S16: {reason}."]
+    lines.append(f"Frozen {a16.get('frozen')}; excluded {a16.get('excluded')}." + (f" Score files left out: {'; '.join(a16['left_out'])}." if a16.get("left_out") else ""))
+    for line in a16.get("check") or []:
+        lines.append(f"A16 pipeline check — {line}.")
+    lines += ["", "**A16 — the arm** (single order seed 1, serve's conditions; the rule written in each x / y / z question):", "",
+              "| model / arm | agreement | x | y | z | sign errors x / y / z | stay rate 0.2–3 cm | boundary ±0.2 as stay: total (x) |", "|---|---|---|---|---|---|---|---|"]
+
+    def a16_row(label: str, entry: Mapping[str, Any]) -> str:
+        sm, bs = entry.get("summary") or {}, entry.get("boundary_stay") or {}
+        ax, se = sm.get("agreement_by_axis") or {}, sm.get("sign_errors_by_axis") or {}
+        return (f"| {label} | {_rate_cell(sm.get('agreement'))} | {_rate_cell(ax.get('x'))} | {_rate_cell(ax.get('y'))} | {_rate_cell(ax.get('z'))} | "
+                f"{' / '.join(_rate_cell(se.get(a)) for a in ('x', 'y', 'z'))} | {_rate_cell(sm.get('stay_rate_small'))} | "
+                f"{_rate_cell(bs.get('agreement'))} ({_rate_cell((bs.get('agreement_by_axis') or {}).get('x'))}) |")
+
+    lines.append(a16_row("v0.7 endpoint (stored)", a16.get("reference_v07_stored") or {}))
+    for model, entry in (a16.get("models") or {}).items():
+        if entry.get("summary"):
+            lines.append(a16_row(LABELS.get(model, model), entry))
+    lines += ["", "Agreement per axis × signed band and the stay rate there (arms and the stored reference):", "",
+              "| model / arm | axis:band | agreement | stay rate |", "|---|---|---|---|"]
+    for model, entry in [("v0.7 endpoint (stored)", a16.get("reference_v07_stored") or {})] + [(LABELS.get(m, m), e) for m, e in (a16.get("models") or {}).items()
+                                                                                                  if m in ARMS]:
+        sm = entry.get("summary") or {}
+        for band, d in (sm.get("agreement_by_axis_band") or {}).items():
+            lines.append(f"| {model} | {band} | {_rate_cell(d)} | {_rate_cell((sm.get('stay_rate_by_axis_band') or {}).get(band))} |")
+    lines += ["", f"y-phrase ablation (y without \" (up is plus)\", A16y, next to the same model's y with it; {a16.get('serve_ablation_v07', SERVE_A16_ABLATION)}):", "",
+              "| model / arm | y agreement with / without | y sign errors with / without |", "|---|---|---|"]
+    for model, entry in (a16.get("models") or {}).items():
+        ab = entry.get("ablation_y")
+        if ab:
+            lines.append(f"| {LABELS.get(model, model)} | {_rate_cell(ab['with_phrase']['agreement'])} / {_rate_cell(ab['without_phrase']['agreement'])} | "
+                         f"{_rate_cell(ab['with_phrase']['sign_errors'])} / {_rate_cell(ab['without_phrase']['sign_errors'])} |")
+    lines += ["", f"**S16 — soccer** ({s16.get('questions')} questions in {s16.get('requests')} requests; per group {s16.get('per_group_questions')}; serve's three orders):", "",
+              "| model / arm | group | questions | flip rate | top p mean / median [q25, q75] | pick-rate RStd |", "|---|---|---|---|---|---|"]
+    ref = s16.get("reference_v07_stored_top_prob") or {}
+    for group, sp in ref.items():
+        lines.append(f"| v0.7 endpoint (stored, one order) | {group} | {(sp or {}).get('n')} | — | {_fmt((sp or {}).get('mean'))} / {_fmt((sp or {}).get('median'))} "
+                     f"[{_fmt((sp or {}).get('q25'))}, {_fmt((sp or {}).get('q75'))}] | — |")
+    for model in [m for m in (*MODELS, *ARMS) if m in (s16.get("models") or {})]:
+        entry = s16["models"][model]
+        for group, e in [("pooled", entry["pooled"]), *entry["per_group"].items()]:
+            tp = e.get("top_prob") or {}
+            lines.append(f"| {LABELS.get(model, model)} | {group} | {e.get('questions')} | {_fmt(e.get('flip_rate'))} | {_fmt(tp.get('mean'))} / {_fmt(tp.get('median'))} "
+                         f"[{_fmt(tp.get('q25'))}, {_fmt(tp.get('q75'))}] | {_fmt((e.get('pick_rstd') or {}).get('value'))} |")
+    return lines
+
+
 def render(result: Mapping[str, Any]) -> str:
     v, r = result["verdict"], result["readings"]
     lines = [f"# v0.8 pre-declared rule — {v['outcome']} · FORMAT {'PASS' if v['FORMAT']['pass'] else 'FAIL'}", ""]
@@ -1692,7 +1925,8 @@ def render(result: Mapping[str, Any]) -> str:
     lines += ["", f"**{cons.get('status', 'UNREAD')}** (R14: {cons.get('r14')}). Applied as written: not conditional on "
               f"FORMAT (FORMAT {'PASS' if v['FORMAT']['pass'] else 'FAIL'}). The original wording ('FORMAT passes but F's flip rate in bins >= 27 > "
               f"0.20') required FORMAT to pass: F's flip rate in bins ≥ 27 {_fmt(orig.get('flip_F_ge27'))}, so that reading would "
-              f"{'' if orig.get('would_add_step') else 'not '}add the consistency step" + ("" if orig.get("readable") else " (unread)") + ".", ""]
+              f"{'' if orig.get('would_add_step') else 'not '}add the consistency step" + ("" if orig.get("readable") else " (unread)") + ".", "",
+              f"{cons.get('reported_separately', R16_SEPARATE)}.", ""]
     of = st.get("O-F") or {}
     lines += ["## O-F — release guard: F − v0.7 short-form outside DC (mean of the three sets, ≤ +0.02)", "",
               "| set | F − v0.7 [95 %] |", "|---|---|"] + [f"| {s} | {_cid((of.get('per_set') or {}).get(s))} |" for s in P1_SETS]
@@ -1741,6 +1975,7 @@ def render(result: Mapping[str, Any]) -> str:
             lines.append(f"| {LABELS.get(model, model)} | {_fmt(pooled.get('value'))} ({pooled.get('questions', 0)}) | {groups or '—'} | {bins or '—'} | "
                          f"{_fmt(prs.get('value'))} | {prb or '—'} |")
     lines += _render_r14(r.get("R14") or {})
+    lines += _render_r16(r.get("A16") or {}, r.get("S16") or {})
     lines += ["", "Long lists:", ""]
     for name, e in (b8.get("long_lists") or {}).items():
         lines.append(f"- {name} ({e['questions']} questions, {e['options']} options): " + "; ".join(_long_list(m, x) for m, x in e["models"].items()))
@@ -1858,11 +2093,12 @@ def pipeline_check(*, n_boot: int, seed: int, out: Path) -> dict[str, Any]:
 
 def compute(standard_sets: Mapping[str, Sequence], standard_preds: Mapping[str, Mapping[str, Sequence]], pod_sets: Mapping[str, Sequence],
             pod_preds: Mapping[str, Mapping[str, Sequence]], b8: Mapping[str, Any], m8g: Mapping[str, Any], *, jev: Mapping[str, Any] | None = None,
-            probes: Mapping[str, Any] | None = None, r14: Mapping[str, Any] | None = None, posthoc: Path | None = None, n_boot: int = 2000,
-            seed: int = 0) -> dict[str, Any]:
+            probes: Mapping[str, Any] | None = None, r14: Mapping[str, Any] | None = None, r16: Mapping[str, Any] | None = None,
+            posthoc: Path | None = None, n_boot: int = 2000, seed: int = 0) -> dict[str, Any]:
     """Every reading and the verdict from in-memory inputs. `b8` = {tags, records (by id), scores (by model), exclude}; `m8g` = {records,
     preds (model → kind → predictions), exclude}; `jev` = {records, jev_preds, scores}; `probes` = {rows, scores}; `r14` = :func:`load_r14`'s
-    result ({tags, record_ids, scores, …}, or {refused} — then R14 is listed unread; None: no R14 score files)."""
+    result ({tags, record_ids, scores, …}, or {refused} — then R14 is listed unread; None: no R14 score files); `r16` = :func:`load_r16`'s
+    result (A16 / S16, reported only: {records, scores, stored, …}, {refused}, or None when absent)."""
     standard = standard_readings(standard_sets, standard_preds, n_boot=n_boot, seed=seed)
     home = home_readings(pod_sets, pod_preds, n_boot=n_boot, seed=seed)
     g2 = g2_reading(pod_sets.get("G2"), pod_preds, n_boot=n_boot, seed=seed)
@@ -1878,6 +2114,7 @@ def compute(standard_sets: Mapping[str, Sequence], standard_preds: Mapping[str, 
                          {**r14_readings(r14_units(r14["tags"], r14.get("record_ids")), r14.get("scores") or {}),
                           "left_out": r14.get("left_out") or [], "check": r14.get("check"), "frozen": (r14.get("frozen") or {}).get("frozen")})
                         if r14 else {"absent": "no R14-<tag>.json score files"}),
+                **r16_part(r16),
                 "posthoc": posthoc_reading(posthoc) if posthoc is not None else posthoc_reading()}
     flips = {f"M8g {name}": ((m8r.get("flip_F_by_bin") or {}).get(name) or {}).get("value") for name in BIN_NAMES}
     flips["B8"] = (((b8r.get("flips") or {}).get("pooled") or {}).get("F") or {}).get("value")
@@ -1887,6 +2124,19 @@ def compute(standard_sets: Mapping[str, Sequence], standard_preds: Mapping[str, 
                    "FORMAT": m8r.get("FORMAT"), "O-F": {k: standard["O-F"].get(k) for k in ("value", "low", "high")},
                    "flip_F_ge27": (m8r.get("flip_F_ge27") or {}).get("value"), "consistency_flips": flips, "r14_provided": r14 is not None}
     return {"verdict": decide(rule_inputs), "readings": readings}
+
+
+def r16_part(r16: Mapping[str, Any] | None) -> dict[str, Any]:
+    """The A16 and S16 readings (reported only; they enter neither P1, P2, FORMAT nor the amended condition)."""
+    if not r16:
+        return {"A16": {"absent": "no frozen A16 / S16 files"}, "S16": {"absent": "no frozen A16 / S16 files"}}
+    if r16.get("refused"):
+        return {"A16": {"refused": r16["refused"]}, "S16": {"refused": r16["refused"]}}
+    common = {"left_out": r16.get("left_out") or [], "frozen": (r16.get("frozen") or {}).get("frozen"), "excluded": r16.get("excluded") or {},
+              "note": R16_SEPARATE}
+    a16 = a16_readings(r16["records"][A16], r16["scores"].get(A16) or {}, r16["scores"].get(A16Y) or {}, (r16.get("stored") or {}).get(A16) or {})
+    s16 = s16_readings(r16["records"][S16], r16["scores"].get(S16) or {}, (r16.get("stored") or {}).get(S16) or {})
+    return {"A16": {**a16, **common, "check": r16.get("check") or []}, "S16": {**s16, **common}}
 
 
 def _scores(spark_dir: Path, set_name: str, input_path: Path | None, readings: Sequence[str], cks: Mapping[str, Path | None], *, frozen=None,
@@ -1933,7 +2183,7 @@ def main(argv: list[str] | None = None) -> int:
         raise SystemExit("missing files the rule reads:\n  " + "\n  ".join(missing))
     notes: list[str] = []
     problems: list[str] = []
-    exclusions = {"items": [], "b8": []}
+    exclusions = {"items": [], "b8": [], "a16": [], "s16": []}
     if G8.OVERLAP_V08.is_file():
         exclusions = read_exclusions()
         notes.append(f"overlap-v08.json (training input sha256 {str(exclusions.get('train_sha256'))[:12]}): {len(exclusions['items'])} M8g items and "
@@ -1971,13 +2221,16 @@ def main(argv: list[str] | None = None) -> int:
     if PROBE_ROWS.is_file():
         probes = {"rows": _read(PROBE_ROWS), "scores": _scores(args.spark_dir, "Probe", PROBE_ROWS, (), cks, problems=problems, notes=notes)}
     r14 = load_r14(args.spark_dir, cks, notes)
+    r16 = load_r16(args.spark_dir, cks, notes, exclude={"a16": exclusions.get("a16") or [], "s16": exclusions.get("s16") or []})
+    if r16 and r16.get("refused"):
+        notes.append("A16 / S16's frozen files changed — their readings are refused (the rest of the verdict stands): " + "; ".join(r16["refused"]))
     if r14 and r14.get("refused"):
         notes.append("R14's frozen files changed — its readings are refused (the rest of the verdict stands): " + "; ".join(r14["refused"]))
     if problems and not args.allow_mismatch:
         raise SystemExit("gate / bench files fail their checks:\n  " + "\n  ".join(problems[:40]))
     _log("computing readings")
     computed = compute(sets, preds, pod_sets, pod_preds, {"tags": tags, "records": b8_records, "scores": b8_scores, "exclude": exclusions["b8"]},
-                       {"records": m8g_records, "preds": m8g_preds, "exclude": exclusions["items"]}, jev=jev, probes=probes, r14=r14,
+                       {"records": m8g_records, "preds": m8g_preds, "exclude": exclusions["items"]}, jev=jev, probes=probes, r14=r14, r16=r16,
                        n_boot=args.n_boot, seed=args.seed)
     notes += ["Seed means: an arm's call distribution per question = the mean of its seeds' 1/L-weighted listings; every other per-item value = the "
               "mean of its seeds' values, on the items both seeds have; arm comparisons pair the items both arms have.",

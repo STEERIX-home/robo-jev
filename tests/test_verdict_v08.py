@@ -284,6 +284,158 @@ def test_m8g_per_source_breakdown():
     assert set(out["per_source"]["v08Fs0"]) == {"MMLU", "PHYS"}
 
 
+# --------------------------------------------------------------------------
+# A16 and S16 (robo-jev-web's 2026-10-16 requests; reported only)
+# --------------------------------------------------------------------------
+
+AXIS_KEYS = ["plus_far", "plus_mid", "plus_near", "plus_small", "plus_fine", "stay", "minus_far", "minus_mid", "minus_near", "minus_small", "minus_fine"]
+#: x / y / z distances of four arm requests: a plus_fine, the −0.2 boundary, a 1–3 cm move, far and mid moves of both signs, a stay (z 0.1).
+A16_DISTANCES = {"v08a16-0000": (0.9, -35.5, 82.0), "v08a16-0001": (-0.2, 5.0, 0.1), "v08a16-0002": (2.0, -10.0, -0.5), "v08a16-0003": (25.0, 0.5, 12.0)}
+
+
+def a16_records() -> list[dict]:
+    from robo_jev.bench import r16_v08 as R
+
+    out = []
+    for rid, distances in A16_DISTANCES.items():
+        rule = {axis: {"distance": d, "label": R.arm_label(d), "label_boundary_stay": R.arm_label(d, boundary_stay=True), "band": R.arm_band(d)}
+                for axis, d in zip("xyz", distances)}
+        out.append({"id": rid, "meta": {"set": "v08-a16", "rule": rule},
+                    "request": {"state": "servo", "questions": {a: {"type": "choice", "instructions": a, "criteria": {k: k for k in AXIS_KEYS}} for a in "xyz"}}})
+    return out
+
+
+def a16_answers(tops: dict, reading: str = "single-s1") -> dict:
+    return {rid: {axis: {reading: {"choice": top, "probabilities": {k: (0.6 if k == top else 0.04) for k in AXIS_KEYS}}} for axis, top in per_axis.items()}
+            for rid, per_axis in tops.items()}
+
+
+#: Seed 0's tops: x — agree, stay on the −0.2 boundary, stay on a 2 cm move, agree; y — a sign error (plus_far for −35.5), then agree; z — agree.
+TOPS_S0 = {"v08a16-0000": {"x": "plus_fine", "y": "plus_far", "z": "plus_far"}, "v08a16-0001": {"x": "stay", "y": "plus_near", "z": "stay"},
+           "v08a16-0002": {"x": "stay", "y": "minus_mid", "z": "minus_fine"}, "v08a16-0003": {"x": "plus_far", "y": "plus_fine", "z": "plus_mid"}}
+#: Seed 1: the same, but y agrees on the first request.
+TOPS_S1 = {**TOPS_S0, "v08a16-0000": {**TOPS_S0["v08a16-0000"], "y": "minus_far"}}
+
+
+def test_a16_readings_per_model_arm_and_ablation():
+    records = a16_records()
+    scores = {"v08Fs0": {"answers": a16_answers(TOPS_S0)}, "v08Fs1": {"answers": a16_answers(TOPS_S1)}}
+    ablation = {m: {"answers": a16_answers({rid: {"y": AXIS_KEYS[6] if rid == "v08a16-0000" else TOPS_S0[rid]["y"]} for rid in TOPS_S0})} for m in scores}
+    stored = a16_answers(TOPS_S0, reading="stored")
+    out = V.a16_readings(records, scores, ablation, stored)
+    s0 = out["models"]["v08Fs0"]["summary"]
+    assert (s0["agreement"]["count"], s0["agreement"]["n"]) == (9, 12)
+    assert [s0["agreement_by_axis"][a]["count"] for a in "xyz"] == [2, 3, 4]
+    assert [(s0["sign_errors_by_axis"][a]["count"], s0["sign_errors_by_axis"][a]["n"]) for a in "xyz"] == [(0, 2), (1, 4), (0, 3)]
+    assert (s0["stay_rate_small"]["count"], s0["stay_rate_small"]["n"]) == (2, 5)  # the −0.2 boundary and the 2 cm move
+    assert out["models"]["v08Fs0"]["boundary_stay"]["agreement_by_axis"]["x"]["count"] == 3  # ±0.2 read as stay: x on the boundary agrees
+    arm = out["models"]["F"]["summary"]
+    assert arm["agreement"]["value"] == pytest.approx(9.5 / 12) and arm["sign_errors_by_axis"]["y"]["value"] == pytest.approx(0.5 / 4)
+    assert out["reference_v07_stored"]["summary"]["agreement"]["count"] == 9  # the stored endpoint row reads the "stored" reading
+    ab = out["models"]["F"]["ablation_y"]
+    assert ab["with_phrase"]["agreement"]["value"] == pytest.approx(3.5 / 4) and ab["without_phrase"]["agreement"]["value"] == pytest.approx(1.0)
+    assert ab["with_phrase"]["sign_errors"]["value"] == pytest.approx(0.5 / 4) and ab["without_phrase"]["sign_errors"]["value"] == 0.0
+    assert "27 -> 50 of 90" in out["serve_ablation_v07"]
+
+
+def s16_records() -> list[dict]:
+    move, look = [f"m{j:02d}" for j in range(15)], [f"g{j}" for j in range(6)]
+    return [{"id": f"v08s16-{i:04d}", "meta": {"set": "v08-s16", "groups": {"red1": "movement", "red1_look": "gaze"}},
+             "request": {"state": f"pitch {i}", "questions": {"red1": {"type": "choice", "criteria": {k: k for k in move}},
+                                                              "red1_look": {"type": "choice", "criteria": {k: k for k in look}}}}} for i in range(2)]
+
+
+def s16_scores(records: list[dict], *, flip_movement: bool) -> dict:
+    """Movement flips in request 0 (when asked); request 1's third order is a tie between the first two moves (→ the earlier, no flip); gaze
+    never flips. Codes A, B, … in key order."""
+    answers = {}
+    for r in records:
+        rid = r["id"]
+        per = {}
+        for name, q in r["request"]["questions"].items():
+            keys = list(q["criteria"])
+            codes = {k: V.G8.CODES_255[j] for j, k in enumerate(keys)}
+            readings = {}
+            for o in range(3):
+                top = keys[1] if (flip_movement and name == "red1" and rid.endswith("0000") and o == 2) else keys[0]
+                probs = {k: (0.4 if k == top else 0.6 / (len(keys) - 1)) for k in keys}
+                if name == "red1" and rid.endswith("0001") and o == 2:
+                    probs = {k: (0.3 if k in keys[:2] else 0.4 / (len(keys) - 2)) for k in keys}
+                readings[f"spaces-{o}"] = {"choice": top, "probabilities": probs, "codes": codes}
+            per[name] = readings
+        answers[rid] = per
+    return {"answers": answers}
+
+
+def test_s16_flips_per_group_and_the_stored_spread():
+    records = s16_records()
+    scores = {m: s16_scores(records, flip_movement=m.startswith("v08Fs")) for m in ("v08Fs0", "v08Fs1", "v07s0")}
+    stored = {r["id"]: {name: {"stored": {"choice": list(q["criteria"])[0], "probabilities": {k: (0.5 if j == 0 else 0.5 / (len(q["criteria"]) - 1))
+                                                                                              for j, k in enumerate(q["criteria"])}}}
+                           for name, q in r["request"]["questions"].items()} for r in records}
+    out = V.s16_readings(records, scores, stored)
+    f = out["models"]["F"]
+    assert f["per_group"]["movement"]["flip_rate"] == 0.5 and f["per_group"]["gaze"]["flip_rate"] == 0.0 and f["pooled"]["flip_rate"] == 0.25
+    assert out["models"]["v07s0"]["per_group"]["movement"]["flip_rate"] == 0.0  # the tie goes to the earlier key: no flip
+    assert out["per_group_questions"] == {"movement": 2, "gaze": 2}
+    assert f["per_group"]["gaze"]["top_prob"]["n"] == 2 * 3 * 2  # two seeds × two questions × three orders
+    assert out["reference_v07_stored_top_prob"]["movement"]["mean"] == pytest.approx(0.5) and out["reference_v07_stored_top_prob"]["pooled"]["n"] == 4
+    assert f["per_group"]["gaze"]["pick_rstd"]["questions"] == 12
+
+
+def _r16_tree(tmp_path: Path) -> tuple[Path, Path, dict]:
+    spark, r16 = tmp_path / "spark", tmp_path / "r16"
+    spark.mkdir()
+    r16.mkdir()
+    a16 = a16_records()
+    (r16 / "A16.jsonl").write_text("".join(json.dumps(r) + "\n" for r in a16), encoding="utf-8")
+    (r16 / "A16-y-ablation.jsonl").write_text("".join(json.dumps(r) + "\n" for r in a16), encoding="utf-8")
+    (r16 / "S16.jsonl").write_text("".join(json.dumps(r) + "\n" for r in s16_records()), encoding="utf-8")
+    (r16 / "A16-stored-v07.json").write_text(json.dumps({"answers": a16_answers(TOPS_S0, reading="stored")}), encoding="utf-8")
+    (r16 / "S16-stored-v07.json").write_text(json.dumps({"answers": {}}), encoding="utf-8")
+    names = ["A16.jsonl", "A16-y-ablation.jsonl", "S16.jsonl", "A16-stored-v07.json", "S16-stored-v07.json"]
+    frozen = {"files": {n: _sha(r16 / n) for n in names}, "frozen": "2026-10-16T15:12:54+09:00"}
+    (r16 / "frozen-before-scoring.json").write_text(json.dumps(frozen), encoding="utf-8")
+    V._sha.cache_clear()
+    return spark, r16, frozen
+
+
+def test_r16_loading_and_the_freeze_refusing_only_these_sets(tmp_path):
+    spark, r16, frozen = _r16_tree(tmp_path)
+    good = {"kind": "v08-bench-scores", "set": "A16", "tag": "v08Fs0-2b", "input_sha256": _sha(r16 / "A16.jsonl"), "readings": {"single-s1": {}},
+            "frozen": frozen, "checkpoint": None, "answers": a16_answers(TOPS_S0)}
+    (spark / "A16-v08Fs0-2b.json").write_text(json.dumps(good), encoding="utf-8")
+    (spark / "A16-v08Fs1-2b.json").write_text(json.dumps({**good, "tag": "v08Fs1-2b", "frozen": {"files": {}}}), encoding="utf-8")
+    loaded = V.load_r16(spark, {"v08Fs0": None, "v08Fs1": None}, [], directory=r16, exclude={"a16": ["v08a16-0003"], "s16": []})
+    assert list(loaded["scores"]["A16"]) == ["v08Fs0"] and any("frozen" in p for p in loaded["left_out"])  # scored on other files: left out
+    assert [r["id"] for r in loaded["records"]["A16"]] == ["v08a16-0000", "v08a16-0001", "v08a16-0002"]  # the overlap exclusion applies
+    part = V.r16_part(loaded)
+    assert part["A16"]["models"]["v08Fs0"]["summary"]["rows"] == 9 and "R14 (the 10-14 requests)" in part["A16"]["note"]
+    assert V.load_r16(spark, {}, [], directory=tmp_path / "nothing") is None
+    (r16 / "S16.jsonl").chmod(0o644)
+    (r16 / "S16.jsonl").write_text("{}\n", encoding="utf-8")
+    refused = V.load_r16(spark, {}, [], directory=r16)
+    assert refused == {"refused": ["S16.jsonl changed after it was frozen"]}
+    out = scenario(p1=True, p2=True, r16=refused)
+    assert out["readings"]["A16"] == {"refused": refused["refused"]} and out["verdict"]["outcome"] == "SUPPORTED"  # only these sets are refused
+    assert "R14" not in out["verdict"]["consistency"]["sources"] and "A16" not in out["verdict"]["consistency"]["sources"]
+
+
+def test_r16_rendered_sections():
+    records, s_records = a16_records(), s16_records()
+    r16 = {"records": {"A16": records, "A16y": records, "S16": s_records}, "frozen": {"frozen": "t"}, "left_out": [], "excluded": {}, "check": [],
+           "scores": {"A16": {"v08Fs0": {"answers": a16_answers(TOPS_S0)}, "v08Fs1": {"answers": a16_answers(TOPS_S1)}},
+                      "A16y": {"v08Fs0": {"answers": a16_answers({rid: {"y": TOPS_S0[rid]["y"]} for rid in TOPS_S0})}},
+                      "S16": {"v08Fs0": s16_scores(s_records, flip_movement=True), "v08Fs1": s16_scores(s_records, flip_movement=True)}},
+           "stored": {"A16": a16_answers(TOPS_S0, reading="stored"), "S16": {}}}
+    out = scenario(p1=True, p2=True, r16=r16)
+    md = V.render({**out, "n_boot": 200, "seed": 0, "git": None, "notes": []})
+    for needle in ("### A16 and S16 — robo-jev-web's 2026-10-16 requests (reported only)", "| v0.7 endpoint (stored) |", "y-phrase ablation",
+                   "**S16 — soccer**", "whose third source stays R14 (the 10-14 requests)", "| F (arm, seed mean) | movement | 2 | 0.500 |"):
+        assert needle in md, needle
+    assert out["readings"]["A16"]["models"]["F"]["summary"]["agreement"]["value"] == pytest.approx(9.5 / 12)
+
+
 def test_r14_readings_on_a_tiny_set():
     units = V.r14_units(R14_TAGS, ["v08r14-lab-0000", "v08r14-cafe-0000"])
     assert [(u["env"], u["question"], u["level"], u["planner"]) for u in units] == [("lab", "move", False, "lower"), ("lab", "offset", True, None),
@@ -497,7 +649,7 @@ def m8g_preds(records: list[dict], *, two_ok: bool, small_ok: bool = True, kind:
 
 
 def scenario(*, p1: bool, p2: bool, format_ok: bool = True, flips: bool = False, of_ok: bool = True, n_boot: int = 200, flip_bins: set | None = None,
-             b8_flip: bool = False, r14_flips: int | None = None, r14_refused: bool = False) -> dict:
+             b8_flip: bool = False, r14_flips: int | None = None, r14_refused: bool = False, r16: dict | None = None) -> dict:
     sets = {s: call_set(s) for s in ("A4", "T9", "T8b")}
     preds: dict[str, dict] = {}
     for model in V.MODELS:
@@ -527,7 +679,7 @@ def scenario(*, p1: bool, p2: bool, format_ok: bool = True, flips: bool = False,
         r14 = {"tags": r14_tag, "record_ids": [r["id"] for r in r14_tag["requests"]], "left_out": [], "check": None, "frozen": {"frozen": "t"},
                "scores": {m: r14_scores(20, r14_flips if m.startswith("v08Fs") else 0) for m in V.MODELS}}
     return V.compute(sets, preds, pod_sets, pod_preds, {"tags": tags, "records": records, "scores": scores},
-                     {"records": m8, "preds": m8_preds}, r14=r14, posthoc=Path("/nonexistent/estimate.json"), n_boot=n_boot, seed=0)
+                     {"records": m8, "preds": m8_preds}, r14=r14, r16=r16, posthoc=Path("/nonexistent/estimate.json"), n_boot=n_boot, seed=0)
 
 
 # --------------------------------------------------------------------------

@@ -46,7 +46,9 @@ BASE = "Qwen/Qwen3.5-2B"
 SERVE_COMMIT = "7b54004bb335c2abdcd3675054221a194166cf3b"
 BUNDLE = REPO / "src" / "robo_jev" / "hf" / "robo_jev_decide.py"
 MIN_FREE = 20 * 2**30
-SETS = ("B8", "Jev", "Probe", "R14", "R14serve", "Collected", "Other")
+SETS = ("B8", "Jev", "Probe", "R14", "R14serve", "A16", "A16y", "S16", "Collected", "Other")
+#: Reported sets frozen in artifacts/v08/r16/ (task v0.8c): sealed for training, already sent by the bench.
+R16_SETS = ("A16", "A16y", "S16")
 _READING = re.compile(r"^(single|balanced)-s(\d+)$|^order-none$|^spaces-(\d)$")
 
 
@@ -132,6 +134,18 @@ def check_frozen(input_path: Path, frozen_path: Path | None, set_name: str) -> d
             problems.append(f"{input_path} is not one of the frozen R14 files")
         if problems:
             raise SystemExit("refusing to score R14: " + "; ".join(problems))
+        return frozen
+    if set_name in R16_SETS:
+        from robo_jev.bench.r16_v08 import check_frozen as r16_frozen
+
+        if frozen_path is None or not Path(frozen_path).is_file():
+            raise SystemExit(f"{set_name} is scored only against its frozen files: pass --frozen <artifacts/v08/r16/frozen-before-scoring.json>")
+        frozen = json.loads(Path(frozen_path).read_text(encoding="utf-8"))
+        problems = r16_frozen(Path(frozen_path).parent)
+        if sha256(input_path) not in (frozen.get("files") or {}).values():
+            problems.append(f"{input_path} is not one of the frozen A16 / S16 files")
+        if problems:
+            raise SystemExit(f"refusing to score {set_name}: " + "; ".join(problems))
         return frozen
     if set_name != "B8":
         return None
@@ -232,7 +246,7 @@ def main(argv: list[str] | None = None) -> int:
         records = records[: args.limit]
     if args.serve_adapter:
         records = [serve_adapted(r) for r in records]
-    if args.set not in ("Probe", "R14", "R14serve"):
+    if args.set not in ("Probe", "R14", "R14serve", *R16_SETS):
         from robo_jev.data.sealed import sealed_record_set
 
         sealed = sorted({sealed_record_set(r) for r in records} - {None})
