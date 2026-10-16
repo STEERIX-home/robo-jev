@@ -1,4 +1,4 @@
-"""Training checkpoint → Hugging Face folders: the PEFT adapter and the merged model (Task hf0 §1).
+"""Training checkpoint → Hugging Face folders: the PEFT adapter and the merged model (Task hf0 §1; the v0.7 release: Task rel07).
 
 **Adapter.** :func:`lora_config` rebuilds the training LoRA (r, alpha, dropout, targets, no bias) as a ``peft`` ``LoraConfig`` with
 ``task_type="CAUSAL_LM"`` and the pinned base (``Qwen/Qwen3.5-2B`` @ revision). :func:`build_peft_model` wraps the real base model with
@@ -13,8 +13,13 @@ model and are not saved) with ``save_pretrained(safe_serialization=True)``.
 
 **Next to the weights** (:func:`write_common_files`): the training tokenizer (``tokenizer.json`` byte for byte — sha256 checked), the
 base's ``tokenizer_config.json`` and ``chat_template.jinja`` (pinned revision), ``robo_jev.json`` (:func:`build_metadata` — prompt
-version and digest, answer-code scheme and token ids, score anchors, readout, training summary, source checkpoint sha256, git sha,
-base revision), the standalone runner ``robo_jev_decide.py``, the model card and figures. :func:`check_no_pickle` refuses pickle files.
+version and digest, answer-code scheme and token ids, score anchors, readout, request limits, the release, training summary, source
+checkpoint sha256, git sha, base revision), the standalone runner ``robo_jev_decide.py``, the model card and figures.
+:func:`check_no_pickle` refuses pickle files.
+
+**Public text only.** :func:`public_paths` turns absolute paths into a local checkout (the data manifests record them) into repo-relative
+ones before they go into ``robo_jev.json``, and :func:`check_public_text` scans every text file of a folder for local paths and anything
+that looks like a key or token — the export, ``cards`` and the upload refuse a folder with a hit.
 """
 
 from __future__ import annotations
@@ -40,15 +45,18 @@ from robo_jev.decisions.prompt import (
     SYSTEM_TEXT,
     fixed_text_digest,
 )
-from robo_jev.infer import DEFAULT_SEED, FORMAT, METADATA_FILE, MODE, file_sha256
+from robo_jev.decisions.records import MAX_QUESTIONS, MAX_STATE_CHARS
+from robo_jev.infer import CHOICE_OPTIONS, DEFAULT_SEED, FORMAT, METADATA_FILE, MODE, file_sha256
 
 __all__ = [
     "ADAPTER_REPO",
     "BASE_ID",
     "BASE_REVISION",
     "FORBIDDEN_SUFFIXES",
+    "LIMITS",
     "MERGED_REPO",
     "PEFT_PREFIX",
+    "RELEASE",
     "STANDALONE",
     "TAG",
     "adapter_key_map",
@@ -56,12 +64,16 @@ __all__ = [
     "build_peft_model",
     "CARD_FIELDS",
     "check_no_pickle",
+    "check_no_verdicts",
+    "check_public_text",
     "lora_config",
     "load_adapter_state",
+    "public_paths",
     "read_training_checkpoint",
     "render_card",
     "save_adapter",
     "save_merged",
+    "strip_verdicts",
     "write_common_files",
 ]
 
@@ -69,12 +81,26 @@ BASE_ID = "Qwen/Qwen3.5-2B"
 BASE_REVISION = "15852e8c16360a2fea060d615a32b45270f8a8fc"
 MERGED_REPO = "Steerix-org/robo-jev-2b"
 ADAPTER_REPO = "Steerix-org/robo-jev-2b-lora"
-TAG = "v0.1"
+#: The release this export makes — the Hub tag, ``robo_jev.json``'s ``version`` and the model card's title.
+TAG = "v0.7"
+#: What ``robo_jev.json`` records about the release (Task rel07; the user chose v0.7 seed 0 on 2026-10-16) — no experiment verdicts:
+#: public files carry none (user, 2026-10-16), see :data:`VERDICT_TEXT`.
+RELEASE = {
+    "tag": TAG,
+    "previous": "v0.1",
+    "model": "v0.7, training seed 0 (run v07-s0-2b, final checkpoint)",
+}
+#: Experiment-protocol wording public files never carry (user, 2026-10-16: no experiment verdicts on public pages): a pre-declared
+#: rule or its verdict. :func:`strip_verdicts` drops such strings from ``robo_jev.json``; :func:`check_no_verdicts` refuses a folder whose
+#: README.md or robo_jev.json still has one.
+VERDICT_TEXT = re.compile(r"pre-?declared|verdict|pre-?registered|\bREJECTED\b|not passed|clearly better than", re.IGNORECASE)
+#: The request limits of both runners (the package's :class:`robo_jev.infer.RoboJev` and the Hub's ``robo_jev_decide.py``).
+LIMITS = {"state_chars": MAX_STATE_CHARS, "questions": [1, MAX_QUESTIONS], "choice_options": list(CHOICE_OPTIONS)}
 GITHUB = "https://github.com/STEERIX-home/robo-jev"
 #: PEFT parameter name = this prefix + the training key (training keys are relative to the text model, ``Qwen3_5ForCausalLM.model``).
 PEFT_PREFIX = "base_model.model.model."
 #: File endings that are (or may be) pickles — never in an export.
-FORBIDDEN_SUFFIXES = (".bin", ".pt", ".pth", ".pkl", ".pickle", ".ckpt", ".joblib", ".npy", ".npz")
+FORBIDDEN_SUFFIXES = (".bin", ".pt", ".pth", ".pkl", ".pickle", ".ckpt", ".joblib", ".npy", ".npz", ".pyc", ".pyo")
 STANDALONE = Path(__file__).with_name("robo_jev_decide.py")
 _TRAINING_KEY = re.compile(r"^layers\.\d+\.(self_attn|linear_attn|mlp)\.[a-z_]+\.lora_[AB]\.default\.weight$")
 
@@ -197,9 +223,11 @@ def _git_sha(repo: Path) -> dict[str, Any]:
 
 
 def _code_scheme(tokenizer: Any) -> dict[str, Any]:
-    from robo_jev.model.zero_shot import verify_codes
+    from robo_jev.model.zero_shot import CODES, verify_codes
 
-    codes, ids = verify_codes(tokenizer, len(SCORE_ANCHORS))
+    low, high = CHOICE_OPTIONS
+    codes, ids = verify_codes(tokenizer, max(high, len(SCORE_ANCHORS)))  # every code a request can show: A–Z (choice up to 26 options)
+    _need(len(set(ids)) == len(ids) == len(CODES) == high, f"answer codes {codes} → ids {ids}: not 26 distinct single tokens")
     return {
         "codes": "one capital letter per shown option, A, B, C, … in the shown order",
         "token_ids": dict(zip(codes, ids)),
@@ -208,7 +236,7 @@ def _code_scheme(tokenizer: Any) -> dict[str, Any]:
             "the last position's hidden state (after the final RMSNorm) times the LM-head rows of the shown codes, in float32; "
             "softmax over the shown codes only"
         ),
-        "options": {"choice": "2-8 (the request's keys, shown as '<code>. <key>: <description>')", "noul": "2 (Yes, No)",
+        "options": {"choice": f"{low}-{high} (the request's keys, shown as '<code>. <key>: <description>', codes A-Z)", "noul": "2 (Yes, No)",
                     "score": f"{len(SCORE_ANCHORS)} anchors"},
     }
 
@@ -224,12 +252,15 @@ def build_metadata(
     dev_ids = data.pop("dev_ids", None) or []
     data["dev_ids_sha256"] = hashlib.sha256("\n".join(dev_ids).encode("utf-8")).hexdigest() if dev_ids else None
     lora = (manifest.get("model") or {}).get("lora") or {}
-    extra = dict(data_manifests or {})
-    return {
+    extra = public_paths(dict(data_manifests or {}))
+    selection = re.sub(r"\s*\(pre-?registered\)", "", str((manifest.get("selection") or {}).get("evaluated") or "")) or None
+    return strip_verdicts({
         "format": "robo-jev-hf/1",
-        "name": "robo-jev v0.1",
+        "name": f"robo-jev {TAG}",
         "version": TAG,
         "variant": variant,
+        "release": dict(RELEASE),
+        "limits": {**LIMITS, "refused": "a request outside the limits is refused whole"},
         "repos": {"merged": MERGED_REPO, "adapter": ADAPTER_REPO, "code": GITHUB},
         "base": {
             "id": BASE_ID, "revision": BASE_REVISION, "digest": ((manifest.get("model") or {}).get("base") or {}).get("digest"),
@@ -276,25 +307,25 @@ def build_metadata(
         },
         "training": {
             "run_id": state.get("run_id"), "step": state.get("step"), "status": state.get("status"),
-            "selection": (manifest.get("selection") or {}).get("evaluated"),
+            "selection": selection,
             "objective": manifest.get("objective"),
             "recipe": {k: config.get(k) for k in (
                 "mode", "lora_dtype", "epochs", "max_steps", "batch_examples", "lr", "weight_decay", "warmup_ratio", "gradient_clip",
                 "questions_per_request", "augment", "type_weights", "code_mass_weight", "seed", "dtype",
             )},
             "precision": "bf16 base and bf16 LoRA compute with float32 master weights; the exported LoRA values are the checkpoint's bf16 model tensors (the values every reported score used)",
-            "data": data,
+            "data": public_paths(data),
             "data_sources": extra,
             "real_robot_data": False,
         },
         "source": {
-            "checkpoint": str(checkpoint_path), "checkpoint_sha256": checkpoint_sha256, "checkpoint_format": state.get("format"),
+            "checkpoint": _public_file(checkpoint_path), "checkpoint_sha256": checkpoint_sha256, "checkpoint_format": state.get("format"),
             "training_git": manifest.get("git"),
             "training_git_note": "the cloud training run synced the code without .git, so its manifest records no commit; the data files are pinned by sha256",
             "export_git": _git_sha(repo),
             "exported": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         },
-    }
+    })
 
 
 def write_common_files(
@@ -321,16 +352,18 @@ CARD_TEMPLATE = Path(__file__).with_name("cards") / "card.md"
 _HF = "https://huggingface.co"
 CARD_FIELDS: dict[str, dict[str, str]] = {
     "merged": {
-        "TITLE": "robo-jev 2B — v0.1", "RELATION": "finetune", "LIBRARY": "transformers", "REPO": MERGED_REPO, "PIP_EXTRA": "", "LOAD_NOTE": "",
+        "TITLE": f"robo-jev 2B — {TAG}", "RELATION": "finetune", "LIBRARY": "transformers", "REPO": MERGED_REPO, "PIP_EXTRA": "", "PIP_EXTRA_NOTE": "",
+        "LOAD_NOTE": "",
         "VARIANT_NOTE": (
-            "This repository holds the **merged weights**: Qwen3.5-2B with the robo-jev v0.1 LoRA adapter merged in, saved in bfloat16 as a "
+            f"This repository holds the **merged weights**: Qwen3.5-2B with the robo-jev {TAG} LoRA adapter merged in, saved in bfloat16 as a "
             "text-only `Qwen3_5ForCausalLM` (the base's vision tower is not part of robo-jev and is left out). The adapter alone is at "
             f"[{ADAPTER_REPO}]({_HF}/{ADAPTER_REPO})."
         ),
         "SIBLING": f"The LoRA adapter for Qwen/Qwen3.5-2B (the same model, 63 MB): [{ADAPTER_REPO}]({_HF}/{ADAPTER_REPO})",
     },
     "adapter": {
-        "TITLE": "robo-jev 2B LoRA — v0.1", "RELATION": "adapter", "LIBRARY": "peft", "REPO": ADAPTER_REPO, "PIP_EXTRA": "peft",
+        "TITLE": f"robo-jev 2B LoRA — {TAG}", "RELATION": "adapter", "LIBRARY": "peft", "REPO": ADAPTER_REPO, "PIP_EXTRA": "peft",
+        "PIP_EXTRA_NOTE": " and `peft`",
         "LOAD_NOTE": f" — fetches {BASE_ID} at revision {BASE_REVISION[:7]} and applies the adapter",
         "VARIANT_NOTE": (
             "This repository holds the **LoRA adapter** (r 32, α 64, 31 M parameters, bfloat16) for "
@@ -343,7 +376,8 @@ CARD_FIELDS: dict[str, dict[str, str]] = {
 
 
 def render_card(variant: str, *, example_output: str = "") -> str:
-    """The model card (``README.md``) of `variant` (``merged`` | ``adapter``) from the shared template."""
+    """The model card (``README.md``) of `variant` (``merged`` | ``adapter``) from the shared template; `example_output` is the real
+    answer of the card's example (``scripts/export_hf.py cards --equivalence``)."""
     fields = {**CARD_FIELDS[variant], "EXAMPLE_OUTPUT": example_output.strip()}
     text = CARD_TEMPLATE.read_text(encoding="utf-8")
     for name, value in fields.items():
@@ -357,8 +391,8 @@ def check_no_pickle(folder: str | Path) -> list[str]:
     """Raise if any file in `folder` is (or may be) a pickle; return the file list."""
     folder = Path(folder)
     files = sorted(str(p.relative_to(folder)) for p in folder.rglob("*") if p.is_file())
-    bad = [f for f in files if f.lower().endswith(FORBIDDEN_SUFFIXES)]
-    _need(not bad, f"{folder}: pickle-type files {bad}")
+    bad = [f for f in files if f.lower().endswith(FORBIDDEN_SUFFIXES) or "__pycache__" in Path(f).parts]
+    _need(not bad, f"{folder}: pickle-type or bytecode files {bad}")
     from safetensors import safe_open
 
     for f in files:  # a pickle can hide behind any name: protocol 2+ pickles start with 0x80, torch's zip archives with PK
@@ -371,3 +405,80 @@ def check_no_pickle(folder: str | Path) -> list[str]:
             head = stream.read(2)
         _need(not head.startswith(b"\x80") and head != b"PK", f"{path}: looks like a pickle or zip archive")
     return files
+
+
+#: An absolute path into a local checkout of this repo — the main one or a worktree under ``.claude/worktrees/`` — up to the repo root
+#: (the data manifests record the paths they were built at). Not preceded by ``:``, ``/`` or a word character, so URLs never match.
+_LOCAL_CHECKOUT = re.compile(r"(?<![\w:/.])/(?:[^/\s\"'<>|]+/)*?robo-?jev/(?:\.claude/worktrees/[^/\s\"'<>|]+/)?")
+#: What must never be in a published text file: local paths and anything shaped like a key or a token.
+PRIVATE_TEXT = {
+    "local path": re.compile(r"(?<![\w:/.])/(?:home|root|Users|tmp|mnt|srv|workspace)/[^\s\"'<>|]*|\.claude/|worktrees/|Desktop/projects"),
+    "user name": re.compile(r"rodex", re.IGNORECASE),
+    "Hugging Face token": re.compile(r"hf_[A-Za-z0-9]{20,}"),
+    "OpenRouter key": re.compile(r"sk-or-[A-Za-z0-9-]{16,}"),
+    "API key": re.compile(r"\bsk-[A-Za-z0-9]{20,}|\brpa_[A-Za-z0-9]{16,}|(?:HF_TOKEN|OPENROUTER_API_KEY|RUNPOD_API_KEY)\s*="),
+}
+
+
+def public_paths(value: Any) -> Any:
+    """`value` with every absolute path into a local checkout of this repo made repo-relative (dicts and lists recursively)."""
+    if isinstance(value, str):
+        return _LOCAL_CHECKOUT.sub("", value)
+    if isinstance(value, dict):
+        return {key: public_paths(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [public_paths(item) for item in value]
+    return value
+
+
+def _public_file(path: str | Path) -> str:
+    """A file's path as ``robo_jev.json`` records it: repo-relative inside a checkout of this repo, else just the file name."""
+    text = public_paths(str(path))
+    return Path(text).name if Path(text).is_absolute() else text
+
+
+def check_public_text(folder: str | Path) -> dict[str, int]:
+    """Scan every text file of `folder` (all but ``.safetensors`` and images) for :data:`PRIVATE_TEXT`; raise on any hit (the message names
+    the file, the line and the kind of hit, never the matched text). Returns ``{file: bytes scanned}``."""
+    folder = Path(folder)
+    hits, scanned = [], {}
+    for path in sorted(p for p in folder.rglob("*") if p.is_file()):
+        if path.suffix.lower() in (".safetensors", ".png", ".jpg", ".jpeg", ".gif", ".webp"):
+            continue
+        name = str(path.relative_to(folder))
+        try:
+            text = path.read_text(encoding="utf-8")
+        except UnicodeDecodeError:  # an export holds no binary file but weights and images
+            hits.append(f"{name} (not UTF-8 text)")
+            continue
+        scanned[name] = len(text.encode("utf-8"))
+        for kind, pattern in PRIVATE_TEXT.items():
+            for match in pattern.finditer(text):
+                hits.append(f"{name}:{text.count(chr(10), 0, match.start()) + 1} ({kind})")
+    _need(not hits, f"{folder}: private text in {len(hits)} place(s): {hits[:10]}")
+    return scanned
+
+
+def strip_verdicts(value: Any) -> Any:
+    """`value` without any string that carries experiment-protocol wording (:data:`VERDICT_TEXT`): such dict entries and list items are
+    dropped, recursively. Format and data-construction rules (answer codes, question picks, subsampling) are kept."""
+    if isinstance(value, dict):
+        return {k: strip_verdicts(v) for k, v in value.items() if not (isinstance(v, str) and VERDICT_TEXT.search(v))}
+    if isinstance(value, list):
+        return [strip_verdicts(v) for v in value if not (isinstance(v, str) and VERDICT_TEXT.search(v))]
+    return value
+
+
+def check_no_verdicts(folder: str | Path) -> list[str]:
+    """Raise if the folder's README.md or robo_jev.json carries experiment-protocol wording (:data:`VERDICT_TEXT`); return the files
+    checked. (The tokenizer and the runner are not authored here and are checked by hash and by the public-text scan.)"""
+    folder, hits, checked = Path(folder), [], []
+    for name in ("README.md", METADATA_FILE):
+        path = folder / name
+        if not path.is_file():
+            continue
+        checked.append(name)
+        text = path.read_text(encoding="utf-8")
+        hits += [f"{name}:{text.count(chr(10), 0, m.start()) + 1}" for m in VERDICT_TEXT.finditer(text)]
+    _need(not hits, f"{folder}: experiment-verdict wording in {hits[:10]}")
+    return checked

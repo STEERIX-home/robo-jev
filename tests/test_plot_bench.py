@@ -137,18 +137,34 @@ def test_models_without_the_axes_values_are_listed_not_drawn():
 
 @pytest.mark.parametrize("theme", sorted(THEMES))
 def test_the_hero_chart_shows_one_bar_per_model_with_only_our_chosen_version(theme):
-    results = _results()
-    rows = hero_rows(results)
-    assert [r["role"] for r in rows].count("ours") == 1 and rows[[r["role"] for r in rows].index("ours")]["label"].startswith("robo-jev v0.1")
+    results = _results(extra=[_model("robojev-v0.7", "robojev v0.7 (2B)", "ours", 0.81, 0.79, 0.71, 0.027)])
+    default = hero_rows(results)
+    assert [r["role"] for r in default].count("ours") == 1 and "previous" not in [r["role"] for r in default]
+    assert len(default) == 5  # the release + baseline + three API models: the release against the decision models and the base
+    rows = hero_rows(results, previous_tag="robojev-v0.1-mix")
+    roles = [r["role"] for r in rows]
+    assert roles.count("ours") == 1 and rows[roles.index("ours")]["label"].startswith("robo-jev v0.7")  # the release
+    assert roles.count("previous") == 1 and rows[roles.index("previous")]["label"] == "robo-jev v0.1 · 2B (previous release)"
     assert [r["skill"] for r in rows] == sorted((r["skill"] for r in rows), reverse=True)
-    assert len(rows) == 5  # chosen ours + baseline + three API models
-    root = _parse(hero_svg(results, theme_name=theme))
+    assert len(rows) == 6  # the release + the previous release + baseline + three API models (v0 and v0.1-main left out)
+    root = _parse(hero_svg(results, theme_name=theme, previous_tag="robojev-v0.1-mix"))
     width = float(root.get("width"))
     bars = [e for e in root.iter("{http://www.w3.org/2000/svg}rect") if e.find("s:title", NS) is not None]
     assert len(bars) == len(rows)
     for bar in bars:
         x, w = float(bar.get("x")), float(bar.get("width"))
         assert 0 <= x and x + w <= width
+    solid = [b for b in bars if b.get("fill") == THEMES[theme]["ours"]]
+    outlined = [b for b in bars if b.get("stroke") == THEMES[theme]["ours"]]
+    assert len(solid) == 1 and solid[0].find("s:title", NS).text.startswith("robo-jev v0.7")
+    assert len(outlined) == 1 and outlined[0].get("fill") == THEMES[theme]["surface"] and "previous release" in outlined[0].find("s:title", NS).text
     texts = " ".join(t.text or "" for t in root.iter("{http://www.w3.org/2000/svg}text"))
     assert "Together Tev1 4B" in texts and "OpenAI GPT-6 Luna Decisions" in texts and "−0.35" in texts  # display names, true minus
 
+
+
+def test_the_scatter_draws_the_step_to_the_release():
+    results = _results(extra=[_model("robojev-v0.7", "robojev v0.7 (2B)", "ours", 0.95, 0.79, 0.82, 0.027)])  # far enough for an arrow
+    svg = scatter_svg(results)
+    assert svg.count("marker-end") == 4  # untrained 2B → v0 → v0.1 (two) → v0.7
+    assert "robojev v0.7 (2B)" in svg

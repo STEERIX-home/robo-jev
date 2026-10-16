@@ -130,3 +130,9 @@ ours:
     role: ours
     T: ["artifacts/cloud/runs/v01-mix-01-fetched/reports/after-v01mix-2b-{set}.predictions.jsonl"]
     G: ["artifacts/cloud/runs/v01-mix-01-fetched/reports/after-v01mix-2b-{set}.predictions.jsonl"]
+  # The v0.7 release (Task rel07, 2026-10-16): training seed 0, scored on its H100 pod with the same tool, prompt and balanced orders.
+  - tag: robojev-v0.7
+    label: ours v0.7 (2B)
+    role: ours
+    T: ["artifacts/cloud/runs/v07-s0-01-fetched/reports/after-v07-s0-2b-{set}.predictions.jsonl"]
+    G: ["artifacts/cloud/runs/v07-s0-01-fetched/reports/after-v07-s0-2b-{set}.predictions.jsonl"]
