@@ -46,7 +46,7 @@ BASE = "Qwen/Qwen3.5-2B"
 SERVE_COMMIT = "7b54004bb335c2abdcd3675054221a194166cf3b"
 BUNDLE = REPO / "src" / "robo_jev" / "hf" / "robo_jev_decide.py"
 MIN_FREE = 20 * 2**30
-SETS = ("B8", "Jev", "Probe", "R14", "R14serve", "A16", "A16y", "S16", "A16s", "Collected", "Other")
+SETS = ("B8", "Jev", "Probe", "R14", "R14serve", "A16", "A16y", "S16", "A16s", "N9g", "Collected", "Other")
 #: Reported sets frozen in artifacts/v08/r16/ (task v0.8c): sealed for training, already sent by the bench.
 R16_SETS = ("A16", "A16y", "S16")
 _READING = re.compile(r"^(single|balanced)-s(\d+)$|^order-none$|^spaces-(\d)$")
@@ -161,6 +161,18 @@ def check_frozen(input_path: Path, frozen_path: Path | None, set_name: str) -> d
         if problems:
             raise SystemExit("refusing to score A16s: " + "; ".join(problems))
         return frozen
+    if set_name == "N9g":  # task v0.9b: the sealed numeric-rule gate of the v0.9 rule, frozen in artifacts/v09/n9g/
+        from robo_jev.bench.n9g_v09 import check_frozen as n9g_frozen
+
+        if frozen_path is None or not Path(frozen_path).is_file():
+            raise SystemExit("N9g is scored only against its frozen file: pass --frozen <artifacts/v09/n9g/frozen-before-scoring.json>")
+        frozen = json.loads(Path(frozen_path).read_text(encoding="utf-8"))
+        problems = n9g_frozen(Path(frozen_path).parent)
+        if sha256(input_path) != (frozen.get("files") or {}).get("N9g.jsonl"):
+            problems.append(f"{input_path} is not the frozen N9g file")
+        if problems:
+            raise SystemExit("refusing to score N9g: " + "; ".join(problems))
+        return frozen
     if set_name != "B8":
         return None
     if frozen_path is None or not Path(frozen_path).is_file():
@@ -260,12 +272,12 @@ def main(argv: list[str] | None = None) -> int:
         records = records[: args.limit]
     if args.serve_adapter:
         records = [serve_adapted(r) for r in records]
-    if args.set not in ("Probe", "R14", "R14serve", "A16s", *R16_SETS):
+    if args.set not in ("Probe", "R14", "R14serve", "A16s", "N9g", *R16_SETS):
         from robo_jev.data.sealed import sealed_record_set
 
         sealed = sorted({sealed_record_set(r) for r in records} - {None})
         if sealed and args.set != "B8":
-            raise SystemExit(f"{args.input}: records of sealed sets {sealed} — only B8 is scored here as a sealed gate")
+            raise SystemExit(f"{args.input}: records of sealed sets {sealed} — only B8 and N9g are scored here as sealed gates (against their frozen files)")
     import torch
 
     from robo_jev.decisions.train import apply_checkpoint
