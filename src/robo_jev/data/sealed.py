@@ -67,6 +67,12 @@ SEALED_RECORD_FILES.update({"v08-a16": "artifacts/v08/r16/A16.jsonl", "v08-s16":
 SEALED_RECORD_SETS += ("v08-a16s",)
 SEALED_RECORD_PREFIXES.update({"v08-a16s": "v08a16s-"})
 SEALED_RECORD_FILES.update({"v08-a16s": "artifacts/v08/a16s/A16s.jsonl"})
+#: Task v0.9b: N9g — the sealed numeric-rule gate of the v0.9 rule (measurement literacy, P-num2; :mod:`robo_jev.bench.n9g_v09`): built by an
+#: author who never sees the v0.9 measurement-literacy generator; never trained on, never sent anywhere.
+SEALED_RECORD_SETS += ("v09-n9g",)
+SEALED_RECORD_PREFIXES.update({"v09-n9g": "v09n9g-"})
+SEALED_RECORD_FILES.update({"v09-n9g": "artifacts/v09/n9g/N9g.jsonl"})
+NEVER_SENT_SETS += ("v09-n9g",)
 
 
 def sealed_record_set(record: dict[str, Any]) -> str | None:
