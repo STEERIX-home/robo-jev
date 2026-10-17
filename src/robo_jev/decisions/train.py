@@ -16,6 +16,15 @@ weight, by its label class's weight within its question family (:mod:`robo_jev.d
 equal total weight over the epoch plan's examples, mean weight 1 per family, capped at ``label_prior_cap``). The code-mass term and the dev
 loss are not weighted. Off (the default), nothing of it runs: the losses and gradients are byte-identical to the unweighted trainer's.
 
+**Order-consistency loss (Task v0.9a, opt-in: ``consistency: {share, lambda, copies, divergence}``).** A choice question picked by a fixed
+seed (``share`` of the choice questions, :func:`robo_jev.decisions.examples.consistency_selected`) is also run as permuted copies of its
+example — one cyclic shift by ⌈N/2⌉ and the reverse, with the record's own codes by position (:func:`robo_jev.decisions.examples.consistency_copies`).
+Each copy's code distribution is mapped back to the option contents and the step loss gains ``lambda`` × the mean Jensen–Shannon divergence
+between the original's and each copy's distributions (:func:`consistency_js`, natural log, over the shown codes), divided by the step's
+example count like every other term. The usual target loss (KL and the code-mass term) stays on the original only. An original and its
+copies are packed into one micro-batch (:func:`pack_units`) so that the gradient flows through all of them. Off (the default), nothing of it
+runs: the losses and gradients are byte-identical to the trainer without the option.
+
 **두 방식** (`mode`):
 
 * ``lora`` (기본) — 저장소의 :func:`robo_jev.train.attach_lora` (peft 0.21 ``inject_adapter_in_model``, adapter는 fp32, 나머지 고정)로
@@ -89,11 +98,16 @@ from robo_jev.checkpoint import (
     save_checkpoint,
 )
 from robo_jev.decisions.examples import (
+    CONSISTENCY_COPIES,
+    CONSISTENCY_SALT,
     DEFAULT_DEV_FRACTION,
     DEFAULT_DEV_SALT,
     DEFAULT_QUESTIONS_PER_REQUEST,
     QUESTION_PICK_VERSION,
     build_examples,
+    consistency_copies,
+    consistency_selected,
+    copy_permutation,
     dev_examples,
     epoch_plan,
     examples_per_epoch,
@@ -122,10 +136,12 @@ __all__ = [
     "base_identity",
     "code_kl",
     "check_step_memory",
+    "consistency_js",
     "disk_free_bytes",
     "estimate_step_memory",
     "load_training_records",
     "pack_micro_batches",
+    "pack_units",
     "records_digest",
     "resolve_config",
     "summarize_dev",
@@ -202,9 +218,13 @@ DEFAULTS: dict[str, Any] = {
     "allow_large_activations": False,  # 메모리 추정이 울타리의 90 %를 넘어도 시작한다 (명시적 확인 — 보통은 거절)
     "label_prior_weights": False,  # Task v0.8a: H-prior loss weights (module docstring) — off by default
     "label_prior_cap": 5.0,  # the cap of an H-prior weight (robo_jev.decisions.prior_weights.DEFAULT_CAP)
+    "consistency": None,  # Task v0.9a: the order-consistency loss (module docstring) — off by default
 }
 #: Keys added after earlier runs were saved: a checkpoint without them was trained with these defaults (resume compares them so).
-LATER_KEYS = {"label_prior_weights": False, "label_prior_cap": 5.0}
+LATER_KEYS = {"label_prior_weights": False, "label_prior_cap": 5.0, "consistency": None}
+#: The order-consistency option's keys and defaults (Task v0.9a); ``divergence`` has one value, ``js``.
+CONSISTENCY_DEFAULTS = {"share": 0.3, "lambda": 0.5, "copies": ["shift", "reverse"], "divergence": "js", "salt": CONSISTENCY_SALT}
+CONSISTENCY_DIVERGENCES = ("js",)
 #: 재개할 때 체크포인트의 설정과 달라도 되는 키 — 중단·예산 밖의 운영 값·경로뿐이다(입력 파일은 경로가 아니라 내용 digest로 대조한다).
 RESUME_FREE_KEYS = (
     "train_input", "out_dir", "run_name", "checkpoint_every", "save_checkpoints", "metrics_every", "max_wall_hours", "stop_after_steps",
@@ -279,7 +299,29 @@ def resolve_config(config: dict[str, Any]) -> dict[str, Any]:
         _need(isinstance(out[key], bool), f"{key}: true/false")
     _need(_is_number(out["label_prior_cap"]) and out["label_prior_cap"] >= 1.0, "label_prior_cap: a number of at least 1")
     out["label_prior_cap"] = float(out["label_prior_cap"])
+    out["consistency"] = _resolve_consistency(out["consistency"])
     return out
+
+
+def _resolve_consistency(value: Any) -> dict[str, Any] | None:
+    """The order-consistency option (module docstring): None (off) or a dict of ``share`` (0 < share ≤ 1), ``lambda`` (> 0), ``copies``
+    (distinct names of :data:`robo_jev.decisions.examples.CONSISTENCY_COPIES`), ``divergence`` (``js``) and ``salt`` (the fixed selection
+    salt); missing keys take :data:`CONSISTENCY_DEFAULTS`."""
+    if value is None:
+        return None
+    _need(isinstance(value, dict), f"consistency: null or a mapping of {sorted(CONSISTENCY_DEFAULTS)} (got {type(value).__name__})")
+    unknown = sorted(set(value) - set(CONSISTENCY_DEFAULTS))
+    _need(not unknown, f"consistency: unknown keys {unknown} (known: {sorted(CONSISTENCY_DEFAULTS)})")
+    out = {**copy.deepcopy(CONSISTENCY_DEFAULTS), **copy.deepcopy(value)}
+    _need(_is_number(out["share"]) and 0.0 < float(out["share"]) <= 1.0, "consistency.share: a number in (0, 1]")
+    _need(_is_number(out["lambda"]) and float(out["lambda"]) > 0.0, "consistency.lambda: a positive number")
+    copies = out["copies"]
+    _need(isinstance(copies, (list, tuple)) and copies and all(c in CONSISTENCY_COPIES for c in copies) and len(set(copies)) == len(copies),
+          f"consistency.copies: distinct names of {list(CONSISTENCY_COPIES)}")
+    _need(out["divergence"] in CONSISTENCY_DIVERGENCES, f"consistency.divergence: one of {list(CONSISTENCY_DIVERGENCES)}")
+    _need(isinstance(out["salt"], str) and bool(out["salt"].strip()), "consistency.salt: a non-empty string")
+    return {"share": float(out["share"]), "lambda": float(out["lambda"]), "copies": [str(c) for c in copies], "divergence": str(out["divergence"]),
+            "salt": str(out["salt"])}
 
 
 # --------------------------------------------------------------------------
@@ -329,18 +371,50 @@ def pack_micro_batches(lengths: Sequence[int], max_tokens: int) -> list[list[int
     return groups
 
 
+def pack_units(lengths: Sequence[int], rows: Sequence[int], max_tokens: int) -> list[list[int]]:
+    """Units (an example with its permuted copies, Task v0.9a) → micro-batches of unit indices, sorted by length: each micro-batch's
+    (rows in it × its longest length) ≤ `max_tokens` (a unit that is over it alone goes alone). With one row per unit this is
+    :func:`pack_micro_batches`."""
+    order = sorted(range(len(lengths)), key=lambda i: (int(lengths[i]), i))
+    groups: list[list[int]] = []
+    current: list[int] = []
+    count = 0
+    for i in order:
+        if current and int(lengths[i]) * (count + int(rows[i])) > int(max_tokens):
+            groups.append(current)
+            current, count = [], 0
+        current.append(i)
+        count += int(rows[i])
+    if current:
+        groups.append(current)
+    return groups
+
+
 # --------------------------------------------------------------------------
 # 손실
 # --------------------------------------------------------------------------
 
 
-def code_kl(backbone: Any, examples: Sequence[dict[str, Any]], *, code_mass: bool = False, head32: torch.Tensor | None = None) -> dict[str, Any]:
+def consistency_js(original: torch.Tensor, copy_logits: torch.Tensor, back: Sequence[int] | torch.Tensor) -> torch.Tensor:
+    """The Jensen–Shannon divergence (natural log) between an original's code distribution and a permuted copy's, over the option contents
+    (Task v0.9a): `original` and `copy_logits` are the K shown codes' logits in each listing's own order; ``back[i]`` is the copy position that
+    shows the original's position i, so ``copy_logits[back]`` is the copy over the original's positions. Differentiable in both."""
+    back = torch.as_tensor(back, dtype=torch.long, device=copy_logits.device)
+    log_p = torch.log_softmax(original.float(), dim=-1)
+    log_q = torch.log_softmax(copy_logits.float().index_select(-1, back), dim=-1)
+    log_m = torch.logaddexp(log_p, log_q) - math.log(2.0)
+    return 0.5 * (log_p.exp() * (log_p - log_m)).sum(dim=-1) + 0.5 * (log_q.exp() * (log_q - log_m)).sum(dim=-1)
+
+
+def code_kl(backbone: Any, examples: Sequence[dict[str, Any]], *, code_mass: bool = False, head32: torch.Tensor | None = None,
+            logits: bool = False) -> dict[str, Any]:
     """예들(``tokens``·``code_ids``·``target``)을 오른쪽 padding으로 한 번에 forward → 답 자리의 코드 분포와 정답의 KL·교차 엔트로피.
 
     돌려주는 것: ``kl``·``ce``(``[B]`` fp32 tensor — gradient가 켜져 있으면 미분 가능), ``probs``(예마다 보이는 순서의 코드 확률 목록).
     코드 logits = 답 자리 hidden(fp32) · LM head 코드 행(fp32) — 진단의 읽기와 같은 수학이다. `code_mass`면 ``log_code_mass``(``[B]``,
     미분 가능 — 보조 항)와 ``code_mass``(목록)도: 전체 어휘 logits = hidden(fp32) · LM head(fp32) — `head32`(고정된 head의 fp32 사본; LoRA)를
-    주면 그것을, 아니면 ``head.float()``(전체 미세조정: gradient가 묶인 head로 간다)를 쓴다.
+    주면 그것을, 아니면 ``head.float()``(전체 미세조정: gradient가 묶인 head로 간다)를 쓴다. `logits` (Task v0.9a): also ``logits``, the
+    shown codes' logits ``[B, K]`` (differentiable; ``-inf`` past a row's own codes).
     """
     device = backbone.device
     lengths = [len(e["tokens"]) for e in examples]
@@ -363,13 +437,13 @@ def code_kl(backbone: Any, examples: Sequence[dict[str, Any]], *, code_mass: boo
         target[row, :k] = torch.tensor(example["target"], dtype=torch.float32)
     head = backbone.model.lm_head.weight
     rows = head[index.to(head.device)].float()  # [B, K, d] — 코드 행만
-    logits = torch.einsum("bkd,bd->bk", rows, states.to(rows.device))
-    mask, target = mask.to(logits.device), target.to(logits.device)
-    logits = logits.masked_fill(~mask, float("-inf"))
-    logp = torch.where(mask, torch.log_softmax(logits, dim=-1), torch.zeros_like(logits))
+    code_logits = torch.einsum("bkd,bd->bk", rows, states.to(rows.device))
+    mask, target = mask.to(code_logits.device), target.to(code_logits.device)
+    code_logits = code_logits.masked_fill(~mask, float("-inf"))
+    logp = torch.where(mask, torch.log_softmax(code_logits, dim=-1), torch.zeros_like(code_logits))
     ce = -(target * logp).sum(dim=-1)
     entropy = -torch.special.xlogy(target, target).sum(dim=-1)
-    probs = torch.softmax(logits.detach(), dim=-1).cpu()
+    probs = torch.softmax(code_logits.detach(), dim=-1).cpu()
     out = {
         "kl": ce - entropy,
         "ce": ce,
@@ -378,9 +452,11 @@ def code_kl(backbone: Any, examples: Sequence[dict[str, Any]], *, code_mass: boo
     if code_mass:
         full = head32 if head32 is not None else head.float()
         lse_all = torch.logsumexp(states.to(full.device) @ full.T, dim=-1)  # [B] — 전체 어휘
-        log_mass = torch.clamp(torch.logsumexp(logits, dim=-1) - lse_all.to(logits.device), max=0.0)
+        log_mass = torch.clamp(torch.logsumexp(code_logits, dim=-1) - lse_all.to(code_logits.device), max=0.0)
         out["log_code_mass"] = log_mass
         out["code_mass"] = log_mass.detach().exp().cpu().tolist()
+    if logits:  # Task v0.9a: the shown codes' logits ([B, K], -inf past a row's own codes; differentiable) for the consistency term
+        out["logits"] = code_logits
     return out
 
 
@@ -698,6 +774,8 @@ class DecisionTrainer:
         if cfg["label_prior_weights"]:  # Task v0.8a: the H-prior weights of the epoch-0 plan, recorded before any step
             table = self._prior(0)[1]
             self.manifest["objective"]["label_prior_weights"] = _prior_summary(table)
+        if cfg["consistency"] is not None:  # Task v0.9a: the order-consistency option and its epoch-0 exposure, recorded before any step
+            self.manifest["objective"]["consistency"] = self._consistency_summary(0)
         self._started = time.perf_counter()
         if resume is not None:
             self._load(resume)
@@ -745,6 +823,7 @@ class DecisionTrainer:
         size = self.config["batch_examples"]
         chunk = self._plan(epoch)[index * size : (index + 1) * size]
         prior = self._prior(epoch)[0][index * size : (index + 1) * size] if self.config["label_prior_weights"] else None
+        consistency = self.config["consistency"]
         out = []
         for position, (record_index, name, order_seed) in enumerate(chunk):
             out.extend(build_examples(self.train_records[record_index], [name], self.tokenizer, order_seed=order_seed, fmt=self.config["format"],
@@ -752,14 +831,48 @@ class DecisionTrainer:
             out[-1]["epoch"] = epoch
             if prior is not None:
                 out[-1]["prior_weight"] = prior[position]
+            if consistency is not None and self._consistency_pick(record_index, name):  # Task v0.9a: the permuted copies
+                out[-1]["copies"] = consistency_copies(self.train_records[record_index], out[-1], self.tokenizer, kinds=consistency["copies"])
         return out
+
+    def _consistency_pick(self, record_index: int, name: str) -> bool:
+        """Whether this plan entry is a choice question the order-consistency option picks (Task v0.9a; module docstring)."""
+        consistency = self.config["consistency"]
+        record = self.train_records[record_index]
+        if consistency is None or record["request"]["questions"][name].get("type") != "choice":
+            return False
+        return consistency_selected(record, name, share=consistency["share"], salt=consistency["salt"])
+
+    def _consistency_summary(self, epoch: int) -> dict[str, Any]:
+        """The manifest's record of the order-consistency option (Task v0.9a): the settings and, over the epoch's plan, the choice examples,
+        those picked and the copy rows they add (N = 2 gives one copy: its shift is its reverse)."""
+        consistency = self.config["consistency"]
+        choice = picked = rows = 0
+        for record_index, name, _ in self._plan(epoch):
+            question = self.train_records[record_index]["request"]["questions"][name]
+            if question.get("type") != "choice":
+                continue
+            choice += 1
+            if self._consistency_pick(record_index, name):
+                picked += 1
+                n = len(question["criteria"])
+                rows += len({tuple(copy_permutation(kind, n)) for kind in consistency["copies"]})
+        return {**consistency, "epoch": epoch, "choice_examples": choice, "picked_examples": picked,
+                "picked_share": picked / choice if choice else None, "copy_rows": rows,
+                "rule": "a choice question picked by a fixed seed (hash of salt, record id, question name < share) is also run as permuted copies "
+                        "(a cyclic shift by ceil(N/2) and the reverse, the record's own codes by position); lambda x the mean Jensen-Shannon "
+                        "divergence between the original's and each copy's distributions over the option contents is added to the step loss "
+                        "(/ the step's examples); the target loss stays on the original only"}
 
     # -- 학습 step --
 
     def step_loss(self, examples: list[dict[str, Any]], *, backward: bool) -> tuple[float, dict[str, Any]]:
         """한 step의 예들 → (손실 Σ (w·KL + λ·(−log 코드 질량)) / 예 수, 예별 값). `backward`면 micro-batch마다 backward해 gradient를 쌓는다.
 
-        예별 값: ``kl``·``ce``·``code_mass``; 합: ``kl_loss``(Σ w·KL / n)·``aux_loss``(λ · Σ −log m / n) — ``kl_loss + aux_loss`` = 손실."""
+        예별 값: ``kl``·``ce``·``code_mass``; 합: ``kl_loss``(Σ w·KL / n)·``aux_loss``(λ · Σ −log m / n) — ``kl_loss + aux_loss`` = 손실.
+        With the order-consistency option (Task v0.9a) the loss also holds ``consistency_loss`` (:meth:`_consistency_step_loss`)."""
+        if self.config["consistency"] is not None:
+            return self._consistency_step_loss(examples, backward=backward)
         weights = [self.config["type_weights"][e["type"]] for e in examples]
         if self.config["label_prior_weights"]:  # Task v0.8a: the KL term only (the code-mass term stays unweighted)
             weights = [w * float(e["prior_weight"]) for w, e in zip(weights, examples)]
@@ -787,6 +900,62 @@ class DecisionTrainer:
                 kl[i], ce[i], mass[i] = float(out["kl"][j].detach()), float(out["ce"][j].detach()), float(out["code_mass"][j])
             padded += len(batch) * max(len(e["tokens"]) for e in batch)
         return total, {"kl": kl, "ce": ce, "code_mass": mass, "kl_loss": kl_total, "aux_loss": aux_total, "micro_batches": len(groups), "padded_tokens": padded}
+
+    def _consistency_step_loss(self, examples: list[dict[str, Any]], *, backward: bool) -> tuple[float, dict[str, Any]]:
+        """:meth:`step_loss` with the order-consistency option (Task v0.9a; module docstring): every example with its permuted copies is one
+        unit, packed into one micro-batch (:func:`pack_units`); the loss = Σ (w·KL + λ·(−log code mass)) over the originals + λ_c · Σ mean over
+        a unit's copies of :func:`consistency_js`, all / the step's example count. Per example also ``js`` (the mean JS, None without copies)."""
+        weights = [self.config["type_weights"][e["type"]] for e in examples]
+        if self.config["label_prior_weights"]:
+            weights = [w * float(e["prior_weight"]) for w, e in zip(weights, examples)]
+        lam = float(self.config["code_mass_weight"])
+        lam_c = float(self.config["consistency"]["lambda"])
+        units = [[e] + list(e.get("copies") or []) for e in examples]
+        groups = pack_units([max(len(r["tokens"]) for r in unit) for unit in units], [len(unit) for unit in units], self.config["micro_batch_tokens"])
+        n = len(examples)
+        kl: list[float] = [0.0] * n
+        ce: list[float] = [0.0] * n
+        mass: list[float] = [0.0] * n
+        js: list[float | None] = [None] * n
+        total = kl_total = aux_total = cons_total = 0.0
+        padded = copy_rows = 0
+        for group in groups:
+            rows = [row for u in group for row in units[u]]
+            first: list[int] = []  # each unit's original row in the micro-batch
+            for u in group:
+                first.append(sum(len(units[v]) for v in group[: len(first)]))
+            with torch.set_grad_enabled(backward):
+                out = code_kl(self.backbone, rows, code_mass=True, head32=self._head32, logits=True)
+                index = torch.tensor(first, dtype=torch.long, device=out["kl"].device)
+                w = torch.tensor([weights[u] for u in group], dtype=torch.float32, device=out["kl"].device)
+                kl_part = (w * out["kl"].index_select(0, index)).sum() / n
+                aux_part = lam * (-out["log_code_mass"].index_select(0, index)).sum() / n
+                terms = []
+                for u, at in zip(group, first):
+                    copies = units[u][1:]
+                    if not copies:
+                        continue
+                    k = len(units[u][0]["code_ids"])
+                    values = torch.stack([consistency_js(out["logits"][at, :k], out["logits"][at + 1 + c, :k], copy["back"])
+                                          for c, copy in enumerate(copies)])
+                    terms.append((u, values.mean()))
+                cons_part = (lam_c * torch.stack([t for _, t in terms]).sum() / n) if terms else out["kl"].new_zeros(())
+                loss = (kl_part + aux_part if lam > 0 else kl_part) + cons_part
+            if backward:
+                loss.backward()
+            total += float(loss.detach())
+            kl_total += float(kl_part.detach())
+            aux_total += float(aux_part.detach())
+            cons_total += float(cons_part.detach())
+            for u, at in zip(group, first):
+                kl[u], ce[u], mass[u] = float(out["kl"][at].detach()), float(out["ce"][at].detach()), float(out["code_mass"][at])
+            for u, value in terms:
+                js[u] = float(value.detach())
+            padded += len(rows) * max(len(r["tokens"]) for r in rows)
+            copy_rows += len(rows) - len(group)
+        return total, {"kl": kl, "ce": ce, "code_mass": mass, "js": js, "kl_loss": kl_total, "aux_loss": aux_total, "consistency_loss": cons_total,
+                       "micro_batches": len(groups), "padded_tokens": padded, "copy_rows": copy_rows,
+                       "consistency_examples": sum(1 for v in js if v is not None)}
 
     def train_step(self) -> dict[str, Any]:
         """step 하나: 예 만들기 → micro-batch마다 forward·backward → clip → optimizer → 일정. 지표를 history에 더하고 돌려준다."""
@@ -818,6 +987,11 @@ class DecisionTrainer:
         }
         if self.config["label_prior_weights"]:
             metrics["prior_weight_mean"] = statistics.fmean(float(e["prior_weight"]) for e in examples) if examples else None
+        if self.config["consistency"] is not None:  # Task v0.9a
+            values = [v for v in parts["js"] if v is not None]
+            metrics.update({"consistency_loss": parts["consistency_loss"], "consistency_examples": parts["consistency_examples"],
+                            "copy_rows": parts["copy_rows"], "js_mean": statistics.fmean(values) if values else None,
+                            "copy_tokens": sum(len(c["tokens"]) for e in examples for c in (e.get("copies") or []))})
         self.step += 1
         self.history.append(metrics)
         return metrics

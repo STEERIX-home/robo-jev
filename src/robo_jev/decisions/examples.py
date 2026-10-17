@@ -35,6 +35,16 @@ secondary questions keep the exposure they had when they shared the record's slo
 without the field are picked exactly as before (the trainer's default); the epoch length then depends on (seed, epoch)
 (:func:`examples_per_epoch` with the run seed).
 
+**Order-consistency copies (Task v0.9a, the trainer's opt-in ``consistency``).** A choice question picked by a fixed seed
+(:func:`consistency_selected` — a hash of a fixed salt, the record id and the question name, below the share; the run seed does not enter,
+so both seeds pick the same questions) is also shown as **permuted copies** of its training example (:func:`consistency_copies`): one cyclic
+shift of the shown order by ⌈N/2⌉ and the reverse (:func:`copy_permutation`; for N = 2 the two are the same order, which is kept once). A
+copy shows the same option lines in the permuted order with **the record's own code assignment by position** — position j shows the same
+code as in the original (A, B, … or ``meta.codes``), so only the contents move — and the same prefix tokens; its text is what the
+diagnosis builds for that order (a test checks it against the counterbalanced listings). ``permutation[j]`` is the original position shown at
+copy position j and ``back`` its inverse: the copy's code distribution read at ``back`` is its distribution over the original's positions,
+that is over the option contents (:func:`robo_jev.decisions.train.consistency_js`).
+
 **dev 나눔** (:func:`split_dev`): 학습 파일에서 레코드 열쇠(:func:`shuffle_key` — 쌍이면 두 id 중 작은 것, 아니면 자기 id)의
 salt 붙인 sha256이 `fraction`(기본 2 %) 아래인 레코드를 dev로 뗀다. 쌍(사실 하나만 바꾼 두 레코드)은 함께 간다 — 짝 하나로 학습하고
 다른 하나로 dev 손실을 재면 거의 같은 글을 재는 것이 된다. 파일 순서와 무관하다. 고르기·멈추기는 dev로만 한다.
@@ -54,9 +64,12 @@ from typing import Any, Sequence
 
 from robo_jev.decisions.codes import assigned_codes
 from robo_jev.decisions.prompt import FORMATS, PROMPT_VERSION, PROMPT_VERSIONS, build_prompts, check_displayed_lines, record_prompts, score_values
+from robo_jev.decisions.prompt import _question_block, _suffix
 from robo_jev.decisions.records import shuffle_key
 
 __all__ = [
+    "CONSISTENCY_COPIES",
+    "CONSISTENCY_SALT",
     "DEFAULT_DEV_FRACTION",
     "DEFAULT_DEV_SALT",
     "DEFAULT_QUESTIONS_PER_REQUEST",
@@ -65,7 +78,11 @@ __all__ = [
     "SCORE_READABLE",
     "build_examples",
     "code_target",
+    "consistency_copies",
+    "consistency_selected",
+    "copy_permutation",
     "derive_seed",
+    "permuted_copy",
     "dev_examples",
     "epoch_plan",
     "examples_per_epoch",
@@ -89,6 +106,10 @@ SCORE_READABLE = {version: (score_values(version)[0], score_values(version)[-1])
 _TYPES = ("choice", "noul", "score")
 #: The recorded per-record pick rule (``meta.question_pick``, module docstring) — the only version the trainer knows.
 QUESTION_PICK_VERSION = "qpick-1"
+#: The permuted copies of the order-consistency option (Task v0.9a, module docstring): a cyclic shift by ⌈N/2⌉ and the reverse.
+CONSISTENCY_COPIES = ("shift", "reverse")
+#: The fixed salt that picks the consistency questions (independent of the run seed).
+CONSISTENCY_SALT = "v09-consistency-1"
 
 
 def derive_seed(*parts: Any) -> int:
@@ -282,6 +303,72 @@ def build_examples(
         prompt["record_id"] = str(record.get("id") or "")
         prompt["order_seed"] = int(order_seed)
         out.append(_with_target(prompt, record))
+    return out
+
+
+def consistency_selected(record: dict[str, Any], name: str, *, share: float, salt: str = CONSISTENCY_SALT) -> bool:
+    """Whether a question of a record gets permuted copies (module docstring): a hash of the fixed `salt`, the record id and the question
+    name below `share`. The caller checks that the question is a choice question."""
+    return derive_seed(str(salt), str(record.get("id") or ""), str(name)) / float(2**63) < float(share)
+
+
+def copy_permutation(kind: str, n: int) -> list[int]:
+    """The permuted copy `kind` of an `n`-option listing: ``permutation[j]`` = the original position shown at copy position j — ``shift``
+    moves every option ⌈n/2⌉ places (``old[s:] + old[:s]``), ``reverse`` reverses the listing."""
+    n = int(n)
+    if n < 2:
+        raise ValueError(f"a permuted copy needs at least 2 options (got {n})")
+    if kind == "shift":
+        s = math.ceil(n / 2)
+        return [(j + s) % n for j in range(n)]
+    if kind == "reverse":
+        return list(range(n - 1, -1, -1))
+    raise ValueError(f"copy kind {kind!r} is not one of {list(CONSISTENCY_COPIES)}")
+
+
+def permuted_copy(record: dict[str, Any], example: dict[str, Any], permutation: Sequence[int], tokenizer: Any) -> dict[str, Any]:
+    """A choice example shown with its options in `permutation` (module docstring): same prefix tokens, the same codes by position, the
+    option lines permuted. Carries ``permutation``, ``back`` (its inverse: the copy position of each original position) and the target
+    in the copy's order (not trained — only the original carries the target loss). The shown lines are checked against the record."""
+    if example.get("type") != "choice":
+        raise ValueError(f"{example.get('record_id')}/{example.get('question')}: permuted copies are for choice questions")
+    n = len(example["options"])
+    permutation = [int(i) for i in permutation]
+    if sorted(permutation) != list(range(n)):
+        raise ValueError(f"{permutation} is not a permutation of {n} positions")
+    question = record["request"]["questions"][example["question"]]
+    lines = [example["option_lines"][i] for i in permutation]
+    suffix = _suffix(_question_block(question, list(example["codes"]), lines, example["version"]), example["format"], example["mode"])
+    prefix = example["text"][: int(example["prefix_chars"])]
+    back = [0] * n
+    for j, i in enumerate(permutation):
+        back[i] = j
+    copy = {key: example[key] for key in ("question", "type", "codes", "code_ids", "prefix_tokens", "prefix_chars", "format", "mode", "version",
+                                          "record_id", "order_seed")}
+    copy.update({"listing": None, "n_listings": None, "options": [example["options"][i] for i in permutation], "option_lines": lines,
+                 "values": None, "codes": list(example["codes"]), "code_ids": list(example["code_ids"]),
+                 "tokens": list(example["tokens"][: int(example["prefix_tokens"])]) + list(tokenizer.encode(suffix, add_special_tokens=False).ids),
+                 "text": prefix + suffix, "target": [example["target"][i] for i in permutation], "clamped": example.get("clamped", False),
+                 "permutation": permutation, "back": back})
+    problems = check_displayed_lines(copy)
+    if problems:
+        raise ValueError(f"{example.get('record_id')}/{example.get('question')}: a permuted copy's lines do not read back — {problems[0]}")
+    return copy
+
+
+def consistency_copies(record: dict[str, Any], example: dict[str, Any], tokenizer: Any, *, kinds: Sequence[str] = CONSISTENCY_COPIES) -> list[dict[str, Any]]:
+    """The distinct permuted copies of a choice example (module docstring), in the order of `kinds`; a copy whose order repeats an earlier
+    one's (N = 2: the shift is the reverse) is kept once. Each copy carries its ``copy`` kind."""
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[int, ...]] = set()
+    for kind in kinds:
+        permutation = copy_permutation(kind, len(example["options"]))
+        if tuple(permutation) in seen:
+            continue
+        seen.add(tuple(permutation))
+        made = permuted_copy(record, example, permutation, tokenizer)
+        made["copy"] = kind
+        out.append(made)
     return out
 
 
